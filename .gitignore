@@ -1,0 +1,19 @@
+# 本地记忆 / 项目数据，不入库（类比 AGENTS.local.md 的本地层）
+.workbuddy/
+
+# 依赖与构建产物（M1 起出现）
+node_modules/
+dist/
+build/
+
+# 本地数据库 / 密钥 / 临时产物
+*.db
+*.db.bak.*
+*.sqlite
+.env
+.tmp/
+shots/
+
+# 编辑器 / 系统
+.DS_Store
+*.log

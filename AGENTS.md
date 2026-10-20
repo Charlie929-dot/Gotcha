@@ -19,7 +19,7 @@
 
 ## 命令约定
 
-- 版本控制：`git status -sb` 看实况；本仓库改动前先切 `feat/` / `fix/` / `chore/` 分支（本机尚未建远程，先本地提交）
+- 版本控制：`git status -sb` 看实况；本仓库改动前先切 `feat/` / `fix/` / `chore/` 分支；已配置远程 `origin`（github.com/Charlie929-dot/Gotcha），提交后按 workflow.md §3 推送（远程不可用时仅本地提交并注明）
 - 测试（M1 起）：`npm test` 全绿 + `npm run typecheck` 通过才能提交
 - 开发：`npm run dev`；构建：`npm run build`（M1 补齐 package.json 脚本，见 workflow.md §4）
 

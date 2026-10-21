@@ -9,7 +9,9 @@
 | LLM 归纳编造 | 记忆污染，用户不再信任 | `intent_json` / 归纳节点强制 `source_events`；上层面必须可下钻核对 |
 | OCR 中文精度 | 记错关键词，检索失效 | WinRT 系统 OCR 起步；接口留替换点，不够再换 RapidOCR |
 | 图谱万节点 | 渲染卡顿 | LOD 分层默认折叠 + 时间窗过滤 + sigma.js 大规模设计 |
-| better-sqlite3 原生模块 | Electron 版本不匹配报 ABI 错误 | 升级 Electron 后 `electron-rebuild`，锁版本 |
+| better-sqlite3 原生模块 | Electron 版本不匹配报 ABI 错误 | better-sqlite3 ≥13 已 N-API 化：13.0.3 同一份自带 prebuilds 在 Node 24.13 与 Electron 45.0.0（napi 10）均可加载，**无需 electron-rebuild**（2026-10-21 两运行时实测）；仍锁版本 13.0.3，大版本升级后先跑 `npm test` + dev 冒烟 |
+| npm 11 安装脚本白名单 | `npm install` 警告 `better-sqlite3@13.0.3 (install: node-gyp rebuild) not covered by allowScripts`，安装脚本未执行 | 本机用 v13 自带 prebuilds，不执行也不影响；将来若必须本地编译，先 `npm install-scripts approve better-sqlite3`（需拍板） |
+| electron-vite 自定义启动参数 | `npm run dev -- --capture` 报 `CACError: Unknown option --capture`（参数被 electron-vite 当成自己的 CLI 选项） | 用仓库脚本 `npm run dev:capture`，或 `npm run dev -- -- --capture`（第二个 `--` 透传成 ELECTRON_CLI_ARGS），或 `GOTCHA_CAPTURE=1 npm run dev` |
 | 透明置顶窗口 | 挡点击 / 抢焦点 / 任务栏异常 | 收起态 `setIgnoreMouseEvents(true, { forward: true })`，只在交互区恢复；永不 `focus()` 抢焦点 |
 | 归纳任务与实时采集争用 | 卡顿、事件积压 | 归纳走 worker + 任务队列，空闲/低负载时执行；队列有上限与背压 |
 | 「为了调试」打印原文 | 隐私事故 | 日志只记 id + 元数据；代码审查重点看日志语句 |

@@ -75,7 +75,8 @@ tests/
 - db/index：打开 → 迁移 → 导出；WAL 模式（采集高频小写入）。
 - events 写入/查询 API：`insertEvent`、`queryTimeline(from, to)`（时间线数据源）。
 - **测试**：`:memory:` 库迁移幂等（跑两次）、down 后重 up 结构一致、timeline 查询边界（空区间/跨天）。
-- **验收**：单测绿；`npm run dev -- --capture-dryrun`（若 Phase 0 已带）可在控制台看到库初始化日志。
+- **验收**：单测绿；`npm run dev:capture`（Phase 0 未带 `--capture-dryrun`，`electron-vite dev --capture` 会被 CLI 误解析，见 gotchas）控制台可见 `db 就绪（schema v1）`，`userData/memory.db` 生成且 WAL 生效。
+- **状态**：✅ 完成（2026-10-21，`feat/m1a-p1-sqlite`）：14 条单测绿、typecheck 绿、dev 冒烟通过；`--capture-dryrun` 语义留待 Phase 2 管线落地时定义。
 
 ### Phase 2 · 采集管线（约 2–3 天，含技术验证）
 
@@ -109,7 +110,7 @@ tests/
 | - | - | - | - |
 | electron | 外壳（技术方案 §3 定案） | — | MIT；~100MB dev 依赖 |
 | electron-vite | 主/preload/renderer 三端构建 + 热重载 | 手写 tsc+html 配置维护成本高；vite 生态成熟 | MIT；dev 依赖 |
-| better-sqlite3 | 存储（§3 定案） | — | MIT；**原生模块**：锁版本 + electron-rebuild（gotchas） |
+| better-sqlite3 | 存储（§3 定案） | — | MIT；**原生模块**：锁 13.0.3（≥13 已 N-API 化，Node/Electron 共用 prebuilds，2026-10-21 实测无需 rebuild） |
 | active-win | 前台窗口元数据（§3 定案） | — | MIT；小 |
 | electron-log | 文件日志（纪律要求日志可追溯） | console 无落盘；自写轮转不值当 | MIT；小 |
 | vitest / playwright | 测试（testing.md 定案） | — | MIT；playwright 需下 Electron 二进制 |
@@ -122,7 +123,7 @@ tests/
 | 风险 | 对策 |
 | - | - |
 | WinRT OCR 无成熟 Node 绑定 | Phase 2a 半天盒装 spike，两候选 + RapidOCR 升级路径，结论先报备再动工 |
-| better-sqlite3 ABI 不匹配（gotchas 已记） | 锁版本；`electron-rebuild` 写进 README 与 rebuild 脚本 |
+| better-sqlite3 ABI 不匹配（gotchas 已记） | v13 已 N-API 化，Node/Electron 同一二进制（2026-10-21 验证）；仍锁 13.0.3，升级 Electron 后先跑冒烟 |
 | desktopCapturer 拿不到窗口区域（多屏/DPI） | 裁剪失败 fallback 全帧降采样；DPI 缩放用 `scaleFactor` 换算，spike 一并验 |
 | 真实管线无法纯自动化测试 | 自动化全合成数据；真机验收走 §0 手工清单，产物进 `.tmp/` |
 | 埋点写 settings 高频写放大 | 计数器内存累加，每 60s 或退出时落盘一次 |

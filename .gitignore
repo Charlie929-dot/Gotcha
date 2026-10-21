@@ -5,6 +5,7 @@
 node_modules/
 dist/
 build/
+out/
 
 # 本地数据库 / 密钥 / 临时产物
 *.db

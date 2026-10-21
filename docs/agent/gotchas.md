@@ -14,6 +14,8 @@
 | 归纳任务与实时采集争用 | 卡顿、事件积压 | 归纳走 worker + 任务队列，空闲/低负载时执行；队列有上限与背压 |
 | 「为了调试」打印原文 | 隐私事故 | 日志只记 id + 元数据；代码审查重点看日志语句 |
 | 文档漂移 | 方案说的和代码不一致 | 按 workflow.md §5 同步矩阵 + 提交前自检 |
+| Electron 宿主 shell 启动 electron | DSH（Electron 应用）向子 shell 注入 `ELECTRON_RUN_AS_NODE=1`，`electron.exe` 退化为纯 Node：`electron.app` undefined、`whenReady` 直接崩（2026-10-21 验证：Electron 45.0.0） | 启动前清变量：PowerShell `Remove-Item Env:\ELECTRON_RUN_AS_NODE`；bash `unset ELECTRON_RUN_AS_NODE`。仅 DSH 派生 shell 需要，用户自有终端不受影响 |
+| electron 二进制未随 npm install 下载 | 本机 `npm install` 后 `node_modules/electron/dist` 缺失（electron 45 包未见 postinstall 钩子，2026-10-21 验证），dev 起不来 | 装完检查 `node_modules\electron\dist\electron.exe`（约 238MB）；缺失则 `node node_modules/electron/install.js` 手动补 |
 
 ## 规则
 

@@ -22,6 +22,7 @@
 | 文档漂移 | 方案说的和代码不一致 | 按 workflow.md §5 同步矩阵 + 提交前自检 |
 | Electron 宿主 shell 启动 electron | DSH（Electron 应用）向子 shell 注入 `ELECTRON_RUN_AS_NODE=1`，`electron.exe` 退化为纯 Node：`electron.app` undefined、`whenReady` 直接崩（2026-10-21 验证：Electron 45.0.0） | 启动前清变量：PowerShell `Remove-Item Env:\ELECTRON_RUN_AS_NODE`；bash `unset ELECTRON_RUN_AS_NODE`。仅 DSH 派生 shell 需要，用户自有终端不受影响 |
 | electron 二进制未随 npm install 下载 | 本机 `npm install` 后 `node_modules/electron/dist` 缺失（electron 45 包未见 postinstall 钩子，2026-10-21 验证），dev 起不来 | 装完检查 `node_modules\electron\dist\electron.exe`（约 238MB）；缺失则 `node node_modules/electron/install.js` 手动补 |
+| Playwright 跑 Electron E2E | `electron.launch()` 继承 shell 的 `ELECTRON_RUN_AS_NODE=1` 会退化成 Node 直接崩；且默认会读写真实 userData | 测试里先 `delete process.env.ELECTRON_RUN_AS_NODE`；用 `GOTCHA_USER_DATA` 指向临时目录（main 用 `app.setPath('userData')` 覆盖），跑完 `rmSync`；Playwright 不需要 `playwright install` 浏览器（Electron 走本地 electron 包），2026-10-21 验证 2 用例通过 |
 
 ## 规则
 

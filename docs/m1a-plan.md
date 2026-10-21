@@ -1,6 +1,6 @@
 # M1a 采集存储底座 · 实施方案
 
-> 状态：**待拍板**（2026-10-21 提交拍板人）。批准后作为 M1a 期间的事实源，与代码同次提交演进；M1a 验收通过后归档。
+> 状态：**待拍板**（§8 Q1–Q3，显式批准制：未记录明确批准不得开始对应 Phase；Q4 分支策略已批准 2026-10-21）。批准后作为 M1a 期间的事实源，与代码同次提交演进；M1a 验收通过后归档。
 > 上游依据：技术方案 §3/§4/§5.1/§7、workflow.md、testing.md、security.md、decisions.md、gotchas.md。
 
 ## 0. 目标与验收
@@ -65,7 +65,7 @@ tests/
 
 - package.json（scripts：`dev` / `test` / `typecheck` / `build`）、tsconfig、electron-vite 三端配置。
 - `src/main/index.ts` 最小入口：开一个隐藏主窗口（M1a 无常驻 UI，时间线是 dev 工具窗口）；解析启动参数。
-- vitest 就位（哪怕先用空用例），`npm test` + `npm run typecheck` 闸门从本 Phase 起生效。
+- vitest 就位，**至少 1 条真实行为断言，禁止空用例凑闸门**（testing.md「空用例不构成验证」）：断言不带启动参数时采集保持默认暂停（A3 的最小前置），或配置加载默认值正确。`npm test` + `npm run typecheck` 闸门从本 Phase 起生效。
 - `.gitignore` 补：`node_modules/`、`.tmp/`、`dist/`、`*.db`。
 - **验收**：三命令全绿；`npm run dev` 能起进程无报错退出。
 
@@ -133,11 +133,13 @@ tests/
 - 每 Phase 一次以上提交，均过闸门；按 workflow.md §3.1 Vibe 分支规范：每个 Phase 一支短命分支（`feat/m1a-p0-scaffold`、`feat/m1a-p1-sqlite`…），PR squash 合入即清；同 Phase 内想试险招（如 OCR 桥接两种候选）拉 `vibe/` 分支验证。
 - M1a 收口时：workflow.md §8 进度表改 M1a ✅、本方案归档至 `docs/archive/`。
 
-## 8. 待拍板清单
+## 8. 待拍板清单（显式批准制）
 
-| # | 问题 | 默认方案（不反对即按此执行） |
-| - | - | - |
-| Q1 | OCR 命中敏感词：本地保留原文只标记（§4.2），还是本地也剥离？ | 保留原文 + `sensitive=1` |
-| Q2 | 依赖报备（§5 六项） | 全部批准 |
-| Q3 | OCR spike 两候选都不达标时，是否允许 RapidOCR 提前到 M1a？ | 允许，但需重新报备体积（onnxruntime ~100MB+） |
-| Q4 | M1a 分支策略：按 workflow.md §3.1，每 Phase 一支 `feat/m1a-p<n>-*` 短命分支 | 每 Phase 一支（vibe 规范落地首例） |
+> **沉默 ≠ 批准**（decisions.md「拍板人与授权载体」）：下表「建议方案」仅供拍板人参考，**不构成默认授权**。任一 Q 未记录明确批准前，不得开始其「阻塞」列标注的 Phase；批准记入 decisions.md「拍板记录」表（日期、来源、结论、适用范围）。
+
+| # | 问题 | 建议方案 | 阻塞 | 状态 |
+| - | - | - | - | - |
+| Q1 | OCR 命中敏感词：本地保留原文只标记（§4.2），还是本地也剥离？ | 保留原文 + `sensitive=1` | Phase 2（sanitize 与入库） | 待批 |
+| Q2 | 依赖报备（§5 六项） | 全部批准 | **Phase 0 起全部**（脚手架即需 electron / electron-vite / vitest） | 待批 |
+| Q3 | OCR spike 两候选都不达标时，是否允许 RapidOCR 提前到 M1a？ | 允许，但需重新报备体积（onnxruntime ~100MB+） | 不阻塞开工；仅 2a 失败触发时需批 | 待批（可延后） |
+| Q4 | M1a 分支策略：按 workflow.md §3.1，每 Phase 一支 `feat/m1a-p<n>-*` 短命分支 | 每 Phase 一支（vibe 规范落地首例） | — | ✅ 已批准（2026-10-21 对话，随 PR #1 规范合入 main） |

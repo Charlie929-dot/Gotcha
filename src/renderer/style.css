@@ -16,10 +16,10 @@ body {
 header {
   position: sticky;
   top: 0;
+  z-index: 10;
   padding: 12px 16px;
-  background: #ffffffee;
+  background: #ffffff;
   border-bottom: 1px solid #e3e3e6;
-  backdrop-filter: blur(8px);
 }
 
 h1 {
@@ -78,6 +78,8 @@ li {
   align-items: baseline;
   padding: 7px 10px;
   border-bottom: 1px solid #ececf0;
+  content-visibility: auto;
+  contain-intrinsic-size: 0 35px;
 }
 
 li:hover {
@@ -123,7 +125,7 @@ li:hover {
     color: #eeeeef;
   }
   header {
-    background: #1b1b1fee;
+    background: #1b1b1f;
     border-color: #2e2e35;
   }
   .nav button {
@@ -142,4 +144,27 @@ li:hover {
   #date {
     color: #a5a5b0;
   }
+}
+
+.live-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #16a34a;
+  margin-left: 6px;
+}
+
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: #22c55e;
+  display: inline-block;
+  animation: pulse 2s infinite ease-in-out;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
 }

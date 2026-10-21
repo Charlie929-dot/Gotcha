@@ -81,11 +81,13 @@ tests/
 ### Phase 2 · 采集管线（约 2–3 天，含技术验证）
 
 - **2a · WinRT OCR spike（最先做，半天盒装）**：验证 Node 侧调 `Windows.Media.Ocr` 的路径。候选顺序：① 长驻 PowerShell 子进程（stdin/stdout JSON 协议，喂 base64 图）② koffi 直调 WinRT API。验收线：单张 1080p 截图 OCR 往返 ≤ 1.5s、中文可识别。两路都不达标 → 上报拍板人评估 RapidOCR 提前（原定二期）。**结论回写本节 + gotchas.md**。
+- **2a 结论（2026-10-21，候选① 通过，②不再验证）**：长驻 `powershell.exe`（5.1，非 pwsh 7）跑 WinRT `Windows.Media.Ocr`，行式 JSON 协议（`resources/ocr/winrt-ocr.ps1`）。1920×1080 合成中文图实测：长驻稳态往返 **40–59ms（中位 43ms）**，冷启动首帧 170ms；每次新起进程 563–633ms（也达标但开销大）。中文可识别；WinRT 按字分词，CJK 之间会插空格（原样入库，M2 归纳时再处理）。
 - **2b · 帧差与元数据**：dHash 8x8（灰度降采样 → 每行比较 → 64bit）、汉明距离阈值（初值 8，settings `capture.diff_threshold` 可调）；active-win 取前台窗口；desktopCapturer 全屏 → 裁窗口区域 → 降采样。
 - **2c · 管线串联**：scheduler（注入时钟，2s tick）→ 截屏 → 帧差未变 → 丢（计 `frames_total/frames_same`）→ 变 → 黑名单进程？只记元数据 : OCR（worker + 队列，上限 50，满则丢最新并计 `queue_dropped`）→ 正则脱敏标记 → insertEvent。
 - **2d · 日志**：electron-log，文件落 `userData/logs/`；语句仅含 id/模块/元数据/错误码。
 - **测试**：dHash 合成图（同图距离 0 / 微改距离小 / 换图距离大）、sanitize golden 用例（密钥/JWT/手机/身份证/卡/邮箱/IP/URL query + 密码词整帧丢弃 + 黑名单只记元数据）、scheduler 用固定时钟断言 tick 与暂停语义、队列背压。
 - **验收**：`npm run dev -- --capture` 真机跑 30 分钟：events 表有数据、无 OCR 原文进日志、CPU 目测 < 3%（正式测量在 A2）。
+- **状态**：🔄 代码完成（2026-10-21，`feat/m1a-p2-capture`）：帧差/脱敏/队列/调度/截屏窗口裁剪/active-win/OCR 桥/埋点全部落地，40 条单测 + typecheck + build 绿；真机冒烟 65s：events 1 条、`stats.day` 已落盘（frames_total 22 / same 21 / ocr_runs 1 / dropped 0 / errors 0）、单帧 OCR 689ms（1280px 宽窗口截图）、日志无 OCR 原文。**待真机 30 分钟验收**（A2 CPU 采样 + A1/A5 复核），未通过前不宣称 A2。
 
 ### Phase 3 · 时间线视图 + 埋点（约 1–1.5 天）
 

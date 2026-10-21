@@ -1,3 +1,14 @@
-// M1a Phase 0 占位 preload：时间线只读视图的数据通道在 Phase 3 按需补充；
-// 当前不向 renderer 暴露任何 API（M1a 无常驻 UI，主窗口隐藏且不加载内容）。
-export {}
+// 时间线数据通道（m1a-plan §3 Phase 3）：renderer 只读查询，无写接口
+import { contextBridge, ipcRenderer } from 'electron'
+import type { EventRow } from '../db'
+
+export interface TimelineApi {
+  query(from: number, to: number): Promise<EventRow[]>
+}
+
+const timeline: TimelineApi = {
+  query: (from: number, to: number): Promise<EventRow[]> =>
+    ipcRenderer.invoke('timeline:query', from, to)
+}
+
+contextBridge.exposeInMainWorld('gotcha', { timeline })

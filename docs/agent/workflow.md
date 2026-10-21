@@ -82,9 +82,9 @@ Gotcha/
 - **进程模型**：单 Electron 进程起步；OCR/归纳走 worker + 本地任务队列，UI 永不阻塞（技术方案 §3.1）。
 - **数据契约**：表与字段以技术方案 §4 为准（四张：`events` / `nodes` / `edges` / `settings`，2026-10-21 已核实修正）。任何上层归纳节点必须带 `source_events`；时间统一毫秒时间戳；schema 变更必须写迁移（版本号 + 幂等 + 回滚）。
 - **出网**：所有送 DeepSeek 的文本必须经过脱敏管道（见 security.md），禁止业务代码直接调 API。
-- **依赖**：新依赖先报备（现有方案为何不行/替代/体积/维护/许可/原生模块）；包管理器用 npm（本机 node v24 / npm 11，无 pnpm）；`better-sqlite3` 升级 Electron 后必须 `electron-rebuild`。
+- **依赖**：新依赖先报备（现有方案为何不行/替代/体积/维护/许可/原生模块）；包管理器用 npm（本机 node v24 / npm 11，无 pnpm）；`better-sqlite3@13` 已 N-API 化（自带 prebuilds，Node/Electron 通用），大版本升级后跑 `npm test` + 冒烟确认。
 - **日志**：只记时间、模块、事件 id、窗口元数据、错误码；不记 OCR 原文、页面内容、剪贴板查询文本、密钥。
-- **命令**：`npm run dev` / `npm test` / `npm run build` / `npm run typecheck`（M1 补齐 package.json 脚本）。
+- **命令**：`npm run dev` / `npm run dev:capture` / `npm test` / `npm run test:e2e`（Playwright Electron）/ `npm run build` / `npm run typecheck`。
 - **时间**：本机时区；业务时间逻辑注入时钟，测试用固定时间，不依赖「现在几点」。
 - **阶段/版本**：里程碑用 M0–M5（技术方案 §7，M1 拆分为 M1a 采集存储底座 + M1b 悬浮球壳），产品版本用 V0.1–V1.x（策划案 §九）。映射关系：**V0.1≈M1a+M1b，V0.5≈M2，V0.8≈M3，V1.0≈M4，V1.x≈M5**。代码版本 M1a 落地后从 v0.1.0 起。
 
@@ -138,13 +138,14 @@ Gotcha/
 | 里程碑 | 主题 | 状态 |
 | - | - | - |
 | M0 | 策划 + 技术方案 | ✅ 完成（2026-10-20） |
-| M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | 🔄 进行中（Phase 2 采集管线代码完成，待真机 30 分钟验收；Phase 3 时间线待开工） |
+| M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | 🔄 进行中（Phase 0–3 代码完成；待 30 分钟真机验收 A2 与 A1/A5 复核） |
 | M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | ⬜ 未开工 |
 | M2 | 知识行为图谱（DeepSeek 结构化/节点边/sigma.js 画布） | ⬜ 未开工 |
 | M3 | 分层记忆（日/周/月归纳/LOD/下钻） | ⬜ 未开工 |
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-21：M1a Phase 3 时间线只读视图（`feat/m1a-p3-timeline`）：renderer 按日分组列表（时间/应用/标题/OCR 摘要 80 字）+ 日期切换 + preload IPC + Playwright Electron 冒烟（合成 events，2 用例）；待 M1a 收口验收。
 - 2026-10-21：M1a Phase 2 采集管线落地（`feat/m1a-p2-capture`）：2a WinRT OCR spike 通过（长驻 PS 5.1，稳态 ~43ms）、dHash 帧差、sanitize、OCR 队列、scheduler、截屏窗口裁剪、active-win、electron-log 埋点；40 条单测 + 真机 65s 冒烟（1 事件、stats 落盘、日志无 OCR 原文）通过，待 30 分钟验收。
 - 2026-10-21：M1a Phase 0 脚手架合入 main（PR #4，`3e61b65`）；Phase 1 SQLite 底座完成（`feat/m1a-p1-sqlite`）：events/settings v1 迁移（up/down/幂等）、WAL、`insertEvent`/`queryTimeline`，14 条单测 + typecheck + dev 冒烟全绿。
 - 2026-10-21：M1a 方案批准合入（PR #2；Q1 本地保留原文 / Q2 六项依赖 / Q4 分支策略已拍板，decisions.md D10/D11）；Phase 0 脚手架开工（feat/m1a-p0-scaffold）。

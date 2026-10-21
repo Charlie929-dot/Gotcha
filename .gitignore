@@ -18,3 +18,7 @@ shots/
 # 编辑器 / 系统
 .DS_Store
 *.log
+
+# Playwright
+test-results/
+playwright-report/

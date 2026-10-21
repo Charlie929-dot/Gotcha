@@ -1,7 +1,7 @@
 import { defineConfig } from 'electron-vite'
 import { resolve } from 'node:path'
 
-// M1a Phase 0：仅 main + preload 两端（renderer 时间线视图 Phase 3 落地时再补）
+// M1a Phase 3：main + preload + renderer 三端（renderer = 只读时间线视图）
 export default defineConfig({
   main: {
     build: {
@@ -14,6 +14,14 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: { index: resolve(__dirname, 'src/renderer/preload.ts') }
+      }
+    }
+  },
+  renderer: {
+    root: resolve(__dirname, 'src/renderer'),
+    build: {
+      rollupOptions: {
+        input: { index: resolve(__dirname, 'src/renderer/index.html') }
       }
     }
   }

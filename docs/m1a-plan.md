@@ -95,6 +95,7 @@ tests/
 - 埋点：scheduler 内计数器，每日一 settings 键（见 §2），`stats.day.<date>` 累加写回。
 - Playwright 冒烟 E2E：预置合成 events（固定时间戳）→ 启动 → 时间线渲染出对应行。
 - **验收**：A1/A2/A5 按上表逐条过；M1a 收口：workflow.md §8 进度表更新、gotchas 补 OCR spike 结论、decisions 若有新拍板（如 OCR 实现路径）追加。
+- **状态**：✅ 代码完成（2026-10-21，`feat/m1a-p3-timeline`）：时间线只读视图（按日分组、时间/应用/标题/OCR 摘要 80 字、前/后一天/今天）、preload IPC 只读查询（暂停模式用只读连接，不建库）、Playwright Electron 冒烟 2 用例（合成 events + 日期切换/空态）全绿；43 条单测 + typecheck + build 绿。**M1a 收口待办**：真机 30 分钟验收（A2 CPU 采样）与 A1 次日回看、A5 数据核对；通过后按本节收口清单归档。
 
 ## 4. 关键设计决策（方案内定，有异议请标出）
 

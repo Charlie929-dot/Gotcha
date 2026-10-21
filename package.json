@@ -10,9 +10,11 @@
     "dev:capture": "electron-vite dev -- --capture",
     "build": "electron-vite build",
     "test": "vitest run",
+    "test:e2e": "electron-vite build && playwright test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.1",
     "@types/better-sqlite3": "9.6.0",
     "@types/node": "^26.6.5",
     "electron": "^45.0.0",

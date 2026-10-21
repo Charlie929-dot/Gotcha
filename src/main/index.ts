@@ -1,8 +1,9 @@
-import { app, BrowserWindow, nativeImage } from 'electron'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { app, BrowserWindow, ipcMain, nativeImage } from 'electron'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import Database from 'better-sqlite3'
 import log from 'electron-log/main'
-import { DB_FILE_NAME, openDatabase, type Db } from '../db'
+import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { getNumberSetting } from '../db/settings'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { CapturePipeline } from '../capture/pipeline'
@@ -12,23 +13,67 @@ import { loadStats, saveStats, statsKey } from '../capture/stats'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
 import { resolveCapture } from './args'
 
+// 测试隔离钩子：E2E 用临时 userData，绝不碰真实数据（gotchas.md）
+if (process.env.GOTCHA_USER_DATA) {
+  mkdirSync(process.env.GOTCHA_USER_DATA, { recursive: true })
+  app.setPath('userData', process.env.GOTCHA_USER_DATA)
+}
+
 let mainWindow: BrowserWindow | null = null
 let db: Db | null = null
+let timelineDb: Db | null = null
 let stopCapture: (() => void) | null = null
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
-    show: false, // M1a 无常驻 UI；时间线是 Phase 3 的 dev 工具窗口
-    width: 1024,
-    height: 768,
+    show: true, // M1a dev 工具窗口：只读时间线（无图谱）
+    width: 1100,
+    height: 800,
+    title: 'Gotcha · 时间线（M1a dev）',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false
     }
   })
+  if (process.env['ELECTRON_RENDERER_URL']) {
+    void mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  } else {
+    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
   mainWindow.on('closed', () => {
     mainWindow = null
+  })
+}
+
+/** 时间线查询连接：采集模式复用写连接；暂停模式只读打开（不存在则不建库，守 A3） */
+function openTimelineDb(): Db | null {
+  if (db) return db
+  if (timelineDb) return timelineDb
+  const file = join(app.getPath('userData'), DB_FILE_NAME)
+  if (!existsSync(file)) return null
+  timelineDb = new Database(file, { readonly: true, fileMustExist: true })
+  return timelineDb
+}
+
+function registerTimelineIpc(): void {
+  ipcMain.handle('timeline:query', (_event, from: unknown, to: unknown) => {
+    if (
+      typeof from !== 'number' ||
+      typeof to !== 'number' ||
+      !Number.isFinite(from) ||
+      !Number.isFinite(to) ||
+      to < from
+    ) {
+      return []
+    }
+    const connection = openTimelineDb()
+    if (!connection) return []
+    try {
+      return queryTimeline(connection, from, to)
+    } catch {
+      return []
+    }
   })
 }
 
@@ -102,6 +147,7 @@ app.whenReady().then(() => {
   } else {
     console.log('[gotcha] 采集默认暂停（A3 红线）：无 --capture 且 GOTCHA_CAPTURE≠1，无任何采集行为')
   }
+  registerTimelineIpc()
   createMainWindow()
 })
 
@@ -112,6 +158,8 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   stopCapture?.()
   stopCapture = null
+  timelineDb?.close()
+  timelineDb = null
   db?.close()
   db = null
 })

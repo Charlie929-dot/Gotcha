@@ -24,7 +24,7 @@
 | electron 二进制未随 npm install 下载 | 本机 `npm install` 后 `node_modules/electron/dist` 缺失（electron 45 包未见 postinstall 钩子，2026-10-21 验证），dev 起不来 | 装完检查 `node_modules\electron\dist\electron.exe`（约 238MB）；缺失则 `node node_modules/electron/install.js` 手动补 |
 | Playwright 跑 Electron E2E | `electron.launch()` 继承 shell 的 `ELECTRON_RUN_AS_NODE=1` 会退化成 Node 直接崩；且默认会读写真实 userData | 测试里先 `delete process.env.ELECTRON_RUN_AS_NODE`；用 `GOTCHA_USER_DATA` 指向临时目录（main 用 `app.setPath('userData')` 覆盖），跑完 `rmSync`；Playwright 不需要 `playwright install` 浏览器（Electron 走本地 electron 包），2026-10-21 验证 2 用例通过 |
 | 帧差指纹尺寸混用 | 截图层返回的是 90x80 灰度，OCR 图尺寸却是 1280x1029；调用方若拿 OCR 尺寸去 `dHash(gray, width, height)`，越界读到 `undefined` → 指纹恒同 → **帧差永不触发**：真机 34 分钟只入 1 条事件，而单测全绿（单测里 width/height 恰好等于灰度尺寸，盲区） | 指纹在截图层按灰度自身尺寸算好再交给管线（`CapturedFrame.diffHash`），管线不得用 image 尺寸重算；`dHash` 对「缓冲区不足」直接抛 `RangeError`，把这类错变成响错；2026-10-21 真机验证：修复后 30 秒 5–8 条事件 |
-| WinRT OCR 对真实屏幕小字号中文错误率高 | 合成图 13px 中文识别 100% 正确，但真实窗口截图里「记事本」被读成「记不文亻牛」、「应用」读成「旧应用」；英文同样有错（verify→verlfy）。原因推测：ClearType 次像素渲染 + 1.25 缩放 + 12px 小字号（未验证） | M1a 接受现状：时间线的**应用名/窗口标题来自 active-win（精确）**，OCR 只作摘要；M2 前需要评估提升 OCR 输入质量（不缩放窗口图 / 局部放大 / 换引擎），评估前不得把 OCR 文本当作可靠检索键 |
+| WinRT OCR 对真实屏幕小字号中文错误率高 | 合成图 13px 中文识别 100% 正确，但真实窗口截图里「记事本」被读成「记不文亻牛」、「应用」读成「旧应用」；英文同样有错（verify→verlfy）。**根因是字号不是画质**：同一张截图 15 个关键词，原生 1152 宽命中 11/15、缩到 806 宽 13/15、**放大 2× 后 15/15**（放大后耗时反而更低：118ms vs 原生 250ms） | OCR 输入统一放大 2×（上限 3840 宽，`src/capture/ocr-scaling.ts`，`resize` quality 用 `'best'`）。仍读不对的是浅灰底小字（如记事本标题栏），M1a 接受：**应用名/窗口标题来自 active-win**，OCR 只作摘要；M2 前若要再上一档再评估云端 VLM（`docs/cloud-ocr-vlm-draft.md`） |
 
 ## 规则
 

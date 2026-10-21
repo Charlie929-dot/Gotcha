@@ -1,5 +1,5 @@
 /**
- * 截屏 → 裁前台窗口区域 → 降采样（m1a-plan §3 Phase 2b）
+ * 截屏 → 裁前台窗口区域 → 放大送 OCR（m1a-plan §3 Phase 2b）
  *
  * desktopCapturer 抓整屏（按 DPI 物理像素），按窗口 bounds 裁剪；
  * 裁剪失败（多屏/DPI 异常）回退整屏，保证采集不断。
@@ -10,17 +10,16 @@ import type { Display } from 'electron'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { dHash, rgbaToGray } from './frame-diff'
+import { ocrTargetSize } from './ocr-scaling'
 import type { WindowBounds } from './window-meta'
 
 /** dHash 输入尺寸（90x80，便于整数降到 9x8） */
 const DIFF_WIDTH = 90
 const DIFF_HEIGHT = 80
-/** OCR 输入最大宽度：控制单帧 OCR 耗时 */
-const MAX_OCR_WIDTH = 1280
 
 export interface CapturedFrame {
   imagePath: string
-  /** OCR 图宽（≤1280） */
+  /** OCR 图宽（放大 2×，上限 MAX_OCR_WIDTH） */
   width: number
   /** OCR 图高 */
   height: number
@@ -113,9 +112,9 @@ export async function captureWindowFrame(
   }
 
   const cropped = full.crop(cropRect)
-  const targetWidth = Math.min(MAX_OCR_WIDTH, cropRect.width)
-  const targetHeight = Math.max(1, Math.round((cropRect.height * targetWidth) / cropRect.width))
-  const windowImage = cropped.resize({ width: targetWidth, height: targetHeight, quality: 'good' })
+  // OCR 输入放大 2 倍：WinRT 字检测对小字号漏检严重（实测 11/15 → 15/15，见 ocr-scaling.ts）
+  const target = ocrTargetSize(cropRect.width, cropRect.height)
+  const windowImage = cropped.resize({ width: target.width, height: target.height, quality: 'best' })
 
   const imagePath = join(tempDir, `frame-${ts}.png`)
   writeFileSync(imagePath, windowImage.toPNG())
@@ -124,5 +123,5 @@ export async function captureWindowFrame(
   const gray = rgbaToGray(new Uint8Array(diffImage.toBitmap()), DIFF_WIDTH, DIFF_HEIGHT)
   const diffHash = dHash(gray, DIFF_WIDTH, DIFF_HEIGHT)
 
-  return { imagePath, width: targetWidth, height: targetHeight, diffHash }
+  return { imagePath, width: target.width, height: target.height, diffHash }
 }

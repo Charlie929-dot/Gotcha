@@ -147,3 +147,4 @@ tests/
 | Q2 | 依赖报备（§5 六项） | 全部批准 | **Phase 0 起全部**（脚手架即需 electron / electron-vite / vitest） | ✅ 已批准（2026-10-21 对话：六项全部批准，按 Phase 需要逐项引入，→ decisions.md D11） |
 | Q3 | OCR spike 两候选都不达标时，是否允许 RapidOCR 提前到 M1a？ | 允许，但需重新报备体积（onnxruntime ~100MB+） | 不阻塞开工；仅 2a 失败触发时需批 | 待批（可延后） |
 | Q4 | M1a 分支策略：按 workflow.md §3.1，每 Phase 一支 `feat/m1a-p<n>-*` 短命分支 | 每 Phase 一支（vibe 规范落地首例） | — | ✅ 已批准（2026-10-21 对话，随 PR #1 规范合入 main） |
+| Q5 | 是否改用**云端视觉模型 OCR**（截图出网），替代/前置本地 WinRT OCR？ | 按 `docs/cloud-ocr-vlm-draft.md`：先做形态 A 影子对比，用数据决定是否进形态 B；本地 OCR 保留兜底 | Phase 2 收尾前（影响 A2/A5 口径与 security.md 硬前提） | 待批（草案 v0.1 已提交，2026-10-21 拍板人指示「先写草案」） |

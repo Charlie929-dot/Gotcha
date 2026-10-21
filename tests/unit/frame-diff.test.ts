@@ -67,6 +67,14 @@ describe('dHash · 帧差指纹', () => {
     }
     expect(hammingDistance(dHash(small, 90, 80), dHash(big, 180, 160))).toBe(0)
   })
+
+  it('缓冲区小于声明尺寸时抛错，不得静默返回同值指纹（真机回归）', () => {
+    // 曾经的真实 bug：截图层把 OCR 图尺寸（如 1280x1029）传给 dHash，而灰度只有 90x80，
+    // 越界读到 undefined → 所有帧指纹相同 → 帧差永不触发（34 分钟只入 1 条事件）
+    expect(() => dHash(new Uint8Array(W * H), 1280, 1029)).toThrow(RangeError)
+    expect(() => dHash(new Uint8Array(W * H), 1280, 1029)).toThrow(/缓冲区不足/)
+    expect(() => dHash(new Uint8Array(W * H), 0, 80)).toThrow(RangeError)
+  })
 })
 
 describe('灰度与缩放', () => {

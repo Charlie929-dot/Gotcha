@@ -36,8 +36,19 @@ export function resizeGray(
   return out
 }
 
-/** 64 bit dHash 指纹（输入任意尺寸灰度图，内部降采样到 9x8） */
+/**
+ * 64 bit dHash 指纹（输入任意尺寸灰度图，内部降采样到 9x8）
+ *
+ * width/height 必须是 **gray 自身的尺寸**：拿 OCR 图尺寸去套 90x80 灰度会越界读到
+ * undefined，指纹恒为同值、帧差永不触发（真机验收踩过，见 gotchas.md）。
+ */
 export function dHash(gray: Uint8Array, width: number, height: number): bigint {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw new RangeError(`dHash 尺寸非法: ${width}x${height}`)
+  }
+  if (gray.length < width * height) {
+    throw new RangeError(`dHash 缓冲区不足: 声明 ${width}x${height}，实际 ${gray.length} 字节`)
+  }
   const small = resizeGray(gray, width, height, DHASH_COLS, DHASH_ROWS)
   let bits = 0n
   for (let y = 0; y < DHASH_ROWS; y++) {

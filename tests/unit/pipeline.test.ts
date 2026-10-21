@@ -6,6 +6,7 @@ import {
   type CapturedFrame
 } from '../../src/capture/pipeline'
 import { OcrQueue } from '../../src/capture/queue'
+import { dHash } from '../../src/capture/frame-diff'
 import type { WindowInfo } from '../../src/capture/window-meta'
 
 const WINDOW: WindowInfo = {
@@ -29,8 +30,14 @@ function gray(seed: number): Uint8Array {
   return out
 }
 
+/** 与真实截图层一致：OCR 图尺寸（1280x1029）与帧差灰度尺寸（90x80）不同 */
 function frame(seed: number): CapturedFrame {
-  return { imagePath: `frame-${seed}.png`, width: W, height: H, gray: gray(seed) }
+  return {
+    imagePath: `frame-${seed}.png`,
+    width: 1280,
+    height: 1029,
+    diffHash: dHash(gray(seed), W, H)
+  }
 }
 
 interface Harness {
@@ -87,6 +94,8 @@ describe('CapturePipeline · 管线语义', () => {
   })
 
   it('内容变化 → 再次 OCR；命中敏感规则时 sensitive=1 且原文保留（D10）', async () => {
+    // 回归：帧差指纹必须来自 90x80 灰度，与 OCR 图尺寸（1280x1029）无关；
+    // 旧实现用 OCR 尺寸重算 dHash，导致所有帧被判「未变」，两帧只入 1 条
     let current = 1
     const { db, pipeline } = makeHarness(
       { captureWindow: async () => frame(current) },

@@ -10,7 +10,7 @@
 import type { Db } from '../db'
 import { insertEvent } from '../db'
 import { sanitize } from '../understand/sanitize'
-import { dHash, hammingDistance } from './frame-diff'
+import { hammingDistance } from './frame-diff'
 import type { OcrEngine } from './ocr/engine'
 import { OcrQueue, type OcrJob } from './queue'
 import type { CaptureStats } from './stats'
@@ -19,9 +19,11 @@ import type { WindowInfo } from './window-meta'
 
 export interface CapturedFrame {
   imagePath: string
+  /** OCR 图宽（≤1280），与帧差指纹的尺寸无关 */
   width: number
   height: number
-  gray: Uint8Array
+  /** 由截图层按 90x80 灰度自算的 dHash 指纹（切勿用 width/height 重算） */
+  diffHash: bigint
 }
 
 export interface PipelineLog {
@@ -95,7 +97,7 @@ export class CapturePipeline {
     }
 
     this.stats.frames_total++
-    const hash = dHash(frame.gray, frame.width, frame.height)
+    const hash = frame.diffHash
     const threshold = this.deps.diffThreshold ?? DEFAULT_DIFF_THRESHOLD
     if (this.lastHash !== null && hammingDistance(this.lastHash, hash) <= threshold) {
       this.stats.frames_same++

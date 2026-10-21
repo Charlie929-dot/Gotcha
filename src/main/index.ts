@@ -8,7 +8,7 @@ import { getNumberSetting } from '../db/settings'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { CapturePipeline } from '../capture/pipeline'
 import { startScheduler } from '../capture/scheduler'
-import { captureWindowFrame } from '../capture/screen'
+import { ScreenCapture } from '../capture/screen-stream'
 import { loadStats, saveStats, statsKey } from '../capture/stats'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
 import { resolveCapture } from './args'
@@ -23,6 +23,7 @@ let mainWindow: BrowserWindow | null = null
 let db: Db | null = null
 let timelineDb: Db | null = null
 let stopCapture: (() => void) | null = null
+let screenCapture: ScreenCapture | null = null
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
@@ -43,6 +44,8 @@ function createMainWindow(): void {
   }
   mainWindow.on('closed', () => {
     mainWindow = null
+    // 采集窗口是隐藏的，不会触发 window-all-closed；关掉时间线即退出，保持原有行为
+    if (screenCapture) app.quit()
   })
 }
 
@@ -78,7 +81,7 @@ function registerTimelineIpc(): void {
 }
 
 /** 采集装配（仅 --capture / GOTCHA_CAPTURE=1 进入；默认暂停时连库都不开） */
-function startCapture(): void {
+async function startCapture(): Promise<void> {
   const userDataDir = app.getPath('userData')
   mkdirSync(userDataDir, { recursive: true })
   db = openDatabase(join(userDataDir, DB_FILE_NAME))
@@ -98,6 +101,19 @@ function startCapture(): void {
     ? join(process.resourcesPath, 'ocr', 'winrt-ocr.ps1')
     : join(app.getAppPath(), 'resources', 'ocr', 'winrt-ocr.ps1')
 
+  // 持久屏幕捕获流：避开 desktopCapturer 每次 1–2s 阻塞主进程（gotchas.md）
+  screenCapture = new ScreenCapture({
+    devServerUrl: process.env['ELECTRON_RENDERER_URL'],
+    htmlPath: join(__dirname, '../renderer/capture.html')
+  })
+  try {
+    await screenCapture.start()
+  } catch (error) {
+    // 流起不来时保留时间线可用；后续 tick 的 captureWindow 会抛错并计 capture_errors
+    log.warn(`[capture] 屏幕捕获流启动失败：${String(error)}`)
+    console.warn(`[gotcha] 屏幕捕获流启动失败：${String(error)}`)
+  }
+
   const engine = new WinrtOcrBridge({ scriptPath: ocrScript })
   const now = (): number => Date.now()
   const pipeline = new CapturePipeline({
@@ -105,7 +121,7 @@ function startCapture(): void {
     ocr: engine,
     now,
     getActiveWindow,
-    captureWindow: (bounds) => captureWindowFrame(bounds, tempDir, now()),
+    captureWindow: (bounds) => screenCapture!.capture(bounds, tempDir, now()),
     deleteFrame: (imagePath) => rmSync(imagePath, { force: true }),
     isBlacklisted: (window) => isBlacklisted(window.executable),
     saveShot: saveShots
@@ -140,10 +156,15 @@ function startCapture(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const capture = resolveCapture(process.argv, process.env)
   if (capture) {
-    startCapture()
+    try {
+      await startCapture()
+    } catch (error) {
+      // 采集装配失败也要保证时间线能打开，错误不吞：写控制台
+      console.error(`[gotcha] 采集启动失败：${String(error)}`)
+    }
   } else {
     console.log('[gotcha] 采集默认暂停（A3 红线）：无 --capture 且 GOTCHA_CAPTURE≠1，无任何采集行为')
   }
@@ -158,6 +179,8 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   stopCapture?.()
   stopCapture = null
+  screenCapture?.dispose()
+  screenCapture = null
   timelineDb?.close()
   timelineDb = null
   db?.close()

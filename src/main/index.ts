@@ -1,8 +1,11 @@
 import { app, BrowserWindow } from 'electron'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { DB_FILE_NAME, openDatabase, type Db } from '../db'
 import { resolveCapture } from './args'
 
 let mainWindow: BrowserWindow | null = null
+let db: Db | null = null
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
@@ -23,7 +26,11 @@ function createMainWindow(): void {
 app.whenReady().then(() => {
   const capture = resolveCapture(process.argv, process.env)
   if (capture) {
-    console.log('[gotcha] 采集开启（--capture / GOTCHA_CAPTURE=1）')
+    // 默认暂停时连库都不开（A3 红线：无参数启动不产生任何写库行为）
+    const userDataDir = app.getPath('userData')
+    mkdirSync(userDataDir, { recursive: true })
+    db = openDatabase(join(userDataDir, DB_FILE_NAME))
+    console.log(`[gotcha] 采集开启：db 就绪（schema v1，${DB_FILE_NAME}）`)
   } else {
     console.log('[gotcha] 采集默认暂停（A3 红线）：无 --capture 且 GOTCHA_CAPTURE≠1，无任何采集行为')
   }
@@ -32,4 +39,9 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   app.quit()
+})
+
+app.on('will-quit', () => {
+  db?.close()
+  db = null
 })

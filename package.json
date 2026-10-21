@@ -7,16 +7,21 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "dev:capture": "electron-vite dev -- --capture",
     "build": "electron-vite build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
     "@types/node": "^26.6.5",
     "electron": "^45.0.0",
     "electron-vite": "^6.0.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3"
   }
 }

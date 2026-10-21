@@ -138,13 +138,14 @@ Gotcha/
 | 里程碑 | 主题 | 状态 |
 | - | - | - |
 | M0 | 策划 + 技术方案 | ✅ 完成（2026-10-20） |
-| M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | 🔄 进行中（Phase 1 SQLite 底座完成；Phase 2 采集管线待开工） |
+| M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | 🔄 进行中（Phase 2 采集管线代码完成，待真机 30 分钟验收；Phase 3 时间线待开工） |
 | M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | ⬜ 未开工 |
 | M2 | 知识行为图谱（DeepSeek 结构化/节点边/sigma.js 画布） | ⬜ 未开工 |
 | M3 | 分层记忆（日/周/月归纳/LOD/下钻） | ⬜ 未开工 |
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-21：M1a Phase 2 采集管线落地（`feat/m1a-p2-capture`）：2a WinRT OCR spike 通过（长驻 PS 5.1，稳态 ~43ms）、dHash 帧差、sanitize、OCR 队列、scheduler、截屏窗口裁剪、active-win、electron-log 埋点；40 条单测 + 真机 65s 冒烟（1 事件、stats 落盘、日志无 OCR 原文）通过，待 30 分钟验收。
 - 2026-10-21：M1a Phase 0 脚手架合入 main（PR #4，`3e61b65`）；Phase 1 SQLite 底座完成（`feat/m1a-p1-sqlite`）：events/settings v1 迁移（up/down/幂等）、WAL、`insertEvent`/`queryTimeline`，14 条单测 + typecheck + dev 冒烟全绿。
 - 2026-10-21：M1a 方案批准合入（PR #2；Q1 本地保留原文 / Q2 六项依赖 / Q4 分支策略已拍板，decisions.md D10/D11）；Phase 0 脚手架开工（feat/m1a-p0-scaffold）。
 - 2026-10-21：`AGENTS.md` 改为精简根文件，细节拆到 `docs/agent/` 五份；git 流程改为改动前先开分支、允许 push。

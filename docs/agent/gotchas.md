@@ -27,6 +27,7 @@
 | WinRT OCR 对真实屏幕小字号中文错误率高 | 合成图 13px 中文识别 100% 正确，但真实窗口截图里「记事本」被读成「记不文亻牛」、「应用」读成「旧应用」；英文同样有错（verify→verlfy）。**根因是字号不是画质**：同一张截图 15 个关键词，原生 1152 宽命中 11/15、缩到 806 宽 13/15、**放大 2× 后 15/15**（放大后耗时反而更低：118ms vs 原生 250ms） | OCR 输入统一放大 2×（上限 3840 宽，`src/capture/ocr-scaling.ts`，`resize` quality 用 `'best'`）。仍读不对的是浅灰底小字（如记事本标题栏），M1a 接受：**应用名/窗口标题来自 active-win**，OCR 只作摘要；M2 前若要再上一档再评估云端 VLM（`docs/cloud-ocr-vlm-draft.md`） |
 | 屏幕捕获阻塞主线程 | 采集模式下时间线鼠标悬停 1–2s 才变色、滚轮几秒才动；主进程 CPU ~50%，渲染进程却空闲。探针实测 `desktopCapturer.getSources()` 本机单次 **1.2–2.3s**（与 thumbnailSize 无关：320×180 也要 1.4s），且同步卡住 Electron 主进程 UI 线程 → OS 输入事件排队；每 2s 采一次 = 持续冻结（2026-10-21 实测事件循环最大卡顿 2209ms） | 改为隐藏窗口常驻 `getDisplayMedia` 屏幕流：`src/capture/screen-stream.ts` 启动时只 `getSources` 一次做「显示器 → 源」映射，之后每帧用 `executeJavaScript` 让 `src/renderer/capture-window.ts` 在隐藏渲染进程里裁剪 / 2× 放大 / PNG 编码，主进程只写文件 + 算 dHash。真机 12s 采样：主进程 IPC 往返 **max 5ms / p95 2ms**，OCR 正常出「记忆球 时间线」；启动多 ~1.5s（getSources 一次） |
 | 暗色模式按钮悬停变近纯白 | 鼠标放到时间线按钮上，按钮从深灰 `#26262c` 直接变成近白 `#f0f0f4`（本机 `AppsUseLightTheme=0`），像「悬停闪白」 | `.nav button:hover` 必须写在暗色媒体查询内（`#2f2f37`）并补 `:active`；按钮加 120ms 颜色过渡，避免主题切换瞬间的闪色。E2E 断言暗/亮两种模式的 hover 计算色（`tests/e2e/timeline.spec.ts`） |
+| A2 CPU 采样受屏幕变化频率影响 | 同一运行时：两次 5 分钟静置窗口 **1.58% / 1.24%**（各约 12 次帧变化），含启动的 23 分钟累计 **3.63%**；OCR 只在帧变化时执行，屏幕持续变化时 0.6–1.2s/帧 ≈ 最坏 5% | 报 A2 必须同时给「窗口内帧变化次数 / 事件数」与累计均值；只看 5 分钟静置数会低估，只看含启动累计会高估。新旧架构对比固定同一采样法：`Get-Process` 全树（含 OCR 子进程）`TotalProcessorTime` 增量 / 时长 / 逻辑核数（2026-10-21 实测） |
 
 ## 规则
 

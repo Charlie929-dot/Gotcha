@@ -130,7 +130,7 @@ tests/
 ## 7. 工期与提交计划
 
 - 总量 **5–7 个工作日**（P0 0.5 / P1 1 / P2 2–3 / P3 1–1.5 / 缓冲 0.5–1），对齐技术方案 §7 的 1–1.5 周。
-- 每 Phase 一次以上提交，均过闸门；分支 `feat/m1a-*`（每 Phase 一支）或单支 `feat/m1a` 分段提交——**默认单支分段提交**，冲突面小。
+- 每 Phase 一次以上提交，均过闸门；按 workflow.md §3.1 Vibe 分支规范：每个 Phase 一支短命分支（`feat/m1a-p0-scaffold`、`feat/m1a-p1-sqlite`…），PR squash 合入即清；同 Phase 内想试险招（如 OCR 桥接两种候选）拉 `vibe/` 分支验证。
 - M1a 收口时：workflow.md §8 进度表改 M1a ✅、本方案归档至 `docs/archive/`。
 
 ## 8. 待拍板清单
@@ -140,4 +140,4 @@ tests/
 | Q1 | OCR 命中敏感词：本地保留原文只标记（§4.2），还是本地也剥离？ | 保留原文 + `sensitive=1` |
 | Q2 | 依赖报备（§5 六项） | 全部批准 |
 | Q3 | OCR spike 两候选都不达标时，是否允许 RapidOCR 提前到 M1a？ | 允许，但需重新报备体积（onnxruntime ~100MB+） |
-| Q4 | 分支策略：单支 `feat/m1a` 分段提交 | 单支 |
+| Q4 | M1a 分支策略：按 workflow.md §3.1，每 Phase 一支 `feat/m1a-p<n>-*` 短命分支 | 每 Phase 一支（vibe 规范落地首例） |

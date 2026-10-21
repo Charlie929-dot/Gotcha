@@ -9,7 +9,7 @@ import { desktopCapturer, screen } from 'electron'
 import type { Display } from 'electron'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { rgbaToGray } from './frame-diff'
+import { dHash, rgbaToGray } from './frame-diff'
 import type { WindowBounds } from './window-meta'
 
 /** dHash 输入尺寸（90x80，便于整数降到 9x8） */
@@ -20,10 +20,12 @@ const MAX_OCR_WIDTH = 1280
 
 export interface CapturedFrame {
   imagePath: string
+  /** OCR 图宽（≤1280） */
   width: number
+  /** OCR 图高 */
   height: number
-  /** 90x80 灰度图，供 dHash */
-  gray: Uint8Array
+  /** 90x80 灰度图的 dHash 指纹；尺寸必须用 DIFF_WIDTH/DIFF_HEIGHT 算 */
+  diffHash: bigint
 }
 
 interface Rect {
@@ -120,6 +122,7 @@ export async function captureWindowFrame(
 
   const diffImage = windowImage.resize({ width: DIFF_WIDTH, height: DIFF_HEIGHT })
   const gray = rgbaToGray(new Uint8Array(diffImage.toBitmap()), DIFF_WIDTH, DIFF_HEIGHT)
+  const diffHash = dHash(gray, DIFF_WIDTH, DIFF_HEIGHT)
 
-  return { imagePath, width: targetWidth, height: targetHeight, gray }
+  return { imagePath, width: targetWidth, height: targetHeight, diffHash }
 }

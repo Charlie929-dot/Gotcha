@@ -87,7 +87,7 @@ tests/
 - **2d · 日志**：electron-log，文件落 `userData/logs/`；语句仅含 id/模块/元数据/错误码。
 - **测试**：dHash 合成图（同图距离 0 / 微改距离小 / 换图距离大）、sanitize golden 用例（密钥/JWT/手机/身份证/卡/邮箱/IP/URL query + 密码词整帧丢弃 + 黑名单只记元数据）、scheduler 用固定时钟断言 tick 与暂停语义、队列背压。
 - **验收**：`npm run dev -- --capture` 真机跑 30 分钟：events 表有数据、无 OCR 原文进日志、CPU 目测 < 3%（正式测量在 A2）。
-- **状态**：🔄 代码完成（2026-10-21，`feat/m1a-p2-capture`）：帧差/脱敏/队列/调度/截屏窗口裁剪/active-win/OCR 桥/埋点全部落地，40 条单测 + typecheck + build 绿；真机冒烟 65s：events 1 条、`stats.day` 已落盘（frames_total 22 / same 21 / ocr_runs 1 / dropped 0 / errors 0）、单帧 OCR 689ms（1280px 宽窗口截图）、日志无 OCR 原文。**待真机 30 分钟验收**（A2 CPU 采样 + A1/A5 复核），未通过前不宣称 A2。
+- **状态**：🔄 代码完成并修复真机缺陷（2026-10-21，`feat/m1a-p2-capture` + `fix/m1a-framediff-dims`）：帧差/脱敏/队列/调度/截屏窗口裁剪/active-win/OCR 桥/埋点全部落地，46 条单测 + typecheck + build 绿。**真机 30 分钟首轮验收发现帧差永不触发**（`dHash` 用了 OCR 图尺寸套 90x80 灰度，指纹恒同 → 34 分钟仅 1 条事件），已修复（指纹改由截图层按灰度尺寸算 + `dHash` 对缓冲区不足抛错 + 回归用例），隔离环境复测 30 秒 5–8 条事件且应用/标题随窗口切换正确。**待修复版重跑 30 分钟验收**（A2 CPU 采样 + A1/A5 复核），未通过前不宣称 A2。
 
 ### Phase 3 · 时间线视图 + 埋点（约 1–1.5 天）
 

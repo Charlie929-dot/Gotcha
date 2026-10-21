@@ -40,11 +40,18 @@ h1 {
   border: 1px solid #d0d0d6;
   border-radius: 6px;
   background: #fff;
+  color: inherit;
   cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
 }
 
 .nav button:hover {
   background: #f0f0f4;
+  border-color: #b9b9c2;
+}
+
+.nav button:active {
+  background: #e6e6ec;
 }
 
 #date {
@@ -132,6 +139,13 @@ li:hover {
     background: #26262c;
     border-color: #3a3a42;
     color: #ddd;
+  }
+  .nav button:hover {
+    background: #2f2f37;
+    border-color: #4a4a55;
+  }
+  .nav button:active {
+    background: #3a3a44;
   }
   li {
     border-color: #2e2e35;

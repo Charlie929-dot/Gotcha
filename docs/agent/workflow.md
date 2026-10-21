@@ -145,6 +145,7 @@ Gotcha/
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-21：修复采集模式下时间线输入冻结（`fix/m1a-input-lag`）：`desktopCapturer.getSources` 每次 1.2–2.3s 且阻塞主进程 → 改隐藏窗口常驻 `getDisplayMedia` 屏幕流（`screen-stream.ts` + `renderer/capture-window.ts`），真机 12s 主进程 IPC 往返 max 5ms / p95 2ms；暗色模式按钮 hover 不再闪白；60 单测 + 4 E2E + typecheck + build 绿。
 - 2026-10-21：M1a Phase 3 时间线只读视图（`feat/m1a-p3-timeline`）：renderer 按日分组列表（时间/应用/标题/OCR 摘要 80 字）+ 日期切换 + preload IPC + Playwright Electron 冒烟（合成 events，2 用例）；待 M1a 收口验收。
 - 2026-10-21：M1a Phase 2 采集管线落地（`feat/m1a-p2-capture`）：2a WinRT OCR spike 通过（长驻 PS 5.1，稳态 ~43ms）、dHash 帧差、sanitize、OCR 队列、scheduler、截屏窗口裁剪、active-win、electron-log 埋点；40 条单测 + 真机 65s 冒烟（1 事件、stats 落盘、日志无 OCR 原文）通过，待 30 分钟验收。
 - 2026-10-21：M1a Phase 0 脚手架合入 main（PR #4，`3e61b65`）；Phase 1 SQLite 底座完成（`feat/m1a-p1-sqlite`）：events/settings v1 迁移（up/down/幂等）、WAL、`insertEvent`/`queryTimeline`，14 条单测 + typecheck + dev 冒烟全绿。

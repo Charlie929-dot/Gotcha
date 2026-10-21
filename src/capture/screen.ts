@@ -1,21 +1,23 @@
 /**
- * 截屏 → 裁前台窗口区域 → 放大送 OCR（m1a-plan §3 Phase 2b）
+ * 截屏几何计算（m1a-plan §3 Phase 2b）
  *
- * desktopCapturer 抓整屏（按 DPI 物理像素），按窗口 bounds 裁剪；
- * 裁剪失败（多屏/DPI 异常）回退整屏，保证采集不断。
+ * 屏幕捕获本身由隐藏采集窗口的持久流完成（见 screen-stream.ts）；这里只保留
+ * 可单测的纯逻辑：按物理像素找到窗口所在显示器、把窗口 bounds 映射成视频像素的
+ * 裁剪区域，并按 OCR 策略算 2× 目标尺寸。
  */
 
-import { desktopCapturer, screen } from 'electron'
-import type { Display } from 'electron'
-import { writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { dHash, rgbaToGray } from './frame-diff'
 import { ocrTargetSize } from './ocr-scaling'
-import type { WindowBounds } from './window-meta'
 
 /** dHash 输入尺寸（90x80，便于整数降到 9x8） */
-const DIFF_WIDTH = 90
-const DIFF_HEIGHT = 80
+export const DIFF_WIDTH = 90
+export const DIFF_HEIGHT = 80
+
+export interface Rect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
 
 export interface CapturedFrame {
   imagePath: string
@@ -27,28 +29,40 @@ export interface CapturedFrame {
   diffHash: bigint
 }
 
-interface Rect {
-  x: number
-  y: number
-  width: number
-  height: number
+/** 与 Electron Display 同形，便于单测注入 */
+export interface DisplayInfo {
+  id: number
+  bounds: Rect
+  scaleFactor: number
 }
 
-/** active-win 在 Electron 主进程返回物理像素；display.bounds 是 DIP，需按 scaleFactor 换算 */
-function findDisplayForPhysicalPoint(point: { x: number; y: number }): Display {
-  const displays = screen.getAllDisplays()
+export interface CaptureGeometry {
+  /** 在视频帧像素坐标系里的裁剪矩形 */
+  crop: Rect
+  /** 送给 OCR 的 2× 目标尺寸 */
+  target: { width: number; height: number }
+}
+
+/**
+ * active-win 在 Electron 主进程返回物理像素；display.bounds 是 DIP，
+ * 先用 scaleFactor 换到物理像素再比较（gotchas.md「active-win 返回物理像素」）。
+ */
+export function findDisplayForPhysicalPoint(
+  displays: readonly DisplayInfo[],
+  primary: DisplayInfo,
+  point: { x: number; y: number }
+): DisplayInfo {
   return (
-    displays.find((d) => {
-      const scale = d.scaleFactor
-      const left = d.bounds.x * scale
-      const top = d.bounds.y * scale
+    displays.find((display) => {
+      const left = display.bounds.x * display.scaleFactor
+      const top = display.bounds.y * display.scaleFactor
       return (
         point.x >= left &&
-        point.x < left + d.bounds.width * scale &&
+        point.x < left + display.bounds.width * display.scaleFactor &&
         point.y >= top &&
-        point.y < top + d.bounds.height * scale
+        point.y < top + display.bounds.height * display.scaleFactor
       )
-    }) ?? screen.getPrimaryDisplay()
+    }) ?? primary
   )
 }
 
@@ -61,16 +75,18 @@ function clampRect(rect: Rect, maxWidth: number, maxHeight: number): Rect | null
   return { x, y, width, height }
 }
 
-/** 抓当前前台窗口区域；截图失败抛错由调用方计 capture_errors */
-export async function captureWindowFrame(
-  bounds: WindowBounds,
-  tempDir: string,
-  ts: number
-): Promise<CapturedFrame> {
-  const display = findDisplayForPhysicalPoint({
-    x: bounds.x + bounds.width / 2,
-    y: bounds.y + bounds.height / 2
-  })
+/**
+ * 窗口 bounds（物理像素）→ 视频帧像素裁剪区。
+ * 视频尺寸通常等于显示器物理尺寸，但 Electron/Chromium 可能缩略，故按比例换算。
+ */
+export function computeCaptureGeometry(
+  bounds: Rect,
+  display: DisplayInfo,
+  video: { width: number; height: number }
+): CaptureGeometry {
+  if (video.width <= 0 || video.height <= 0) {
+    throw new RangeError(`视频尺寸非法: ${video.width}x${video.height}`)
+  }
   const scale = display.scaleFactor
   const displayPhysical: Rect = {
     x: display.bounds.x * scale,
@@ -78,50 +94,20 @@ export async function captureWindowFrame(
     width: display.bounds.width * scale,
     height: display.bounds.height * scale
   }
-
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: {
-      width: Math.round(displayPhysical.width),
-      height: Math.round(displayPhysical.height)
-    }
-  })
-  const source =
-    sources.find((s) => s.display_id === String(display.id)) ?? sources[0]
-  if (!source || source.thumbnail.isEmpty()) {
-    throw new Error('整屏截图失败')
-  }
-
-  const full = source.thumbnail
-  const fullSize = full.getSize()
-  // 缩略图尺寸与物理屏幕尺寸的比例（Electron 可能把超大屏缩略图限制到上限）
-  const ratioX = fullSize.width / displayPhysical.width
-  const ratioY = fullSize.height / displayPhysical.height
-
+  const ratioX = video.width / displayPhysical.width
+  const ratioY = video.height / displayPhysical.height
   const relative: Rect = {
     x: (bounds.x - displayPhysical.x) * ratioX,
     y: (bounds.y - displayPhysical.y) * ratioY,
     width: bounds.width * ratioX,
     height: bounds.height * ratioY
   }
-  const cropRect = clampRect(relative, fullSize.width, fullSize.height) ?? {
+  const crop = clampRect(relative, video.width, video.height) ?? {
     x: 0,
     y: 0,
-    width: fullSize.width,
-    height: fullSize.height
+    width: video.width,
+    height: video.height
   }
-
-  const cropped = full.crop(cropRect)
-  // OCR 输入放大 2 倍：WinRT 字检测对小字号漏检严重（实测 11/15 → 15/15，见 ocr-scaling.ts）
-  const target = ocrTargetSize(cropRect.width, cropRect.height)
-  const windowImage = cropped.resize({ width: target.width, height: target.height, quality: 'best' })
-
-  const imagePath = join(tempDir, `frame-${ts}.png`)
-  writeFileSync(imagePath, windowImage.toPNG())
-
-  const diffImage = windowImage.resize({ width: DIFF_WIDTH, height: DIFF_HEIGHT })
-  const gray = rgbaToGray(new Uint8Array(diffImage.toBitmap()), DIFF_WIDTH, DIFF_HEIGHT)
-  const diffHash = dHash(gray, DIFF_WIDTH, DIFF_HEIGHT)
-
-  return { imagePath, width: target.width, height: target.height, diffHash }
+  const target = ocrTargetSize(crop.width, crop.height)
+  return { crop, target }
 }

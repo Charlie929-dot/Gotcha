@@ -86,3 +86,9 @@ test('日期切换：前一天无数据时显示空态', async () => {
   await page.locator('#today').click()
   await expect(page.locator('li')).toHaveCount(3)
 })
+
+test('实时同步徽标展示与手动刷新按钮存在可用', async () => {
+  await expect(page.locator('#live')).toBeVisible()
+  await page.locator('#refresh').click()
+  await expect(page.locator('li')).toHaveCount(3)
+})

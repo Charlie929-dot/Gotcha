@@ -15,6 +15,12 @@ export type BallEdge = 'left' | 'right' | 'top' | 'bottom'
 /** 与 renderer 的 `ball-interaction.ts` 状态一一对应（D16） */
 export type BallInteractionState = 'idle' | 'expanded' | 'grace' | 'dragging'
 
+/** 球上角标（与 main/ball.ts 的 BallNotice 同构） */
+export type BallNotice =
+  | { kind: 'countdown'; seconds: number }
+  | { kind: 'error'; text: string }
+  | { kind: 'hotkey-unavailable'; text: string }
+
 export interface BallPlacement {
   docked: boolean
   edge: BallEdge | null
@@ -34,6 +40,7 @@ export interface BallApi {
   onStatus(callback: (status: BallCaptureStatus) => void): () => void
   onPlacement(callback: (placement: BallPlacement) => void): () => void
   onForceRetract(callback: () => void): () => void
+  onNotice(callback: (notice: BallNotice | null) => void): () => void
   setPointerInside(inside: boolean): void
   setInteractionState(state: BallInteractionState): void
   dragStart(point: BallScreenPoint): void
@@ -70,6 +77,15 @@ const api: BallApi = {
     ipcRenderer.on('ball:force-retract', listener)
     return () => {
       ipcRenderer.removeListener('ball:force-retract', listener)
+    }
+  },
+  onNotice(callback) {
+    const listener = (_event: IpcRendererEvent, notice: BallNotice | null): void => {
+      callback(notice)
+    }
+    ipcRenderer.on('ball:notice', listener)
+    return () => {
+      ipcRenderer.removeListener('ball:notice', listener)
     }
   },
   setPointerInside: (inside) => ipcRenderer.send('ball:pointer-inside', inside === true),

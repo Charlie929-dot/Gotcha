@@ -41,11 +41,18 @@ interface BallPlacement {
   edge: BallEdge | null
 }
 
+/** 角标（与 main/ball.ts 的 BallNotice 同构，Phase 2） */
+type BallNotice =
+  | { kind: 'countdown'; seconds: number }
+  | { kind: 'error'; text: string }
+  | { kind: 'hotkey-unavailable'; text: string }
+
 interface BallApi {
   getStatus(): Promise<BallStatus>
   onStatus(callback: (status: BallStatus) => void): () => void
   onPlacement(callback: (placement: BallPlacement) => void): () => void
   onForceRetract(callback: () => void): () => void
+  onNotice(callback: (notice: BallNotice | null) => void): () => void
   setPointerInside(inside: boolean): void
   setInteractionState(state: BallInteractionState): void
   dragStart(point: BallScreenPoint): void
@@ -67,6 +74,10 @@ const MOVE_THROTTLE_MS = 16
 const ballElement = document.getElementById('ball')
 if (!ballElement) throw new Error('找不到 #ball')
 const ball: HTMLElement = ballElement
+
+const noticeNode = document.getElementById('notice')
+if (!noticeNode) throw new Error('找不到 #notice')
+const noticeElement: HTMLElement = noticeNode
 
 let docked = false
 let dockEdge: BallEdge | null = null
@@ -131,6 +142,29 @@ function applyStatus(status: BallStatus): void {
   const running = status === 'running'
   ball.classList.toggle('running', running)
   ball.classList.toggle('paused', !running)
+}
+
+/**
+ * 角标（Phase 2）：倒计时显示剩余秒数，失败 / 热键被占用显示「!」并把原因放进 title。
+ * null = 清除（draft 里角标不参与交互，pointer-events: none）。
+ */
+function applyNotice(notice: BallNotice | null): void {
+  if (!notice) {
+    noticeElement.hidden = true
+    noticeElement.textContent = ''
+    noticeElement.removeAttribute('data-kind')
+    noticeElement.removeAttribute('title')
+    return
+  }
+  noticeElement.hidden = false
+  noticeElement.dataset.kind = notice.kind
+  if (notice.kind === 'countdown') {
+    noticeElement.textContent = String(notice.seconds)
+    noticeElement.title = `${notice.seconds} 秒后开始记录（Alt+P 可取消）`
+    return
+  }
+  noticeElement.textContent = '!'
+  noticeElement.title = notice.text
 }
 
 function releasePointer(event: PointerEvent): void {
@@ -217,5 +251,6 @@ void window.gotchaBall.getStatus().then(applyStatus).catch(() => {})
 window.gotchaBall.onStatus(applyStatus)
 window.gotchaBall.onPlacement(applyPlacement)
 window.gotchaBall.onForceRetract(() => dispatch({ type: 'force-retract' }))
+window.gotchaBall.onNotice(applyNotice)
 
 export {}

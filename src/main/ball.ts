@@ -44,6 +44,17 @@ import {
 } from './ball-retract'
 import { buildTrayMenu, toMenuTemplate } from './tray-menu'
 
+/**
+ * 球上角标（m1b-plan §3 Phase 2）：
+ * - countdown：启动自动恢复的 3s 倒计时（3 → 2 → 1），期间球保持暂停视觉；
+ * - error：恢复 / 开始失败，保持暂停并提示；
+ * - hotkey-unavailable：`Alt+P` 被占用，托盘菜单仍可切换。
+ */
+export type BallNotice =
+  | { kind: 'countdown'; seconds: number }
+  | { kind: 'error'; text: string }
+  | { kind: 'hotkey-unavailable'; text: string }
+
 export interface BallShellOptions {
   preloadPath: string
   devServerUrl?: string
@@ -59,6 +70,8 @@ export interface BallShellOptions {
 export interface BallShell {
   window: BrowserWindow
   setStatus(status: CaptureStatus): void
+  /** 角标：null 清除；页面重载后自动重放最近一条 */
+  showNotice(notice: BallNotice | null): void
   reposition(): void
   dispose(): void
 }
@@ -190,6 +203,14 @@ export function createBallShell(options: BallShellOptions): BallShell {
     if (!win.isDestroyed()) win.webContents.send('ball:status', status)
   }
 
+  let latestNotice: BallNotice | null = null
+
+  /** 角标广播：也用于「页面重载后重放」，避免倒计时 / 报错角标丢失 */
+  const pushNotice = (notice: BallNotice | null): void => {
+    latestNotice = notice
+    if (!win.isDestroyed()) win.webContents.send('ball:notice', notice)
+  }
+
   /** 停靠信息广播：renderer 据此决定是否缩入（docked + edge） */
   const pushPlacement = (): void => {
     if (!win.isDestroyed()) win.webContents.send('ball:placement', { docked, edge })
@@ -257,6 +278,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
     applyIgnore()
     pushStatus(options.getStatus())
     pushPlacement()
+    pushNotice(latestNotice)
   })
 
   if (options.devServerUrl) {
@@ -427,6 +449,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
   return {
     window: win,
     setStatus: (status) => pushStatus(status),
+    showNotice: (notice) => pushNotice(notice),
     reposition,
     dispose: () => {
       screen.removeListener('display-added', reposition)

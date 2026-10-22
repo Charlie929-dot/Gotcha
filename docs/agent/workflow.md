@@ -140,12 +140,13 @@ Gotcha/
 | - | - | - |
 | M0 | 策划 + 技术方案 | ✅ 完成（2026-10-20） |
 | M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | ✅ 完成（2026-10-22 收口；A1 为能力验证，15:00 段样本不足见 `docs/archive/m1a-plan.md` §0） |
-| M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | 🚧 进行中（Phase 0 采集控制器 ✅、Phase 1 球窗口与视觉 ✅ 2026-10-22；Phase 2–3 待做；方案 v0.3：`docs/m1b-plan.md`；Q1=B 见 decisions D13） |
+| M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | 🚧 进行中（Phase 0 采集控制器 ✅、Phase 1 球窗口与视觉 ✅ 2026-10-22、Phase 2 隐私总开关 + Alt+P ✅ 2026-10-23；Phase 3 验收与收口 待做；方案 v0.3：`docs/m1b-plan.md`；Q1=B 见 decisions D13） |
 | M2 | 知识行为图谱（DeepSeek 结构化/节点边/sigma.js 画布） | ⬜ 未开工 |
 | M3 | 分层记忆（日/周/月归纳/LOD/下钻） | ⬜ 未开工 |
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-23：M1b Phase 2 隐私总开关 + `Alt+P`（`feat/m1b-p2-switch`）：`hotkeys.ts` 注册 `Alt+P`（占用时球上挂「!」角标 + 日志，托盘菜单兜底）；热键 / 托盘 / 球右键共用 `toggleCapture()` 单一入口，暂停先落 0/0 再关闸、恢复 `await start()` 成功才切运行；两键 `capture.enabled` / `capture.resume_on_start` 只在显式操作时写（`--capture` 直开不写）；启动 `resume_on_start=1` 先保持暂停 + 3s 倒计时角标（托盘气球提示），点球 / 托盘 / 退出即取消并写 0/0，`Alt+P` 则取消倒计时后立刻显式开始。真机反馈修复：进程级复用 `ScreenCapture` 的显示源映射（暂停仍释放窗口 / 媒体流），避免每次恢复重跑 `desktopCapturer.getSources()` 卡 1–2s；倒计时到点后的 `starting` 阶段仍可取消，点球排队停止，Alt+P 接管同一 in-flight start。新增 12 条单测（hotkeys 3 / capture-switch 9）+ 6 条开关 E2E（含慢假启动竞态），`npm test` 168 条 / typecheck / 开关 E2E 6 条 / build 全绿。
 - 2026-10-23：修悬浮球自动缩回（D16，`feat/m1b-p1-ball` 追加）：旧逻辑指针离球心 >24px 就恢复穿透、>40px 才收起，中间带丢 leave 事件导致「滑出后卡在展开态」；改为展开 / 宽限 / 拖动期间保持窗口可交互，离开窗口 600ms 宽限到期缩回，主进程 50ms 游标兜底（离开安全区 ≥700ms 强制缩回，含过渡 ≤900ms）。交互状态机 `src/renderer/ball/ball-interaction.ts` 与兜底判定 `src/main/ball-retract.ts` 抽为纯函数；新增 17 条单测、E2E 13 条（含连续 10 次展开-缩回、丢失 leave 兜底）；`npm test` 156 条 / typecheck / 13 条 E2E / build 全绿。真机手感（缩回时机、热区唤醒）待 B7 手工确认。
 - 2026-10-22：M1b 球停靠语义改腾讯管家式（D15，`feat/m1b-p1-ball` 追加提交）：停靠时窗口贴齐工作区边缘（窗口不出屏），球体用 CSS 平移 32px 缩入、只露半颗（24px），悬停滑出全显（160ms 过渡）、移开缩回；拖动松手停在原地（自由位），窗口离边缘 ≤24px 才吸附并缩入；`userData/ball.json` v2 区分停靠（edge + offset_ratio）/ 自由（x_ratio / y_ratio），仅拖动后惰性写；缩入态复测「球不进截图」diff=0。单测 139 条 / E2E 11 条（新增停靠缩入、悬停滑出、自由位拖动、停靠/自由两种重启恢复）/ typecheck / build 全绿。
 - 2026-10-22：M1b Phase 1 球窗口与视觉（`feat/m1b-p1-ball`）：透明球窗口 64×64（`frame:false` / `transparent` / `alwaysOnTop:'floating'` / `skipTaskbar` / `focusable:false` / `showInactive()`），鼠标穿透 + renderer 圆形命中检测（进圆关穿透、出圆恢复），悬停 1.08 放大、暂停态灰暗 + 斜杠；贴边/吸附/多屏 clamp/拔屏回退主屏为纯函数（`ball-position.ts`），位置惰性写 `userData/ball.json`（原子写，仅 edge/offset_ratio/display_id）；点击球打开/聚焦时间线（Q3）；托盘（打开时间线 / 暂停·恢复 / 退出）+ 球右键同菜单（Q4）；`requestSingleInstanceLock` 单实例 + `second-instance` 只聚焦时间线；退出前 `await controller.stop()` 收口；`setContentProtection(true)` 真机实测球不进截图（desktopCapturer 显示/隐藏 diff=0）；修 125% 缩放下 `setPosition` 让窗口越拖越胖的坑（吸附像素网格）。新增 45 条单测 + 6 条 E2E（球窗口属性 / 默认位置 / 点击开时间线 / 拖动吸附落盘 / ball.json 重启恢复 / 双开单实例 + 时间线 4 条回归），`npm test` 127 条 / typecheck / 10 条 E2E / build 全绿；球体视觉、悬停与托盘菜单为真机手工项（B1/B2/B8）。

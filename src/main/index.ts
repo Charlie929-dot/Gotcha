@@ -1,9 +1,9 @@
-import { app, BrowserWindow, ipcMain, nativeImage } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage } from 'electron'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import log from 'electron-log/main'
-import { DB_FILE_NAME, openDatabase, queryTimeline } from '../db'
+import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
@@ -19,6 +19,10 @@ import { claimSingleInstance } from './single-instance'
 import { BALL_STATE_FILE } from './ball-state'
 import { createBallShell, type BallShell } from './ball'
 import { installTray, type TrayShell } from './tray'
+import { toggleEnabled } from './tray-menu'
+import { registerToggleHotkey, type HotkeyHandle } from './hotkeys'
+import { persistSwitch, readSwitchSettings, StartupResumeCountdown } from './capture-switch'
+import { createFakeCaptureSession } from './fake-capture'
 
 // 测试隔离钩子：E2E 用临时 userData，绝不碰真实数据（gotchas.md）
 if (process.env.GOTCHA_USER_DATA) {
@@ -26,9 +30,40 @@ if (process.env.GOTCHA_USER_DATA) {
   app.setPath('userData', process.env.GOTCHA_USER_DATA)
 }
 
+/** 启动参数直开（--capture / GOTCHA_CAPTURE=1）只调试用，不写 settings（D13） */
+const launchCapture = resolveCapture(process.argv, process.env)
+/** 只有显式 UI 操作（Alt+P / 托盘 / 球右键）才落盘两键；--capture 直开不写 */
+const persistsSwitch = !launchCapture
+
+/**
+ * E2E 假采集：必须同时满足「显式开关 + 临时 userData + 非打包态」；
+ * 任一不满足就走真实采集路径，绝不静默降级（§3 Phase 2 / §6）。
+ */
+const fakeCapture =
+  process.env.GOTCHA_FAKE_CAPTURE === '1' &&
+  Boolean(process.env.GOTCHA_USER_DATA) &&
+  !app.isPackaged
+
+const dbPath = join(app.getPath('userData'), DB_FILE_NAME)
+/**
+ * 进程级复用：dispose() 仍销毁隐藏窗口 / 媒体流（Q6），但 ScreenCapture 保留一次
+ * desktopCapturer.getSources() 得到的显示源映射。否则每次 Alt+P 恢复都会重新执行
+ * 已知会同步冻结主进程 1.2–2.3s 的源枚举。假采集路径不会使用它。
+ */
+const screenCapture = fakeCapture
+  ? null
+  : new ScreenCapture({
+      devServerUrl: process.env['ELECTRON_RENDERER_URL'],
+      htmlPath: join(__dirname, '../renderer/capture.html')
+    })
+
 let mainWindow: BrowserWindow | null = null
 let ballShell: BallShell | null = null
 let trayShell: TrayShell | null = null
+let hotkeyHandle: HotkeyHandle | null = null
+let startupCountdown: StartupResumeCountdown | null = null
+/** 倒计时到点后的 starting 阶段，Alt+P 可把自动恢复接管为显式开启 */
+let startupResumeClaimedExplicitly = false
 let shuttingDown = false
 let quitRequested = false
 let logInitialized = false
@@ -42,7 +77,7 @@ function ensureLog(): void {
 
 /** 连接生命周期：时间线只读 / 采集写连接（m1b Plan §3 Phase 0） */
 const connections = new CaptureDbConnections({
-  dbPath: join(app.getPath('userData'), DB_FILE_NAME),
+  dbPath,
   fileExists: (path) => existsSync(path),
   openWritable: (path) => openDatabase(path),
   openReadonly: (path) => new Database(path, { readonly: true, fileMustExist: true })
@@ -65,6 +100,8 @@ app.on('before-quit', (event) => {
   quitRequested = true
   if (shuttingDown) return
   shuttingDown = true
+  startupCountdown?.cancel()
+  hotkeyHandle?.dispose()
   // 退出前等 stop 收口（在途 OCR 丢弃、stats 落盘、流释放）；3s 超时后放弃并强退。
   // 用 before-quit + preventDefault：will-quit 阶段再拦会被 Electron 当成 quit 已在进行。
   event.preventDefault()
@@ -76,6 +113,7 @@ app.on('before-quit', (event) => {
     }
     connections.closeAll()
     trayShell?.dispose()
+    if (fakeCapture) globalThis.__gotchaTest = undefined
     app.quit()
   })()
 })
@@ -90,6 +128,12 @@ function showTimelineWindow(): void {
     return
   }
   createMainWindow()
+}
+
+/** 用户主动打开时间线 = 一次交互：取消在途的启动自动恢复并把意图置 0（D13） */
+function openTimeline(): void {
+  cancelStartupResume(true)
+  showTimelineWindow()
 }
 
 function createMainWindow(): void {
@@ -160,7 +204,10 @@ function createSession(): Promise<CaptureSession> {
     now: () => Date.now(),
     ensureWriteDb: () => connections.ensureWritable(),
     releaseWriteDb: (openedThisTime) => connections.releaseWritableIfNew(openedThisTime),
-    createScreenStream: () => new ScreenCapture({ devServerUrl, htmlPath: captureHtmlPath }),
+    createScreenStream: () => {
+      if (!screenCapture) throw new Error('真实屏幕采集器未初始化')
+      return screenCapture
+    },
     createOcr: () => new WinrtOcrBridge({ scriptPath: ocrScript }),
     getActiveWindow,
     isBlacklisted: (window) => isBlacklisted(window.executable),
@@ -173,13 +220,177 @@ function createSession(): Promise<CaptureSession> {
 }
 
 const controller = new CaptureController({
-  createSession,
+  createSession: fakeCapture
+    ? async () => {
+        const delayMs = Math.max(0, Number(process.env.GOTCHA_FAKE_CAPTURE_START_DELAY_MS) || 0)
+        if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+        return createFakeCaptureSession()
+      }
+    : createSession,
   log: captureLog,
   onStatusChange: (status) => {
     ballShell?.setStatus(status)
     trayShell?.update(status)
   }
 })
+
+/**
+ * 为写 settings 打开写连接（显式操作才到这里：临时 userData / 空库会建库，属 A3 收窄口径）。
+ * 打不开就放弃本次写入并记 warn，不阻塞开关动作。
+ */
+function switchDb(): Db | null {
+  try {
+    return connections.ensureWritable().db
+  } catch (error) {
+    captureLog('warn', 'switch settings write skipped (db unavailable)', {
+      error: String(error)
+    })
+    return null
+  }
+}
+
+/**
+ * 启动自动恢复：`resume_on_start=1` 时先暂停视觉 + 3s 倒计时，到点才真正开始。
+ * 失败保持暂停 + 球上提示，不写 settings（启动恢复不是新的显式授权，D13/A3）。
+ */
+async function resumeFromStartup(): Promise<void> {
+  try {
+    await controller.start()
+    // ScreenCapture 首次起流可能同步冻结主进程；让冻结期间排队的热键 / 球 IPC 先处理，
+    // 再决定自动恢复是否真正完成，避免用户明明在倒计时内操作却被判为来不及取消。
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    if (!startupCountdown?.active) {
+      if (startupResumeClaimedExplicitly) {
+        startupResumeClaimedExplicitly = false
+        if (persistsSwitch) {
+          const db = switchDb()
+          if (db) persistSwitch(db, true)
+        }
+        ballShell?.showNotice(null)
+        captureLog('info', 'capture startup resume claimed by explicit toggle')
+        return
+      }
+      await controller.stop()
+      captureLog('info', 'capture startup resume canceled during start')
+      return
+    }
+    startupCountdown.complete()
+    ballShell?.showNotice(null)
+    captureLog('info', 'capture resumed on start')
+  } catch (error) {
+    startupResumeClaimedExplicitly = false
+    startupCountdown?.complete()
+    ballShell?.showNotice({ kind: 'error', text: '自动恢复失败，仍为暂停' })
+    captureLog('error', 'capture resume on start failed', { error: String(error) })
+  }
+}
+
+function scheduleStartupResume(): void {
+  startupCountdown = new StartupResumeCountdown({
+    onTick: (seconds) => ballShell?.showNotice({ kind: 'countdown', seconds }),
+    onDue: () => {
+      void resumeFromStartup()
+    }
+  })
+  startupCountdown.start()
+  trayShell?.balloon('3 秒后开始记录', '点球或按 Alt+P 可取消，托盘菜单同样有效')
+}
+
+/**
+ * 取消在途的启动自动恢复；`persist` 时把两键置 0/0（用户点球 / 托盘 / 退出都算取消，
+ * 按 D13「3s 内任意交互即取消」落盘）。Alt+P 在倒计时里按则是立刻显式开始，见 toggleCapture。
+ */
+function cancelStartupResume(persist: boolean): boolean {
+  if (!startupCountdown?.cancel()) return false
+  ballShell?.showNotice(null)
+  if (persist && persistsSwitch) {
+    const db = switchDb()
+    if (db) persistSwitch(db, false)
+  }
+  return true
+}
+
+/** 读启动恢复授权：没有库（空 userData）就是暂停，不建库、不写盘（A3） */
+function readResumeOnStart(): boolean {
+  if (!existsSync(dbPath)) return false
+  try {
+    return readSwitchSettings(connections.queryDb()).resumeOnStart
+  } catch (error) {
+    captureLog('warn', 'capture switch settings unreadable', { error: String(error) })
+    return false
+  }
+}
+
+/**
+ * 唯一 toggle 入口（Alt+P / 托盘 / 球右键共用，§3 Phase 2）：
+ * - 暂停：先落 0/0 再关闸（顺序反了会在退出 / 崩溃中途残留「已授权恢复」）；
+ * - 恢复：`await start()` 成功后才切亮，失败保持暂停 + 角标提示，绝不「显示运行但没采」。
+ * 转换在途（starting / stopping）忽略重复触发，避免连点排队。
+ */
+async function toggleCapture(): Promise<void> {
+  // Alt+P 在倒计时里 = 立刻显式开始。若到点后的真实起流已经进入 starting，
+  // 接管该 in-flight start；不能被 toggleEnabled(starting)=false 静默忽略。
+  const canceledStartupResume = cancelStartupResume(false)
+  const status = controller.status()
+  if (canceledStartupResume && status === 'starting') {
+    startupResumeClaimedExplicitly = true
+    try {
+      await controller.start()
+    } catch {
+      // resumeFromStartup 负责统一显示失败提示与日志；这里只清标记，避免 void 调用未处理拒绝。
+      startupResumeClaimedExplicitly = false
+    }
+    return
+  }
+  if (!toggleEnabled(status)) return
+
+  if (status === 'running') {
+    if (persistsSwitch) {
+      const db = switchDb()
+      if (db) persistSwitch(db, false)
+    }
+    try {
+      await controller.stop()
+    } catch (error) {
+      captureLog('error', 'capture stop failed', { error: String(error) })
+    }
+    return
+  }
+
+  try {
+    await controller.start()
+    if (persistsSwitch) {
+      const db = switchDb()
+      if (db) persistSwitch(db, true)
+    }
+    ballShell?.showNotice(null)
+  } catch (error) {
+    ballShell?.showNotice({ kind: 'error', text: '开始记录失败，检查屏幕录制权限后重试' })
+    captureLog('error', 'capture start failed', { error: String(error) })
+  }
+}
+
+/** 测试钩子：只在假采集（临时 userData + 非打包）下挂到主进程 globalThis */
+interface GotchaTestHook {
+  toggle(): Promise<void>
+  status(): string
+  notice(notice: unknown): void
+}
+
+declare global {
+  var __gotchaTest: GotchaTestHook | undefined
+}
+
+function installTestHook(): void {
+  globalThis.__gotchaTest = {
+    toggle: () => toggleCapture(),
+    status: () => controller.status(),
+    notice: (notice) => {
+      if (notice === null) ballShell?.showNotice(null)
+      else ballShell?.showNotice(notice as Parameters<BallShell['showNotice']>[0])
+    }
+  }
+}
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -199,7 +410,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 // 单实例：必须在创建任何窗口之前抢锁；没抢到直接退出（§4.8）
 const primaryInstance = claimSingleInstance(app, () => {
-  showTimelineWindow()
+  openTimeline()
 })
 
 if (primaryInstance) {
@@ -225,21 +436,27 @@ if (primaryInstance) {
       htmlPath: join(__dirname, '../renderer/ball/ball.html'),
       stateFilePath: join(app.getPath('userData'), BALL_STATE_FILE),
       getStatus: () => controller.status(),
-      openTimeline: showTimelineWindow,
+      openTimeline,
       toggleCapture: () => {
-        void controller.toggle()
+        void toggleCapture()
       },
-      quit: () => app.quit(),
+      quit: () => {
+        cancelStartupResume(true)
+        app.quit()
+      },
       log: captureLog
     })
 
     trayShell = installTray(
       {
-        openTimeline: showTimelineWindow,
+        openTimeline,
         toggleCapture: () => {
-          void controller.toggle()
+          void toggleCapture()
         },
-        quit: () => app.quit()
+        quit: () => {
+          cancelStartupResume(true)
+          app.quit()
+        }
       },
       controller.status()
     )
@@ -248,5 +465,24 @@ if (primaryInstance) {
     ballShell.window.on('closed', () => {
       if (!quitRequested) app.quit()
     })
+
+    if (fakeCapture) installTestHook()
+
+    hotkeyHandle = registerToggleHotkey(
+      globalShortcut,
+      () => {
+        void toggleCapture()
+      },
+      captureLog
+    )
+    if (!hotkeyHandle.registered) {
+      ballShell.showNotice({
+        kind: 'hotkey-unavailable',
+        text: 'Alt+P 已被其他应用占用，可从托盘菜单切换记录'
+      })
+    }
+
+    // Q1=B：只有上次显式开启（resume_on_start=1）才延迟 3s 自动恢复，且可被任意交互取消
+    if (!launchCapture && readResumeOnStart()) scheduleStartupResume()
   })
 }

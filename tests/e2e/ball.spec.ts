@@ -13,7 +13,6 @@ import { join } from 'node:path'
 import { positionFor, positionOnPixelGrid, type BallEdge, type BallRect } from '../../src/main/ball-position'
 
 const APP_ARGS = ['.'] as const
-const BALL_TITLE = 'Gotcha 球'
 
 let userDataDir: string
 let app: ElectronApplication

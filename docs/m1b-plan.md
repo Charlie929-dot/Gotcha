@@ -38,11 +38,12 @@ src/
 │  ├─ index.ts              # 入口：单实例锁 / 装配球窗口 / 托盘 / 热键 / 采集控制器
 │  ├─ capture-controller.ts # 从 startCapture 拆出：start() / stop() / status() / toggle()，Promise + 串行
 │  ├─ ball.ts               # 悬浮球窗口：创建、贴边与拖动吸附（位置计算为纯函数）、显隐、命中检测通道
+│  ├─ ball-retract.ts       # 自动缩回兜底判定（纯函数）：安全区、宽限计时、强制缩回
 │  ├─ hotkeys.ts            # Alt+P 注册/注销 + 失败上报（注入 globalShortcut，可单测）
 │  └─ tray.ts               # 托盘图标 + 最小菜单（打开时间线 / 暂停·恢复 / 退出）
 ├─ renderer/
-│  ├─ ball/                 # ball.html / ball.ts / ball.css：圆形、悬停放大、暂停态、指针命中检测
-│  ├─ ball-preload.ts       # 球专用 preload：状态订阅 / toggle / 指针进出通道（最小权限）
+│  ├─ ball/                 # ball.html / ball.ts / ball.css / ball-interaction.ts：圆形、悬停放大、交互状态机、暂停态
+│  ├─ ball-preload.ts       # 球专用 preload：状态订阅 / toggle / 指针进出 / 交互状态 / 兜底缩回通道（最小权限）
 │  ├─ preload.ts            # 时间线只读查询（M1b 不追加采集开关 API）
 │  └─ index.html / main.ts  # 现有时间线窗口（M1b 点击球的落地页）
 ├─ db/ ...                  # 既有
@@ -51,6 +52,8 @@ src/
    └─ queue.ts              # 新增 drainAll()：取空队列（供 halt 删帧）
 tests/
 ├─ unit/ball-position.test.ts       # 贴边吸附、多屏 clamp、display_id 回退、比例位置（纯函数）
+├─ unit/ball-interaction.test.ts    # 交互状态机：热区展开、窗口内不收起、宽限、拖动、强制缩回
+├─ unit/ball-retract.test.ts        # 兜底判定：安全区边界、离开计时、到点强制缩回
 ├─ unit/capture-controller.test.ts  # start/stop 幂等、并发串行、start 失败回滚、stop 后无 tick
 ├─ unit/pipeline-halt.test.ts       # 闸关后：在途 OCR 不写库、队列清空、临时帧删除
 ├─ unit/hotkeys.test.ts             # 注册失败/成功、切换调用（假 globalShortcut）

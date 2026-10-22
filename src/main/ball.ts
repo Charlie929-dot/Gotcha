@@ -1,12 +1,16 @@
 /**
- * 悬浮球窗口（m1b-plan §3 Phase 1）
+ * 悬浮球窗口（m1b-plan §3 Phase 1，2026-10-22 拍板改为腾讯管家式停靠，D15）
  *
- * 职责：透明球窗口的创建 / 贴边位置 / 鼠标穿透切换 / 拖动与吸附 / 位置落盘 /
- * 状态广播 / 右键菜单。几何计算与文件读写都在纯函数模块（ball-position / ball-state），
- * 这里只做 Electron 接线。
+ * 职责：透明球窗口的创建 / 位置与停靠 / 鼠标穿透切换 / 拖动与吸附 / 位置落盘 /
+ * 状态与停靠信息广播 / 右键菜单。几何计算与文件读写都在纯函数模块
+ * （ball-position / ball-state），这里只做 Electron 接线。
  *
- * 穿透模型（§3 Phase 1）：窗口默认 `setIgnoreMouseEvents(true, { forward: true })`，
- * renderer 用转发的指针事件做圆形命中检测，进圆内 → 关穿透，出圆/出窗 → 恢复穿透。
+ * 停靠模型：窗口始终整块落在工作区内（贴齐边缘），球体缩入（露出 24px）由 renderer
+ * 的 CSS transform 完成；悬停滑出、移开缩回也在 renderer 侧（不移动窗口，避免
+ * 滑出/缩回时命中区域抖动）。拖动松手离边缘 ≤24px 才吸附，否则停在原地（free）。
+ *
+ * 穿透模型：窗口默认 `setIgnoreMouseEvents(true, { forward: true })`，
+ * renderer 用转发的指针事件做圆形命中检测，进圆内 → 关穿透，出圆 → 恢复穿透。
  * 该通道只接受球窗口 sender（§4.9 权限面分离）。
  */
 
@@ -15,12 +19,14 @@ import type { CaptureStatus } from './capture-controller'
 import {
   BALL_WINDOW_SIZE,
   clampPosition,
-  nearestEdge,
-  positionFor,
+  dockedPosition,
+  nearestEdgeWithin,
   positionOnPixelGrid,
   ratioFor,
+  ratiosForFree,
   resolveLayout,
   type BallDisplay,
+  type BallEdge,
   type BallPoint
 } from './ball-position'
 import { readBallState, writeBallState } from './ball-state'
@@ -79,6 +85,20 @@ function toBallDisplays(): BallDisplay[] {
   }))
 }
 
+function workAreaOf(display: Electron.Display): {
+  x: number
+  y: number
+  width: number
+  height: number
+} {
+  return {
+    x: display.workArea.x,
+    y: display.workArea.y,
+    width: display.workArea.width,
+    height: display.workArea.height
+  }
+}
+
 export function createBallShell(options: BallShellOptions): BallShell {
   const displays = toBallDisplays()
   const primaryId = screen.getPrimaryDisplay().id
@@ -89,8 +109,11 @@ export function createBallShell(options: BallShellOptions): BallShell {
     })
   }
   const initial = resolveLayout(saved, displays, primaryId)
-  let edge = initial.edge
+  let docked = initial.docked
+  let edge: BallEdge | null = initial.edge
   let offsetRatio = initial.offsetRatio
+  let xRatio = saved?.x_ratio ?? 0.5
+  let yRatio = saved?.y_ratio ?? 0.5
   let displayId = initial.displayId
 
   const scaleForDisplay = (id: number): number => {
@@ -133,7 +156,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
   })
 
   win.setIgnoreMouseEvents(true, { forward: true })
-  // 球常驻置顶，不能出现在自己的截图里（§4.10 真机验证项）
+  // 球常驻置顶，不能出现在自己的截图里（§4.10 已验证）
   win.setContentProtection(true)
   win.setAlwaysOnTop(true, 'floating')
   win.setSkipTaskbar(true)
@@ -144,9 +167,15 @@ export function createBallShell(options: BallShellOptions): BallShell {
     if (!win.isDestroyed()) win.webContents.send('ball:status', status)
   }
 
+  /** 停靠信息广播：renderer 据此决定是否缩入（docked + edge） */
+  const pushPlacement = (): void => {
+    if (!win.isDestroyed()) win.webContents.send('ball:placement', { docked, edge })
+  }
+
   win.webContents.on('did-finish-load', () => {
     if (!win.isDestroyed() && !win.isVisible()) win.showInactive()
     pushStatus(options.getStatus())
+    pushPlacement()
   })
 
   if (options.devServerUrl) {
@@ -155,38 +184,50 @@ export function createBallShell(options: BallShellOptions): BallShell {
     void win.loadFile(options.htmlPath)
   }
 
-  /** 吸附到最近边缘并落盘（只在拖动结束时调用） */
-  const snapToEdge = (position: BallPoint): void => {
+  const persist = (): void => {
+    try {
+      writeBallState(options.stateFilePath, {
+        edge,
+        offset_ratio: offsetRatio,
+        x_ratio: xRatio,
+        y_ratio: yRatio,
+        display_id: displayId
+      })
+    } catch (error) {
+      options.log('warn', 'ball state write failed', { error: String(error) })
+    }
+  }
+
+  /**
+   * 松手落位（只在拖动结束时调用）：
+   * 离边缘 ≤ DOCK_THRESHOLD 才吸附停靠，否则自由停在原地。
+   */
+  const settleAt = (position: BallPoint): void => {
     const center = {
       x: position.x + BALL_WINDOW_SIZE / 2,
       y: position.y + BALL_WINDOW_SIZE / 2
     }
     const display = screen.getDisplayNearestPoint(center)
-    const workArea = {
-      x: display.workArea.x,
-      y: display.workArea.y,
-      width: display.workArea.width,
-      height: display.workArea.height
-    }
+    const workArea = workAreaOf(display)
     const clamped = clampPosition(position, workArea)
-    const nextEdge = nearestEdge(clamped, workArea)
-    const nextRatio = ratioFor(nextEdge, clamped, workArea)
-    const finalPosition = positionFor(nextEdge, nextRatio, workArea)
+    const nextEdge = nearestEdgeWithin(clamped, workArea)
 
-    edge = nextEdge
-    offsetRatio = nextRatio
     displayId = display.id
-    placeWindow(finalPosition, display.scaleFactor)
-
-    try {
-      writeBallState(options.stateFilePath, {
-        edge: nextEdge,
-        offset_ratio: nextRatio,
-        display_id: display.id
-      })
-    } catch (error) {
-      options.log('warn', 'ball state write failed', { error: String(error) })
+    if (nextEdge) {
+      docked = true
+      edge = nextEdge
+      offsetRatio = ratioFor(nextEdge, clamped, workArea)
+      placeWindow(dockedPosition(nextEdge, offsetRatio, workArea), display.scaleFactor)
+    } else {
+      docked = false
+      edge = null
+      const ratios = ratiosForFree(clamped, workArea)
+      xRatio = ratios.xRatio
+      yRatio = ratios.yRatio
+      placeWindow(clamped, display.scaleFactor)
     }
+    persist()
+    pushPlacement()
   }
 
   let drag: { offsetX: number; offsetY: number; lastMoveAt: number } | null = null
@@ -242,7 +283,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
       const [x, y] = win.getPosition()
       position = { x, y }
     }
-    snapToEdge(position)
+    settleAt(position)
   }
 
   const onContextMenu = (event: IpcMainEvent): void => {
@@ -274,18 +315,20 @@ export function createBallShell(options: BallShellOptions): BallShell {
   ipcMain.on('ball:open-timeline', onOpenTimeline)
   ipcMain.handle('ball:current-status', onCurrentStatus)
 
-  /** 显示器增删 / 分辨率变化后重新吸附，避免球停在不可见区域 */
+  /** 显示器增删 / 分辨率变化后重新落位：停靠保持边缘比例，自由位保持相对位置 */
   const reposition = (): void => {
     const now = toBallDisplays()
     const layout = resolveLayout(
-      { edge, offset_ratio: offsetRatio, display_id: displayId },
+      { edge, offset_ratio: offsetRatio, x_ratio: xRatio, y_ratio: yRatio, display_id: displayId },
       now,
       screen.getPrimaryDisplay().id
     )
+    docked = layout.docked
     edge = layout.edge
     offsetRatio = layout.offsetRatio
     displayId = layout.displayId
     placeWindow(layout.position, scaleForDisplay(layout.displayId))
+    pushPlacement()
   }
 
   screen.on('display-added', reposition)

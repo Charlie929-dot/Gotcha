@@ -1,7 +1,7 @@
 /**
- * M1b Phase 1 E2E：ball.json 重启恢复（B2 / Q8）
+ * M1b Phase 1 E2E：ball.json 重启恢复（B2 / Q8 / D15）
  *
- * 预置一份合法 ball.json（左缘 + 0.25 比例）→ 启动 → 球落在该位置；
+ * 预置一份合法 ball.json（停靠 / 自由两种）→ 启动 → 球落在对应位置、缩入状态正确；
  * 启动本身不得改写 ball.json（惰性写入：只在拖动/吸附后写）。
  */
 
@@ -11,9 +11,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  positionFor,
+  dockedPosition,
+  freePosition,
   positionOnPixelGrid,
-  type BallEdge,
   type BallRect
 } from '../../src/main/ball-position'
 
@@ -32,7 +32,9 @@ interface Geometry {
 }
 
 let userDataDir: string
-let app: ElectronApplication
+let app: ElectronApplication | null = null
+let displays: DisplayInfo[] = []
+let primaryId = 0
 
 function statePath(): string {
   return join(userDataDir, 'ball.json')
@@ -65,40 +67,100 @@ async function readGeometry(target: ElectronApplication): Promise<Geometry> {
   return info
 }
 
-test.beforeAll(async () => {
-  delete process.env.ELECTRON_RUN_AS_NODE
-  userDataDir = mkdtempSync(join(tmpdir(), 'gotcha-restart-'))
-})
-
-test.afterAll(async () => {
-  await app?.close()
-  rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-})
-
-test('ball.json 重启后恢复位置，且启动不改写文件（惰性写入）', async () => {
-  // 第一次启动只为拿到真实显示器 id / 工作区 / 缩放
-  app = await launch()
-  await (await app.firstWindow()).waitForSelector('#ball')
-  const first = await readGeometry(app)
-  await app.close()
-  await new Promise((resolve) => setTimeout(resolve, 500))
-
-  const display = first.displays.find((candidate) => candidate.id === first.primaryId)
-  if (!display) throw new Error('找不到主显示器')
-
-  const saved = { edge: 'left' as BallEdge, offset_ratio: 0.25, display_id: display.id }
-  writeFileSync(statePath(), JSON.stringify(saved))
-  const before = readFileSync(statePath(), 'utf8')
-
-  // 第二次启动：按 ball.json 还原到左缘 1/4 处
+async function launchAndRead(): Promise<Geometry> {
   app = await launch()
   const ballPage = await app.firstWindow()
   await ballPage.waitForSelector('#ball')
-  const second = await readGeometry(app)
+  // 等 placement 消息与缩入过渡（160ms）结束
+  await ballPage.waitForTimeout(400)
+  return readGeometry(app)
+}
 
-  const expected = positionOnPixelGrid(positionFor('left', 0.25, display.workArea), display.scaleFactor)
-  expect(second.bounds).toEqual({ ...expected, width: 64, height: 64 })
+async function closeApp(): Promise<void> {
+  await app?.close()
+  app = null
+  await new Promise((resolve) => setTimeout(resolve, 500))
+}
 
-  // 启动不写文件：内容与启动前逐字一致（惰性写入，A3/Q8）
+test.beforeAll(async () => {
+  delete process.env.ELECTRON_RUN_AS_NODE
+  userDataDir = mkdtempSync(join(tmpdir(), 'gotcha-restart-'))
+
+  // 第一次启动只为拿到真实显示器 id / 工作区 / 缩放
+  const geometry = await launchAndRead()
+  displays = geometry.displays
+  primaryId = geometry.primaryId
+  await closeApp()
+})
+
+test.afterAll(async () => {
+  await closeApp()
+  rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+})
+
+test('ball.json 停靠态重启恢复：贴边 + 缩入，且启动不改写文件', async () => {
+  const display = displays.find((candidate) => candidate.id === primaryId)
+  if (!display) throw new Error('找不到主显示器')
+
+  writeFileSync(
+    statePath(),
+    JSON.stringify({
+      edge: 'left',
+      offset_ratio: 0.25,
+      x_ratio: 0.5,
+      y_ratio: 0.5,
+      display_id: display.id
+    })
+  )
+  const before = readFileSync(statePath(), 'utf8')
+
+  const geometry = await launchAndRead()
+  const expected = positionOnPixelGrid(
+    dockedPosition('left', 0.25, display.workArea),
+    display.scaleFactor
+  )
+  expect(geometry.bounds).toEqual({ ...expected, width: 64, height: 64 })
+
+  const ballPage = await app!.firstWindow()
+  await expect(ballPage.locator('#ball')).toHaveClass(/dock-left/)
+  const matrix = await ballPage.locator('#ball').evaluate((element) => {
+    const m = new DOMMatrix(getComputedStyle(element).transform)
+    return { e: m.e, f: m.f }
+  })
+  expect(matrix.e).toBeCloseTo(-32, 1)
+
+  // 启动不写文件：惰性写入（A3/Q8）
   expect(readFileSync(statePath(), 'utf8')).toBe(before)
+
+  await closeApp()
+})
+
+test('ball.json 自由态重启恢复：停在记录的位置，不缩入', async () => {
+  const display = displays.find((candidate) => candidate.id === primaryId)
+  if (!display) throw new Error('找不到主显示器')
+
+  writeFileSync(
+    statePath(),
+    JSON.stringify({
+      edge: null,
+      offset_ratio: 0,
+      x_ratio: 0.2,
+      y_ratio: 0.3,
+      display_id: display.id
+    })
+  )
+  const before = readFileSync(statePath(), 'utf8')
+
+  const geometry = await launchAndRead()
+  const expected = positionOnPixelGrid(
+    freePosition(0.2, 0.3, display.workArea),
+    display.scaleFactor
+  )
+  expect(geometry.bounds).toEqual({ ...expected, width: 64, height: 64 })
+
+  const ballPage = await app!.firstWindow()
+  await expect(ballPage.locator('#ball')).not.toHaveClass(/dock-/)
+  expect(readFileSync(statePath(), 'utf8')).toBe(before)
+
+  await closeApp()
 })

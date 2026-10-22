@@ -101,23 +101,22 @@ test('实时同步徽标展示与手动刷新按钮存在可用', async () => {
 })
 
 test('暗色模式按钮悬停不再是近纯白（回归：悬停闪白）', async () => {
+  const box = await page.locator('#prev').boundingBox()
+  if (!box) throw new Error('找不到 #prev 按钮')
+
   const hoverColor = async (): Promise<string> => {
-    const box = await page.locator('#prev').boundingBox()
-    if (!box) throw new Error('找不到 #prev 按钮')
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
-    await page.waitForTimeout(250) // 等 120ms 背景过渡结束
     return await page
       .locator('#prev')
       .evaluate((el) => getComputedStyle(el).backgroundColor)
   }
 
   await page.emulateMedia({ colorScheme: 'dark' })
-  await page.waitForTimeout(250)
+  // 背景过渡 120ms；用 poll 等终态（2026-10-22 全量跑时固定等待偶发不足）
   // 暗色悬停应为深色（#2f2f37），而不是旧版漏写暗色覆盖时的 #f0f0f4
-  expect(await hoverColor()).toBe('rgb(47, 47, 55)')
+  await expect.poll(hoverColor, { timeout: 3_000 }).toBe('rgb(47, 47, 55)')
 
   await page.emulateMedia({ colorScheme: 'light' })
-  await page.waitForTimeout(250)
-  expect(await hoverColor()).toBe('rgb(240, 240, 244)')
+  await expect.poll(hoverColor, { timeout: 3_000 }).toBe('rgb(240, 240, 244)')
   await page.emulateMedia({ colorScheme: 'no-preference' })
 })

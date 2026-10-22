@@ -1,13 +1,21 @@
 /**
  * 球专用 preload（m1b-plan §3 Phase 2 / §4.9 权限面分离）
  *
- * 只暴露球需要的通道：状态订阅 / 状态查询 / 指针进出 / 拖动 / 打开时间线 / 右键菜单。
- * 时间线 preload 不追加采集开关 API，球 preload 也不暴露时间线查询。
+ * 只暴露球需要的通道：状态订阅 / 状态查询 / 停靠信息 / 指针进出 / 拖动 /
+ * 打开时间线 / 右键菜单。时间线 preload 不追加采集开关 API，球 preload 也不暴露
+ * 时间线查询。
  */
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
 export type BallCaptureStatus = 'paused' | 'starting' | 'running' | 'stopping'
+
+export type BallEdge = 'left' | 'right' | 'top' | 'bottom'
+
+export interface BallPlacement {
+  docked: boolean
+  edge: BallEdge | null
+}
 
 export interface BallScreenPoint {
   screenX: number
@@ -21,6 +29,7 @@ export interface BallDragEndPayload extends BallScreenPoint {
 export interface BallApi {
   getStatus(): Promise<BallCaptureStatus>
   onStatus(callback: (status: BallCaptureStatus) => void): () => void
+  onPlacement(callback: (placement: BallPlacement) => void): () => void
   setPointerInside(inside: boolean): void
   dragStart(point: BallScreenPoint): void
   dragMove(point: BallScreenPoint): void
@@ -38,6 +47,15 @@ const api: BallApi = {
     ipcRenderer.on('ball:status', listener)
     return () => {
       ipcRenderer.removeListener('ball:status', listener)
+    }
+  },
+  onPlacement(callback) {
+    const listener = (_event: IpcRendererEvent, placement: BallPlacement): void => {
+      callback(placement)
+    }
+    ipcRenderer.on('ball:placement', listener)
+    return () => {
+      ipcRenderer.removeListener('ball:placement', listener)
     }
   },
   setPointerInside: (inside) => ipcRenderer.send('ball:pointer-inside', inside === true),

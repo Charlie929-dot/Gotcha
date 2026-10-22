@@ -1,16 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import {
-  BALL_EDGE_OFFSET,
+  BALL_SIZE,
+  BALL_TUCK_OFFSET,
   BALL_WINDOW_SIZE,
+  DOCK_THRESHOLD,
   clampPosition,
   clampRatio,
-  nearestEdge,
-  positionFor,
+  dockedPosition,
+  freePosition,
+  nearestEdgeWithin,
   positionOnPixelGrid,
   ratioFor,
+  ratiosForFree,
   resolveLayout,
   snapToPixelGrid,
-  type BallDisplay
+  type BallDisplay,
+  type BallSavedState
 } from '../../src/main/ball-position'
 
 const PRIMARY: BallDisplay = {
@@ -24,57 +29,94 @@ const SECONDARY_LEFT: BallDisplay = {
   workArea: { x: -1920, y: 0, width: 1920, height: 1080 }
 }
 
-/** 主屏上方副屏：负 y */
-const SECONDARY_TOP: BallDisplay = {
-  id: 3,
-  workArea: { x: 0, y: -1080, width: 1920, height: 1080 }
-}
-
 const SPAN_X = PRIMARY.workArea.width - BALL_WINDOW_SIZE
 const SPAN_Y = PRIMARY.workArea.height - BALL_WINDOW_SIZE
 
-describe('positionFor：贴边位置', () => {
-  it('默认右边缘垂直居中（B1）', () => {
-    expect(positionFor('right', 0.5, PRIMARY.workArea)).toEqual({
-      x: 1920 - BALL_WINDOW_SIZE - BALL_EDGE_OFFSET,
+function saved(partial: Partial<BallSavedState>): BallSavedState {
+  return {
+    edge: 'right',
+    offset_ratio: 0.5,
+    x_ratio: 0.5,
+    y_ratio: 0.5,
+    display_id: PRIMARY.id,
+    ...partial
+  }
+}
+
+describe('停靠几何常量（D15）', () => {
+  it('球体 48、窗口 64，缩进 32 后只露半颗（24px）', () => {
+    expect(BALL_SIZE).toBe(48)
+    expect(BALL_WINDOW_SIZE).toBe(64)
+    expect(BALL_TUCK_OFFSET).toBe(32)
+    // 露出宽度 = 窗口宽 - 居中留白 - 缩进量 = 64 - 8 - 32 = 24（半颗球的半径）
+    expect(BALL_WINDOW_SIZE - (BALL_WINDOW_SIZE - BALL_SIZE) / 2 - BALL_TUCK_OFFSET).toBe(24)
+    expect(DOCK_THRESHOLD).toBe(24)
+  })
+})
+
+describe('dockedPosition：窗口贴齐边缘（球体由 renderer 缩进）', () => {
+  it('右边缘垂直居中：窗口右缘贴工作区右缘', () => {
+    expect(dockedPosition('right', 0.5, PRIMARY.workArea)).toEqual({
+      x: 1920 - BALL_WINDOW_SIZE,
       y: (1080 - BALL_WINDOW_SIZE) / 2
     })
   })
 
-  it('四条边都按 6px 内缩，窗口完整落在工作区内', () => {
-    expect(positionFor('left', 0, PRIMARY.workArea)).toEqual({ x: BALL_EDGE_OFFSET, y: 0 })
-    expect(positionFor('right', 1, PRIMARY.workArea)).toEqual({
-      x: 1920 - BALL_WINDOW_SIZE - BALL_EDGE_OFFSET,
+  it('四条边都贴齐（无 6px 内缩）', () => {
+    expect(dockedPosition('left', 0, PRIMARY.workArea)).toEqual({ x: 0, y: 0 })
+    expect(dockedPosition('right', 1, PRIMARY.workArea)).toEqual({
+      x: 1920 - BALL_WINDOW_SIZE,
       y: SPAN_Y
     })
-    expect(positionFor('top', 0, PRIMARY.workArea)).toEqual({ x: 0, y: BALL_EDGE_OFFSET })
-    expect(positionFor('bottom', 1, PRIMARY.workArea)).toEqual({
+    expect(dockedPosition('top', 0.5, PRIMARY.workArea)).toEqual({
+      x: SPAN_X / 2,
+      y: 0
+    })
+    expect(dockedPosition('bottom', 1, PRIMARY.workArea)).toEqual({
       x: SPAN_X,
-      y: 1080 - BALL_WINDOW_SIZE - BALL_EDGE_OFFSET
+      y: 1080 - BALL_WINDOW_SIZE
     })
   })
 
   it('负坐标工作区（左侧副屏）不丢符号', () => {
-    expect(positionFor('right', 0.5, SECONDARY_LEFT.workArea)).toEqual({
-      x: -1920 + 1920 - BALL_WINDOW_SIZE - BALL_EDGE_OFFSET,
+    expect(dockedPosition('left', 0.5, SECONDARY_LEFT.workArea)).toEqual({
+      x: -1920,
       y: SPAN_Y / 2
     })
   })
 
-  it('负 y 工作区（上方副屏）垂直居中仍正确', () => {
-    expect(positionFor('top', 0.5, SECONDARY_TOP.workArea)).toEqual({
-      x: SPAN_X / 2,
-      y: -1080 + BALL_EDGE_OFFSET
-    })
-  })
-
   it('比例越界被夹到 [0,1]', () => {
-    expect(positionFor('right', -5, PRIMARY.workArea)).toEqual(positionFor('right', 0, PRIMARY.workArea))
-    expect(positionFor('right', 5, PRIMARY.workArea)).toEqual(positionFor('right', 1, PRIMARY.workArea))
+    expect(dockedPosition('right', -5, PRIMARY.workArea)).toEqual(
+      dockedPosition('right', 0, PRIMARY.workArea)
+    )
+    expect(dockedPosition('right', 5, PRIMARY.workArea)).toEqual(
+      dockedPosition('right', 1, PRIMARY.workArea)
+    )
   })
 
   it('窗口比工作区还大时贴左上，不产生负坐标', () => {
-    expect(positionFor('right', 0.5, { x: 0, y: 0, width: 40, height: 40 })).toEqual({ x: 0, y: 0 })
+    expect(dockedPosition('right', 0.5, { x: 0, y: 0, width: 40, height: 40 })).toEqual({
+      x: 0,
+      y: 0
+    })
+  })
+})
+
+describe('freePosition：自由停在原地（按工作区比例）', () => {
+  it('0.5 / 0.5 即工作区居中', () => {
+    expect(freePosition(0.5, 0.5, PRIMARY.workArea)).toEqual({
+      x: SPAN_X / 2,
+      y: SPAN_Y / 2
+    })
+  })
+
+  it('边界比例对应工作区两端', () => {
+    expect(freePosition(0, 0, PRIMARY.workArea)).toEqual({ x: 0, y: 0 })
+    expect(freePosition(1, 1, PRIMARY.workArea)).toEqual({ x: SPAN_X, y: SPAN_Y })
+  })
+
+  it('比例越界被夹紧', () => {
+    expect(freePosition(-1, 2, PRIMARY.workArea)).toEqual({ x: 0, y: SPAN_Y })
   })
 })
 
@@ -92,34 +134,45 @@ describe('clampPosition', () => {
   })
 })
 
-describe('nearestEdge：吸附到最近边缘', () => {
-  it('贴近左边吸附 left', () => {
-    expect(nearestEdge({ x: 4, y: 400 }, PRIMARY.workArea)).toBe('left')
+describe('nearestEdgeWithin：≤24px 才吸附', () => {
+  it('贴右缘吸附 right', () => {
+    expect(nearestEdgeWithin({ x: SPAN_X, y: 400 }, PRIMARY.workArea)).toBe('right')
   })
 
-  it('贴近右边吸附 right', () => {
-    expect(nearestEdge({ x: 1850, y: 400 }, PRIMARY.workArea)).toBe('right')
+  it('距右缘 20px 吸附，距右缘 30px 不吸附（自由）', () => {
+    expect(nearestEdgeWithin({ x: SPAN_X - 20, y: 400 }, PRIMARY.workArea)).toBe('right')
+    expect(nearestEdgeWithin({ x: SPAN_X - 30, y: 400 }, PRIMARY.workArea)).toBeNull()
   })
 
-  it('贴近上缘吸附 top', () => {
-    expect(nearestEdge({ x: 800, y: 2 }, PRIMARY.workArea)).toBe('top')
+  it('四边分别吸附', () => {
+    expect(nearestEdgeWithin({ x: 10, y: 400 }, PRIMARY.workArea)).toBe('left')
+    expect(nearestEdgeWithin({ x: 800, y: 10 }, PRIMARY.workArea)).toBe('top')
+    expect(nearestEdgeWithin({ x: 800, y: 1080 - BALL_WINDOW_SIZE - 10 }, PRIMARY.workArea)).toBe(
+      'bottom'
+    )
   })
 
-  it('贴近下缘吸附 bottom', () => {
-    expect(nearestEdge({ x: 800, y: 1010 }, PRIMARY.workArea)).toBe('bottom')
+  it('拖出屏外（负坐标）仍按最近边吸附', () => {
+    expect(nearestEdgeWithin({ x: -40, y: 400 }, PRIMARY.workArea)).toBe('left')
+    expect(nearestEdgeWithin({ x: SPAN_X + 40, y: 400 }, PRIMARY.workArea)).toBe('right')
   })
 
-  it('负坐标副屏吸附仍取最近的边', () => {
-    expect(nearestEdge({ x: -1915, y: 400 }, SECONDARY_LEFT.workArea)).toBe('left')
+  it('工作区中间返回 null（自由位）', () => {
+    expect(nearestEdgeWithin({ x: 800, y: 400 }, PRIMARY.workArea)).toBeNull()
   })
 })
 
-describe('ratioFor：吸附后落盘比例', () => {
-  it.each(['left', 'right', 'top', 'bottom'] as const)('%s 边位置 ↔ 比例往返一致', (edge) => {
+describe('ratioFor / ratiosForFree', () => {
+  it.each(['left', 'right', 'top', 'bottom'] as const)('%s 边停靠位置 ↔ 比例往返一致', (edge) => {
     for (const ratio of [0, 0.25, 0.5, 0.75, 1]) {
-      const position = positionFor(edge, ratio, PRIMARY.workArea)
+      const position = dockedPosition(edge, ratio, PRIMARY.workArea)
       expect(ratioFor(edge, position, PRIMARY.workArea)).toBeCloseTo(ratio, 6)
     }
+  })
+
+  it('自由位比例往返一致', () => {
+    const position = freePosition(0.25, 0.75, PRIMARY.workArea)
+    expect(ratiosForFree(position, PRIMARY.workArea)).toEqual({ xRatio: 0.25, yRatio: 0.75 })
   })
 
   it('工作区跨度不足时比例归 0，不产生 NaN', () => {
@@ -136,7 +189,6 @@ describe('clampRatio', () => {
 
 describe('snapToPixelGrid：非整数缩放下的像素网格吸附', () => {
   it('125%：吸附到 DIP×1.25 为整数的最近整数坐标', () => {
-    // 1466 × 1.25 = 1832.5（非整数物理像素）→ 1464 × 1.25 = 1830
     expect(snapToPixelGrid(1466, 1.25)).toBe(1464)
     expect(snapToPixelGrid(1464, 1.25)).toBe(1464)
     expect(snapToPixelGrid(376, 1.25)).toBe(376)
@@ -162,45 +214,54 @@ describe('snapToPixelGrid：非整数缩放下的像素网格吸附', () => {
   })
 })
 
-describe('resolveLayout：默认态与多屏回退', () => {
-  it('无落盘状态：主屏右边缘垂直居中', () => {
+describe('resolveLayout：默认态、停靠 / 自由、多屏回退', () => {
+  it('无落盘状态：主屏右边缘垂直居中、停靠态', () => {
     expect(resolveLayout(null, [PRIMARY], PRIMARY.id)).toEqual({
       displayId: PRIMARY.id,
+      docked: true,
       edge: 'right',
       offsetRatio: 0.5,
-      position: positionFor('right', 0.5, PRIMARY.workArea)
+      position: dockedPosition('right', 0.5, PRIMARY.workArea)
     })
   })
 
-  it('落盘状态命中副屏：在原显示器上还原', () => {
+  it('落盘停靠态命中副屏：在原显示器上还原', () => {
     const layout = resolveLayout(
-      { edge: 'left', offset_ratio: 0.25, display_id: SECONDARY_LEFT.id },
+      saved({ edge: 'left', offset_ratio: 0.25, display_id: SECONDARY_LEFT.id }),
       [PRIMARY, SECONDARY_LEFT],
       PRIMARY.id
     )
     expect(layout.displayId).toBe(SECONDARY_LEFT.id)
+    expect(layout.docked).toBe(true)
     expect(layout.edge).toBe('left')
-    expect(layout.position).toEqual(positionFor('left', 0.25, SECONDARY_LEFT.workArea))
+    expect(layout.position).toEqual(dockedPosition('left', 0.25, SECONDARY_LEFT.workArea))
+  })
+
+  it('落盘自由态：按 x/y 比例还原窗口位置', () => {
+    const layout = resolveLayout(
+      saved({ edge: null, x_ratio: 0.2, y_ratio: 0.8 }),
+      [PRIMARY],
+      PRIMARY.id
+    )
+    expect(layout.docked).toBe(false)
+    expect(layout.edge).toBeNull()
+    expect(layout.position).toEqual(freePosition(0.2, 0.8, PRIMARY.workArea))
   })
 
   it('display_id 已失效（拔屏）：回退主屏，保留边缘与比例', () => {
     const layout = resolveLayout(
-      { edge: 'bottom', offset_ratio: 0.75, display_id: 999 },
+      saved({ edge: 'bottom', offset_ratio: 0.75, display_id: 999 }),
       [PRIMARY],
       PRIMARY.id
     )
     expect(layout.displayId).toBe(PRIMARY.id)
     expect(layout.edge).toBe('bottom')
     expect(layout.offsetRatio).toBe(0.75)
-    expect(layout.position).toEqual(positionFor('bottom', 0.75, PRIMARY.workArea))
+    expect(layout.position).toEqual(dockedPosition('bottom', 0.75, PRIMARY.workArea))
   })
 
   it('比例越界（旧文件）被夹到 [0,1]', () => {
-    const layout = resolveLayout(
-      { edge: 'right', offset_ratio: 2, display_id: PRIMARY.id },
-      [PRIMARY],
-      PRIMARY.id
-    )
+    const layout = resolveLayout(saved({ offset_ratio: 2 }), [PRIMARY], PRIMARY.id)
     expect(layout.offsetRatio).toBe(1)
   })
 })

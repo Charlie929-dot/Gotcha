@@ -1,5 +1,6 @@
 /**
- * M1b Phase 1 E2E：球窗口存在且透明置顶 / 默认暂停视觉 / 点击打开时间线 / 拖动吸附落盘
+ * M1b Phase 1 E2E：球窗口存在且透明置顶 / 默认暂停视觉 / 停靠缩入 + 悬停滑出 /
+ * 点击打开时间线 / 拖动松手（近边吸附、中间自由）
  *
  * 隔离：GOTCHA_USER_DATA 指向临时目录，不碰真实 userData，也不启动真实采集
  * （默认暂停，A3：球壳与时间线都不应建库、不写 ball.json）。
@@ -10,7 +11,13 @@ import { _electron as electron, type ElectronApplication, type Page } from 'play
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { positionFor, positionOnPixelGrid, type BallEdge, type BallRect } from '../../src/main/ball-position'
+import {
+  dockedPosition,
+  freePosition,
+  positionOnPixelGrid,
+  type BallEdge,
+  type BallRect
+} from '../../src/main/ball-position'
 
 const APP_ARGS = ['.'] as const
 
@@ -25,6 +32,15 @@ interface BallWindowInfo {
   alwaysOnTop: boolean
   visible: boolean
   focusable: boolean
+}
+
+interface BallMatrix {
+  a: number
+  b: number
+  c: number
+  d: number
+  e: number
+  f: number
 }
 
 async function readBallWindow(): Promise<BallWindowInfo> {
@@ -54,6 +70,64 @@ async function readBallWindow(): Promise<BallWindowInfo> {
   return info
 }
 
+/** 球体当前 transform 矩阵（缩进 = e/f，悬停放大 = a/d） */
+async function ballMatrix(): Promise<BallMatrix> {
+  return ballPage.locator('#ball').evaluate((element) => {
+    const matrix = new DOMMatrix(getComputedStyle(element).transform)
+    return { a: matrix.a, b: matrix.b, c: matrix.c, d: matrix.d, e: matrix.e, f: matrix.f }
+  })
+}
+
+/** 悬停到缩入后露出的半颗球上，等过渡结束 */
+async function hoverVisibleHalf(): Promise<void> {
+  const box = await ballPage.locator('#ball').boundingBox()
+  if (!box) throw new Error('找不到球体包围盒')
+  // 缩入态：可见的是靠窗口内侧的半颗，取可见半区的中心
+  const visibleX = box.width > 48 ? box.x + box.width / 2 : box.x + box.width / 4
+  await ballPage.mouse.move(visibleX, box.y + box.height / 2)
+  await ballPage.waitForTimeout(350)
+}
+
+/**
+ * 合成指针拖拽：Playwright 的 mouse.move 只给视口坐标，Chromium 会用「当前窗口位置
+ * + clientX」反推 screenX；窗口跟着鼠标移动时这会形成反馈、放大位移。这里直接派发带
+ * 绝对 screenX/screenY 的 PointerEvent，等价于真实鼠标（真实事件就是绝对屏幕坐标）。
+ */
+async function dispatchDrag(
+  page: Page,
+  from: { screenX: number; screenY: number; clientX: number; clientY: number },
+  to: { screenX: number; screenY: number; clientX: number; clientY: number }
+): Promise<void> {
+  await page.evaluate(
+    (payload) => {
+      const ball = document.getElementById('ball')
+      if (!ball) throw new Error('找不到 #ball')
+      const make = (
+        type: string,
+        point: { screenX: number; screenY: number; clientX: number; clientY: number }
+      ): PointerEvent =>
+        new PointerEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          pointerId: 1,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: type === 'pointerup' ? 0 : 1,
+          clientX: point.clientX,
+          clientY: point.clientY,
+          screenX: point.screenX,
+          screenY: point.screenY
+        })
+      ball.dispatchEvent(make('pointerdown', payload.from))
+      window.dispatchEvent(make('pointermove', payload.to))
+      window.dispatchEvent(make('pointerup', payload.to))
+    },
+    { from, to }
+  )
+}
+
 test.beforeAll(async () => {
   // DSH 宿主会注入 ELECTRON_RUN_AS_NODE=1，子进程里必须清掉（gotchas.md）
   delete process.env.ELECTRON_RUN_AS_NODE
@@ -65,6 +139,8 @@ test.beforeAll(async () => {
   })
   ballPage = await app.firstWindow()
   await ballPage.waitForSelector('#ball')
+  // 等 did-finish-load 的 placement 消息 + 缩入过渡结束（160ms）
+  await ballPage.waitForTimeout(400)
 })
 
 test.afterAll(async () => {
@@ -72,7 +148,7 @@ test.afterAll(async () => {
   rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 
-test('球窗口：64×64、置顶、不聚焦，默认暂停视觉（A3）', async () => {
+test('球窗口：64×64、置顶、不聚焦，默认停靠右缘且球缩入半颗（D15）', async () => {
   const ball = await readBallWindow()
   expect(ball.bounds.width).toBe(64)
   expect(ball.bounds.height).toBe(64)
@@ -80,22 +156,33 @@ test('球窗口：64×64、置顶、不聚焦，默认暂停视觉（A3）', asy
   expect(ball.visible).toBe(true)
   expect(ball.focusable).toBe(false)
 
+  // 窗口贴齐工作区右缘（不缩窗口，缩的是球）
+  const expected = positionOnPixelGrid(dockedPosition('right', 0.5, ball.workArea), ball.scaleFactor)
+  expect(ball.bounds.x).toBe(expected.x)
+  expect(ball.bounds.y).toBe(expected.y)
+
   await expect(ballPage.locator('#ball')).toHaveClass(/paused/)
-  await expect(ballPage.locator('#ball')).not.toHaveClass(/running/)
+  await expect(ballPage.locator('#ball')).toHaveClass(/dock-right/)
+
+  // 缩入 32px：球心贴屏幕边缘，只露半颗
+  const matrix = await ballMatrix()
+  expect(matrix.e).toBeCloseTo(32, 1)
 })
 
-test('默认位置：主屏右边缘垂直居中、贴边 6px，且落在工作区内', async () => {
-  const { bounds, workArea, scaleFactor } = await readBallWindow()
-  // 125% 等非整数缩放下位置吸附到像素网格，贴边会落在 6±2 DIP（见 gotchas）
-  const expected = positionOnPixelGrid(positionFor('right', 0.5, workArea), scaleFactor)
-  expect(bounds.x).toBe(expected.x)
-  expect(bounds.y).toBe(expected.y)
-  const edgeGap = workArea.x + workArea.width - (bounds.x + bounds.width)
-  expect(edgeGap).toBeGreaterThanOrEqual(2)
-  expect(edgeGap).toBeLessThanOrEqual(10)
+test('悬停滑出全显，移开缩回（D15）', async () => {
+  await hoverVisibleHalf()
+  await expect(ballPage.locator('#ball')).toHaveClass(/expanded/)
+  expect((await ballMatrix()).e).toBeCloseTo(0, 1)
+
+  // 移到窗口左上角（离球心 > 收拢阈值）→ 缩回
+  await ballPage.mouse.move(2, 2)
+  await ballPage.waitForTimeout(350)
+  await expect(ballPage.locator('#ball')).not.toHaveClass(/expanded/)
+  expect((await ballMatrix()).e).toBeCloseTo(32, 1)
 })
 
 test('点击球打开时间线窗口（Q3）；默认暂停不建库（A3 红线）', async () => {
+  await hoverVisibleHalf()
   const timelinePromise = app.waitForEvent('window')
   await ballPage.mouse.click(32, 32)
   const timeline = await timelinePromise
@@ -108,31 +195,69 @@ test('点击球打开时间线窗口（Q3）；默认暂停不建库（A3 红线
   expect(existsSync(join(userDataDir, 'ball.json'))).toBe(false)
 })
 
-test('拖动后吸附最近边缘，ball.json 只写边缘/比例/显示器（Q8）', async () => {
-  await ballPage.mouse.move(32, 32)
-  await ballPage.mouse.down()
-  await ballPage.mouse.move(32, 260, { steps: 8 })
-  await ballPage.mouse.up()
-
+test('拖动：松手停在原地；靠近边缘才吸附缩入（D15）', async () => {
   const statePath = join(userDataDir, 'ball.json')
-  await expect.poll(() => existsSync(statePath), { timeout: 5_000 }).toBe(true)
 
-  const saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
-    edge: BallEdge
+  // ① 从缩入态往中间拖（偏移 -96 / +100）：松手停在原地（自由位，不吸附）
+  await hoverVisibleHalf()
+  const start = await readBallWindow()
+  const fromX = start.bounds.x + 32
+  const fromY = start.bounds.y + 32
+
+  await dispatchDrag(
+    ballPage,
+    { screenX: fromX, screenY: fromY, clientX: 32, clientY: 32 },
+    { screenX: fromX - 96, screenY: fromY + 100, clientX: 10, clientY: 132 }
+  )
+  await expect.poll(() => existsSync(statePath), { timeout: 5_000 }).toBe(true)
+  await ballPage.waitForTimeout(300)
+
+  let saved = JSON.parse(readFileSync(statePath, 'utf8')) as {
+    edge: BallEdge | null
     offset_ratio: number
+    x_ratio: number
+    y_ratio: number
     display_id: number
   }
-  expect(['left', 'right', 'top', 'bottom']).toContain(saved.edge)
-  expect(saved.offset_ratio).toBeGreaterThanOrEqual(0)
-  expect(saved.offset_ratio).toBeLessThanOrEqual(1)
+  expect(saved.edge).toBeNull()
   expect(typeof saved.display_id).toBe('number')
-  // 只含位置三键，不含任何采集内容
-  expect(Object.keys(saved).sort()).toEqual(['display_id', 'edge', 'offset_ratio'])
+  expect(saved.x_ratio).toBeGreaterThan(0)
+  expect(saved.y_ratio).toBeGreaterThan(0)
+  // 自由位：球完整可见，不再缩入
+  await expect(ballPage.locator('#ball')).not.toHaveClass(/dock-/)
+  expect((await ballMatrix()).e).toBeCloseTo(0, 1)
 
-  // 吸附后的窗口位置 = 纯函数按落盘状态算出的位置（再吸附到像素网格）
-  const { bounds, workArea, scaleFactor } = await readBallWindow()
-  expect(bounds).toEqual({
-    ...positionOnPixelGrid(positionFor(saved.edge, saved.offset_ratio, workArea), scaleFactor),
+  const free = await readBallWindow()
+  const expectedFree = positionOnPixelGrid(
+    freePosition(saved.x_ratio, saved.y_ratio, free.workArea),
+    free.scaleFactor
+  )
+  expect(free.bounds.x).toBe(expectedFree.x)
+  expect(free.bounds.y).toBe(expectedFree.y)
+
+  // ② 从自由位往右缘拖（偏移 +92 / +52，落点距右缘 4px）：≤24px → 吸附并缩入
+  const mid = await readBallWindow()
+  const midX = mid.bounds.x + 32
+  const midY = mid.bounds.y + 32
+  await dispatchDrag(
+    ballPage,
+    { screenX: midX, screenY: midY, clientX: 32, clientY: 32 },
+    { screenX: midX + 92, screenY: midY + 52, clientX: 52, clientY: 132 }
+  )
+  await ballPage.waitForTimeout(400)
+
+  saved = JSON.parse(readFileSync(statePath, 'utf8'))
+  expect(saved.edge).toBe('right')
+  await expect(ballPage.locator('#ball')).toHaveClass(/dock-right/)
+  expect((await ballMatrix()).e).toBeCloseTo(32, 1)
+
+  const docked = await readBallWindow()
+  expect(docked.bounds.x + docked.bounds.width).toBe(docked.workArea.x + docked.workArea.width)
+  expect(docked.bounds).toEqual({
+    ...positionOnPixelGrid(
+      dockedPosition('right', saved.offset_ratio, docked.workArea),
+      docked.scaleFactor
+    ),
     width: 64,
     height: 64
   })

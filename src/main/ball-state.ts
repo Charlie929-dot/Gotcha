@@ -1,7 +1,8 @@
 /**
- * 球位置偏好文件（m1b-plan §4.7 / Q2 / Q8）
+ * 球位置偏好文件（m1b-plan §4.7 / Q2 / Q8 / D15）
  *
- * 只存边缘 / 比例 / 显示器 id，不含任何采集内容；仅在拖动或吸附后惰性写入，
+ * v2 结构：停靠（`edge` + `offset_ratio`）或自由（`edge=null` + `x_ratio` / `y_ratio`），
+ * 外加 `display_id`。只存位置，不含任何采集内容；仅在拖动 / 吸附后惰性写入，
  * 空 userData 启动不会生成该文件（A3 口径：无显式交互时零磁盘写入）。
  * 写入走 `ball.json.tmp` → rename 的原子替换，避免半截文件。
  */
@@ -12,7 +13,12 @@ import { clampRatio, isBallEdge, type BallSavedState } from './ball-position'
 
 export const BALL_STATE_FILE = 'ball.json'
 
-/** 解析并校验 `ball.json` 内容；损坏 / 字段缺失返回 null（调用方回退默认位置） */
+/**
+ * 解析并校验 `ball.json`。
+ *
+ * 兼容 v1（只有 edge / offset_ratio / display_id，没有自由位字段）：缺省 `x_ratio` /
+ * `y_ratio` 取 0.5；不兼容的值一律返回 null（调用方回退默认停靠位）。
+ */
 export function parseBallState(raw: string): BallSavedState | null {
   let parsed: unknown
   try {
@@ -22,12 +28,21 @@ export function parseBallState(raw: string): BallSavedState | null {
   }
   if (typeof parsed !== 'object' || parsed === null) return null
   const data = parsed as Partial<BallSavedState>
-  if (!isBallEdge(data.edge)) return null
+
+  const edge: BallSavedState['edge'] | undefined =
+    data.edge === null ? null : isBallEdge(data.edge) ? data.edge : undefined
+  if (edge === undefined) return null
   if (typeof data.offset_ratio !== 'number' || !Number.isFinite(data.offset_ratio)) return null
   if (typeof data.display_id !== 'number' || !Number.isFinite(data.display_id)) return null
+
+  const xRatio = typeof data.x_ratio === 'number' && Number.isFinite(data.x_ratio) ? data.x_ratio : 0.5
+  const yRatio = typeof data.y_ratio === 'number' && Number.isFinite(data.y_ratio) ? data.y_ratio : 0.5
+
   return {
-    edge: data.edge,
+    edge,
     offset_ratio: clampRatio(data.offset_ratio),
+    x_ratio: clampRatio(xRatio),
+    y_ratio: clampRatio(yRatio),
     display_id: data.display_id
   }
 }

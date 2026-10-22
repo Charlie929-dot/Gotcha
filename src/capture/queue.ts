@@ -39,4 +39,9 @@ export class OcrQueue {
   take(): OcrJob | undefined {
     return this.items.shift()
   }
+
+  /** 一次取空（关闸时由管线逐条删帧并计 queue_dropped），返回 FIFO 顺序 */
+  drainAll(): OcrJob[] {
+    return this.items.splice(0, this.items.length)
+  }
 }

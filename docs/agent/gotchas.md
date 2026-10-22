@@ -28,6 +28,7 @@
 | 屏幕捕获阻塞主线程 | 采集模式下时间线鼠标悬停 1–2s 才变色、滚轮几秒才动；主进程 CPU ~50%，渲染进程却空闲。探针实测 `desktopCapturer.getSources()` 本机单次 **1.2–2.3s**（与 thumbnailSize 无关：320×180 也要 1.4s），且同步卡住 Electron 主进程 UI 线程 → OS 输入事件排队；每 2s 采一次 = 持续冻结（2026-10-21 实测事件循环最大卡顿 2209ms） | 改为隐藏窗口常驻 `getDisplayMedia` 屏幕流：`src/capture/screen-stream.ts` 启动时只 `getSources` 一次做「显示器 → 源」映射，之后每帧用 `executeJavaScript` 让 `src/renderer/capture-window.ts` 在隐藏渲染进程里裁剪 / 2× 放大 / PNG 编码，主进程只写文件 + 算 dHash。真机 12s 采样：主进程 IPC 往返 **max 5ms / p95 2ms**，OCR 正常出「记忆球 时间线」；启动多 ~1.5s（getSources 一次） |
 | 暗色模式按钮悬停变近纯白 | 鼠标放到时间线按钮上，按钮从深灰 `#26262c` 直接变成近白 `#f0f0f4`（本机 `AppsUseLightTheme=0`），像「悬停闪白」 | `.nav button:hover` 必须写在暗色媒体查询内（`#2f2f37`）并补 `:active`；按钮加 120ms 颜色过渡，避免主题切换瞬间的闪色。E2E 断言暗/亮两种模式的 hover 计算色（`tests/e2e/timeline.spec.ts`） |
 | A2 CPU 采样受屏幕变化频率影响 | 同一运行时：两次 5 分钟静置窗口 **1.58% / 1.24%**（各约 12 次帧变化），含启动的 23 分钟累计 **3.63%**；OCR 只在帧变化时执行，屏幕持续变化时 0.6–1.2s/帧 ≈ 最坏 5% | 报 A2 必须同时给「窗口内帧变化次数 / 事件数」与累计均值；只看 5 分钟静置数会低估，只看含启动累计会高估。新旧架构对比固定同一采样法：`Get-Process` 全树（含 OCR 子进程）`TotalProcessorTime` 增量 / 时长 / 逻辑核数（2026-10-21 实测） |
+| stats 跨午夜归属漂移 | `stats.day.<date>` 启动时按当天 key 载入，但 00:00 后 60s 落盘换成新 key 写入的仍是**同一份累计计数器**：2026-10-22 的 key 含 10-21 累计（13782 帧，不是当日新增），`capture_errors:607` 两天完全相同 | 落盘前比较 `statsKey(now)` 与当前 key：先把旧 key 落盘、再 `zeroStats()` 用新 key 继续；补「跨日 flush 两次」单测。M1a 30 分钟窗口内不受影响，列为 M1b 待办（2026-10-22 发现） |
 
 ## 规则
 

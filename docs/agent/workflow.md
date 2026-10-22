@@ -138,14 +138,15 @@ Gotcha/
 | 里程碑 | 主题 | 状态 |
 | - | - | - |
 | M0 | 策划 + 技术方案 | ✅ 完成（2026-10-20） |
-| M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | 🔄 进行中（Phase 0–3 代码完成；A2/A3/A4/A5 已验收，A1 次日回看待完成） |
+| M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | ✅ 完成（2026-10-22 收口；A1 为能力验证，15:00 段样本不足见 `docs/archive/m1a-plan.md` §0） |
 | M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | ⬜ 未开工 |
 | M2 | 知识行为图谱（DeepSeek 结构化/节点边/sigma.js 画布） | ⬜ 未开工 |
 | M3 | 分层记忆（日/周/月归纳/LOD/下钻） | ⬜ 未开工 |
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
-- 2026-10-21：M1a 验收（新架构）：A2 两次 5 分钟法 **1.58% / 1.24%**（含启动累计 3.63%，口径见 m1a-plan §0）、A3/A4/A5 通过；A1 待次日回看。
+- 2026-10-22：M1a 收口：A1 回看（能力验证，15:00 段样本不足见归档方案 §0）、A2/A3/A4/A5 已过；`docs/m1a-plan.md` 归档至 `docs/archive/`，M1a 状态 ✅。
+- 2026-10-21：M1a 验收（新架构）：A2 两次 5 分钟法 **1.58% / 1.24%**（含启动累计 3.63%，口径见 `docs/archive/m1a-plan.md` §0）、A3/A4/A5 通过；A1 待次日回看。
 - 2026-10-21：修复采集模式下时间线输入冻结（`fix/m1a-input-lag`）：`desktopCapturer.getSources` 每次 1.2–2.3s 且阻塞主进程 → 改隐藏窗口常驻 `getDisplayMedia` 屏幕流（`screen-stream.ts` + `renderer/capture-window.ts`），真机 12s 主进程 IPC 往返 max 5ms / p95 2ms；暗色模式按钮 hover 不再闪白；60 单测 + 4 E2E + typecheck + build 绿。
 - 2026-10-21：M1a Phase 3 时间线只读视图（`feat/m1a-p3-timeline`）：renderer 按日分组列表（时间/应用/标题/OCR 摘要 80 字）+ 日期切换 + preload IPC + Playwright Electron 冒烟（合成 events，2 用例）；待 M1a 收口验收。
 - 2026-10-21：M1a Phase 2 采集管线落地（`feat/m1a-p2-capture`）：2a WinRT OCR spike 通过（长驻 PS 5.1，稳态 ~43ms）、dHash 帧差、sanitize、OCR 队列、scheduler、截屏窗口裁剪、active-win、electron-log 埋点；40 条单测 + 真机 65s 冒烟（1 事件、stats 落盘、日志无 OCR 原文）通过，待 30 分钟验收。

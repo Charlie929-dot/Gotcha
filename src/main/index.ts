@@ -9,7 +9,7 @@ import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { CapturePipeline } from '../capture/pipeline'
 import { startScheduler } from '../capture/scheduler'
 import { ScreenCapture } from '../capture/screen-stream'
-import { loadStats, saveStats, statsKey } from '../capture/stats'
+import { createDailyStatsFlusher, loadStats, statsKey } from '../capture/stats'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
 import { resolveCapture } from './args'
 
@@ -116,6 +116,8 @@ async function startCapture(): Promise<void> {
 
   const engine = new WinrtOcrBridge({ scriptPath: ocrScript })
   const now = (): number => Date.now()
+  // 首次载入与落盘归属同一个日期 key，避免瞬时跨日各算一次
+  const todayStatsKey = statsKey(now())
   const pipeline = new CapturePipeline({
     db,
     ocr: engine,
@@ -131,7 +133,7 @@ async function startCapture(): Promise<void> {
         }
       : undefined,
     diffThreshold: getNumberSetting(db, 'capture.diff_threshold', 8),
-    initialStats: loadStats(db, statsKey(now())),
+    initialStats: loadStats(db, todayStatsKey),
     log: (entry) => {
       const line = `[capture] ${entry.msg}${entry.data ? ` ${JSON.stringify(entry.data)}` : ''}`
       if (entry.level === 'warn') log.warn(line)
@@ -144,14 +146,14 @@ async function startCapture(): Promise<void> {
     now,
     onTick: () => pipeline.tick()
   })
-  const flushTimer = setInterval(() => {
-    if (db) saveStats(db, statsKey(now()), pipeline.getStats())
-  }, 60_000)
+  // 跨午夜先落旧 key 再清零（gotchas「stats 跨午夜归属漂移」）
+  const statsFlusher = createDailyStatsFlusher({ db, counter: pipeline, now, key: todayStatsKey })
+  const flushTimer = setInterval(() => statsFlusher.flush(), 60_000)
 
   stopCapture = (): void => {
     scheduler.stop()
     clearInterval(flushTimer)
-    if (db) saveStats(db, statsKey(now()), pipeline.getStats())
+    statsFlusher.flush()
     void engine.dispose()
   }
 }

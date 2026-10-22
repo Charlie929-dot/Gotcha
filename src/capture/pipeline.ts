@@ -56,6 +56,7 @@ export class CapturePipeline {
   private readonly stats: CaptureStats = zeroStats()
   private lastHash: bigint | null = null
   private currentDrain: Promise<void> | null = null
+  private halted = false
 
   constructor(private readonly deps: CaptureDeps) {
     this.queue = deps.queue ?? new OcrQueue()
@@ -75,6 +76,31 @@ export class CapturePipeline {
     return this.queue
   }
 
+  /**
+   * 关闸（同步，微秒级；m1b-plan §4.4）。
+   *
+   * 之后 tick 不再截帧 / 入队；在途 OCR 结果在 insertEvent 前丢弃；排队任务
+   * 一次清空并逐帧删除。stop() 必须先调用它，视觉切换只依赖这一步，不等流释放。
+   */
+  halt(): void {
+    if (this.halted) return
+    this.halted = true
+    const dropped = this.queue.drainAll()
+    this.stats.queue_dropped += dropped.length
+    for (const job of dropped) this.discard(job.imagePath)
+    if (dropped.length > 0) {
+      this.deps.log?.({
+        level: 'info',
+        msg: 'ocr queue drained after halt',
+        data: { queue_dropped: this.stats.queue_dropped }
+      })
+    }
+  }
+
+  isHalted(): boolean {
+    return this.halted
+  }
+
   /** 一次采样（调度器每 2s 调用；上一次未完成时调度器会跳过） */
   async tick(): Promise<void> {
     const now = this.deps.now()
@@ -85,6 +111,8 @@ export class CapturePipeline {
     } catch {
       window = null
     }
+    // 闸已关：不再截帧（stop 后在途 tick 的唯一入口）
+    if (this.halted) return
     if (!window) {
       this.stats.capture_errors++
       return
@@ -95,6 +123,11 @@ export class CapturePipeline {
       frame = await this.deps.captureWindow(window.bounds)
     } catch {
       frame = null
+    }
+    // 截屏期间关闸：帧丢弃，不入队、不写库
+    if (this.halted) {
+      if (frame) this.discard(frame.imagePath)
+      return
     }
     if (!frame) {
       this.stats.capture_errors++
@@ -163,6 +196,16 @@ export class CapturePipeline {
     try {
       const result = await this.deps.ocr.recognize(job.imagePath)
       this.stats.ocr_runs++
+      // 关闸后返回的结果整帧丢弃：不 sanitize、不写库，统计复用 queue_dropped
+      if (this.halted) {
+        this.stats.queue_dropped++
+        this.deps.log?.({
+          level: 'info',
+          msg: 'frame dropped after halt',
+          data: { ts: job.ts, app: job.app, queue_dropped: this.stats.queue_dropped }
+        })
+        return
+      }
       const sanitized = sanitize(result.text)
       if (sanitized.drop) {
         this.deps.log?.({

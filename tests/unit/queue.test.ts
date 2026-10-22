@@ -24,4 +24,14 @@ describe('OcrQueue · 上限与丢弃', () => {
     expect(queue.push(job(50))).toBe(false)
     expect(queue.dropped).toBe(1)
   })
+
+  it('drainAll 一次取空并保持 FIFO 顺序', () => {
+    const queue = new OcrQueue()
+    expect(queue.drainAll()).toEqual([])
+    for (const entry of [job(1), job(2), job(3)]) queue.push(entry)
+
+    expect(queue.drainAll().map((entry) => entry.ts)).toEqual([1, 2, 3])
+    expect(queue.size).toBe(0)
+    expect(queue.take()).toBeUndefined()
+  })
 })

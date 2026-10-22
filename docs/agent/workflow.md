@@ -139,12 +139,13 @@ Gotcha/
 | - | - | - |
 | M0 | 策划 + 技术方案 | ✅ 完成（2026-10-20） |
 | M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | ✅ 完成（2026-10-22 收口；A1 为能力验证，15:00 段样本不足见 `docs/archive/m1a-plan.md` §0） |
-| M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | ⬜ 未开工（方案 v0.3 已拍板：`docs/m1b-plan.md`；Q1=B 见 decisions D13） |
+| M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | 🚧 进行中（Phase 0 采集控制器 ✅ 2026-10-22；方案 v0.3：`docs/m1b-plan.md`；Q1=B 见 decisions D13） |
 | M2 | 知识行为图谱（DeepSeek 结构化/节点边/sigma.js 画布） | ⬜ 未开工 |
 | M3 | 分层记忆（日/周/月归纳/LOD/下钻） | ⬜ 未开工 |
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-22：M1b Phase 0 采集控制器重构（`feat/m1b-p0-controller`）：`CaptureController` 状态机（paused/starting/running/stopping，Promise 串行、同向去重、start 失败回滚）、`CapturePipeline.halt()` 闸（闸后不截帧/不入队、在途 OCR 结果丢弃、队列清空删帧）、`OcrQueue.drainAll()`、只读/写连接生命周期（先关只读再开写）；新增 18 条单测，`npm test` 82 条 + typecheck + 4 E2E 绿；`--capture` / `GOTCHA_CAPTURE=1` 路径保留。Phase 1 球窗口未开工。
 - 2026-10-22：M1b 方案 v0.3 拍板（`docs/m1b-plan.md`）：Q1=B（`capture.enabled` + `capture.resume_on_start` 两键，重启延迟 3s 恢复、可见提示、可取消）→ decisions D13；Q2–Q6/Q8 按 v0.2 建议结案，Q7 经二次拍板改为窄口径（D14）；§8 无待批项，方案可作 M1b 事实源；security.md 采集开关表述已同步改写。未动代码。
 - 2026-10-22：M1a 收口：A1 回看（能力验证，15:00 段样本不足见归档方案 §0）、A2/A3/A4/A5 已过；`docs/m1a-plan.md` 归档至 `docs/archive/`，M1a 状态 ✅。
 - 2026-10-22：M1b 方案草案 v0.1 起草（`docs/m1b-plan.md`，待拍板）：Phase 0 采集控制器重构 → Phase 1 球窗口与视觉 → Phase 2 隐私总开关 + `Alt+P` → Phase 3 验收收口；§8 七项待批（持久化语义、球形态、点击行为、托盘、Alt+Space、暂停释放资源、暂停范围）；未动代码。

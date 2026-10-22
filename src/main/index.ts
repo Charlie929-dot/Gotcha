@@ -1,16 +1,19 @@
 import { app, BrowserWindow, ipcMain, nativeImage } from 'electron'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import log from 'electron-log/main'
-import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
-import { getNumberSetting } from '../db/settings'
+import { DB_FILE_NAME, openDatabase, queryTimeline } from '../db'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
-import { CapturePipeline } from '../capture/pipeline'
-import { startScheduler } from '../capture/scheduler'
 import { ScreenCapture } from '../capture/screen-stream'
-import { createDailyStatsFlusher, loadStats, statsKey } from '../capture/stats'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
+import {
+  CaptureController,
+  CaptureDbConnections,
+  createCaptureSession,
+  type CaptureLog,
+  type CaptureSession
+} from './capture-controller'
 import { resolveCapture } from './args'
 
 // 测试隔离钩子：E2E 用临时 userData，绝不碰真实数据（gotchas.md）
@@ -20,10 +23,24 @@ if (process.env.GOTCHA_USER_DATA) {
 }
 
 let mainWindow: BrowserWindow | null = null
-let db: Db | null = null
-let timelineDb: Db | null = null
-let stopCapture: (() => void) | null = null
-let screenCapture: ScreenCapture | null = null
+let shuttingDown = false
+let quitRequested = false
+let logInitialized = false
+
+/** 连接生命周期：时间线只读 / 采集写连接（m1b Plan §3 Phase 0） */
+const connections = new CaptureDbConnections({
+  dbPath: join(app.getPath('userData'), DB_FILE_NAME),
+  fileExists: (path) => existsSync(path),
+  openWritable: (path) => openDatabase(path),
+  openReadonly: (path) => new Database(path, { readonly: true, fileMustExist: true })
+})
+
+const captureLog: CaptureLog = (level, msg, data) => {
+  const line = `[capture] ${msg}${data ? ` ${JSON.stringify(data)}` : ''}`
+  if (level === 'error') log.error(line)
+  else if (level === 'warn') log.warn(line)
+  else log.info(line)
+}
 
 function createMainWindow(): void {
   mainWindow = new BrowserWindow({
@@ -44,19 +61,10 @@ function createMainWindow(): void {
   }
   mainWindow.on('closed', () => {
     mainWindow = null
-    // 采集窗口是隐藏的，不会触发 window-all-closed；关掉时间线即退出，保持原有行为
-    if (screenCapture) app.quit()
+    // 采集窗口是隐藏的，不会触发 window-all-closed；关掉时间线即退出，保持原有行为。
+    // quit 已在进行时不再补一次 app.quit()，避免和 before-quit 的异步收口互卡。
+    if (!quitRequested && controller.status() !== 'paused') app.quit()
   })
-}
-
-/** 时间线查询连接：采集模式复用写连接；暂停模式只读打开（不存在则不建库，守 A3） */
-function openTimelineDb(): Db | null {
-  if (db) return db
-  if (timelineDb) return timelineDb
-  const file = join(app.getPath('userData'), DB_FILE_NAME)
-  if (!existsSync(file)) return null
-  timelineDb = new Database(file, { readonly: true, fileMustExist: true })
-  return timelineDb
 }
 
 function registerTimelineIpc(): void {
@@ -70,7 +78,7 @@ function registerTimelineIpc(): void {
     ) {
       return []
     }
-    const connection = openTimelineDb()
+    const connection = connections.queryDb()
     if (!connection) return []
     try {
       return queryTimeline(connection, from, to)
@@ -80,89 +88,63 @@ function registerTimelineIpc(): void {
   })
 }
 
-/** 采集装配（仅 --capture / GOTCHA_CAPTURE=1 进入；默认暂停时连库都不开） */
-async function startCapture(): Promise<void> {
+/** 采集会话装配（仅 --capture / GOTCHA_CAPTURE=1 或显式开启时进入；默认暂停时连库都不开） */
+function createSession(): Promise<CaptureSession> {
+  if (!logInitialized) {
+    log.initialize()
+    log.transports.file.level = 'info'
+    logInitialized = true
+  }
   const userDataDir = app.getPath('userData')
-  mkdirSync(userDataDir, { recursive: true })
-  db = openDatabase(join(userDataDir, DB_FILE_NAME))
-
-  log.initialize()
-  log.transports.file.level = 'info'
-  log.info(`[capture] started schema=v1 db=${DB_FILE_NAME}`)
-  console.log(`[gotcha] 采集开启：db 就绪（schema v1，${DB_FILE_NAME}）`)
-
-  const tempDir = join(userDataDir, 'tmp')
-  const shotsDir = join(userDataDir, 'shots')
-  mkdirSync(tempDir, { recursive: true })
-  const saveShots = getNumberSetting(db, 'capture.save_shots', 0) === 1
-  if (saveShots) mkdirSync(shotsDir, { recursive: true })
-
+  const devServerUrl = process.env['ELECTRON_RENDERER_URL']
+  const captureHtmlPath = join(__dirname, '../renderer/capture.html')
   const ocrScript = app.isPackaged
     ? join(process.resourcesPath, 'ocr', 'winrt-ocr.ps1')
     : join(app.getAppPath(), 'resources', 'ocr', 'winrt-ocr.ps1')
 
-  // 持久屏幕捕获流：避开 desktopCapturer 每次 1–2s 阻塞主进程（gotchas.md）
-  screenCapture = new ScreenCapture({
-    devServerUrl: process.env['ELECTRON_RENDERER_URL'],
-    htmlPath: join(__dirname, '../renderer/capture.html')
-  })
-  try {
-    await screenCapture.start()
-  } catch (error) {
-    // 流起不来时保留时间线可用；后续 tick 的 captureWindow 会抛错并计 capture_errors
-    log.warn(`[capture] 屏幕捕获流启动失败：${String(error)}`)
-    console.warn(`[gotcha] 屏幕捕获流启动失败：${String(error)}`)
-  }
-
-  const engine = new WinrtOcrBridge({ scriptPath: ocrScript })
-  const now = (): number => Date.now()
-  // 首次载入与落盘归属同一个日期 key，避免瞬时跨日各算一次
-  const todayStatsKey = statsKey(now())
-  const pipeline = new CapturePipeline({
-    db,
-    ocr: engine,
-    now,
+  return createCaptureSession({
+    userDataDir,
+    devServerUrl,
+    captureHtmlPath,
+    now: () => Date.now(),
+    ensureWriteDb: () => connections.ensureWritable(),
+    releaseWriteDb: (openedThisTime) => connections.releaseWritableIfNew(openedThisTime),
+    createScreenStream: () => new ScreenCapture({ devServerUrl, htmlPath: captureHtmlPath }),
+    createOcr: () => new WinrtOcrBridge({ scriptPath: ocrScript }),
     getActiveWindow,
-    captureWindow: (bounds) => screenCapture!.capture(bounds, tempDir, now()),
-    deleteFrame: (imagePath) => rmSync(imagePath, { force: true }),
     isBlacklisted: (window) => isBlacklisted(window.executable),
-    saveShot: saveShots
-      ? (eventId, imagePath) => {
-          const image = nativeImage.createFromPath(imagePath)
-          writeFileSync(join(shotsDir, `${eventId}.jpg`), image.toJPEG(80))
-        }
-      : undefined,
-    diffThreshold: getNumberSetting(db, 'capture.diff_threshold', 8),
-    initialStats: loadStats(db, todayStatsKey),
-    log: (entry) => {
-      const line = `[capture] ${entry.msg}${entry.data ? ` ${JSON.stringify(entry.data)}` : ''}`
-      if (entry.level === 'warn') log.warn(line)
-      else log.info(line)
-    }
+    saveShot: (eventId, imagePath, shotsDir) => {
+      const image = nativeImage.createFromPath(imagePath)
+      writeFileSync(join(shotsDir, `${eventId}.jpg`), image.toJPEG(80))
+    },
+    log: captureLog
   })
+}
 
-  const scheduler = startScheduler({
-    intervalMs: 2000,
-    now,
-    onTick: () => pipeline.tick()
+const controller = new CaptureController({ createSession, log: captureLog })
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
   })
-  // 跨午夜先落旧 key 再清零（gotchas「stats 跨午夜归属漂移」）
-  const statsFlusher = createDailyStatsFlusher({ db, counter: pipeline, now, key: todayStatsKey })
-  const flushTimer = setInterval(() => statsFlusher.flush(), 60_000)
-
-  stopCapture = (): void => {
-    scheduler.stop()
-    clearInterval(flushTimer)
-    statsFlusher.flush()
-    void engine.dispose()
-  }
 }
 
 app.whenReady().then(async () => {
   const capture = resolveCapture(process.argv, process.env)
   if (capture) {
     try {
-      await startCapture()
+      await controller.start()
+      console.log(`[gotcha] 采集开启：db 就绪（schema v1，${DB_FILE_NAME}）`)
     } catch (error) {
       // 采集装配失败也要保证时间线能打开，错误不吞：写控制台
       console.error(`[gotcha] 采集启动失败：${String(error)}`)
@@ -175,16 +157,24 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  app.quit()
+  // 用户关掉最后一个窗口才主动退出；quit 进行中（window-all-closed 由 quit 触发）不再重入
+  if (!quitRequested) app.quit()
 })
 
-app.on('will-quit', () => {
-  stopCapture?.()
-  stopCapture = null
-  screenCapture?.dispose()
-  screenCapture = null
-  timelineDb?.close()
-  timelineDb = null
-  db?.close()
-  db = null
+app.on('before-quit', (event) => {
+  quitRequested = true
+  if (shuttingDown) return
+  shuttingDown = true
+  // 退出前等 stop 收口（在途 OCR 丢弃、stats 落盘、流释放）；3s 超时后放弃并强退。
+  // 用 before-quit + preventDefault：will-quit 阶段再拦会被 Electron 当成 quit 已在进行。
+  event.preventDefault()
+  void (async () => {
+    try {
+      await withTimeout(controller.stop(), 3_000, '采集停止超时（3s）')
+    } catch (error) {
+      console.warn(`[gotcha] 退出时停止采集失败：${String(error)}`)
+    }
+    connections.closeAll()
+    app.quit()
+  })()
 })

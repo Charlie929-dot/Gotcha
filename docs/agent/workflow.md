@@ -145,7 +145,7 @@ Gotcha/
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
-- 2026-10-22：M1b 方案 v0.3 拍板（`docs/m1b-plan.md`）：Q1=B（`capture.enabled` + `capture.resume_on_start` 两键，重启延迟 3s 恢复、可见提示、可取消）→ decisions D13；Q2–Q8 按 v0.2 建议结案；§8 无待批项，方案可作 M1b 事实源；security.md 采集开关表述已同步改写。未动代码。
+- 2026-10-22：M1b 方案 v0.3 拍板（`docs/m1b-plan.md`）：Q1=B（`capture.enabled` + `capture.resume_on_start` 两键，重启延迟 3s 恢复、可见提示、可取消）→ decisions D13；Q2–Q6/Q8 按 v0.2 建议结案，Q7 经二次拍板改为窄口径（D14）；§8 无待批项，方案可作 M1b 事实源；security.md 采集开关表述已同步改写。未动代码。
 - 2026-10-22：M1a 收口：A1 回看（能力验证，15:00 段样本不足见归档方案 §0）、A2/A3/A4/A5 已过；`docs/m1a-plan.md` 归档至 `docs/archive/`，M1a 状态 ✅。
 - 2026-10-22：M1b 方案草案 v0.1 起草（`docs/m1b-plan.md`，待拍板）：Phase 0 采集控制器重构 → Phase 1 球窗口与视觉 → Phase 2 隐私总开关 + `Alt+P` → Phase 3 验收收口；§8 七项待批（持久化语义、球形态、点击行为、托盘、Alt+Space、暂停释放资源、暂停范围）；未动代码。
 - 2026-10-22：M1b 起步前清理：修 stats 跨午夜串日（`fix/stats-midnight-rollover`）——`createDailyStatsFlusher` flush 时比较日期 key，跨日先落旧 key 再清零换新 key；新增 `tests/unit/stats.test.ts` 4 条（含跨日 flush 回归）。M1b 范围见上表（技术方案 §7：收起/悬停/拖动/暂停态视觉/隐私总开关），状态仍未开工。

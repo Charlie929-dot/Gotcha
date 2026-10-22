@@ -28,6 +28,8 @@
 | A5 | ✅ | settings `stats.day.2026-10-21` = `{frames_total:2745, frames_same:2166, ocr_runs:578, queue_dropped:0, capture_errors:1}`（17:25 落盘点）；日志最长行 152 字符、OCR 原文 grep 0 命中。**已知缺陷（2026-10-22 已修）**：跨午夜时新 key 继承旧 key 累计（见 gotchas「stats 跨午夜归属漂移」；`fix/stats-midnight-rollover` 修复并补跨日回归用例） |
 
 > A2 出现「5 分钟法达标、含启动累计 3.63%」的口径差异，原因与采样注意事项见 gotchas.md「A2 CPU 采样受屏幕变化频率影响」。
+>
+> **口径旁注（2026-10-22，M1b 起）**：A3 的「磁盘零写入」取证口径收窄为「**无显式用户交互时零磁盘写入**」。M1b 起球位置偏好写 `userData/ball.json`，仅在用户拖动/吸附后惰性写入，不含任何采集内容、不建库、不写日志；A3 原始验收结论（✅）不变。依据见 decisions.md D13 与 `docs/m1b-plan.md` §4.7。
 
 ## 1. 前置约束（摘录自规范，M1a 期间有效）
 

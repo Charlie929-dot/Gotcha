@@ -1,14 +1,32 @@
 /**
- * 悬浮球视觉与指针交互（m1b-plan §3 Phase 1，D15 腾讯管家式停靠）
+ * 悬浮球视觉与指针交互（m1b-plan §3 Phase 1，D15 停靠 + D16 自动缩回）
  *
  * - 停靠（docked）：窗口贴齐屏幕边缘，球体用 CSS translate 缩进 32px → 只露半颗；
- *   悬停滑回中心全显（`expanded`），移开缩回；不移动窗口，避免滑出/缩回时命中区抖动。
- * - 自由（free）：球完整可见，跟随主进程窗口位置。
- * - 穿透：窗口默认穿透，renderer 用实时球心做圆形命中检测，进圆关穿透、出圆恢复。
+ *   指针进入固定热区（可见半球 + 8px）后滑回中心全显（`expanded`）；离开窗口后
+ *   600ms 宽限（`grace`）到期才缩回。距离不再决定收起——旧实现的中间带会丢事件，
+ *   球卡在展开态（gotchas「展开态提前恢复穿透」）。
+ * - 自由（free）：球完整可见，跟随主进程窗口位置，不展开、不自动缩回。
+ * - 穿透：窗口默认穿透；`pointerInside` 与交互状态一起决定是否可交互——展开 / 宽限 /
+ *   拖动期间必须保持可交互（否则收不到 `pointerleave`），缩回后才恢复穿透。
  * - 拖动：pointerdown 记录起点并临时展开球，pointermove 节流上报屏幕坐标（主进程
  *   setPosition），pointerup 交给主进程判定吸附/原地；未移动的按下-释放按点击处理。
+ * - 兜底：主进程发现指针离开窗口安全区超时后发 `ball:force-retract`，这里立刻缩回。
  * - 不直接碰采集：状态与开关都经主进程，renderer 只发通道消息（§4.1）。
+ *
+ * 状态机在 `ball-interaction.ts`（纯函数、单测覆盖），这里只做 DOM / IPC 接线。
  */
+
+import {
+  BALL_GRACE_MS,
+  BALL_HIT_RADIUS,
+  initialSnapshot,
+  isExpanded,
+  reduceInteraction,
+  type BallInteractionEvent,
+  type BallInteractionSnapshot,
+  type BallInteractionState,
+  type BallPointerGeometry
+} from './ball-interaction'
 
 type BallStatus = 'paused' | 'starting' | 'running' | 'stopping'
 type BallEdge = 'left' | 'right' | 'top' | 'bottom'
@@ -27,7 +45,9 @@ interface BallApi {
   getStatus(): Promise<BallStatus>
   onStatus(callback: (status: BallStatus) => void): () => void
   onPlacement(callback: (placement: BallPlacement) => void): () => void
+  onForceRetract(callback: () => void): () => void
   setPointerInside(inside: boolean): void
+  setInteractionState(state: BallInteractionState): void
   dragStart(point: BallScreenPoint): void
   dragMove(point: BallScreenPoint): void
   dragEnd(payload: BallScreenPoint & { moved: boolean }): void
@@ -41,12 +61,6 @@ declare global {
   }
 }
 
-/** 球体直径 48 → 命中半径 24 */
-const BALL_RADIUS = 24
-/** 缩入后悬停展开的判定半径（球心到指针 ≤ 24 即悬停） */
-const EXPAND_RADIUS = 24
-/** 展开后离开的判定半径（留 16px 余量，避免滑出时指针「脱离」球体导致抖动） */
-const COLLAPSE_RADIUS = 40
 const DRAG_THRESHOLD = 3
 const MOVE_THROTTLE_MS = 16
 
@@ -56,8 +70,8 @@ const ball: HTMLElement = ballElement
 
 let docked = false
 let dockEdge: BallEdge | null = null
-let expanded = false
-let pointerInside = false
+let snapshot: BallInteractionSnapshot = initialSnapshot()
+let graceTimer: ReturnType<typeof setTimeout> | null = null
 let dragging = false
 let dragMoved = false
 let dragOrigin: BallScreenPoint | null = null
@@ -74,32 +88,43 @@ function distanceToBall(clientX: number, clientY: number): number {
   return Math.hypot(clientX - center.x, clientY - center.y)
 }
 
-function applyExpanded(next: boolean): void {
-  if (next === expanded) return
-  expanded = next
-  ball.classList.toggle('expanded', next)
+function geometryAt(clientX: number, clientY: number): BallPointerGeometry {
+  return { docked, distance: distanceToBall(clientX, clientY) }
+}
+
+function clearGraceTimer(): void {
+  if (graceTimer === null) return
+  clearTimeout(graceTimer)
+  graceTimer = null
+}
+
+function dispatch(event: BallInteractionEvent): void {
+  applySnapshot(reduceInteraction(snapshot, event))
+}
+
+function applySnapshot(next: BallInteractionSnapshot): void {
+  const prev = snapshot
+  snapshot = next
+  ball.classList.toggle('expanded', isExpanded(next))
+  if (next.pointerInside !== prev.pointerInside) {
+    ball.classList.toggle('hover', next.pointerInside)
+    window.gotchaBall.setPointerInside(next.pointerInside)
+  }
+  if (next.state === prev.state) return
+  window.gotchaBall.setInteractionState(next.state)
+  clearGraceTimer()
+  // 宽限期由 renderer 计时（主进程另有游标兜底）；回到展开或缩回都会取消
+  if (next.state === 'grace') {
+    graceTimer = setTimeout(() => dispatch({ type: 'grace-expired' }), BALL_GRACE_MS)
+  }
 }
 
 function applyPlacement(placement: BallPlacement): void {
   docked = placement.docked
   dockEdge = placement.edge
-  ball.classList.remove('dock-left', 'dock-right', 'dock-top', 'dock-bottom', 'expanded')
+  ball.classList.remove('dock-left', 'dock-right', 'dock-top', 'dock-bottom')
   if (docked && dockEdge) ball.classList.add(`dock-${dockEdge}`)
-  expanded = false
-}
-
-function setInside(next: boolean): void {
-  if (next === pointerInside) return
-  pointerInside = next
-  ball.classList.toggle('hover', next)
-  window.gotchaBall.setPointerInside(next)
-}
-
-function handlePointer(clientX: number, clientY: number): void {
-  const distance = distanceToBall(clientX, clientY)
-  if (docked && !expanded && distance <= EXPAND_RADIUS) applyExpanded(true)
-  if (docked && expanded && distance > COLLAPSE_RADIUS) applyExpanded(false)
-  setInside(distance <= BALL_RADIUS)
+  dispatch({ type: 'placement', docked })
 }
 
 function applyStatus(status: BallStatus): void {
@@ -117,15 +142,14 @@ function releasePointer(event: PointerEvent): void {
 }
 
 ball.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0 || distanceToBall(event.clientX, event.clientY) > BALL_RADIUS) return
+  if (event.button !== 0 || distanceToBall(event.clientX, event.clientY) > BALL_HIT_RADIUS) return
   dragging = true
   dragMoved = false
   dragOrigin = { screenX: event.screenX, screenY: event.screenY }
   lastMoveAt = 0
+  dispatch({ type: 'pointer-down', geometry: geometryAt(event.clientX, event.clientY) })
   ball.setPointerCapture?.(event.pointerId)
   ball.classList.add('dragging')
-  // 拖动期间球完整可见，避免半颗球跟着窗口跑
-  applyExpanded(true)
   window.gotchaBall.dragStart({ screenX: event.screenX, screenY: event.screenY })
   event.preventDefault()
 })
@@ -146,7 +170,7 @@ window.addEventListener('pointermove', (event) => {
     }
     return
   }
-  handlePointer(event.clientX, event.clientY)
+  dispatch({ type: 'pointer-move', geometry: geometryAt(event.clientX, event.clientY) })
 })
 
 window.addEventListener('pointerup', (event) => {
@@ -160,8 +184,8 @@ window.addEventListener('pointerup', (event) => {
     moved: dragMoved
   })
   dragOrigin = null
-  // 松手后由主进程 placement 消息决定重新缩入 / 自由；这里先保持当前视觉
-  if (!docked) applyExpanded(false)
+  // 松手后由主进程 placement 消息决定缩入 / 自由；这里先按停靠态保持展开
+  dispatch({ type: 'pointer-up', docked })
 })
 
 window.addEventListener('pointercancel', (event) => {
@@ -175,12 +199,12 @@ window.addEventListener('pointercancel', (event) => {
     moved: dragMoved
   })
   dragOrigin = null
+  dispatch({ type: 'pointer-cancel' })
 })
 
 window.addEventListener('pointerleave', () => {
   if (dragging) return
-  setInside(false)
-  applyExpanded(false)
+  dispatch({ type: 'pointer-leave' })
 })
 
 ball.addEventListener('contextmenu', (event) => {
@@ -192,5 +216,6 @@ ball.addEventListener('contextmenu', (event) => {
 void window.gotchaBall.getStatus().then(applyStatus).catch(() => {})
 window.gotchaBall.onStatus(applyStatus)
 window.gotchaBall.onPlacement(applyPlacement)
+window.gotchaBall.onForceRetract(() => dispatch({ type: 'force-retract' }))
 
 export {}

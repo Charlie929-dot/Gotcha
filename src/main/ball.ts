@@ -1,17 +1,24 @@
 /**
- * 悬浮球窗口（m1b-plan §3 Phase 1，2026-10-22 拍板改为腾讯管家式停靠，D15）
+ * 悬浮球窗口（m1b-plan §3 Phase 1，2026-10-22 拍板改为腾讯管家式停靠，D15；
+ * 2026-10-23 补自动缩回机制，D16）
  *
  * 职责：透明球窗口的创建 / 位置与停靠 / 鼠标穿透切换 / 拖动与吸附 / 位置落盘 /
- * 状态与停靠信息广播 / 右键菜单。几何计算与文件读写都在纯函数模块
- * （ball-position / ball-state），这里只做 Electron 接线。
+ * 状态与停靠信息广播 / 右键菜单 / 自动缩回兜底。几何、落盘与兜底判定都在纯函数模块
+ * （ball-position / ball-state / ball-retract），这里只做 Electron 接线。
  *
  * 停靠模型：窗口始终整块落在工作区内（贴齐边缘），球体缩入（露出 24px）由 renderer
- * 的 CSS transform 完成；悬停滑出、移开缩回也在 renderer 侧（不移动窗口，避免
+ * 的 CSS transform 完成；悬停滑出、离开宽限后缩回也在 renderer 侧（不移动窗口，避免
  * 滑出/缩回时命中区域抖动）。拖动松手离边缘 ≤24px 才吸附，否则停在原地（free）。
  *
- * 穿透模型：窗口默认 `setIgnoreMouseEvents(true, { forward: true })`，
- * renderer 用转发的指针事件做圆形命中检测，进圆内 → 关穿透，出圆 → 恢复穿透。
- * 该通道只接受球窗口 sender（§4.9 权限面分离）。
+ * 穿透模型：窗口默认 `setIgnoreMouseEvents(true, { forward: true })`。renderer 上报
+ * 球体命中（`pointerInside`）与交互状态（idle / expanded / grace / dragging），
+ * 只有 idle 且指针不在球上时才恢复穿透；展开 / 宽限 / 拖动期间保持可交互，否则
+ * renderer 收不到 pointerleave，球会卡在展开态（D16）。该通道只接受球窗口 sender
+ * （§4.9 权限面分离）。
+ *
+ * 自动缩回兜底（D16）：renderer 负责 600ms 宽限计时；主进程在展开 / 宽限期间每 50ms
+ * 用 `screen.getCursorScreenPoint()` 检查真实指针，离开窗口安全区（64×64 + 8px）超过
+ * 宽限 + 100ms 后发 `ball:force-retract`，保证丢事件时也能收回。
  */
 
 import { BrowserWindow, Menu, ipcMain, screen, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron'
@@ -30,6 +37,11 @@ import {
   type BallPoint
 } from './ball-position'
 import { readBallState, writeBallState } from './ball-state'
+import {
+  BALL_RETRACT_POLL_MS,
+  decideRetract,
+  type BallRetractState
+} from './ball-retract'
 import { buildTrayMenu, toMenuTemplate } from './tray-menu'
 
 export interface BallShellOptions {
@@ -61,6 +73,17 @@ interface DragEndPayload extends Partial<PointerPoint> {
 }
 
 const DRAG_MOVE_THROTTLE_MS = 16
+
+const BALL_INTERACTION_STATES: readonly BallRetractState[] = [
+  'idle',
+  'expanded',
+  'grace',
+  'dragging'
+]
+
+function isInteractionState(value: unknown): value is BallRetractState {
+  return typeof value === 'string' && (BALL_INTERACTION_STATES as readonly string[]).includes(value)
+}
 
 function isPointerPoint(value: unknown): value is PointerPoint {
   if (typeof value !== 'object' || value === null) return false
@@ -172,8 +195,66 @@ export function createBallShell(options: BallShellOptions): BallShell {
     if (!win.isDestroyed()) win.webContents.send('ball:placement', { docked, edge })
   }
 
+  let pointerInside = false
+  let interaction: BallRetractState = 'idle'
+  let watcher: ReturnType<typeof setInterval> | null = null
+  let outsideSince: number | null = null
+  let forceSent = false
+
+  /** 穿透开关：只有缩入态且指针不在球上时才恢复穿透（D16） */
+  const applyIgnore = (): void => {
+    if (win.isDestroyed()) return
+    win.setIgnoreMouseEvents(!(pointerInside || interaction !== 'idle'), { forward: true })
+  }
+
+  const stopWatcher = (): void => {
+    if (watcher !== null) {
+      clearInterval(watcher)
+      watcher = null
+    }
+    outsideSince = null
+    forceSent = false
+  }
+
+  /** 兜底：展开 / 宽限期间检查真实指针，离开安全区超时后强制缩回 */
+  const checkCursor = (): void => {
+    if (win.isDestroyed() || !win.isVisible()) return
+    const decision = decideRetract({
+      state: interaction,
+      cursor: screen.getCursorScreenPoint(),
+      bounds: win.getBounds(),
+      outsideSince,
+      now: Date.now()
+    })
+    outsideSince = decision.outsideSince
+    if (!decision.forceRetract || forceSent) return
+    forceSent = true
+    win.webContents.send('ball:force-retract')
+  }
+
+  const startWatcher = (): void => {
+    if (watcher !== null) return
+    outsideSince = null
+    forceSent = false
+    watcher = setInterval(checkCursor, BALL_RETRACT_POLL_MS)
+  }
+
+  const applyInteraction = (next: BallRetractState): void => {
+    if (next === interaction) return
+    interaction = next
+    if (interaction === 'expanded' || interaction === 'grace') startWatcher()
+    else stopWatcher()
+    applyIgnore()
+  }
+
+  win.on('closed', stopWatcher)
+
   win.webContents.on('did-finish-load', () => {
     if (!win.isDestroyed() && !win.isVisible()) win.showInactive()
+    // 页面重载后状态归零，避免沿用旧展开态 / 穿透状态
+    pointerInside = false
+    applyInteraction('idle')
+    applyIgnore()
     pushStatus(options.getStatus())
     pushPlacement()
   })
@@ -237,7 +318,14 @@ export function createBallShell(options: BallShellOptions): BallShell {
 
   const onPointerInside = (event: IpcMainEvent, inside: unknown): void => {
     if (!ensureSender(event) || typeof inside !== 'boolean') return
-    win.setIgnoreMouseEvents(!inside, { forward: true })
+    if (inside === pointerInside) return
+    pointerInside = inside
+    applyIgnore()
+  }
+
+  const onInteractionState = (event: IpcMainEvent, state: unknown): void => {
+    if (!ensureSender(event) || !isInteractionState(state)) return
+    applyInteraction(state)
   }
 
   const onDragStart = (event: IpcMainEvent, point: unknown): void => {
@@ -308,6 +396,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
   }
 
   ipcMain.on('ball:pointer-inside', onPointerInside)
+  ipcMain.on('ball:interaction-state', onInteractionState)
   ipcMain.on('ball:drag-start', onDragStart)
   ipcMain.on('ball:drag-move', onDragMove)
   ipcMain.on('ball:drag-end', onDragEnd)
@@ -343,7 +432,9 @@ export function createBallShell(options: BallShellOptions): BallShell {
       screen.removeListener('display-added', reposition)
       screen.removeListener('display-removed', reposition)
       screen.removeListener('display-metrics-changed', reposition)
+      stopWatcher()
       ipcMain.removeListener('ball:pointer-inside', onPointerInside)
+      ipcMain.removeListener('ball:interaction-state', onInteractionState)
       ipcMain.removeListener('ball:drag-start', onDragStart)
       ipcMain.removeListener('ball:drag-move', onDragMove)
       ipcMain.removeListener('ball:drag-end', onDragEnd)

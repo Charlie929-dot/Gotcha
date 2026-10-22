@@ -1,9 +1,14 @@
 /**
  * M1b Phase 1 E2E：球窗口存在且透明置顶 / 默认暂停视觉 / 停靠缩入 + 悬停滑出 /
- * 点击打开时间线 / 拖动松手（近边吸附、中间自由）
+ * 点击打开时间线 / 拖动松手（近边吸附、中间自由）/ 离开宽限与兜底缩回（D16）
  *
  * 隔离：GOTCHA_USER_DATA 指向临时目录，不碰真实 userData，也不启动真实采集
  * （默认暂停，A3：球壳与时间线都不应建库、不写 ball.json）。
+ *
+ * 指针有两路：
+ * - renderer 看到的是 Playwright/CDP 注入的合成指针（position 由 mouse.move 决定）；
+ * - 主进程兜底用 screen.getCursorScreenPoint() 读真实 OS 指针，合成指针不会移动它。
+ *   需要稳定验证兜底时，用 setFallbackCursor 在测试进程里改写该函数（仅测试内）。
  */
 
 import { expect, test } from '@playwright/test'
@@ -89,6 +94,39 @@ async function hoverVisibleHalf(): Promise<void> {
 }
 
 /**
+ * 模拟「指针离开球窗口」：CDP 注入的鼠标移动不会像真实 OS 光标那样由浏览器侧
+ * 生成 pointerleave（离开事件是原生窗口层产生的），这里显式派发一次。
+ */
+async function leaveBallWindow(): Promise<void> {
+  await ballPage.mouse.move(-20, -20)
+  await ballPage.evaluate(() => {
+    window.dispatchEvent(new PointerEvent('pointerleave'))
+  })
+}
+
+/**
+ * 改写主进程兜底读取的「真实指针」位置（null = 还原）。
+ * 只影响 screen.getCursorScreenPoint()，即 D16 的主进程兜底；renderer 仍用合成指针。
+ */
+async function setFallbackCursor(cursor: { x: number; y: number } | null): Promise<void> {
+  await app.evaluate(({ screen }, point) => {
+    const holder = globalThis as unknown as {
+      __gotchaCursorPoint?: () => { x: number; y: number }
+    }
+    if (!holder.__gotchaCursorPoint) {
+      holder.__gotchaCursorPoint = screen.getCursorScreenPoint.bind(screen)
+    }
+    screen.getCursorScreenPoint = point ? () => ({ x: point.x, y: point.y }) : holder.__gotchaCursorPoint
+  }, cursor)
+}
+
+/** 把兜底指针钉在当前球窗口中心：正常用例里让兜底保持安静 */
+async function pinFallbackCursorToWindow(): Promise<void> {
+  const { bounds } = await readBallWindow()
+  await setFallbackCursor({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 })
+}
+
+/**
  * 合成指针拖拽：Playwright 的 mouse.move 只给视口坐标，Chromium 会用「当前窗口位置
  * + clientX」反推 screenX；窗口跟着鼠标移动时这会形成反馈、放大位移。这里直接派发带
  * 绝对 screenX/screenY 的 PointerEvent，等价于真实鼠标（真实事件就是绝对屏幕坐标）。
@@ -169,16 +207,25 @@ test('球窗口：64×64、置顶、不聚焦，默认停靠右缘且球缩入�
   expect(matrix.e).toBeCloseTo(32, 1)
 })
 
-test('悬停滑出全显，移开缩回（D15）', async () => {
+test('悬停滑出全显；窗口内移动不收起；离开 600ms 宽限后缩回（D15/D16）', async () => {
+  await pinFallbackCursorToWindow()
   await hoverVisibleHalf()
   await expect(ballPage.locator('#ball')).toHaveClass(/expanded/)
   expect((await ballMatrix()).e).toBeCloseTo(0, 1)
 
-  // 移到窗口左上角（离球心 > 收拢阈值）→ 缩回
+  // 指针仍在窗口内（安全区，离球心 > 旧收拢阈值）：不得按半径收起
   await ballPage.mouse.move(2, 2)
-  await ballPage.waitForTimeout(350)
+  await ballPage.waitForTimeout(200)
+  await expect(ballPage.locator('#ball')).toHaveClass(/expanded/)
+
+  // 离开窗口：宽限期内保持全显，避免「刚移开又滑回来」的闪烁
+  await leaveBallWindow()
+  await ballPage.waitForTimeout(250)
+  await expect(ballPage.locator('#ball')).toHaveClass(/expanded/)
+
+  // 宽限到期 + 160ms 过渡 → 缩回（D16 上限 ≤900ms）
+  await expect.poll(async () => (await ballMatrix()).e, { timeout: 2_500 }).toBeCloseTo(32, 1)
   await expect(ballPage.locator('#ball')).not.toHaveClass(/expanded/)
-  expect((await ballMatrix()).e).toBeCloseTo(32, 1)
 })
 
 test('点击球打开时间线窗口（Q3）；默认暂停不建库（A3 红线）', async () => {
@@ -261,4 +308,33 @@ test('拖动：松手停在原地；靠近边缘才吸附缩入（D15）', async
     width: 64,
     height: 64
   })
+})
+
+test('连续 10 次「悬停展开 → 离开宽限 → 缩回」全部收回（D16）', async () => {
+  await pinFallbackCursorToWindow()
+
+  for (let round = 0; round < 10; round++) {
+    await hoverVisibleHalf()
+    await expect(ballPage.locator('#ball')).toHaveClass(/expanded/)
+    expect((await ballMatrix()).e).toBeCloseTo(0, 1)
+
+    await leaveBallWindow()
+    await expect.poll(async () => (await ballMatrix()).e, { timeout: 2_500 }).toBeCloseTo(32, 1)
+    await expect(ballPage.locator('#ball')).not.toHaveClass(/expanded/)
+  }
+})
+
+test('renderer 丢失 pointerleave 时，主进程游标兜底仍会缩回（D16）', async () => {
+  const { bounds } = await readBallWindow()
+  // 真实 OS 指针钉在窗口外（合成指针仍会进入球体）：模拟 leave 事件丢失
+  await setFallbackCursor({ x: bounds.x - 600, y: bounds.y - 600 })
+
+  await hoverVisibleHalf()
+  await expect(ballPage.locator('#ball')).toHaveClass(/expanded/)
+
+  // 不派发 pointerleave：只靠 50ms 游标检查 + 宽限 + 100ms 兜底余量
+  await expect.poll(async () => (await ballMatrix()).e, { timeout: 3_000 }).toBeCloseTo(32, 1)
+  await expect(ballPage.locator('#ball')).not.toHaveClass(/expanded/)
+
+  await setFallbackCursor(null)
 })

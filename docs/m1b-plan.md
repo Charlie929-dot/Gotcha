@@ -121,7 +121,7 @@ tests/
 7. **持久化边界**（v0.3，Q1=B 已批）：两键分工——`capture.enabled` = 当前运行态；`capture.resume_on_start` = 下次启动的显式授权（缺省 0）。写时机：显式开启 → 同时写 1/1；显式暂停 → 同时写 0/0；启动 3s 内取消恢复 → 写 0/0。`--capture` / `GOTCHA_CAPTURE=1` 不写任何键。球位置**不进 settings 表**：暂停态时间线连接只读、空 userData 建库违反 A3，故写 `userData/ball.json`，仅拖动/吸附后惰性写入（Q8 已批）。
 8. **单实例**：采集与球都是进程级资源，双开会产生两个 scheduler、两个写连接（SQLite 争锁）与重复 events，故在创建任何窗口前加锁。
 9. **权限面分离**：球与时间线各自 preload，且主进程校验 sender；最小权限不是「少写几行」，而是「球打不开时间线、时间线打不开采集」。
-10. **球不进截图**（待验证）：球常驻置顶会叠在活动窗口上，按窗口 bounds 截屏会把它一起截进去，污染 OCR 与帧差。Phase 1 真机验证 `ballWindow.setContentProtection(true)`（Windows 走 WDA_EXCLUDEFROMCAPTURE）是否可用且不影响可见性；不可用则退到「截图前隐藏球 1 帧」的备选，并在 §6 记结论。
+10. **球不进截图**（已验证，2026-10-22）：球常驻置顶会叠在活动窗口上，按窗口 bounds 截屏会把它一起截进去，污染 OCR 与帧差。`ballWindow.setContentProtection(true)`（Windows 走 WDA_EXCLUDEFROMCAPTURE）实测可用：desktopCapturer 缩略图里球区域「显示 vs 隐藏」逐像素 diff=0（1920×1080 屏、80×80 区域），且不影响球在屏上的可见性；备选「截图前隐藏球 1 帧」不再需要。
 
 ## 5. 依赖报备
 
@@ -140,7 +140,7 @@ tests/
 | 球挡窗口 / 抢焦点 | `focusable: false` 需真机确认不影响拖动与 hover；`skipTaskbar` + `show: false` 后 `showInactive()`；点击只在拖动结束时生效 |
 | 退出时丢在途事件 / 残留临时帧 | 退出前 `await pipeline.flush()`（3s 超时）；`halt()` 清队列时逐条删帧；B8 手工验证 |
 | 双开导致重复采集 | `requestSingleInstanceLock()`；`second-instance` 只聚焦已有实例，不新建窗口 |
-| 球被自己录进截图 | `setContentProtection(true)` 真机验证（§4.10）；不可用则截图前临时隐藏球并补 1 帧延迟 |
+| 球被自己录进截图 | `setContentProtection(true)` **已验证可用**（2026-10-22 真机：desktopCapturer 缩略图球区域「显示 vs 隐藏」逐像素 diff=0）；结论见 §4.10 注 |
 | 只读连接与写连接并存 | 开启采集时先 `close()` 时间线连接再 `openDatabase()`；单测覆盖「先浏览后开启」路径 |
 
 ## 7. 工期与提交计划

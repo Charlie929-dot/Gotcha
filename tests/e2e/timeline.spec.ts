@@ -1,5 +1,6 @@
 /**
- * M1a Phase 3 E2E：预置合成 events（固定时间戳）→ 启动应用 → 时间线渲染出对应行
+ * M1a Phase 3 E2E：预置合成 events（固定时间戳）→ 启动应用 → 点击球打开时间线
+ * → 时间线渲染出对应行（M1b Phase 1 起时间线由球点击打开，Q3）
  *
  * 隔离：GOTCHA_USER_DATA 指向临时目录（main 里 app.setPath 覆盖），不碰真实 userData。
  */
@@ -54,7 +55,13 @@ test.beforeAll(async () => {
     args: [...APP_ARGS],
     env: { ...process.env, GOTCHA_USER_DATA: userDataDir }
   })
-  page = await app.firstWindow()
+  // M1b Phase 1：启动只有球（常驻外壳），点击球打开时间线窗口（Q3）
+  const ballPage = await app.firstWindow()
+  await ballPage.waitForSelector('#ball')
+  const timelinePromise = app.waitForEvent('window')
+  await ballPage.mouse.click(32, 32)
+  page = await timelinePromise
+  await page.waitForLoadState('domcontentloaded')
 })
 
 test.afterAll(async () => {

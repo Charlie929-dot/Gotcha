@@ -99,10 +99,10 @@ tests/
   - 暂停 = 同步 `halt()`（关闸、清队列、删帧）→ 立即切灰暗/斜杠 → 异步停 scheduler → 异步 `dispose()` 屏幕流 → stats 落盘。视觉不等流释放。
   - 恢复 = `await start()` 成功后才切亮；起流失败保持暂停视觉并在球上提示，**不得出现「已运行但没在采」**。
 - 写库：只有用户显式操作写 `capture.enabled`；`--capture` / `GOTCHA_CAPTURE=1` 不写。
-- 启动态（Q1=B，D13）：无 `capture.resume_on_start` 键或 `=0` → 暂停（A3）；`=1` → 球先显示暂停态 + 「3s 后开始记录」倒计时角标与托盘气泡，3s 内任意交互（点球 / `Alt+P` / 托盘菜单）即取消并把两键置 0；超时后 `await start()`，**成功才切运行视觉**，失败保持暂停并提示。异常退出（崩溃 / 断电）后重启同样走这条路径——那是用户已授权的持续选择，由启动提示与可取消兜底。
+- 启动态（Q1=B，D13）：无 `capture.resume_on_start` 键或 `=0` → 暂停（A3）；`=1` → 球先显示暂停态 + 「3s 后开始记录」倒计时角标与托盘气泡，3s 内任意交互（点球 / `Alt+P` / 托盘菜单）即取消并把两键置 0；超时后 `await start()`，**成功才切运行视觉**，失败保持暂停并提示。异常退出（崩溃 / 断电）后重启同样走这条路径——那是用户已授权的持续选择，由启动提示与可取消兜底。**倒计时内按 `Alt+P` 的语义（落地细化）**：取消倒计时并立刻显式开始（成功后写 1/1），不先写 0；点球 / 托盘 / 退出按上文写 0/0。`resume_on_start=1` 的启动恢复本身不写 settings（不是新的显式授权，A3）。
 - 托盘（Q4 已改必选）：打开时间线 / 暂停·恢复 / 退出；图标用 `nativeImage` 内联 PNG，不新增依赖。
 - **preload 与 IPC**：新增 `ball-preload.ts`，只暴露 `onStatus` / `toggle` / `setPointerInside`；主进程对所有 `ball:*` handler 校验 `event.sender.id === ballWindow?.webContents.id`。时间线 preload **不追加**采集开关 API。
-- **测试**：hotkeys 注册失败分支；暂停态 toggle 不启动采集；E2E 用假控制器注入——`GOTCHA_FAKE_CAPTURE=1` **且** `GOTCHA_USER_DATA` 存在时才生效，`app.isPackaged` 时忽略该变量，E2E 断言 toggle 后球视觉切换且 events 行数不变；时间线回归。
+- **测试**：hotkeys 注册失败分支；暂停态 toggle 不启动采集；E2E 用假控制器注入——`GOTCHA_FAKE_CAPTURE=1` **且** `GOTCHA_USER_DATA` 存在时才生效，`app.isPackaged` 时忽略该变量，E2E 断言 toggle 后球视觉切换且 events 行数不变；时间线回归。**热键无法用合成按键触发**，假采集模式下主进程挂 `globalThis.__gotchaTest`（toggle / status / notice）供 E2E 调用，走同一个 `toggleCapture()`；`Alt+P` 注册/占用/抛错由单测覆盖。
 - **验收**：`Alt+P` 运行↔暂停，`settings` 值正确，屏幕流释放（无采集窗口活跃），时间线在暂停态仍可打开，E2E 全程无真实录屏。
 
 ### Phase 3 · 验收与收口（约 0.5–1 天）
@@ -200,6 +200,7 @@ v0.2 设定的合并条件已全部满足，本方案可作为 M1b 事实源：
 | 10 | §3 Phase 1 / §4.10 / §6 | 新增单实例锁、球不进截图（`setContentProtection` 待验证） | 本次补充（三轮审查均未覆盖） |
 | 11 | §6 / §7 | 修正「不 `show()` 前激活」措辞为 `showInactive()`；工期 5–7 → 6–8 天 | e460d29c / 本次 |
 | 12 | B2 / §3 Phase 1 / §6 | 新增自动缩回机制：离开 600ms 宽限、展开/宽限/拖动保持可交互、主进程 50ms 游标兜底（D16）；交互状态机与兜底判定抽纯函数并补单测/E2E | 2026-10-23 拍板 / `docs/m1b-ball-retract-draft.md` |
+| 13 | §3 Phase 2 | 落地细化：倒计时内 `Alt+P` = 取消倒计时并立刻显式开始；启动恢复本身不写 settings；假采集测试钩子 `__gotchaTest`（热键无法用合成按键触发） | `feat/m1b-p2-switch` 实现（2026-10-23） |
 
 ### v0.2 → v0.3（2026-10-22 拍板落定）
 

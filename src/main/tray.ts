@@ -12,6 +12,8 @@ import { buildTrayMenu, toMenuTemplate, TRAY_ICON_DATA_URL, type TrayMenuActions
 export interface TrayShell {
   tray: Tray
   update(status: CaptureStatus): void
+  /** 启动自动恢复的 3s 提示（Windows 气球通知；不可用时静默） */
+  balloon(title: string, content: string): void
   dispose(): void
 }
 
@@ -28,9 +30,18 @@ export function installTray(actions: TrayMenuActions, status: CaptureStatus): Tr
   // Windows 下单击托盘图标打开时间线（右键由 context menu 接管）
   tray.on('click', () => actions.openTimeline())
 
+  const balloon = (title: string, content: string): void => {
+    try {
+      tray.displayBalloon({ icon, title, content })
+    } catch {
+      // 部分环境（无通知权限 / 非 Windows）不支持气球通知；静默，球上仍有倒计时角标
+    }
+  }
+
   return {
     tray,
     update,
+    balloon,
     dispose: () => tray.destroy()
   }
 }

@@ -58,6 +58,14 @@ test.beforeAll(async () => {
   // M1b Phase 1：启动只有球（常驻外壳），点击球打开时间线窗口（Q3）
   const ballPage = await app.firstWindow()
   await ballPage.waitForSelector('#ball')
+  // 停靠缩入态先悬停展开再点：窗口穿透时「move → down」几乎同时到达，
+  // 不给 pointermove 的穿透开关留时间，mousedown 会落到下层窗口（2026-10-23 全量跑偶发）
+  await ballPage.waitForTimeout(400)
+  const box = await ballPage.locator('#ball').boundingBox()
+  if (!box) throw new Error('找不到球体包围盒')
+  const visibleX = box.width > 48 ? box.x + box.width / 2 : box.x + box.width / 4
+  await ballPage.mouse.move(visibleX, box.y + box.height / 2)
+  await ballPage.waitForTimeout(350)
   const timelinePromise = app.waitForEvent('window')
   await ballPage.mouse.click(32, 32)
   page = await timelinePromise

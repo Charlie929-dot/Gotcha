@@ -111,6 +111,39 @@ body {
   display: block;
 }
 
+/* 角标（m1b-plan §3 Phase 2）：3s 自动恢复倒计时 / 失败 / 热键被占用。
+ * 固定在 64×64 窗口右上角（不在 #ball 里），停靠缩入 / 四边停靠都不会被裁切；
+ * 不拦指针（球体命中用它自己的半径） */
+.notice {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  background: #3f4658;
+  color: #f7f8fb;
+  font: 600 11px/1 system-ui, 'Segoe UI', sans-serif;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  user-select: none;
+}
+
+.notice[data-kind='error'],
+.notice[data-kind='hotkey-unavailable'] {
+  background: #b4453c;
+}
+
+.notice[hidden] {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   #ball {
     transition: none;

@@ -146,6 +146,7 @@ Gotcha/
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
 - 2026-10-22：M1a 收口：A1 回看（能力验证，15:00 段样本不足见归档方案 §0）、A2/A3/A4/A5 已过；`docs/m1a-plan.md` 归档至 `docs/archive/`，M1a 状态 ✅。
+- 2026-10-22：M1b 起步前清理：修 stats 跨午夜串日（`fix/stats-midnight-rollover`）——`createDailyStatsFlusher` flush 时比较日期 key，跨日先落旧 key 再清零换新 key；新增 `tests/unit/stats.test.ts` 4 条（含跨日 flush 回归）。M1b 范围见上表（技术方案 §7：收起/悬停/拖动/暂停态视觉/隐私总开关），状态仍未开工。
 - 2026-10-21：M1a 验收（新架构）：A2 两次 5 分钟法 **1.58% / 1.24%**（含启动累计 3.63%，口径见 `docs/archive/m1a-plan.md` §0）、A3/A4/A5 通过；A1 待次日回看。
 - 2026-10-21：修复采集模式下时间线输入冻结（`fix/m1a-input-lag`）：`desktopCapturer.getSources` 每次 1.2–2.3s 且阻塞主进程 → 改隐藏窗口常驻 `getDisplayMedia` 屏幕流（`screen-stream.ts` + `renderer/capture-window.ts`），真机 12s 主进程 IPC 往返 max 5ms / p95 2ms；暗色模式按钮 hover 不再闪白；60 单测 + 4 E2E + typecheck + build 绿。
 - 2026-10-21：M1a Phase 3 时间线只读视图（`feat/m1a-p3-timeline`）：renderer 按日分组列表（时间/应用/标题/OCR 摘要 80 字）+ 日期切换 + preload IPC + Playwright Electron 冒烟（合成 events，2 用例）；待 M1a 收口验收。

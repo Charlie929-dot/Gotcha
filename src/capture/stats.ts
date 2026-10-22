@@ -49,3 +49,51 @@ export function loadStats(db: Db, key: string): CaptureStats {
 export function saveStats(db: Db, key: string, stats: CaptureStats): void {
   setSetting(db, key, JSON.stringify(stats))
 }
+
+/** 计数器宿主（CapturePipeline 实现；单测可注入假实现） */
+export interface StatsCounter {
+  getStats(): CaptureStats
+  /** 跨午夜换 key 时清零当日累计 */
+  resetStats(): void
+}
+
+export interface DailyStatsFlusher {
+  /** 当前累计归属的日期 key（排查 / 断言用） */
+  readonly key: string
+  /** 落盘一次；跨午夜先落旧 key，再清零换新 key */
+  flush(): void
+}
+
+export interface DailyStatsFlusherDeps {
+  db: Db
+  counter: StatsCounter
+  now(): number
+  /** 启动时的 key，通常与首次 loadStats 用的一致；默认 statsKey(now()) */
+  key?: string
+}
+
+/**
+ * 每日 stats 落盘（gotchas「stats 跨午夜归属漂移」）
+ *
+ * 计数器是进程内累计、每 60s 落盘；若 00:00 后直接换新 key 写同一份累计，
+ * 前一天的数会整份复制到新一天。这里在 flush 时比较日期 key：变了就先把
+ * 旧 key 落盘、清零，再用新 key 继续。边界误差 ≤ 一轮 flush 间隔（60s）：
+ * 跨日后的这几帧仍算进旧 key，新 key 从 0 起算。
+ */
+export function createDailyStatsFlusher(deps: DailyStatsFlusherDeps): DailyStatsFlusher {
+  let key = deps.key ?? statsKey(deps.now())
+  return {
+    get key() {
+      return key
+    },
+    flush() {
+      const currentKey = statsKey(deps.now())
+      if (currentKey !== key) {
+        saveStats(deps.db, key, deps.counter.getStats())
+        deps.counter.resetStats()
+        key = currentKey
+      }
+      saveStats(deps.db, key, deps.counter.getStats())
+    }
+  }
+}

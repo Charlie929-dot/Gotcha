@@ -25,7 +25,7 @@
 | A2 | ✅（5 分钟法） | 两次 5 分钟采样：**1.58%**（Electron 1.28% + OCR 0.29%；17:14–17:19，窗口内 12 次帧变化）与 **1.24%**（0.70% + 0.54%；17:20–17:25），8 逻辑核口径。**口径提醒**：同一运行时累计 23.2 分钟（含启动）均值 **3.63%**；屏幕持续变化时 OCR 0.6–1.2s/帧，最坏约 5%。报数必须带窗口内变化次数，不能只报均值 |
 | A3 | ✅ | 空 userData + 无 `--capture` 启动：仅 index.html 一个窗口；未生成 `memory.db`、无 `logs/`；时间线显示「这一天还没有记录」 |
 | A4 | ✅ | `npm test` 60 通过（12 文件）、`npx playwright test` 4 通过、`npm run typecheck`、`npm run build` 全绿（PR #13） |
-| A5 | ✅ | settings `stats.day.2026-10-21` = `{frames_total:2745, frames_same:2166, ocr_runs:578, queue_dropped:0, capture_errors:1}`（17:25 落盘点）；日志最长行 152 字符、OCR 原文 grep 0 命中。**已知缺陷**：跨午夜时新 key 继承旧 key 累计（2026-10-22 发现，见 gotchas「stats 跨午夜归属漂移」），M1b 修 |
+| A5 | ✅ | settings `stats.day.2026-10-21` = `{frames_total:2745, frames_same:2166, ocr_runs:578, queue_dropped:0, capture_errors:1}`（17:25 落盘点）；日志最长行 152 字符、OCR 原文 grep 0 命中。**已知缺陷（2026-10-22 已修）**：跨午夜时新 key 继承旧 key 累计（见 gotchas「stats 跨午夜归属漂移」；`fix/stats-midnight-rollover` 修复并补跨日回归用例） |
 
 > A2 出现「5 分钟法达标、含启动累计 3.63%」的口径差异，原因与采样注意事项见 gotchas.md「A2 CPU 采样受屏幕变化频率影响」。
 

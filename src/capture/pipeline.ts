@@ -66,6 +66,11 @@ export class CapturePipeline {
     return { ...this.stats }
   }
 
+  /** 跨午夜换 stats key 时清零当日累计（lastHash 保留，帧差与采集不中断） */
+  resetStats(): void {
+    Object.assign(this.stats, zeroStats())
+  }
+
   getQueue(): OcrQueue {
     return this.queue
   }

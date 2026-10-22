@@ -61,7 +61,7 @@ describe('StartupResumeCountdown（启动 3s 自动恢复，Q1=B）', () => {
     vi.useRealTimers()
   })
 
-  it('默认 3s：立即报 3，随后 2 → 1 → 到点触发一次 onDue，自动结束', () => {
+  it('默认 3s：立即报 3，随后 2 → 1；到点启动期间仍可取消，complete 后结束', () => {
     vi.useFakeTimers()
     const ticks: number[] = []
     const due = vi.fn()
@@ -82,11 +82,29 @@ describe('StartupResumeCountdown（启动 3s 自动恢复，Q1=B）', () => {
     vi.advanceTimersByTime(1000)
     expect(ticks).toEqual([3, 2, 1])
     expect(due).toHaveBeenCalledTimes(1)
-    expect(countdown.active).toBe(false)
+    expect(countdown.active).toBe(true)
+    expect(countdown.secondsLeft()).toBe(0)
 
-    // 到点后继续走时间：不得重复触发，cancel 返回 false
+    // 到点后的真实起流阶段仍可取消；不得重复触发 onDue
     vi.advanceTimersByTime(5000)
     expect(due).toHaveBeenCalledTimes(1)
+    expect(countdown.cancel()).toBe(true)
+    expect(countdown.active).toBe(false)
+    expect(countdown.cancel()).toBe(false)
+  })
+
+  it('到点启动完成后 complete 收口，之后不再可取消', () => {
+    vi.useFakeTimers()
+    const due = vi.fn()
+    const countdown = new StartupResumeCountdown({ onDue: due })
+
+    countdown.start()
+    vi.advanceTimersByTime(3000)
+    expect(due).toHaveBeenCalledTimes(1)
+    expect(countdown.active).toBe(true)
+
+    countdown.complete()
+    expect(countdown.active).toBe(false)
     expect(countdown.cancel()).toBe(false)
   })
 

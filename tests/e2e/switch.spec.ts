@@ -73,10 +73,15 @@ function countEvents(dir: string): number {
   }
 }
 
-async function launch(dir: string): Promise<Launched> {
+async function launch(dir: string, extraEnv: Record<string, string> = {}): Promise<Launched> {
   const app = await electron.launch({
     args: [...APP_ARGS],
-    env: { ...process.env, GOTCHA_USER_DATA: dir, GOTCHA_FAKE_CAPTURE: '1' }
+    env: {
+      ...process.env,
+      GOTCHA_USER_DATA: dir,
+      GOTCHA_FAKE_CAPTURE: '1',
+      ...extraEnv
+    }
   })
   const ball = await app.firstWindow()
   await ball.waitForSelector('#ball')
@@ -184,6 +189,55 @@ test('倒计时内点球即取消：保持暂停、两键置 0，3s 后也不自
     await ball.waitForTimeout(3_500)
     await expect(ball.locator('#ball')).toHaveClass(/paused/)
     expect(countEvents(dir)).toBe(0)
+  } finally {
+    await close(launched)
+  }
+})
+
+test('倒计时到点且起流仍在 starting：点球仍取消并最终保持暂停', async () => {
+  const dir = freshDir('gotcha-resume-starting-click-')
+  seedSwitch(dir, true, true)
+  const launched = await launch(dir, { GOTCHA_FAKE_CAPTURE_START_DELAY_MS: '1500' })
+  const { app, ball } = launched
+  try {
+    await expect
+      .poll(() => app.evaluate(() => globalThis.__gotchaTest!.status()), { timeout: 6_000 })
+      .toBe('starting')
+
+    await hoverVisibleHalf(ball)
+    const timelinePromise = app.waitForEvent('window')
+    await ball.mouse.click(32, 32)
+    const timeline = await timelinePromise
+    await timeline.waitForLoadState('domcontentloaded')
+
+    await expect
+      .poll(() => app.evaluate(() => globalThis.__gotchaTest!.status()), { timeout: 5_000 })
+      .toBe('paused')
+    await expect.poll(() => readSettings(dir)[SWITCH_ENABLED_KEY]).toBe('0')
+    expect(readSettings(dir)[SWITCH_RESUME_ON_START_KEY]).toBe('0')
+    await expect(ball.locator('#notice')).toBeHidden()
+  } finally {
+    await close(launched)
+  }
+})
+
+test('倒计时到点且起流仍在 starting：Alt+P 接管为显式开启并写 1/1', async () => {
+  const dir = freshDir('gotcha-resume-starting-hotkey-')
+  seedSwitch(dir, true, true)
+  const launched = await launch(dir, { GOTCHA_FAKE_CAPTURE_START_DELAY_MS: '1500' })
+  const { app, ball } = launched
+  try {
+    await expect
+      .poll(() => app.evaluate(() => globalThis.__gotchaTest!.status()), { timeout: 6_000 })
+      .toBe('starting')
+
+    await toggle(app)
+    await expect
+      .poll(() => app.evaluate(() => globalThis.__gotchaTest!.status()), { timeout: 5_000 })
+      .toBe('running')
+    await expect.poll(() => readSettings(dir)[SWITCH_ENABLED_KEY]).toBe('1')
+    expect(readSettings(dir)[SWITCH_RESUME_ON_START_KEY]).toBe('1')
+    await expect(ball.locator('#notice')).toBeHidden()
   } finally {
     await close(launched)
   }

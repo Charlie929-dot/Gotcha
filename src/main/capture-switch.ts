@@ -64,13 +64,15 @@ export interface StartupResumeDeps {
  * 启动自动恢复倒计时（可取消）。
  *
  * `start()` 立即回报剩余秒数（3），随后每秒回落；到点调用一次 `onDue()`。
- * 任何交互调用 `cancel()`：返回是否真的取消了在途倒计时；取消后不再触发 onDue。
- * 到点后自动进入非活跃态，重复 `cancel()` 返回 false。
+ * 到点只代表进入“正在启动”，在调用方明确 `complete()` 前仍保持可取消：真实屏幕流
+ * 启动可能阻塞主进程，期间到达的点球 / Alt+P 不能被误判为“倒计时已结束”。
+ * 任何交互调用 `cancel()`：返回是否取消了倒计时或在途启动；取消后不再触发 onDue。
  */
 export class StartupResumeCountdown {
   private timer: unknown = null
   private startedAt = 0
   private activeFlag = false
+  private dueFlag = false
   private readonly delayMs: number
   private readonly tickMs: number
   private readonly now: () => number
@@ -103,31 +105,40 @@ export class StartupResumeCountdown {
   start(): void {
     if (this.activeFlag) return
     this.activeFlag = true
+    this.dueFlag = false
     this.startedAt = this.now()
     this.deps.onTick?.(this.secondsLeft())
     this.timer = this.setTimer(() => this.tick(), this.tickMs)
   }
 
-  /** 返回是否取消了在途倒计时（已到点 / 未启动时返回 false） */
+  /** 到点启动完成（成功或失败）后由调用方收口；之后 cancel 返回 false。 */
+  complete(): void {
+    this.activeFlag = false
+    this.dueFlag = false
+    this.clearTickTimer()
+  }
+
+  /** 返回是否取消了倒计时或到点后的在途启动（未启动 / 已完成时返回 false） */
   cancel(): boolean {
     if (!this.activeFlag) return false
     this.activeFlag = false
-    if (this.timer !== null) {
-      this.clearTimer(this.timer)
-      this.timer = null
-    }
+    this.dueFlag = false
+    this.clearTickTimer()
     return true
   }
 
+  private clearTickTimer(): void {
+    if (this.timer === null) return
+    this.clearTimer(this.timer)
+    this.timer = null
+  }
+
   private tick(): void {
-    if (!this.activeFlag) return
+    if (!this.activeFlag || this.dueFlag) return
     const remaining = this.delayMs - (this.now() - this.startedAt)
     if (remaining <= 0) {
-      this.activeFlag = false
-      if (this.timer !== null) {
-        this.clearTimer(this.timer)
-        this.timer = null
-      }
+      this.dueFlag = true
+      this.clearTickTimer()
       this.deps.onDue()
       return
     }

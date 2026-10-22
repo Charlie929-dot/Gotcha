@@ -139,13 +139,14 @@ Gotcha/
 | - | - | - |
 | M0 | 策划 + 技术方案 | ✅ 完成（2026-10-20） |
 | M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | ✅ 完成（2026-10-22 收口；A1 为能力验证，15:00 段样本不足见 `docs/archive/m1a-plan.md` §0） |
-| M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | ⬜ 未开工 |
+| M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | ⬜ 未开工（方案草案见 `docs/m1b-plan.md`，待拍板） |
 | M2 | 知识行为图谱（DeepSeek 结构化/节点边/sigma.js 画布） | ⬜ 未开工 |
 | M3 | 分层记忆（日/周/月归纳/LOD/下钻） | ⬜ 未开工 |
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
 - 2026-10-22：M1a 收口：A1 回看（能力验证，15:00 段样本不足见归档方案 §0）、A2/A3/A4/A5 已过；`docs/m1a-plan.md` 归档至 `docs/archive/`，M1a 状态 ✅。
+- 2026-10-22：M1b 方案草案 v0.1 起草（`docs/m1b-plan.md`，待拍板）：Phase 0 采集控制器重构 → Phase 1 球窗口与视觉 → Phase 2 隐私总开关 + `Alt+P` → Phase 3 验收收口；§8 七项待批（持久化语义、球形态、点击行为、托盘、Alt+Space、暂停释放资源、暂停范围）；未动代码。
 - 2026-10-22：M1b 起步前清理：修 stats 跨午夜串日（`fix/stats-midnight-rollover`）——`createDailyStatsFlusher` flush 时比较日期 key，跨日先落旧 key 再清零换新 key；新增 `tests/unit/stats.test.ts` 4 条（含跨日 flush 回归）。M1b 范围见上表（技术方案 §7：收起/悬停/拖动/暂停态视觉/隐私总开关），状态仍未开工。
 - 2026-10-21：M1a 验收（新架构）：A2 两次 5 分钟法 **1.58% / 1.24%**（含启动累计 3.63%，口径见 `docs/archive/m1a-plan.md` §0）、A3/A4/A5 通过；A1 待次日回看。
 - 2026-10-21：修复采集模式下时间线输入冻结（`fix/m1a-input-lag`）：`desktopCapturer.getSources` 每次 1.2–2.3s 且阻塞主进程 → 改隐藏窗口常驻 `getDisplayMedia` 屏幕流（`screen-stream.ts` + `renderer/capture-window.ts`），真机 12s 主进程 IPC 往返 max 5ms / p95 2ms；暗色模式按钮 hover 不再闪白；60 单测 + 4 E2E + typecheck + build 绿。

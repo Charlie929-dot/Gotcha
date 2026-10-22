@@ -13,13 +13,13 @@
 
 | # | 验收项 | 方法 |
 | - | - | - |
-| B1 | 球常驻贴边 | 启动后球出现在屏幕边缘（默认右侧、垂直居中）：不抢焦点、不进任务栏、不挡正常操作 |
-| B2 | 悬停 / 拖动 | 悬停轻微放大（「我在」）；可拖动并吸附回边缘；位置重启后恢复；多屏 / 缩放不越界；拔屏后球回到主屏可见区 |
+| B1 | 球常驻贴边 | 启动后球出现在屏幕边缘（默认右侧、垂直居中）：不抢焦点、不进任务栏、不挡正常操作；停靠时球半缩入（露出 24px），悬停滑出全显（D15） |
+| B2 | 悬停 / 拖动 | 悬停轻微放大（「我在」）并滑出全显，离开窗口 600ms 宽限后自动缩回（D16）；可拖动，**松手停在原地**，离边缘 ≤24px 才吸附并缩入；位置重启后恢复（停靠 / 自由两态）；多屏 / 缩放不越界；拔屏后球回到主屏可见区 |
 | B3 | 暂停/运行视觉可辨 | 运行 = 常态半透明；暂停 = 灰暗 + 斜杠图标；**首次启动、无任何设置与无显式交互时为暂停态**（A3 延续）；**「已暂停」只能在采集闸关闭后显示**（§4.4） |
 | B4 | `Alt+P` 全链路 | 运行中按下 → 闸立即关闭（新帧不再入队、在途结果不再写库）、停屏幕流 / 调度 / OCR、落盘 stats、球切暂停视觉；再按恢复；视觉切换 ≤ 200ms 且不依赖流释放；热键被占用时有可见反馈 |
 | B5 | 状态持久化 | 用户显式开启 → `capture.enabled=1` 且 `capture.resume_on_start=1`；显式暂停 → 两键都置 0；重启时 `resume_on_start=1` 才延迟 3s 自动恢复（可取消），否则仍为暂停；无任何键时仍为暂停；`capture.enabled` 只表示当前运行态（§4.7） |
 | B6 | 测试闸门 | `npm test` 全绿 + `npm run typecheck` 通过；新增球位置 / 控制器状态机 / halt / 热键单测 + 1–2 条 E2E（球可见、`Alt+P` 视觉切换、时间线回归）；**E2E 不得启动真实录屏与真实 OCR**（§3 Phase 2） |
-| B7 | 真机手工清单 | 贴边 / 多屏 / DPI 缩放 / 拖动吸附 / 暂停恢复 / 退出重启 / **双开** 各过一遍，结果回写本节 |
+| B7 | 真机手工清单 | 缩入停靠 / 悬停滑出 / 自由位拖动 / 多屏 / DPI 缩放 / 暂停恢复 / 退出重启 / **双开** 各过一遍，结果回写本节 |
 | B8 | 退出与单实例 | 托盘（或球右键）可退出且退出前等在途队列落地；重复启动只产生一个实例，不会出现第二个球或第二份采集 |
 
 ## 1. 前置约束（M1b 期间有效）
@@ -38,11 +38,12 @@ src/
 │  ├─ index.ts              # 入口：单实例锁 / 装配球窗口 / 托盘 / 热键 / 采集控制器
 │  ├─ capture-controller.ts # 从 startCapture 拆出：start() / stop() / status() / toggle()，Promise + 串行
 │  ├─ ball.ts               # 悬浮球窗口：创建、贴边与拖动吸附（位置计算为纯函数）、显隐、命中检测通道
+│  ├─ ball-retract.ts       # 自动缩回兜底判定（纯函数）：安全区、宽限计时、强制缩回
 │  ├─ hotkeys.ts            # Alt+P 注册/注销 + 失败上报（注入 globalShortcut，可单测）
 │  └─ tray.ts               # 托盘图标 + 最小菜单（打开时间线 / 暂停·恢复 / 退出）
 ├─ renderer/
-│  ├─ ball/                 # ball.html / ball.ts / ball.css：圆形、悬停放大、暂停态、指针命中检测
-│  ├─ ball-preload.ts       # 球专用 preload：状态订阅 / toggle / 指针进出通道（最小权限）
+│  ├─ ball/                 # ball.html / ball.ts / ball.css / ball-interaction.ts：圆形、悬停放大、交互状态机、暂停态
+│  ├─ ball-preload.ts       # 球专用 preload：状态订阅 / toggle / 指针进出 / 交互状态 / 兜底缩回通道（最小权限）
 │  ├─ preload.ts            # 时间线只读查询（M1b 不追加采集开关 API）
 │  └─ index.html / main.ts  # 现有时间线窗口（M1b 点击球的落地页）
 ├─ db/ ...                  # 既有
@@ -51,6 +52,8 @@ src/
    └─ queue.ts              # 新增 drainAll()：取空队列（供 halt 删帧）
 tests/
 ├─ unit/ball-position.test.ts       # 贴边吸附、多屏 clamp、display_id 回退、比例位置（纯函数）
+├─ unit/ball-interaction.test.ts    # 交互状态机：热区展开、窗口内不收起、宽限、拖动、强制缩回
+├─ unit/ball-retract.test.ts        # 兜底判定：安全区边界、离开计时、到点强制缩回
 ├─ unit/capture-controller.test.ts  # start/stop 幂等、并发串行、start 失败回滚、stop 后无 tick
 ├─ unit/pipeline-halt.test.ts       # 闸关后：在途 OCR 不写库、队列清空、临时帧删除
 ├─ unit/hotkeys.test.ts             # 注册失败/成功、切换调用（假 globalShortcut）
@@ -79,14 +82,15 @@ tests/
 ### Phase 1 · 球窗口与视觉（约 2–2.5 天）
 
 - 窗口：`frame: false` / `transparent: true` / `alwaysOnTop` / `skipTaskbar` / `hasShadow: false` / `resizable: false` / `show: false` 后 `showInactive()`（不抢焦点）。尺寸 **64×64**（球直径 48 + 悬停 `scale(1.08)` 到 51.8 + 阴影余量），避免放大被裁；球体视觉仍按 Q2 的 48px。
-- 鼠标穿透：**不是区域级 API**。窗口默认 `setIgnoreMouseEvents(true, { forward: true })`，renderer 靠转发的指针事件做命中检测（到圆心距离 ≤ 半径即「在球上」），进入圆内 → IPC 通知主进程 `setIgnoreMouseEvents(false)`，离开 → 恢复 `true`。该 IPC 只接受球窗口 sender。
-- 拖动：`pointerdown` 拖动 → 主进程节流 `setPosition`（约 16ms）→ 松手吸附最近边缘；位置写 `userData/ball.json`（`tmp` + rename 原子写；只在拖动/吸附后写，不写采集内容）。
+- 停靠视觉（D15 / D16）：窗口贴齐工作区边缘（窗口整块在屏内），球体在窗口内平移 32px 缩进 → 只露半颗（24px）；指针进入固定热区（可见半球 + 8px 容差 = 32px）后球滑回窗口中心全显（CSS transform，160ms），离开窗口后经 **600ms 宽限**（回来即取消）才缩回。**不移动窗口做滑出**，避免滑出/缩回时命中区抖动。
+- 鼠标穿透：**不是区域级 API**。窗口默认 `setIgnoreMouseEvents(true, { forward: true })`；renderer 上报「球体命中」与交互状态（idle / expanded / grace / dragging），**展开、宽限、拖动期间必须保持可交互**——旧实现按球心距离 >24px 就恢复穿透、>40px 才收起，指针停在中间带时球仍展开、窗口已穿透，后续 move / leave 收不到，球会卡在展开态（D16、gotchas）。只有缩入且指针不在球上时才恢复穿透。展开态另起主进程兜底：每 50ms 用 `screen.getCursorScreenPoint()` 检查真实指针，离开窗口安全区（64×64 + 8px）≥700ms 强制缩回（`ball:force-retract`），含过渡总耗时 ≤900ms。该 IPC 只接受球窗口 sender。
+- 拖动：`pointerdown` 记录偏移 → 主进程节流 `setPosition`（约 16ms）；松手时**离边缘 ≤24px 才吸附并缩入，否则停在原地（自由位，球完整可见）**；位置写 `userData/ball.json`（v2：停靠存 `edge` + `offset_ratio`，自由存 `x_ratio` / `y_ratio`；`tmp` + rename 原子写；只在拖动后写，不写采集内容）。
 - 点击（未拖动）→ 打开/聚焦现有时间线窗口（Q3）。
-- 位置计算抽成纯函数（`ball.ts`）：默认右边缘垂直居中、贴边 6px；clamp 用 `workArea`（避开任务栏）；`ball.display_id` 找不到时**回退主屏**并记日志；监听 `display-added` / `display-removed` / `display-metrics-changed` 重新吸附。
+- 位置计算抽成纯函数（`ball-position.ts`）：默认右边缘垂直居中、停靠缩入；clamp 用 `workArea`（避开任务栏）；非整数缩放下窗口位置吸附物理像素网格；`ball.display_id` 找不到时**回退主屏**并记日志；监听 `display-added` / `display-removed` / `display-metrics-changed` 重新落位。
 - **单实例**：`app.requestSingleInstanceLock()`，未拿到即 `app.quit()`；`second-instance` 只把已有实例的时间线窗口打开/聚焦，不新建球、不重启采集。
 - **退出入口（Q4）**：托盘为必选（打开时间线 / 暂停·恢复 / 退出）；球右键菜单同样提供「退出」，作为托盘不可用时的兜底。退出前 `await pipeline.flush()`（3s 超时后放弃并记 warn），避免在途事件丢失与临时帧残留。
-- **测试**：纯函数单测（贴边 / 越界 / 负坐标 / 缩放 / 缺失 display_id）；单实例逻辑用假锁单测。
-- **验收**：真机可见球、悬停放大、拖动吸附、重启位置恢复、拔屏回主屏、双开只起一个、可退出。
+- **测试**：纯函数单测（贴边 / 越界 / 负坐标 / 缩放 / 缺失 display_id；交互状态机 `ball-interaction`；兜底判定 `ball-retract`）；单实例逻辑用假锁单测；E2E 覆盖「窗口内移动不收起 / 离开 600ms 宽限后缩回 / 连续 10 次展开-缩回 / renderer 丢失 leave 时主进程兜底缩回」。
+- **验收**：真机可见球、悬停放大、拖动吸附、重启位置恢复、拔屏回主屏、双开只起一个、可退出；真机手感确认「移开后自然缩回、不闪烁、缩入热区容易再次唤醒」。
 
 ### Phase 2 · 隐私总开关 + Alt+P（约 1.5–2 天）
 
@@ -121,7 +125,7 @@ tests/
 7. **持久化边界**（v0.3，Q1=B 已批）：两键分工——`capture.enabled` = 当前运行态；`capture.resume_on_start` = 下次启动的显式授权（缺省 0）。写时机：显式开启 → 同时写 1/1；显式暂停 → 同时写 0/0；启动 3s 内取消恢复 → 写 0/0。`--capture` / `GOTCHA_CAPTURE=1` 不写任何键。球位置**不进 settings 表**：暂停态时间线连接只读、空 userData 建库违反 A3，故写 `userData/ball.json`，仅拖动/吸附后惰性写入（Q8 已批）。
 8. **单实例**：采集与球都是进程级资源，双开会产生两个 scheduler、两个写连接（SQLite 争锁）与重复 events，故在创建任何窗口前加锁。
 9. **权限面分离**：球与时间线各自 preload，且主进程校验 sender；最小权限不是「少写几行」，而是「球打不开时间线、时间线打不开采集」。
-10. **球不进截图**（待验证）：球常驻置顶会叠在活动窗口上，按窗口 bounds 截屏会把它一起截进去，污染 OCR 与帧差。Phase 1 真机验证 `ballWindow.setContentProtection(true)`（Windows 走 WDA_EXCLUDEFROMCAPTURE）是否可用且不影响可见性；不可用则退到「截图前隐藏球 1 帧」的备选，并在 §6 记结论。
+10. **球不进截图**（已验证，2026-10-22）：球常驻置顶会叠在活动窗口上，按窗口 bounds 截屏会把它一起截进去，污染 OCR 与帧差。`ballWindow.setContentProtection(true)`（Windows 走 WDA_EXCLUDEFROMCAPTURE）实测可用：desktopCapturer 缩略图里球区域「显示 vs 隐藏」逐像素 diff=0（1920×1080 屏、80×80 区域），且不影响球在屏上的可见性；备选「截图前隐藏球 1 帧」不再需要。
 
 ## 5. 依赖报备
 
@@ -131,7 +135,7 @@ tests/
 
 | 风险 | 对策 |
 | - | - |
-| 透明窗口鼠标穿透 / 悬停丢失 | 窗口默认穿透并 `forward: true`，renderer 命中检测后开关穿透（§3 Phase 1）；窗 64px > 球 48px×1.08，避免悬停被裁；真机在 Win11 缩放 / 多屏下验 |
+| 透明窗口鼠标穿透 / 悬停丢失 | 窗口默认穿透并 `forward: true`，renderer 命中检测后开关穿透（§3 Phase 1）；**展开 / 宽限 / 拖动期间不恢复穿透**（避免丢 leave 卡在展开态），离开 600ms 宽限 + 主进程 50ms 游标兜底（D16）；窗 64px > 球 48px×1.08，避免悬停被裁；真机在 Win11 缩放 / 多屏下验 |
 | 多屏 / DPI 坐标漂移 | 位置存 `display_id` + 边缘比例，clamp 用 `workArea`；监听 `display-*` 事件；缺失 display_id 回退主屏；单测覆盖越界与负坐标 |
 | `Alt+P` 被其他应用占用 / 抢占助记键 | `register` 返回 false → 球上角标 + 日志；托盘菜单提供同一开关入口；助记键副作用在 Q5 旁告知拍板人 |
 | 重构采集生命周期引入 M1a 回归 | Phase 0 只搬移不改语义、保留 `--capture` 旧启动路径；跑 M1a 单测 + 65s 真机冒烟 |
@@ -140,7 +144,7 @@ tests/
 | 球挡窗口 / 抢焦点 | `focusable: false` 需真机确认不影响拖动与 hover；`skipTaskbar` + `show: false` 后 `showInactive()`；点击只在拖动结束时生效 |
 | 退出时丢在途事件 / 残留临时帧 | 退出前 `await pipeline.flush()`（3s 超时）；`halt()` 清队列时逐条删帧；B8 手工验证 |
 | 双开导致重复采集 | `requestSingleInstanceLock()`；`second-instance` 只聚焦已有实例，不新建窗口 |
-| 球被自己录进截图 | `setContentProtection(true)` 真机验证（§4.10）；不可用则截图前临时隐藏球并补 1 帧延迟 |
+| 球被自己录进截图 | `setContentProtection(true)` **已验证可用**（2026-10-22 真机：desktopCapturer 缩略图球区域「显示 vs 隐藏」逐像素 diff=0）；结论见 §4.10 注 |
 | 只读连接与写连接并存 | 开启采集时先 `close()` 时间线连接再 `openDatabase()`；单测覆盖「先浏览后开启」路径 |
 
 ## 7. 工期与提交计划
@@ -156,7 +160,7 @@ tests/
 | # | 问题 | 结论（2026-10-22 拍板） | 阻塞 | 状态 |
 | - | - | - | - | - |
 | Q1 | 采集开关持久化语义 | **采用 B**：`capture.enabled`（当前态）+ `capture.resume_on_start`（下次启动授权，缺省 0）；显式开启即授权、显式暂停即撤销；重启延迟 3s 自动恢复并给可见提示、可取消；security.md 同步改写（D13） | Phase 2 | ✅ 已批 |
-| Q2 | 球体形态与默认位置 | 球 48px / 窗口 64px、贴边 6px、屏幕右边缘垂直居中、半透明；位置存 `userData/ball.json`（`edge` + `offset_ratio` + `display_id`），缺失 display_id 回退主屏 | Phase 1 | ✅ 已批 |
+| Q2 | 球体形态与默认位置 | 球 48px / 窗口 64px、屏幕右边缘垂直居中、半透明；**停靠语义按 D15 修订：贴边 = 缩入边缘（露出 24px），悬停滑出全显；松手停在原地，离边 ≤24px 才吸附**；位置存 `userData/ball.json`（停靠：`edge` + `offset_ratio`；自由：`x_ratio` / `y_ratio`；均含 `display_id`），缺失 display_id 回退主屏 | Phase 1 | ✅ 已批（D15 修订） |
 | Q3 | M1b 点击球的行为 | 打开现有时间线窗口（M2 图谱落地后替换），不做占位伪功能 | Phase 1 | ✅ 已批 |
 | Q4 | 托盘是否纳入 M1b | 纳入且必选：打开时间线 / 暂停·恢复 / 退出；内置 `Tray` 不新增依赖；球右键菜单提供同一出口 | Phase 1 | ✅ 已批 |
 | Q5 | `Alt+Space` 是否 M1b 注册 | 不注册（与系统窗口菜单键冲突），M2 再定；已知会：全局 `Alt+P` 会抢占其他应用的该助记键 | — | ✅ 已批（不阻塞） |
@@ -165,6 +169,8 @@ tests/
 | Q8 | A3 取证口径 | 接受 `ball.json` 惰性写入；A3 口径收窄为「无显式交互时零磁盘写入」，该文件不含任何采集内容 | Phase 1 | ✅ 已批 |
 
 > 备注：Q7 于 2026-10-22 二次拍板改为**窄口径**（原宽口径记录不再适用，见 decisions D14）。归档的 `docs/archive/m1a-plan.md` 正文未改写，只在验收记录后加了 A3 口径旁注（对应 Q8）。
+> 备注：Q2 的「贴边 6px 全露出」于 2026-10-22 按拍板人要求改为**腾讯管家式缩入停靠**（D15）：停靠时球半缩入、悬停滑出、拖动松手停在原地、近边 ≤24px 才吸附；`ball.json` 相应扩展自由位字段。
+> 备注：停靠后的**自动缩回机制**于 2026-10-23 拍板（D16）：离开窗口 600ms 宽限到期缩回、展开/宽限/拖动期间保持可交互、主进程 50ms 游标兜底，详见 `docs/m1b-ball-retract-draft.md` 方案 A。
 
 ## 9. 合并条件核对（v0.3）
 
@@ -193,6 +199,7 @@ v0.2 设定的合并条件已全部满足，本方案可作为 M1b 事实源：
 | 9 | §1 / Q8 | 新增 A3 取证口径说明（惰性写 `ball.json`） | 本次补充（v0.1 未覆盖） |
 | 10 | §3 Phase 1 / §4.10 / §6 | 新增单实例锁、球不进截图（`setContentProtection` 待验证） | 本次补充（三轮审查均未覆盖） |
 | 11 | §6 / §7 | 修正「不 `show()` 前激活」措辞为 `showInactive()`；工期 5–7 → 6–8 天 | e460d29c / 本次 |
+| 12 | B2 / §3 Phase 1 / §6 | 新增自动缩回机制：离开 600ms 宽限、展开/宽限/拖动保持可交互、主进程 50ms 游标兜底（D16）；交互状态机与兜底判定抽纯函数并补单测/E2E | 2026-10-23 拍板 / `docs/m1b-ball-retract-draft.md` |
 
 ### v0.2 → v0.3（2026-10-22 拍板落定）
 

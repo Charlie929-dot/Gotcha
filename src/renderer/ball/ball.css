@@ -1,0 +1,118 @@
+/* 悬浮球（m1b-plan §3 Phase 1 / Q2 / D15）
+ * 窗口 64×64 透明；球体 48px 居中。
+ * 停靠：窗口贴齐屏幕边缘，球体平移 32px 缩进 → 只露半颗（24px）；悬停滑回中心全显。
+ * 悬停 1.08 放大（51.84 < 64，避免裁切）。
+ */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-app-region: no-drag;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#ball {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0.88;
+  background: radial-gradient(circle at 35% 30%, #7d8fae 0%, #4d5a73 55%, #333c4f 100%);
+  box-shadow:
+    0 2px 8px rgba(0, 0, 0, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+  /* 停靠缩进量由 dock-* 类给出，expanded 时归零；scale 承载悬停放大 */
+  --tuck-x: 0px;
+  --tuck-y: 0px;
+  --hover-scale: 1;
+  transform: translate(var(--tuck-x), var(--tuck-y)) scale(var(--hover-scale));
+  transition:
+    transform 160ms ease,
+    opacity 160ms ease,
+    filter 160ms ease,
+    background 160ms ease;
+}
+
+#ball.running {
+  opacity: 0.88;
+}
+
+#ball.paused {
+  opacity: 0.72;
+  filter: grayscale(1);
+  background: radial-gradient(circle at 35% 30%, #9aa0ab 0%, #62666f 55%, #484b52 100%);
+}
+
+/* 停靠缩进：露出半颗球（24px），悬停时由 .expanded 滑出 */
+#ball.dock-right {
+  --tuck-x: 32px;
+}
+
+#ball.dock-left {
+  --tuck-x: -32px;
+}
+
+#ball.dock-bottom {
+  --tuck-y: 32px;
+}
+
+#ball.dock-top {
+  --tuck-y: -32px;
+}
+
+#ball.expanded {
+  --tuck-x: 0px;
+  --tuck-y: 0px;
+}
+
+#ball.hover {
+  --hover-scale: 1.08;
+  opacity: 1;
+}
+
+#ball.paused.hover {
+  opacity: 0.88;
+}
+
+/* 拖动时球完整可见且不播过渡，避免跟手延迟 */
+#ball.dragging {
+  transition: none;
+}
+
+.slash {
+  display: none;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 32px;
+  height: 4px;
+  margin: -2px 0 0 -16px;
+  border-radius: 2px;
+  background: #e8ebf2;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28);
+  transform: rotate(-45deg);
+  pointer-events: none;
+}
+
+#ball.paused .slash {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #ball {
+    transition: none;
+  }
+}

@@ -5,7 +5,7 @@
 > 1. **M1a（底座期）**：不引入云端 VLM，维持纯本地 2× 放大 WinRT OCR，保住零出网、零 API 成本、极低 CPU 与高精度全文搜索（15/15 命中）；
 > 2. **M2（图谱与理解期）**：引入云端多模态模型，**不用于秒级流水线打字**，而用于**事件聚合（Episode）阶段的内容理解、复杂视觉图表解析与关系图谱连边**；
 > 3. **调度策略**：采用**基于本地视觉拓扑特征的自适应动态频率采样（形态 D）**，告别死板定时与人工白名单。
-> 关联：`docs/agent/decisions.md` D12、`m1a-plan.md` Q5（已结案）、`security.md`、D5、D10
+> 关联：`docs/agent/decisions.md` D12、`docs/archive/m1a-plan.md` Q5（已结案）、`security.md`、D5、D10
 
 ## 0. 一句话
 

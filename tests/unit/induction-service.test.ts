@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openDatabase, insertEvent } from '../../src/db'
 import { setSetting } from '../../src/db/settings'
-import { readCursor } from '../../src/understand/cloud/batch'
+import { readCursor, startOfLocalDay } from '../../src/understand/cloud/batch'
 import { FakeLlmClient, LlmAbortError, LlmParseError, type LlmClient } from '../../src/understand/cloud/llm-client'
 import { createInductionService, type InductionService } from '../../src/understand/service'
 import { localDayKey, readUsage } from '../../src/understand/induction'
@@ -36,7 +36,7 @@ afterEach(() => {
 })
 
 describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
-  it('合法输出：落节点与边、推进游标、记账 usage', async () => {
+  it('合法输出：落节点与边、同一天重复点击幂等、记账 usage', async () => {
     const db = makeDb()
     try {
       const client = new FakeLlmClient([{ json: VALID, usage: { promptTokens: 120, completionTokens: 30 } }])
@@ -46,11 +46,16 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
       expect(outcome).toMatchObject({ status: 'ok', nodes: 2, edges: 1, placeholders: 0, consumed: 2 })
       expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 2 })
       expect(db.prepare('SELECT COUNT(*) AS n FROM edges').get()).toEqual({ n: 1 })
-      expect(readCursor(db)).toEqual({ ts: NOW - 9 * 60_000, id: 2 })
+      // 按天归纳不再推进旧游标（D28）
+      expect(readCursor(db)).toEqual({ ts: 0, id: 0 })
       expect(readUsage(db, NOW)).toEqual({ calls: 1, promptTokens: 120, completionTokens: 30 })
       expect(client.requests).toHaveLength(1)
       expect(client.optionCalls[0].signal).toBeInstanceOf(AbortSignal)
       expect(client.requests[0].events[0].eventIds).toEqual([1, 2])
+
+      // 同一天再点一次：事件都已在节点 source_events 里，零请求
+      expect(await service.runOnce()).toEqual({ status: 'empty' })
+      expect(client.requests).toHaveLength(1)
     } finally {
       db.close()
     }
@@ -174,7 +179,7 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
     }
   })
 
-  it('全部时刻不可剥离：只生成「内容已保护」占位节点，不调用 LLM、游标照常推进', async () => {
+  it('全部时刻不可剥离：只生成「内容已保护」占位节点，不调用 LLM', async () => {
     const db = makeDb({ ocr: '请输入密码' })
     try {
       const client = new FakeLlmClient([])
@@ -184,7 +189,8 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
       expect(client.requests).toHaveLength(0)
       const row = db.prepare('SELECT type, title FROM nodes').get() as Record<string, unknown>
       expect(row).toMatchObject({ type: 'protected', title: '内容已保护' })
-      expect(readCursor(db)).toEqual({ ts: NOW - 9 * 60_000, id: 2 })
+      // 占位节点也覆盖 source_events，再点一次不会重复出云
+      expect(await makeService(db, client).runOnce()).toEqual({ status: 'empty' })
     } finally {
       db.close()
     }
@@ -206,7 +212,6 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
         { type: 'activity', title: '读代码' },
         { type: 'protected', title: '内容已保护' }
       ])
-      expect(readCursor(db)).toEqual({ ts: NOW - 9 * 60_000, id: 2 })
     } finally {
       db.close()
     }
@@ -326,10 +331,50 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
       ])
       const service = makeService(db, client)
 
-      expect(await service.runOnce()).toMatchObject({ status: 'ok', consumed: 1 })
-      expect(readCursor(db)).toEqual({ ts: NOW - 10 * 60_000, id: 1 })
+      expect(await service.runOnce()).toMatchObject({ status: 'ok', consumed: 1, more: true })
+      expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 1 })
       expect((await service.runOnce()).status).toBe('ok')
-      expect(readCursor(db)).toEqual({ ts: NOW - 9 * 60_000, id: 2 })
+      // 第二次只剩 B（A 的事件已在 source_events 里）
+      expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 2 })
+      expect(client.requests).toHaveLength(2)
+      expect(client.requests[1].events[0].eventIds).toEqual([2])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('手动 dayStart：只归纳指定日，今天的事件留给今天', async () => {
+    const db = openDatabase(':memory:')
+    try {
+      const yesterday = NOW - 24 * 60 * 60_000
+      const yesterdayStart = startOfLocalDay(yesterday)
+      // 昨天一条、今天一条
+      insertEvent(db, { ts: yesterday, app: 'old.exe', windowTitle: '昨天', ocrText: '旧内容' })
+      insertEvent(db, { ts: NOW - 10 * 60_000, app: 'new.exe', windowTitle: '今天', ocrText: '新内容' })
+      const client = new FakeLlmClient([
+        {
+          json: {
+            nodes: [{ title: '昨天的事', summary: 'S', type: 'activity', event_ids: [1] }],
+            edges: []
+          }
+        },
+        {
+          json: {
+            nodes: [{ title: '今天的事', summary: 'S', type: 'activity', event_ids: [2] }],
+            edges: []
+          }
+        }
+      ])
+      const service = makeService(db, client)
+
+      const oldOutcome = await service.runOnce({ manual: true, dayStart: yesterdayStart })
+      expect(oldOutcome.status).toBe('ok')
+      expect(client.requests[0].events.map((event) => event.eventIds)).toEqual([[1]])
+
+      // 不传 dayStart = 今天，只处理今天那条
+      const todayOutcome = await service.runOnce({ manual: true })
+      expect(todayOutcome.status).toBe('ok')
+      expect(client.requests[1].events.map((event) => event.eventIds)).toEqual([[2]])
     } finally {
       db.close()
     }

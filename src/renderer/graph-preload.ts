@@ -19,7 +19,7 @@ export interface GraphApi {
   nodeEvents(nodeId: number): Promise<NodeEventsResult>
   status(): Promise<InductionSnapshot>
   onStatus(callback: (snapshot: InductionSnapshot) => void): () => void
-  induceNow(): Promise<GraphInduceResult>
+  induceNow(dayStart?: number): Promise<GraphInduceResult>
   setConsent(consented: boolean): Promise<InductionSnapshot>
   settings(): Promise<GraphSettingsView>
   saveSettings(patch: unknown): Promise<GraphSettingsSaveResult>
@@ -44,7 +44,8 @@ const api: GraphApi = {
       ipcRenderer.removeListener('graph:status', listener)
     }
   },
-  induceNow: () => ipcRenderer.invoke('graph:induce-now') as Promise<GraphInduceResult>,
+  induceNow: (dayStart?: number) =>
+    ipcRenderer.invoke('graph:induce-now', dayStart) as Promise<GraphInduceResult>,
   setConsent: (consented) =>
     ipcRenderer.invoke('graph:set-consent', consented) as Promise<InductionSnapshot>,
   settings: () => ipcRenderer.invoke('graph:settings:get') as Promise<GraphSettingsView>,

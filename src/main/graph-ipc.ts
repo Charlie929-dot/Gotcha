@@ -42,7 +42,7 @@ export interface GraphIpcDeps {
   queryGraph(from: number, to: number): GraphDayData
   queryNodeEvents(nodeId: number): NodeEventsResult
   getSnapshot(): InductionSnapshot
-  runInductionNow(): Promise<InductionRunOutcome>
+  runInductionNow(dayStart?: number): Promise<InductionRunOutcome>
   setConsent(consented: boolean): void
   readSettings(): GraphSettingsView
   saveSettings(patch: unknown): GraphSettingsSaveResult
@@ -120,10 +120,11 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
     ],
     [
       'graph:induce-now',
-      async (event) => {
+      async (event, dayStart) => {
         if (!ensureSender(event)) return { status: 'error', message: 'forbidden' } satisfies GraphInduceResult
         try {
-          return serializeOutcome(await deps.runInductionNow())
+          const day = isFiniteNumber(dayStart) ? dayStart : undefined
+          return serializeOutcome(await deps.runInductionNow(day))
         } catch (error) {
           deps.log('error', 'graph induce failed', { error: String(error) })
           return {

@@ -6,6 +6,8 @@
  *   暂停期间 `runOnce()` 直接跳过（含「立即归纳」），保证零出网；
  * - 失败退避 `graph.retry_backoff_minutes`（默认 1,5,15，上限 30），成功复位；
  * - 每日 token 超 `graph.budget_tokens_per_day`（默认 1M）停自动归纳；
+ * - 按本地日取批（D28）：自动只跑今天，手动只跑图谱当前查看日；节点 `source_events`
+ *   已覆盖的事件跳过，重复点击幂等；旧游标只保留兼容，不再驱动归纳；
  * - 空 content / 非法 JSON 与校验失败都各走 1 次修复重试（错误摘要为固定文案）；
  * - 失败 / 取消也把已消耗的 token 记账，避免失败循环绕过预算；
  * - 未配置供应商（getClient 返回 null）时跳过、不抛到采集链路。
@@ -16,7 +18,7 @@
 
 import type { Db } from '../db'
 import { getNumberSetting, getSetting } from '../db/settings'
-import { readBatch, readCursor } from './cloud/batch'
+import { nextLocalDayStart, readDayBatch, startOfLocalDay } from './cloud/batch'
 import { LLM_DEFAULTS } from './cloud/constants'
 import { LlmAbortError, LlmParseError, type LlmClient, type LlmJsonResult } from './cloud/llm-client'
 import { buildCloudMomentPayload } from './cloud/redact'
@@ -32,7 +34,15 @@ export type InductionStatus =
   | 'stopped'
 
 export type RunOutcome =
-  | { status: 'ok'; nodes: number; edges: number; placeholders: number; consumed: number }
+  | {
+      status: 'ok'
+      nodes: number
+      edges: number
+      placeholders: number
+      consumed: number
+      /** 本批已满，可能还有未归纳事件；手动入口据此继续拉取（自动不追） */
+      more?: boolean
+    }
   | { status: 'empty' }
   | { status: 'skipped'; reason: 'auto-off' | 'in-flight' | 'not-configured' | 'budget' | 'paused' }
   | { status: 'aborted' }
@@ -58,7 +68,7 @@ export interface InductionServiceOptions {
 export interface InductionService {
   start(): void
   stop(): void
-  runOnce(options?: { manual?: boolean }): Promise<RunOutcome>
+  runOnce(options?: { manual?: boolean; dayStart?: number }): Promise<RunOutcome>
   getState(): InductionState
   isActive(): boolean
 }
@@ -126,7 +136,7 @@ export function createInductionService(options: InductionServiceOptions): Induct
     }, delayMs)
   }
 
-  async function runOnce(runOptions: { manual?: boolean } = {}): Promise<RunOutcome> {
+  async function runOnce(runOptions: { manual?: boolean; dayStart?: number } = {}): Promise<RunOutcome> {
     if (busy) return { status: 'skipped', reason: 'in-flight' }
     if (paused) return { status: 'skipped', reason: 'paused' }
     busy = true
@@ -156,8 +166,15 @@ export function createInductionService(options: InductionServiceOptions): Induct
         return { status: 'skipped', reason: 'not-configured' }
       }
 
-      const cursorBefore = readCursor(db)
-      const batch = readBatch(db, currentNow, { maxMoments: maxMoments() })
+      const targetDay = startOfLocalDay(runOptions.dayStart ?? currentNow)
+      // 自动 / 手动都按本地日取批：自动默认今天；手动传图谱当前查看日（D28）。
+      // 今天保留 5 分钟合并窗口；历史日取到当天 23:59:59.999。
+      const dayEnd = Math.min(nextLocalDayStart(targetDay) - 1, currentNow - LLM_DEFAULTS.batchLagMs)
+      if (dayEnd < targetDay) {
+        setState({ status: 'idle' })
+        return { status: 'empty' }
+      }
+      const batch = readDayBatch(db, targetDay, dayEnd, { maxMoments: maxMoments() })
       if (batch.moments.length === 0) {
         setState({ status: 'idle' })
         return { status: 'empty' }
@@ -165,8 +182,6 @@ export function createInductionService(options: InductionServiceOptions): Induct
 
       const built = buildCloudMomentPayload(batch.moments)
       const allowedEventIds = new Set<number>(built.payload.events.flatMap((event) => event.eventIds))
-      const lastConsumed = batch.consumed[batch.consumed.length - 1]
-      const cursorAfter = lastConsumed ? { ts: lastConsumed.ts, id: lastConsumed.id } : cursorBefore
 
       let result: InductionResult = { nodes: [], edges: [] }
       let usageTotals: InductionUsage | undefined
@@ -226,7 +241,6 @@ export function createInductionService(options: InductionServiceOptions): Induct
         result,
         moments: batch.moments,
         excludedEventIds: built.excludedIds,
-        cursor: cursorAfter,
         usage: usageTotals,
         now: currentNow
       })
@@ -236,7 +250,8 @@ export function createInductionService(options: InductionServiceOptions): Induct
         nodes: stats.nodesCreated,
         edges: stats.edgesInserted,
         placeholders: stats.placeholders,
-        consumed: batch.consumed.length
+        consumed: batch.consumed.length,
+        more: batch.moments.length >= maxMoments()
       }
     } catch (error) {
       // 失败 / 取消也已经消耗了 token：照实记账，否则失败循环永远绕得过每日预算

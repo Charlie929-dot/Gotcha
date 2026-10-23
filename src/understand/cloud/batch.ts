@@ -184,3 +184,98 @@ export function readBatch(db: Db, now: number, options: { maxMoments?: number } 
   const events = selectBatchEvents(db, cursor, now)
   return mergeMoments(events, { maxMoments: options.maxMoments })
 }
+
+/* ------------------------------------------------------------------ *
+ * 按本地日取批（D28）
+ *
+ * 归纳不再从旧游标一路补历史：自动只跑今天，手动只跑图谱当前查看日。
+ * 已归纳事件以节点 `source_events` 为准过滤，重复点击只处理剩余事件。
+ * ------------------------------------------------------------------ */
+
+/** 本地日 00:00:00.000 的时间戳（与图谱 / 时间线的日期窗口一致） */
+export function startOfLocalDay(ts: number): number {
+  const date = new Date(ts)
+  date.setHours(0, 0, 0, 0)
+  return date.getTime()
+}
+
+/** 下一个本地日 00:00:00.000 的时间戳 */
+export function nextLocalDayStart(ts: number): number {
+  const date = new Date(ts)
+  date.setDate(date.getDate() + 1)
+  date.setHours(0, 0, 0, 0)
+  return date.getTime()
+}
+
+function parseSourceEventIds(raw: string | null): number[] {
+  if (!raw) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is number => typeof id === 'number' && Number.isInteger(id))
+      : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 某天已被节点覆盖的事件 id（含敏感占位节点）。
+ * 只查 ts 区间与当天相交的节点，避免全表扫描。
+ */
+export function readInducedEventIds(db: Db, from: number, to: number): Set<number> {
+  const rows = db
+    .prepare(
+      'SELECT source_events FROM nodes WHERE level = 1 AND ts_start IS NOT NULL AND ts_end IS NOT NULL AND ts_end >= ? AND ts_start <= ?'
+    )
+    .all(from, to) as Array<{ source_events: string | null }>
+  const ids = new Set<number>()
+  for (const row of rows) {
+    for (const id of parseSourceEventIds(row.source_events)) ids.add(id)
+  }
+  return ids
+}
+
+/** 按本地日读取原始事件（ts 升序）；默认上限 2 万条，防单日异常数据一次拉爆内存 */
+export function selectDayEvents(
+  db: Db,
+  from: number,
+  to: number,
+  options: { limit?: number } = {}
+): BatchEvent[] {
+  if (to < from) return []
+  return db
+    .prepare(
+      `SELECT id, ts, app, window_title, ocr_text, sensitive
+       FROM events
+       WHERE ts >= ? AND ts <= ?
+       ORDER BY ts ASC, id ASC
+       LIMIT ?`
+    )
+    .all(from, to, options.limit ?? 20_000) as BatchEvent[]
+}
+
+export interface ReadDayBatchOptions {
+  maxMoments?: number
+  /** 单日原始事件读取上限（默认 2 万） */
+  limit?: number
+}
+
+/**
+ * 按天取一批：只返回该天尚未被节点覆盖的事件。
+ * - 自动归纳传今天；手动归纳传当前查看日；
+ * - 已归纳事件（含占位）跳过，因此重复点击是幂等的，不会重复出云；
+ * - 不推进旧游标（`graph.cursor_*` 仅保留兼容，不再驱动归纳）。
+ */
+export function readDayBatch(
+  db: Db,
+  from: number,
+  to: number,
+  options: ReadDayBatchOptions = {}
+): ReadBatchResult {
+  const events = selectDayEvents(db, from, to, { limit: options.limit })
+  if (events.length === 0) return { moments: [], consumed: [] }
+  const induced = readInducedEventIds(db, from, to)
+  const uninduced = induced.size === 0 ? events : events.filter((event) => !induced.has(event.id))
+  return mergeMoments(uninduced, { maxMoments: options.maxMoments })
+}

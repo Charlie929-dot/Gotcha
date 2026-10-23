@@ -140,6 +140,7 @@ const els = {
 
 let day = startOfDay(Date.now())
 let snapshot: InductionSnapshot | null = null
+let statusFlashTimer: ReturnType<typeof setTimeout> | null = null
 let lastData: GraphDayData = { nodes: [], edges: [] }
 let graph: GraphInstance | null = null
 let renderer: SigmaInstance | null = null
@@ -216,6 +217,10 @@ function statusView(current: InductionSnapshot | null): { kind: string; text: st
 }
 
 function applySnapshot(next: InductionSnapshot): void {
+  if (statusFlashTimer !== null) {
+    clearTimeout(statusFlashTimer)
+    statusFlashTimer = null
+  }
   snapshot = next
   const view = statusView(next)
   els.status.dataset.kind = view.kind
@@ -228,6 +233,17 @@ function applySnapshot(next: InductionSnapshot): void {
   )
   renderEmpty()
   renderMeta()
+}
+
+/** 归纳完成 / 当天已最新时短暂替换状态徽标，4s 后恢复快照状态 */
+function flashStatus(text: string, kind: string): void {
+  if (statusFlashTimer !== null) clearTimeout(statusFlashTimer)
+  els.status.dataset.kind = kind
+  els.status.textContent = text
+  statusFlashTimer = setTimeout(() => {
+    statusFlashTimer = null
+    if (snapshot) applySnapshot(snapshot)
+  }, 4_000)
 }
 
 function renderEmpty(): void {
@@ -650,28 +666,73 @@ document.getElementById('timeline')?.addEventListener('click', () => {
 })
 
 document.getElementById('induce')?.addEventListener('click', async () => {
-  const result: GraphInduceResult = await window.gotchaGraph.induceNow()
-  if (result.status === 'ok') {
+  // 手动归纳只处理当前查看日（D28）。单批最多 20 个时刻，这里连续拉取
+  // 最多 10 批，避免用户为了补齐一天点几十次；仍满批时提示可再点一次。
+  let nodes = 0
+  let edges = 0
+  let placeholders = 0
+  let more = false
+  let result: GraphInduceResult | null = null
+  for (let batch = 0; batch < 10; batch += 1) {
+    result = await window.gotchaGraph.induceNow(day)
+    if (result.status !== 'ok') break
+    nodes += result.nodes
+    edges += result.edges
+    placeholders += result.placeholders
+    more = result.more === true
+    if (!more) break
+  }
+
+  if (result?.status === 'ok') {
     await refresh()
+    const text =
+      nodes > 0
+        ? `已归纳 ${nodes} 个节点 · ${edges} 条边${more ? '（还有剩余，可再点一次）' : ''}`
+        : placeholders > 0
+          ? '已生成本地保护占位'
+          : '这一天已是最新'
+    flashStatus(text, 'ok')
     return
   }
-  if (result.status === 'skipped' && result.reason === 'consent') {
+
+  // 连续拉取中途遇到空批（上一批刚好处理完）也按本轮已归纳的结果收尾
+  if (result?.status === 'empty') {
+    if (nodes > 0) await refresh()
+    flashStatus(
+      nodes > 0 ? `已归纳 ${nodes} 个节点 · ${edges} 条边` : '这一天已是最新',
+      'ok'
+    )
+    return
+  }
+
+  if (result?.status === 'skipped' && result.reason === 'consent') {
     els.consent.hidden = false
     return
   }
-  if (result.status === 'skipped' && result.reason === 'paused') {
+  if (result?.status === 'skipped' && result.reason === 'paused') {
+    if (nodes > 0) await refresh()
     els.empty.hidden = false
     els.empty.dataset.kind = 'paused'
     els.empty.textContent = '采集暂停中；恢复记录后才能归纳'
     return
   }
-  if (result.status === 'skipped' && result.reason === 'not-configured') {
+  if (result?.status === 'skipped' && result.reason === 'in-flight') {
+    flashStatus('归纳进行中，请稍候', 'idle')
+    return
+  }
+  if (result?.status === 'skipped' && result.reason === 'not-configured') {
     els.empty.hidden = false
     els.empty.dataset.kind = 'no-key'
     els.empty.textContent = '未配置可用的 LLM 供应商'
     return
   }
-  if (result.status === 'error') {
+  if (result?.status === 'skipped' && result.reason === 'budget') {
+    if (nodes > 0) await refresh()
+    flashStatus(`今日预算已用尽${nodes > 0 ? '；已归纳的部分已保存' : ''}`, 'budget')
+    return
+  }
+  if (result?.status === 'error') {
+    if (nodes > 0) await refresh()
     els.empty.hidden = false
     els.empty.dataset.kind = 'error'
     els.empty.textContent = `归纳失败：${result.message}`
@@ -681,7 +742,7 @@ document.getElementById('induce')?.addEventListener('click', async () => {
 els.consentButton.addEventListener('click', async () => {
   try {
     applySnapshot(await window.gotchaGraph.setConsent(true))
-    await window.gotchaGraph.induceNow()
+    await window.gotchaGraph.induceNow(day)
     await refresh()
   } catch (error) {
     els.empty.hidden = false

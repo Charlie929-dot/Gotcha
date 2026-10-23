@@ -770,7 +770,8 @@ if (primaryInstance) {
           : { found: false, events: [], missingIds: [], malformed: false }
       },
       getSnapshot: currentInductionSnapshot,
-      runInductionNow: () => ensureInductionRuntime().runOnce({ manual: true }),
+      runInductionNow: (dayStart?: number) =>
+        ensureInductionRuntime().runOnce({ manual: true, dayStart }),
       setConsent: (consented) => ensureInductionRuntime().setConsent(consented),
       readSettings: () => readGraphSettings(connections.queryDb()),
       saveSettings: (patch) => {

@@ -64,6 +64,7 @@
 | 「获取模型」的鉴权与重定向 | `/models` 若跟随 302，Authorization 头会被带到别处；无超时会挂住设置界面 | `redirect:'error'` + 10s AbortController 超时 + 响应体上限；错误只映射状态码 / 网络原因，不回显密钥或响应正文；用注入 fetch 单测（`tests/unit/cloud-models.test.ts`） |
 | 已保存密钥回显给渲染进程 | 一旦回显，密钥会进 DOM / 截图 / 调试日志，违反 D21；把密钥塞进 settings 也会随数据库备份扩散 | 设置读取只回「env / file / none」来源；写入走独立 IPC `graph:provider:key`（providerId + 一次性输入，主进程反查 apiKeyEnv）；settings 通道继续整单拒绝 apiKey 字段 |
 | DeepSeek V4 默认 thinking 吃满 `max_tokens` | 归纳一直报「LLM 返回空 content」；响应 `finish_reason=length`，`completion_tokens` 全是 `reasoning_tokens`。2026-10-23 合成批次实测：400 个 event_id + `max_tokens=2000` → reasoning 2000/2000、content 0；小批次/短输入不会复现，容易被误判成 JSON 模式的偶发空响应 | 结构化 JSON 归纳显式关闭 thinking：请求体加 `thinking:{type:'disabled'}`（只对 `*.deepseek.com` 发送，避免严格网关因未知参数 400）。关闭后同批 content_len=3282、completion_tokens=1512、`finish_reason=stop`。`finish_reason=length` 时把空 content / 残 JSON 报成「被 max_tokens（N）截断」，不要只报「空 content」 |
+| 归纳按旧游标补历史，今天的图长期为空 | 自动归纳从 `graph.cursor_*` 一路从 10-21 补到 10-22，今天 2,000+ 条排在后面；按 10 分钟一批要十几小时才轮到今天，用户看到的是「昨天突然多出节点、今天不动」 | 改为按本地日取批（D28）：自动只归纳今天，手动「立即归纳」只归纳图谱当前查看日；用节点 `source_events` 去重，重复点击幂等；旧游标仅保留兼容，不再驱动自动归纳（`src/understand/cloud/batch.ts` 的 `readDayBatch` / `service.ts`） |
 
 ## 规则
 

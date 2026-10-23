@@ -41,7 +41,7 @@ interface GraphWindowApi {
     to: number
   ): Promise<{ nodes: GraphNodeLite[]; edges: Array<{ id: number }> }>
   nodeEvents(nodeId: number): Promise<{ found: boolean; events: unknown[]; missingIds: number[] }>
-  induceNow(): Promise<{ status: string; reason?: string }>
+  induceNow(dayStart?: number): Promise<{ status: string; reason?: string }>
   settings(): Promise<{ intervalMinutes: number }>
 }
 

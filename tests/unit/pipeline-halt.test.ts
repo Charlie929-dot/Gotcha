@@ -169,22 +169,24 @@ describe('CapturePipeline · halt 闸', () => {
     }
   })
 
-  it('黑名单窗口：截屏期间关闸，不直写元数据事件', async () => {
-    let release!: (value: CapturedFrame) => void
-    const captureWindow = vi.fn(
+  it('黑名单窗口：截屏前判断，取证窗口期间关闸也不写元数据事件', async () => {
+    let release!: (value: WindowInfo | null) => void
+    const getActiveWindow = vi.fn(
       () =>
-        new Promise<CapturedFrame>((resolve) => {
+        new Promise<WindowInfo | null>((resolve) => {
           release = resolve
         })
     )
-    const { db, pipeline } = makeHarness({ captureWindow, isBlacklisted: () => true })
+    const captureWindow = vi.fn(async () => frame(1))
+    const { db, pipeline } = makeHarness({ getActiveWindow, captureWindow, isBlacklisted: () => true })
     try {
       const ticking = pipeline.tick()
       await nextTask()
       pipeline.halt()
-      release(frame(1))
+      release(WINDOW)
       await ticking
 
+      expect(captureWindow).not.toHaveBeenCalled()
       expect(eventCount(db)).toBe(0)
       expect(pipeline.getQueue().size).toBe(0)
     } finally {

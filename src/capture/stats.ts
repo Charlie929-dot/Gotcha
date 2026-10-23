@@ -14,10 +14,19 @@ export interface CaptureStats {
   ocr_runs: number
   queue_dropped: number
   capture_errors: number
+  /** 临时帧删除失败次数（残留由下次启动的受控清理兜底，F06） */
+  temp_delete_failed: number
 }
 
 export function zeroStats(): CaptureStats {
-  return { frames_total: 0, frames_same: 0, ocr_runs: 0, queue_dropped: 0, capture_errors: 0 }
+  return {
+    frames_total: 0,
+    frames_same: 0,
+    ocr_runs: 0,
+    queue_dropped: 0,
+    capture_errors: 0,
+    temp_delete_failed: 0
+  }
 }
 
 /** 本地日期的 settings 键：stats.day.2026-10-21 */

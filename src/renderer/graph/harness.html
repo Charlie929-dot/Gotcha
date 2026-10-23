@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gotcha · 全局图 P0 harness</title>
+    <link rel="stylesheet" href="./harness.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="brand">
+        <h1>全局图 · P0 harness</h1>
+        <span id="status" class="status" data-kind="loading">生成数据…</span>
+      </div>
+      <div class="nav">
+        <label class="chip" title="切换合成数据规模（性能对比 210 / 1k / 2k）">
+          数据
+          <select id="dataset"></select>
+        </label>
+        <label class="chip" title="隐藏时刻点，只看主题">
+          <input id="only-themes" type="checkbox" /> 只看主题
+        </label>
+        <button id="calendar-btn" type="button" title="按时间筛选（只调暗，不删数据）">
+          日期：<span id="day-label">全部</span>
+        </button>
+        <button id="fit" type="button">适配视野</button>
+        <button id="reheat" type="button">重排</button>
+        <button id="reset-layout" type="button" title="清掉本机保存的位置 seed，重新沉降">重置布局</button>
+      </div>
+    </header>
+
+    <main class="stage">
+      <section class="canvas-wrap">
+        <div id="count" class="count"></div>
+        <div id="hud" class="hud"></div>
+        <div id="empty" class="state" hidden></div>
+        <foam-graph id="graph"></foam-graph>
+
+        <div id="calendar" class="calendar" hidden>
+          <header class="cal-head">
+            <button id="cal-prev" type="button" aria-label="上个月">‹</button>
+            <strong id="cal-title"></strong>
+            <button id="cal-next" type="button" aria-label="下个月">›</button>
+          </header>
+          <div class="cal-weekdays">
+            <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+          </div>
+          <div id="cal-grid" class="cal-grid"></div>
+          <div class="cal-presets">
+            <button type="button" data-preset="today">今天</button>
+            <button type="button" data-preset="3d">前 3 天</button>
+            <button type="button" data-preset="7d">前 7 天</button>
+            <button type="button" data-preset="30d">前 1 月</button>
+            <button type="button" data-preset="all">全部</button>
+          </div>
+          <p class="cal-hint">点=单日 · 拖=涂抹范围 · Ctrl+点=加减 · Shift+点=从上次扩到这天</p>
+        </div>
+
+        <div id="focus-bar" class="focus-bar" hidden>
+          <span>聚焦：<strong id="focus-label"></strong></span>
+          <button id="focus-exit" type="button">退出聚焦</button>
+        </div>
+
+        <div class="legend">
+          <span><i class="dot knowledge"></i>知识</span>
+          <span><i class="dot activity"></i>行为</span>
+          <span><i class="dot protected"></i>保护</span>
+          <span><i class="dot moment"></i>时刻</span>
+        </div>
+      </section>
+
+      <aside id="panel" class="panel" hidden>
+        <header class="panel-head">
+          <h2 id="panel-title"></h2>
+          <button id="panel-close" type="button" aria-label="关闭">×</button>
+        </header>
+        <p id="panel-meta" class="panel-meta"></p>
+        <div id="panel-body" class="panel-body"></div>
+      </aside>
+    </main>
+
+    <footer class="footer">
+      P0 harness · 合成数据（确定性种子，无真实用户内容）· Foam 0.40.0 + F1–F13 补丁 ·
+      单击聚焦/双击详情/日历只调暗
+    </footer>
+
+    <script type="module" src="./harness.ts"></script>
+  </body>
+</html>

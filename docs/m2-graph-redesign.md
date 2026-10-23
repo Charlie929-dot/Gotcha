@@ -445,6 +445,13 @@ commit 3a3662d1fff122e2701d7fb43adb70d9087d9bc3（2026-10-23）
 links 类型只有 source/target；createGraphModel 用展开复制，运行时 weight 可保留
 lineWidth 已是常数；lessened 透明度 0.05；节点尺寸按 degree；无双击；无位置 seed
 
+# P0 harness 实测（2026-10-24，本机 Windows / Electron 45；合成数据；.tmp/harness-check.mjs）
+base 210 主题 + 800 时刻：1010 节点 / 1344 连线，沉降约 3.1 s，布局中 60 fps
+1k（500 + 500）：沉降约 3.0 s，布局中 60 fps
+2k（1000 + 1000）：沉降约 3.4 s，布局中 56 fps
+日历单日（10-23：8 主题 / 17 时刻）：调暗 985 / 1010 个节点，节点数不变；双击主题开侧栏；「只看主题」剩 210 节点
+调暗/高亮只改透明度、不删节点；相机按 focused 子集包围盒适配（空范围不移动）
+
 # 模型（沿用 v0.2）
 bge-small-zh-v1.5 512d；model.onnx 94,851,877 B；Electron 45 主进程 3 条 7.2 ms；首次加载约 0.47 s
 

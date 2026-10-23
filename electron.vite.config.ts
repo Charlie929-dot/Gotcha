@@ -29,7 +29,9 @@ export default defineConfig({
           index: resolve(__dirname, 'src/renderer/index.html'),
           capture: resolve(__dirname, 'src/renderer/capture.html'),
           ball: resolve(__dirname, 'src/renderer/ball/ball.html'),
-          graph: resolve(__dirname, 'src/renderer/graph/graph.html')
+          graph: resolve(__dirname, 'src/renderer/graph/graph.html'),
+          // P0 harness：合成数据的全局图验证页（P3 收口时移除或转正式页）
+          harness: resolve(__dirname, 'src/renderer/graph/harness.html')
         }
       }
     }

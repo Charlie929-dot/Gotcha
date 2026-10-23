@@ -29,6 +29,38 @@ describe('buildCloudPayload · 出云唯一出口', () => {
     expect(result.excludedIds).toEqual([])
   })
 
+  it('app 字段也走同一脱敏函数（审查发现 app 未脱敏）', () => {
+    const result = buildCloudPayload([event({ id: 9, app: `launcher-${SECRET_API_KEY}` })])
+    expect(result.redactedIds).toContain(9)
+    const serialized = JSON.stringify(result.payload)
+    expect(serialized).not.toContain(SECRET_API_KEY)
+    expect(result.payload.events[0].app).toContain('[已脱敏]')
+  })
+
+  it('app 命中密码类规则时整条不出云', () => {
+    const result = buildCloudPayload([event({ id: 10, app: 'password-manager.exe' })])
+    expect(result.excludedIds).toEqual([10])
+    expect(result.payload.events).toEqual([])
+  })
+
+  it('CloudPayload 的 brand 只存在于类型层，不参与序列化', () => {
+    const result = buildCloudPayload([event()])
+    expect(Object.keys(result.payload)).toEqual(['events'])
+    expect(JSON.stringify(result.payload)).toBe(
+      JSON.stringify({
+        events: [
+          {
+            id: 1,
+            ts: 1_700_000_000_000,
+            app: 'notepad.exe',
+            title: '未命名 - 记事本',
+            ocr: '普通内容'
+          }
+        ]
+      })
+    )
+  })
+
   it('非 sensitive 事件若含敏感形态也剥离（双保险），序列化后不含原文', () => {
     const result = buildCloudPayload([
       event({ id: 7, ocrText: `密钥 ${SECRET_API_KEY}，邮箱 ${SECRET_EMAIL}，手机 ${SECRET_PHONE}` })

@@ -1,18 +1,23 @@
 /**
  * SQLite 打开 / 迁移 / events 读写（m1a-plan §3 Phase 1）
  *
- * - 打开 → WAL（文件库）→ 跑迁移 → 返回实例；测试传 `:memory:`。
- * - 库文件：`userData/memory.db`（m1a-plan §2；security.md 暂定名）。
+ * - 打开 → WAL（文件库）→ 迁移前备份（security.md：迁移前必须可回滚）→ 跑迁移 → 返回实例；
+ * - 库文件：`userData/memory.db`（m1a-plan §2；security.md 暂定名）；
+ * - 备份名：`memory.db.bak.<yyyy-MM-dd-HHmmss>`（已在 .gitignore，不进仓库）；
  * - 时间线查询 ts 区间为**闭区间** [from, to]，按 ts 升序、同 ts 按 id 升序。
  */
 
 import Database from 'better-sqlite3'
-import { applyMigrations } from './migrations'
+import { copyFileSync, existsSync, statSync } from 'node:fs'
+import { applyMigrations, getSchemaVersion, migrations } from './migrations'
 
 export type Db = Database.Database
 
 /** 库文件名（m1a-plan §2 定稿名） */
 export const DB_FILE_NAME = 'memory.db'
+
+/** 当前 schema 版本（迁移数组最后一项） */
+export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1].version
 
 /** 新事件输入（官方字段；可选列缺省为 NULL，sensitive 缺省 0） */
 export interface NewEvent {
@@ -37,13 +42,52 @@ export interface EventRow {
   sensitive: number
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/** 备份文件名时间戳（本地时区，避免 Windows 文件名冒号） */
+export function backupStamp(date = new Date()): string {
+  return [
+    date.getFullYear(),
+    pad2(date.getMonth() + 1),
+    pad2(date.getDate()),
+    '-',
+    pad2(date.getHours()),
+    pad2(date.getMinutes()),
+    pad2(date.getSeconds())
+  ].join('')
+}
+
+/**
+ * 迁移前备份：先 checkpoint 把 WAL 落进主库，再整文件复制。
+ * 备份失败直接抛错（宁可启动失败，也不在无备份的情况下改用户库）。
+ */
+function backupBeforeMigration(db: Db, filePath: string): string {
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)')
+  } catch {
+    // checkpoint 被占用时仍继续复制主库文件；WAL 内容会在备份中缺失，
+    // 但下一次启动会重新尝试，不静默跳过备份。
+  }
+  const backupPath = `${filePath}.bak.${backupStamp()}`
+  copyFileSync(filePath, backupPath)
+  return backupPath
+}
+
 /** 打开库并迁移到最新版本。文件库开 WAL（采集高频小写入）。 */
 export function openDatabase(filePath: string): Db {
+  const isFile = filePath !== ':memory:'
+  const existed = isFile && existsSync(filePath) && statSync(filePath).size > 0
   const db = new Database(filePath)
-  if (filePath !== ':memory:') {
+  if (isFile) {
     db.pragma('journal_mode = WAL')
   }
   db.pragma('busy_timeout = 5000')
+
+  if (existed && getSchemaVersion(db) < LATEST_SCHEMA_VERSION) {
+    backupBeforeMigration(db, filePath)
+  }
   applyMigrations(db)
   return db
 }

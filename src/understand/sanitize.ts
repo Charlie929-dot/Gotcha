@@ -25,6 +25,9 @@ interface Rule {
 const RULES: Rule[] = [
   // 密码输入特征词 → 整帧丢弃（视觉级检测超出 M1a 范围）
   { name: 'password-context', re: /密码|passw(?:or)?d|passphrase|\bpin\b/i, drop: true },
+  // 认证头 / 通用 Bearer、Basic 凭据（security.md 正则层「JWT/Bearer」）
+  { name: 'bearer-token', re: /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/i },
+  { name: 'basic-auth', re: /\bBasic\s+[A-Za-z0-9+/=]{8,}/i },
   // 常见密钥形态
   { name: 'api-key', re: /\b(?:sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b/ },
   { name: 'secret-assignment', re: /(?:api[_-]?key|secret|token)\s*[:=]\s*[^\s]{6,}/i },

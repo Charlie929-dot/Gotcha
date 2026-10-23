@@ -1,19 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
+import { buildCloudPayload } from '../../src/understand/cloud/redact'
 import { createDeepSeekClient } from '../../src/understand/cloud/deepseek'
 import {
+  LlmAbortError,
   LlmError,
   LlmHttpError,
   LlmNetworkError,
   LlmParseError,
-  LlmTimeoutError,
-  type LlmJsonRequest
+  LlmTimeoutError
 } from '../../src/understand/cloud/llm-client'
 
-const REQUEST: LlmJsonRequest = {
-  messages: [
-    { role: 'system', content: '输出 json' },
-    { role: 'user', content: '{"events":[]}' }
-  ]
+function payload() {
+  return buildCloudPayload([
+    { id: 1, ts: 1_700_000_000_000, app: 'notepad.exe', windowTitle: '标题', ocrText: '正文' },
+    { id: 2, ts: 1_700_000_001_000, app: 'chrome.exe', windowTitle: '页面', ocrText: '内容' }
+  ]).payload
 }
 
 function okResponse(
@@ -40,11 +41,11 @@ function makeClient(
   })
 }
 
-describe('DeepSeek 客户端 · JSON Output', () => {
-  it('成功：POST /chat/completions，带 json_object / 温度 / 上限 / Bearer；解析 json 与 usage', async () => {
+describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
+  it('成功：POST /chat/completions，prompt 由载荷拼装，禁止重定向，解析 json 与 usage', async () => {
     const fetchImpl = vi.fn(async () => okResponse('{"nodes":[{"id":"n1"}]}'))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
-    const result = await client.completeJson(REQUEST)
+    const result = await client.completeJson(payload())
 
     expect(result.json).toEqual({ nodes: [{ id: 'n1' }] })
     expect(result.usage).toEqual({ promptTokens: 10, completionTokens: 4 })
@@ -52,8 +53,14 @@ describe('DeepSeek 客户端 · JSON Output', () => {
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('https://api.deepseek.com/chat/completions')
     expect(init.method).toBe('POST')
+    // 不跟随重定向：Authorization 头不能被 302 带到别处
+    expect(init.redirect).toBe('error')
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer test-key')
-    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+
+    const body = JSON.parse(String(init.body)) as {
+      messages: Array<{ role: string; content: string }>
+      [key: string]: unknown
+    }
     expect(body).toMatchObject({
       model: 'deepseek-flash',
       response_format: { type: 'json_object' },
@@ -61,7 +68,30 @@ describe('DeepSeek 客户端 · JSON Output', () => {
       max_tokens: 2000,
       stream: false
     })
-    expect(body.messages).toEqual(REQUEST.messages)
+    // 调用方只能给载荷；messages 由客户端拼装，且用户消息就是脱敏后事件
+    expect(body.messages).toHaveLength(2)
+    expect(body.messages[0].role).toBe('system')
+    expect(body.messages[0].content).toContain('json')
+    expect(body.messages[1].role).toBe('user')
+    const userContent = JSON.parse(body.messages[1].content) as {
+      events: Array<{ id: number; app: string; title: string; ocr: string }>
+    }
+    expect(userContent.events.map((e) => e.id)).toEqual([1, 2])
+    expect(userContent.events[0]).toEqual({
+      id: 1,
+      ts: 1_700_000_000_000,
+      app: 'notepad.exe',
+      title: '标题',
+      ocr: '正文'
+    })
+  })
+
+  it('每次调用可覆盖 maxTokens / temperature（不改变内容出口）', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => okResponse('{}'))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await client.completeJson(payload(), { maxTokens: 500, temperature: 0.2 })
+    const body = JSON.parse(String((fetchImpl.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>
+    expect(body).toMatchObject({ max_tokens: 500, temperature: 0.2 })
   })
 
   it('baseUrl 末尾斜杠不会拼出双斜杠', async () => {
@@ -69,7 +99,7 @@ describe('DeepSeek 客户端 · JSON Output', () => {
     const client = makeClient(fetchImpl as unknown as typeof fetch, {
       baseUrl: 'https://api.deepseek.com/'
     })
-    await client.completeJson(REQUEST)
+    await client.completeJson(payload())
     expect(fetchImpl.mock.calls[0][0]).toBe('https://api.deepseek.com/chat/completions')
   })
 
@@ -78,7 +108,7 @@ describe('DeepSeek 客户端 · JSON Output', () => {
     const fetchImpl = vi.fn(async () => responses.shift()!)
     const sleep = vi.fn(async (_ms: number) => {})
     const client = makeClient(fetchImpl as unknown as typeof fetch, { sleep })
-    const result = await client.completeJson(REQUEST)
+    const result = await client.completeJson(payload())
     expect(result.json).toEqual({ ok: true })
     expect(fetchImpl).toHaveBeenCalledTimes(2)
     expect(sleep).toHaveBeenCalledTimes(1)
@@ -94,7 +124,7 @@ describe('DeepSeek 客户端 · JSON Output', () => {
     const fetchImpl = vi.fn(async () => responses.shift()!)
     const sleep = vi.fn(async (_ms: number) => {})
     const client = makeClient(fetchImpl as unknown as typeof fetch, { sleep })
-    await client.completeJson(REQUEST)
+    await client.completeJson(payload())
     expect(fetchImpl).toHaveBeenCalledTimes(3)
     expect(sleep.mock.calls.map((call) => call[0])).toEqual([1_000, 2_000])
   })
@@ -102,7 +132,10 @@ describe('DeepSeek 客户端 · JSON Output', () => {
   it('400 不重试，抛 LlmHttpError(400)', async () => {
     const fetchImpl = vi.fn(async () => new Response('', { status: 400 }))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
-    await expect(client.completeJson(REQUEST)).rejects.toMatchObject({ name: 'LlmHttpError', status: 400 })
+    await expect(client.completeJson(payload())).rejects.toMatchObject({
+      name: 'LlmHttpError',
+      status: 400
+    })
     expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
@@ -112,7 +145,7 @@ describe('DeepSeek 客户端 · JSON Output', () => {
     })
     const sleep = vi.fn(async (_ms: number) => {})
     const client = makeClient(fetchImpl as unknown as typeof fetch, { sleep, maxRetries: 1 })
-    await expect(client.completeJson(REQUEST)).rejects.toBeInstanceOf(LlmNetworkError)
+    await expect(client.completeJson(payload())).rejects.toBeInstanceOf(LlmNetworkError)
     expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
 
@@ -124,9 +157,35 @@ describe('DeepSeek 客户端 · JSON Output', () => {
         })
     )
     const client = makeClient(fetchImpl as unknown as typeof fetch, { timeoutMs: 5, maxRetries: 0 })
-    const error = await client.completeJson(REQUEST).catch((err: unknown) => err)
+    const error = await client.completeJson(payload()).catch((err: unknown) => err)
     expect(error).toBeInstanceOf(LlmTimeoutError)
-    expect(String((error as Error).message)).not.toContain('{"events":[]')
+    expect(String((error as Error).message)).not.toContain('标题')
+  })
+
+  it('外部 AbortSignal：在途请求立即取消、不重试（D18 暂停）', async () => {
+    const fetchImpl = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+        })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch, { maxRetries: 2 })
+    const aborter = new AbortController()
+    const promise = client.completeJson(payload(), { signal: aborter.signal })
+    aborter.abort()
+    await expect(promise).rejects.toBeInstanceOf(LlmAbortError)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('外部 AbortSignal 预先已取消：不发请求', async () => {
+    const fetchImpl = vi.fn(async () => okResponse('{}'))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const aborter = new AbortController()
+    aborter.abort()
+    await expect(client.completeJson(payload(), { signal: aborter.signal })).rejects.toBeInstanceOf(
+      LlmAbortError
+    )
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
   it('空 content / 非法 JSON / 坏响应体都按 LlmParseError 处理且不重试', async () => {
@@ -137,7 +196,7 @@ describe('DeepSeek 客户端 · JSON Output', () => {
     ]) {
       const fetchImpl = vi.fn(async () => response)
       const client = makeClient(fetchImpl as unknown as typeof fetch)
-      await expect(client.completeJson(REQUEST)).rejects.toBeInstanceOf(LlmParseError)
+      await expect(client.completeJson(payload())).rejects.toBeInstanceOf(LlmParseError)
       expect(fetchImpl).toHaveBeenCalledTimes(1)
     }
   })
@@ -145,7 +204,7 @@ describe('DeepSeek 客户端 · JSON Output', () => {
   it('usage 缺失时记 0', async () => {
     const fetchImpl = vi.fn(async () => okResponse('{}', {}))
     const client = makeClient(fetchImpl as unknown as typeof fetch)
-    const result = await client.completeJson(REQUEST)
+    const result = await client.completeJson(payload())
     expect(result.usage).toEqual({ promptTokens: 0, completionTokens: 0 })
   })
 

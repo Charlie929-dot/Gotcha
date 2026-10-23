@@ -1,10 +1,11 @@
 /**
  * LLM 供应商配置（M2 / D21）
  *
- * 形态参照 harness 模型配置：`{ active, providers: [{ id, label, baseUrl, model, apiKeyEnv }] }`。
- * - 预设 DeepSeek；可加任意 OpenAI 兼容供应商（自定义 baseUrl / model）；
+ * settings 契约（已拍板）：`llm.active_provider`（独立键）+ `llm.providers`（JSON 数组）。
+ * - 预设 DeepSeek；可加自定义 OpenAI 兼容供应商（baseUrl / model）；
  * - 只存环境变量名，密钥值从进程环境 / `userData/.env` 读取，不进 settings、不落日志；
- * - 配置源是 settings（`llm.providers`），本模块只做纯解析与解析，读写由上层负责。
+ * - URL 只允许 https；本地网关（localhost / 127.0.0.1 / ::1）允许 http；拒绝 URL 内凭据、
+ *   query、fragment（审查发现「自定义供应商允许任意 HTTP」与凭据回落风险）。
  */
 
 import { LLM_DEFAULTS } from './constants'
@@ -17,9 +18,9 @@ export interface LlmProvider {
   apiKeyEnv: string
 }
 
-export interface LlmProvidersConfig {
-  active: string
-  providers: LlmProvider[]
+export interface LlmProvidersSettings {
+  active?: string | null
+  providers?: string | null
 }
 
 export const DEFAULT_PROVIDER: LlmProvider = {
@@ -30,10 +31,7 @@ export const DEFAULT_PROVIDER: LlmProvider = {
   apiKeyEnv: LLM_DEFAULTS.apiKeyEnv
 }
 
-export const DEFAULT_PROVIDERS_CONFIG: LlmProvidersConfig = {
-  active: DEFAULT_PROVIDER.id,
-  providers: [DEFAULT_PROVIDER]
-}
+export const DEFAULT_ACTIVE_PROVIDER = DEFAULT_PROVIDER.id
 
 export type ResolvedLlmProvider =
   | { ok: true; provider: LlmProvider; apiKey: string }
@@ -44,13 +42,25 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== ''
 }
 
-function isValidHttpUrl(value: string): boolean {
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1'
+}
+
+/** 规范化并校验 baseUrl：https（或本地 http）、无凭据、无 query/fragment */
+export function normalizeBaseUrl(value: string): string | null {
+  if (!isNonEmptyString(value)) return null
+  let url: URL
   try {
-    const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:'
+    url = new URL(value.trim())
   } catch {
-    return false
+    return null
   }
+  if (url.username !== '' || url.password !== '') return null
+  if (url.search !== '' || url.hash !== '') return null
+  const secure = url.protocol === 'https:'
+  const localHttp = url.protocol === 'http:' && isLoopbackHost(url.hostname)
+  if (!secure && !localHttp) return null
+  return url.toString().replace(/\/+$/, '')
 }
 
 /** 校验单个供应商；非法项返回 null（由调用方跳过，不整体失败） */
@@ -60,48 +70,39 @@ export function parseProvider(raw: unknown): LlmProvider | null {
   if (
     !isNonEmptyString(item.id) ||
     !isNonEmptyString(item.label) ||
-    !isNonEmptyString(item.baseUrl) ||
     !isNonEmptyString(item.model) ||
-    !isNonEmptyString(item.apiKeyEnv) ||
-    !isValidHttpUrl(item.baseUrl)
+    !isNonEmptyString(item.apiKeyEnv)
   ) {
     return null
   }
+  const baseUrl = normalizeBaseUrl(item.baseUrl as string)
+  if (!baseUrl) return null
   return {
     id: item.id.trim(),
     label: item.label.trim(),
-    baseUrl: item.baseUrl.trim().replace(/\/+$/, ''),
+    baseUrl,
     model: item.model.trim(),
     apiKeyEnv: item.apiKeyEnv.trim()
   }
 }
 
-/** 默认配置的副本：避免调用方改到共享常量 */
-function defaultProvidersConfig(): LlmProvidersConfig {
-  return { active: DEFAULT_PROVIDER.id, providers: [{ ...DEFAULT_PROVIDER }] }
-}
-
-/** 解析 settings 里的 `llm.providers`；缺失 / 非法 / 空列表 → 默认 DeepSeek 预设 */
-export function parseProvidersConfig(raw: string | null | undefined): LlmProvidersConfig {
-  if (!raw) return defaultProvidersConfig()
+/** 解析 settings.llm.providers（JSON 数组）；缺失 / 非法 / 空列表 → 默认 DeepSeek 预设 */
+export function parseProviders(raw: string | null | undefined): LlmProvider[] {
+  if (!raw) return [{ ...DEFAULT_PROVIDER }]
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch {
-    return defaultProvidersConfig()
+    return [{ ...DEFAULT_PROVIDER }]
   }
-  if (typeof parsed !== 'object' || parsed === null) return defaultProvidersConfig()
-  const value = parsed as { active?: unknown; providers?: unknown }
-  if (!Array.isArray(value.providers)) return defaultProvidersConfig()
+  if (!Array.isArray(parsed)) return [{ ...DEFAULT_PROVIDER }]
   const providers: LlmProvider[] = []
-  for (const item of value.providers) {
+  for (const item of parsed) {
     const provider = parseProvider(item)
     // 同 id 去重：先出现者生效，避免重复键导致不可预期选择
     if (provider && !providers.some((p) => p.id === provider.id)) providers.push(provider)
   }
-  if (providers.length === 0) return defaultProvidersConfig()
-  const active = isNonEmptyString(value.active) ? value.active : providers[0].id
-  return { active, providers }
+  return providers.length > 0 ? providers : [{ ...DEFAULT_PROVIDER }]
 }
 
 /**
@@ -109,13 +110,36 @@ export function parseProvidersConfig(raw: string | null | undefined): LlmProvide
  * 未知 active / 缺密钥都返回原因（不静默回退到默认供应商，避免用户以为换成功了）。
  */
 export function resolveLlmProvider(
-  config: LlmProvidersConfig,
+  activeProvider: string | null | undefined,
+  providers: readonly LlmProvider[],
   env: Record<string, string | undefined>,
   fileEnv: Record<string, string> = {}
 ): ResolvedLlmProvider {
-  const provider = config.providers.find((item) => item.id === config.active)
-  if (!provider) return { ok: false, reason: 'unknown-provider', providerId: config.active }
+  const activeId =
+    isNonEmptyString(activeProvider) && activeProvider.trim() !== ''
+      ? activeProvider.trim()
+      : (providers.some((p) => p.id === DEFAULT_ACTIVE_PROVIDER)
+          ? DEFAULT_ACTIVE_PROVIDER
+          : providers[0]?.id ?? DEFAULT_ACTIVE_PROVIDER)
+  const provider = providers.find((item) => item.id === activeId)
+  if (!provider) return { ok: false, reason: 'unknown-provider', providerId: activeId }
   const apiKey = env[provider.apiKeyEnv] ?? fileEnv[provider.apiKeyEnv] ?? ''
-  if (!apiKey) return { ok: false, reason: 'missing-key', providerId: provider.id, apiKeyEnv: provider.apiKeyEnv }
+  if (!apiKey) {
+    return {
+      ok: false,
+      reason: 'missing-key',
+      providerId: provider.id,
+      apiKeyEnv: provider.apiKeyEnv
+    }
+  }
   return { ok: true, provider, apiKey }
+}
+
+/** 从 settings 两键直接解析（Phase 1 调度层用） */
+export function resolveFromSettings(
+  settings: LlmProvidersSettings,
+  env: Record<string, string | undefined>,
+  fileEnv: Record<string, string> = {}
+): ResolvedLlmProvider {
+  return resolveLlmProvider(settings.active, parseProviders(settings.providers), env, fileEnv)
 }

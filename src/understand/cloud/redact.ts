@@ -1,10 +1,11 @@
 /**
  * 出云唯一出口（M2 / D19；security.md「三层脱敏墙」）
  *
- * - 只输出必要字段：id / ts / app / 截断后的标题与 OCR 摘要；
+ * - 只输出必要字段：id / ts / app / 截断后的标题与 OCR 摘要，且三个文本字段全部过同一脱敏函数；
  * - `sensitive=1` 事件：命中片段替换为 `[已脱敏]` 后二次扫描；
  *   仍命中（含密码类规则）→ 整条不出云（excludedIds，由归纳层生成本地占位节点）；
- * - 所有文本都过同一脱敏函数，业务代码不得绕过本模块直接请求 LLM。
+ * - `CloudPayload` 带 nominal brand：LLM 客户端只接受本模块产出的载荷，
+ *   业务代码无法直接拼 messages 绕过脱敏（审查发现「唯一出口可绕过」）。
  */
 
 import { redactSensitive } from '../sanitize'
@@ -27,8 +28,12 @@ export interface CloudEvent {
   ocr: string
 }
 
+declare const cloudPayloadBrand: unique symbol
+
+/** 只能由 `buildCloudPayload()` 产生；brand 只存在于类型层，不参与序列化 */
 export interface CloudPayload {
-  events: CloudEvent[]
+  readonly events: readonly CloudEvent[]
+  readonly [cloudPayloadBrand]: true
 }
 
 export interface CloudBuildResult {
@@ -40,6 +45,7 @@ export interface CloudBuildResult {
 }
 
 export interface BuildCloudPayloadOptions {
+  appMaxChars?: number
   titleMaxChars?: number
   ocrMaxChars?: number
 }
@@ -56,6 +62,7 @@ export function buildCloudPayload(
   events: readonly RedactableEvent[],
   options: BuildCloudPayloadOptions = {}
 ): CloudBuildResult {
+  const appMaxChars = options.appMaxChars ?? LLM_DEFAULTS.appMaxChars
   const titleMaxChars = options.titleMaxChars ?? LLM_DEFAULTS.titleMaxChars
   const ocrMaxChars = options.ocrMaxChars ?? LLM_DEFAULTS.ocrMaxChars
   const payloadEvents: CloudEvent[] = []
@@ -64,21 +71,26 @@ export function buildCloudPayload(
 
   for (const event of events) {
     // 先剥离再截断：避免敏感串被截断后漏检、把半截密钥发出去
+    const app = redactSensitive(normalize(event.app))
     const title = redactSensitive(normalize(event.windowTitle))
     const ocr = redactSensitive(normalize(event.ocrText))
-    if (title.blocked || ocr.blocked) {
+    if (app.blocked || title.blocked || ocr.blocked) {
       excludedIds.push(event.id)
       continue
     }
-    if (title.redacted || ocr.redacted) redactedIds.push(event.id)
+    if (app.redacted || title.redacted || ocr.redacted) redactedIds.push(event.id)
     payloadEvents.push({
       id: event.id,
       ts: event.ts,
-      app: event.app,
+      app: truncate(app.text, appMaxChars),
       title: truncate(title.text, titleMaxChars),
       ocr: truncate(ocr.text, ocrMaxChars)
     })
   }
 
-  return { payload: { events: payloadEvents }, redactedIds, excludedIds }
+  return {
+    payload: { events: payloadEvents } as unknown as CloudPayload,
+    redactedIds,
+    excludedIds
+  }
 }

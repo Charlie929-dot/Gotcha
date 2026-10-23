@@ -16,6 +16,7 @@ export const LLM_DEFAULTS = {
   maxTokens: 2_000,
   temperature: 0,
   /** 出云字段截断（D19 / 成本控制） */
+  appMaxChars: 80,
   titleMaxChars: 120,
   ocrMaxChars: 200
 } as const

@@ -32,6 +32,19 @@ describe('sanitize · 脱敏标记（D10：本地保留原文）', () => {
     }
   })
 
+  it('Bearer / Basic 认证头命中（security.md 正则层「JWT/Bearer」）', () => {
+    const cases = [
+      'Authorization: Bearer abcDEF123._-xyz',
+      'curl -H "Authorization: Basic dXNlcjpwYXNzd29yZA=="',
+      'Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature'
+    ]
+    for (const text of cases) {
+      expect(sanitize(text).sensitive, text).toBe(true)
+    }
+    // 短 token / 普通英文不误报
+    expect(sanitize('Bearer token 很短').sensitive).toBe(false)
+  })
+
   it('密码类特征词 → 整帧丢弃（drop 优先，不标 sensitive）', () => {
     for (const text of ['请输入密码', 'Reset password', 'passwd:', 'PIN 码', 'passphrase']) {
       expect(sanitize(text)).toEqual({ text, sensitive: false, drop: true })

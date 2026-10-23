@@ -4,7 +4,9 @@
  * - 游标 `(ts, id)`：只取「ts > cursor_ts」或「同 ts 且 id > cursor_id」的事件；
  * - 批窗口：ts <= now - 5min（留出相邻事件合并窗口），避免把「正在发生」的片段切碎；
  * - 合并：同一 `app + 窗口标题`、相邻 ≤ 90s 的事件合并为一个「时刻」，OCR 摘要去重拼接；
- * - 单批最多 20 个时刻；未进批的事件留在库里，游标只推进到已消费的最后一个事件。
+ * - 单批最多 20 个时刻；单时刻最多回显 40 个事件 id，整批最多回显 400 个 id
+ *   （输出必须列举全部 id，超限确定性切分 / 留给下一批，避免输出截断后同批反复卡住；F04）；
+ *   未进批的事件留在库里，游标只推进到已消费的最后一个事件。
  */
 
 import type { Db } from '../../db'
@@ -90,12 +92,21 @@ export function selectBatchEvents(
  */
 export function mergeMoments(
   events: readonly BatchEvent[],
-  options: { maxMoments?: number; gapMs?: number } = {}
+  options: {
+    maxMoments?: number
+    gapMs?: number
+    maxEventIdsPerMoment?: number
+    maxEventIds?: number
+  } = {}
 ): ReadBatchResult {
   const maxMoments = options.maxMoments ?? LLM_DEFAULTS.maxMoments
   const gapMs = options.gapMs ?? LLM_DEFAULTS.mergeGapMs
+  const maxEventIdsPerMoment = Math.max(1, options.maxEventIdsPerMoment ?? LLM_DEFAULTS.maxEventIdsPerMoment)
+  const maxEventIds = Math.max(1, options.maxEventIds ?? LLM_DEFAULTS.batchMaxEventIds)
   const moments: Moment[] = []
   let consumedCount = 0
+  /** 已进批的事件 id 数：输出必须全部回显，整批到顶就停，未消费事件留给下一批（F04） */
+  let batchEventIds = 0
 
   interface Draft {
     app: string
@@ -129,8 +140,15 @@ export function mergeMoments(
     const title = normalize(event.window_title)
     const ocr = normalize(event.ocr_text)
     const mergeable =
-      current !== null && current.app === app && current.title === title && event.ts - current.endTs <= gapMs
+      current !== null &&
+      current.app === app &&
+      current.title === title &&
+      event.ts - current.endTs <= gapMs &&
+      // 单个时刻回显 id 到顶就切开：同一 app/标题的长会话拆成多个相邻时刻（F04）
+      current.eventIds.length < maxEventIdsPerMoment
     if (mergeable && current) {
+      // 整批 id 到顶：当前时刻保持已合并部分，未消费事件留给下一批
+      if (batchEventIds + 1 > maxEventIds) break
       current.endTs = Math.max(current.endTs, event.ts)
       current.eventIds.push(event.id)
       // OCR 摘要去重：完全相同或已被已有片段包含则不重复拼（后续出云时统一截断）
@@ -138,10 +156,12 @@ export function mergeMoments(
         current.ocrParts.push(ocr)
       }
       current.sensitive = current.sensitive || event.sensitive === 1
+      batchEventIds += 1
       continue
     }
     close()
     if (moments.length >= maxMoments) break
+    if (batchEventIds + 1 > maxEventIds) break
     current = {
       app,
       title,
@@ -151,6 +171,7 @@ export function mergeMoments(
       eventIds: [event.id],
       sensitive: event.sensitive === 1
     }
+    batchEventIds += 1
   }
   close()
 

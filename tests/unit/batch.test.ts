@@ -77,6 +77,50 @@ describe('mergeMoments · 同一 app + 标题、相邻 ≤ 90s 合并为时刻',
   })
 })
 
+describe('mergeMoments · 回显 id 上限（F04：输出必须列举全部 id）', () => {
+  it('同一时刻上千事件确定性切分：单时刻 ≤ 上限、整批 id 到顶即停', () => {
+    const events = Array.from({ length: 1_000 }, (_, index) => ev(index + 1, index * 1_000))
+    const { moments, consumed } = mergeMoments(events, {
+      maxMoments: 20,
+      maxEventIdsPerMoment: 40,
+      maxEventIds: 400
+    })
+    expect(moments).toHaveLength(10)
+    expect(moments[0].eventIds).toEqual(Array.from({ length: 40 }, (_, index) => index + 1))
+    expect(moments[1].eventIds[0]).toBe(41)
+    expect(consumed.map((event) => event.id)).toEqual(Array.from({ length: 400 }, (_, index) => index + 1))
+  })
+
+  it('默认参数下超大批次：消费 400 个 id 后停止，下一批从新游标继续（游标可前进）', () => {
+    const events = Array.from({ length: 1_000 }, (_, index) => ev(index + 1, index * 1_000))
+    const first = mergeMoments(events)
+    expect(first.moments).toHaveLength(10)
+    expect(first.consumed).toHaveLength(400)
+    const last = first.consumed[first.consumed.length - 1]
+    expect(last.id).toBe(400)
+
+    const rest = events.filter(
+      (event) => event.ts > last.ts || (event.ts === last.ts && event.id > last.id)
+    )
+    const second = mergeMoments(rest)
+    expect(second.consumed[0].id).toBe(401)
+    expect(second.moments[0].eventIds[0]).toBe(401)
+    expect(second.consumed).toHaveLength(400)
+  })
+
+  it('切分确定性：同一输入重复调用结果一致', () => {
+    const events = Array.from({ length: 200 }, (_, index) => ev(index + 1, index * 1_000))
+    const options = { maxMoments: 20, maxEventIdsPerMoment: 30, maxEventIds: 90 }
+    expect(mergeMoments(events, options)).toEqual(mergeMoments(events, options))
+  })
+
+  it('正常小批不受 id 上限影响（回归）', () => {
+    const { moments, consumed } = mergeMoments([ev(1, 0), ev(2, 1_000), ev(3, 2_000)])
+    expect(moments).toHaveLength(1)
+    expect(consumed).toHaveLength(3)
+  })
+})
+
 describe('取批游标与批窗口', () => {
   const NOW = 2_000_000
 

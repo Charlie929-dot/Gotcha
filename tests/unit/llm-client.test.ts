@@ -271,6 +271,23 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
     }
   })
 
+  it('解析失败（空 content / 非法 JSON）的 LlmParseError 携带已消耗 usage（F03：失败也要能记账）', async () => {
+    for (const response of [okResponse(''), okResponse('not-json')]) {
+      const fetchImpl = vi.fn(async () => response)
+      const client = makeClient(fetchImpl as unknown as typeof fetch)
+      const error = await client.completeJson(payload()).catch((err: unknown) => err)
+      expect(error).toBeInstanceOf(LlmParseError)
+      expect((error as LlmParseError).usage).toEqual({ promptTokens: 10, completionTokens: 4 })
+    }
+    // 响应体本身不是 JSON（不是合法 ChatCompletionResponse）时没有可用 usage，不伪造
+    const fetchImpl = vi.fn(async () => new Response('not-json-body', { status: 200 }))
+    const error = await makeClient(fetchImpl as unknown as typeof fetch)
+      .completeJson(payload())
+      .catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(LlmParseError)
+    expect((error as LlmParseError).usage).toBeUndefined()
+  })
+
   it('usage 缺失时记 0', async () => {
     const fetchImpl = vi.fn(async () => okResponse('{}', {}))
     const client = makeClient(fetchImpl as unknown as typeof fetch)

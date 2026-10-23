@@ -91,6 +91,42 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
     }
   })
 
+  it('两次解析都失败也按真实 usage 记账（F03：失败循环不能绕过预算）', async () => {
+    const db = makeDb()
+    try {
+      const client = new FakeLlmClient([
+        new LlmParseError('LLM 返回空 content', { promptTokens: 100, completionTokens: 0 }),
+        new LlmParseError('LLM 返回空 content', { promptTokens: 100, completionTokens: 0 })
+      ])
+      const service = makeService(db, client)
+      const outcome = await service.runOnce()
+
+      expect(outcome.status).toBe('error')
+      expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 0 })
+      expect(readCursor(db)).toEqual({ ts: 0, id: 0 })
+      // 修复前 spent 只在解析成功后累计，这里会是 0
+      expect(readUsage(db, NOW)).toEqual({ calls: 2, promptTokens: 200, completionTokens: 0 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('首轮解析失败（带 usage）+ 修复成功：usage 合计包含失败那一次（F03）', async () => {
+    const db = makeDb()
+    try {
+      const client = new FakeLlmClient([
+        new LlmParseError('LLM 返回空 content', { promptTokens: 50, completionTokens: 0 }),
+        { json: VALID, usage: { promptTokens: 120, completionTokens: 30 } }
+      ])
+      const outcome = await makeService(db, client).runOnce()
+
+      expect(outcome.status).toBe('ok')
+      expect(readUsage(db, NOW)).toEqual({ calls: 2, promptTokens: 170, completionTokens: 30 })
+    } finally {
+      db.close()
+    }
+  })
+
   it('修复重试仍非法：整批失败、游标不动、不写节点', async () => {
     const db = makeDb()
     try {

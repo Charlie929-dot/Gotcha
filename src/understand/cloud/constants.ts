@@ -25,6 +25,10 @@ export const LLM_DEFAULTS = {
   mergeGapMs: 90_000,
   /** 单批最多时刻数 */
   maxMoments: 20,
+  /** 单个「时刻」最多回显的事件 ID 数；超出即确定性切成相邻时刻（F04：输出必须列举全部 id） */
+  maxEventIdsPerMoment: 40,
+  /** 单批最多回显的事件 ID 总数；超出部分留给下一批，游标照常推进（F04） */
+  batchMaxEventIds: 400,
   /** 单次查询事件上限（防止长期停机后一次拉爆内存；游标仍逐批推进） */
   batchEventLimit: 5_000,
   /** 归纳节点标题 / 摘要上限（prompt 与校验器共用） */

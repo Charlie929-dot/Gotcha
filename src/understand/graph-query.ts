@@ -1,13 +1,15 @@
 /**
- * 图谱只读查询（M2 Phase 2；m2-plan §3 Phase 2「数据」）
+ * 图谱只读查询（M2 Phase 2 / v0.3 §4.4 §8）
  *
- * - 按日期窗口取节点（与日窗口相交，只取 `level = 1`）与两端都在结果集内的边；
- * - 按节点取成员事件（`source_events` → events 行），坏 JSON / 缺失 id 只跳过并计数，
- *   不抛到 UI；
+ * - `queryGraphDay`：旧按日取图路径（M2 Phase 2 起沿用；只取 level=1 节点与两端都在结果集内的边）；
+ * - `queryGlobalGraph`：v0.3 全局图数据（主题 + 时刻 + 多归属 + embedding 边 + 位置），
+ *   客户端一次性加载后再按日历调暗，不再按日重新构图；
+ * - 按节点取成员事件（`source_events` → events 行），坏 JSON / 缺失 id 只跳过并计数，不抛到 UI；
  * - 纯读：只接收 `Db`，不建连接、不写库，供主进程只读连接调用。
  */
 
 import type { Db } from '../db'
+import { parseEventIdsDetailed } from './source-events'
 
 export interface GraphNodeDto {
   id: number
@@ -75,19 +77,8 @@ function isFiniteNumber(value: unknown): value is number {
 }
 
 function parseEventIds(raw: string | null): { ids: number[]; malformed: boolean } {
-  if (typeof raw !== 'string' || raw.trim() === '') return { ids: [], malformed: false }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return { ids: [], malformed: true }
-  }
-  if (!Array.isArray(parsed)) return { ids: [], malformed: true }
-  const seen = new Set<number>()
-  for (const value of parsed) {
-    if (typeof value === 'number' && Number.isInteger(value) && value > 0) seen.add(value)
-  }
-  return { ids: [...seen].sort((a, b) => a - b), malformed: false }
+  const parsed = parseEventIdsDetailed(raw)
+  return { ids: parsed.ids, malformed: parsed.malformed }
 }
 
 interface NodeRow {
@@ -277,4 +268,238 @@ export function queryNodeEvents(db: Db, nodeId: number): NodeEventsResult {
   // 按时间顺序展示（source_events 本身是 id 升序，不代表时间顺序）
   events.sort((a, b) => (a.ts === b.ts ? a.id - b.id : a.ts - b.ts))
   return { found: true, events, missingIds, malformed: parsed.malformed }
+}
+
+/* ------------------------------------------------------------------ *
+ * v0.3 全局图（docs/m2-graph-redesign.md §4 / §8）
+ * ------------------------------------------------------------------ */
+
+export interface GlobalThemeDto {
+  id: number
+  type: string
+  title: string
+  summary: string
+  tsStart: number
+  tsEnd: number
+  /** `source_events` 里的成员事件数（v2 兼容字段，不代表权威归属） */
+  sourceCount: number
+  /** `theme_moments` 里的成员时刻数（v3 权威） */
+  memberCount: number
+  /** 返回边集内的度（只算 embedding 边） */
+  degree: number
+}
+
+export interface GlobalMomentDto {
+  id: number
+  startTs: number
+  endTs: number
+  dayKey: string
+  app: string | null
+  windowTitle: string | null
+  ocrSummary: string | null
+  eventIds: number[]
+  /** 是否有任何主题归属（false = 悬空时刻，日历聚焦时不会出现） */
+  assigned: boolean
+}
+
+export interface MembershipDto {
+  themeId: number
+  momentId: number
+  weight: number
+  /** 'owner' | 'secondary' | 'manual' */
+  source: string
+}
+
+export interface NodePositionDto {
+  nodeId: number
+  x: number
+  y: number
+}
+
+export interface GraphGlobalStats {
+  themes: number
+  moments: number
+  memberships: number
+  edges: number
+  positions: number
+}
+
+export interface GraphGlobalData {
+  themes: GlobalThemeDto[]
+  moments: GlobalMomentDto[]
+  memberships: MembershipDto[]
+  edges: GraphEdgeDto[]
+  positions: NodePositionDto[]
+  stats: GraphGlobalStats
+}
+
+export interface GlobalQueryOptions {
+  /** 是否包含没有主题归属的时刻（默认 false：画布不出现悬空点） */
+  includeOrphanMoments?: boolean
+  /** 兼容期回退：把旧 `kind='ai'` 边也带上（默认不含；回填期间显式开启） */
+  includeLegacyAiEdges?: boolean
+  /** 是否读 node_positions 做布局 seed（默认 true） */
+  includePositions?: boolean
+}
+
+interface GlobalThemeRow {
+  id: number
+  type: string | null
+  title: string | null
+  summary: string | null
+  ts_start: number | null
+  ts_end: number | null
+  source_events: string | null
+}
+
+interface GlobalMomentRow {
+  id: number
+  start_ts: number
+  end_ts: number
+  day_key: string
+  app: string | null
+  window_title: string | null
+  ocr_summary: string | null
+  event_ids: string | null
+}
+
+export function emptyGlobalGraph(): GraphGlobalData {
+  return {
+    themes: [],
+    moments: [],
+    memberships: [],
+    edges: [],
+    positions: [],
+    stats: { themes: 0, moments: 0, memberships: 0, edges: 0, positions: 0 }
+  }
+}
+
+/**
+ * 一次取全量全局图（当前规模 210 主题 / ~800 时刻，客户端内存里筛选即可）。
+ * - 边默认只取 `kind='embedding'`，旧 `ai` 边不出现（G-graph-query 验收）；
+ * - 两端有一端不在主题集内的边丢弃，避免悬空边；
+ * - 悬空时刻默认不返回（`includeOrphanMoments` 可显式要）。
+ */
+export function queryGlobalGraph(db: Db, options: GlobalQueryOptions = {}): GraphGlobalData {
+  const themeRows = db
+    .prepare(
+      `SELECT id, type, title, summary, ts_start, ts_end, source_events
+       FROM nodes WHERE level = 1 ORDER BY id ASC`
+    )
+    .all() as GlobalThemeRow[]
+
+  const membershipRows = db
+    .prepare('SELECT theme_id, moment_id, weight, source FROM theme_moments')
+    .all() as Array<{ theme_id: number; moment_id: number; weight: number | null; source: string | null }>
+
+  const momentRows = db
+    .prepare(
+      `SELECT id, start_ts, end_ts, day_key, app, window_title, ocr_summary, event_ids
+       FROM moments ORDER BY start_ts ASC, id ASC`
+    )
+    .all() as GlobalMomentRow[]
+
+  const themes: GlobalThemeDto[] = themeRows.map((row) => {
+    const tsStart = row.ts_start ?? 0
+    return {
+      id: row.id,
+      type: row.type ?? 'unknown',
+      title: row.title ?? '',
+      summary: row.summary ?? '',
+      tsStart,
+      tsEnd: row.ts_end ?? tsStart,
+      sourceCount: parseEventIds(row.source_events).ids.length,
+      memberCount: 0,
+      degree: 0
+    }
+  })
+  const themeById = new Map<number, GlobalThemeDto>()
+  for (const theme of themes) themeById.set(theme.id, theme)
+
+  const memberships: MembershipDto[] = []
+  const momentThemeCount = new Map<number, number>()
+  for (const row of membershipRows) {
+    const theme = themeById.get(row.theme_id)
+    // 主题被合并/删除后的残留归属不返回（避免侧栏指向不存在的节点）
+    if (!theme) continue
+    memberships.push({
+      themeId: row.theme_id,
+      momentId: row.moment_id,
+      weight: isFiniteNumber(row.weight) ? row.weight : 1,
+      source: row.source ?? 'owner'
+    })
+    theme.memberCount += 1
+    momentThemeCount.set(row.moment_id, (momentThemeCount.get(row.moment_id) ?? 0) + 1)
+  }
+
+  const moments: GlobalMomentDto[] = []
+  for (const row of momentRows) {
+    const assigned = (momentThemeCount.get(row.id) ?? 0) > 0
+    if (!assigned && !options.includeOrphanMoments) continue
+    moments.push({
+      id: row.id,
+      startTs: row.start_ts,
+      endTs: row.end_ts,
+      dayKey: row.day_key,
+      app: row.app,
+      windowTitle: row.window_title,
+      ocrSummary: row.ocr_summary,
+      eventIds: parseEventIds(row.event_ids).ids,
+      assigned
+    })
+  }
+
+  const edgeKinds = options.includeLegacyAiEdges ? ['embedding', 'ai'] : ['embedding']
+  const placeholders = edgeKinds.map(() => '?').join(',')
+  const edgeRows = db
+    .prepare(
+      `SELECT id, src, dst, weight, kind, evidence FROM edges
+       WHERE kind IN (${placeholders}) ORDER BY id ASC`
+    )
+    .all(...edgeKinds) as EdgeRow[]
+
+  const edges: GraphEdgeDto[] = []
+  for (const row of edgeRows) {
+    const source = row.src
+    const target = row.dst
+    if (!isFiniteNumber(source) || !isFiniteNumber(target)) continue
+    const srcTheme = themeById.get(source)
+    const dstTheme = themeById.get(target)
+    if (!srcTheme || !dstTheme) continue
+    edges.push({
+      id: row.id,
+      source,
+      target,
+      weight: isFiniteNumber(row.weight) ? row.weight : 0,
+      kind: row.kind ?? 'embedding',
+      evidence: row.evidence ?? ''
+    })
+    srcTheme.degree += 1
+    dstTheme.degree += 1
+  }
+
+  let positions: NodePositionDto[] = []
+  if (options.includePositions !== false) {
+    const positionRows = db
+      .prepare('SELECT node_id, x, y FROM node_positions ORDER BY node_id ASC')
+      .all() as Array<{ node_id: number; x: number; y: number }>
+    positions = positionRows
+      .filter((row) => themeById.has(row.node_id))
+      .map((row) => ({ nodeId: row.node_id, x: row.x, y: row.y }))
+  }
+
+  return {
+    themes,
+    moments,
+    memberships,
+    edges,
+    positions,
+    stats: {
+      themes: themes.length,
+      moments: moments.length,
+      memberships: memberships.length,
+      edges: edges.length,
+      positions: positions.length
+    }
+  }
 }

@@ -69,6 +69,75 @@ export const NODES_LEVEL_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_nodes_level ON nodes(level);
 `
 
+/* ------------------------------------------------------------------ *
+ * v3：时刻层 + 多归属 + 主题向量/位置（docs/m2-graph-redesign.md §4）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 时刻（「同 app + 同标题 + 相邻 ≤90s」的事件组）。
+ * - `event_ids` 是 JSON 数组，必须能解析回 events 行（L0 是事实源，不因时刻改写）；
+ * - `day_key` 是本地日期 `yyyy-mm-dd`，日历筛选与按日回填都按它分组。
+ */
+export const MOMENTS_DDL = `
+CREATE TABLE IF NOT EXISTS moments (
+  id           INTEGER PRIMARY KEY,
+  start_ts     INTEGER NOT NULL,
+  end_ts       INTEGER NOT NULL,
+  day_key      TEXT NOT NULL,
+  app          TEXT,
+  window_title TEXT,
+  ocr_summary  TEXT,
+  event_ids    TEXT NOT NULL,
+  created_at   INTEGER NOT NULL
+);
+`
+
+/** 日历按天取时刻 */
+export const MOMENTS_DAY_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_moments_day ON moments(day_key);
+`
+
+/**
+ * 主题成员（多对多）：主归属 `source='owner'` 恒有，次归属 0–2 个。
+ * `nodes.source_events` 退化为兼容并集字段，新查询以本表为准。
+ */
+export const THEME_MOMENTS_DDL = `
+CREATE TABLE IF NOT EXISTS theme_moments (
+  theme_id   INTEGER NOT NULL,
+  moment_id  INTEGER NOT NULL,
+  weight     REAL NOT NULL DEFAULT 1.0,
+  source     TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (theme_id, moment_id)
+);
+`
+
+/** 按时刻反查主题（侧栏「也属于」） */
+export const THEME_MOMENTS_MOMENT_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_theme_moments_moment ON theme_moments(moment_id);
+`
+
+/** 主题向量：Float32Array（已 L2 归一化），模型名 + 维度用于换模型时识别 */
+export const NODE_EMBEDDINGS_DDL = `
+CREATE TABLE IF NOT EXISTS node_embeddings (
+  node_id    INTEGER PRIMARY KEY,
+  model      TEXT NOT NULL,
+  dim        INTEGER NOT NULL,
+  vec        BLOB NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`
+
+/** 节点位置：只用于下次 seed，活布局会继续移动，不冻结 */
+export const NODE_POSITIONS_DDL = `
+CREATE TABLE IF NOT EXISTS node_positions (
+  node_id    INTEGER PRIMARY KEY,
+  x          REAL NOT NULL,
+  y          REAL NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`
+
 /** 邻域查询 / 边去重按端点查 */
 export const EDGES_SRC_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);

@@ -11,6 +11,7 @@
 
 import type { Db } from '../../db'
 import { getSetting, setSetting } from '../../db/settings'
+import { parseSourceEventIds } from '../source-events'
 import { LLM_DEFAULTS } from './constants'
 
 export interface BatchEvent {
@@ -207,17 +208,6 @@ export function nextLocalDayStart(ts: number): number {
   return date.getTime()
 }
 
-function parseSourceEventIds(raw: string | null): number[] {
-  if (!raw) return []
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    return Array.isArray(parsed)
-      ? parsed.filter((id): id is number => typeof id === 'number' && Number.isInteger(id))
-      : []
-  } catch {
-    return []
-  }
-}
 
 /**
  * 某天已被节点覆盖的事件 id（含敏感占位节点）。

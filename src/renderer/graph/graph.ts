@@ -2,7 +2,7 @@
  * 图谱窗口（M2 Phase 2b）
  *
  * - 数据：`graph:query` 取当天节点/边 → graphology + sigma 力导向画布（懒加载，时间线不背图谱体积）；
- * - 交互：滚轮缩放、拖拽平移、悬停高亮邻域（其余降透明度）、点击节点开侧栏（C4）；
+ * - 交互：滚轮缩放、拖拽平移、悬停高亮邻域（其余降透明度）、单击节点进局部图、双击开侧栏（C4）；
  * - 侧栏「在时间线中查看」带日期跳转；设置抽屉覆盖归纳参数 / 供应商 / 快捷键 / 出网确认（D21/D22/D24）；
  * - 空状态（未配置 key / 未确认出网 / 采集暂停 / 无节点）与归纳状态徽标。
  *
@@ -48,6 +48,8 @@ declare global {
       hover(nodeId: number | null): void
       focus(nodeId: number | string): void
       clearFocus(): void
+      /** 节点在页面坐标系中的位置（E2E 用真实鼠标事件验证单击 / 双击语义） */
+      position(nodeId: number): { x: number; y: number } | null
       filters(): Record<string, boolean>
       visibleCounts(): { nodes: number; edges: number }
     }
@@ -148,7 +150,10 @@ let visibleTypes: VisibleTypes = defaultVisibleTypes()
 let focusKey: string | null = null
 let focusSet: Set<string> | null = null
 let currentEdges: Array<{ source: string; target: string }> = []
+let nodeClickTimer: ReturnType<typeof setTimeout> | null = null
 const nodeTypeByKey = new Map<string, string>()
+/** 与 sigma 默认 doubleClickTimeout(300ms) 对齐：留 20ms 余量，双击时取消单击聚焦 */
+const NODE_CLICK_DELAY_MS = 320
 
 const panel = createNodePanel(
   {
@@ -302,7 +307,14 @@ function clearFocusState(): void {
   els.focusBar.hidden = true
 }
 
+function cancelPendingNodeClick(): void {
+  if (nodeClickTimer === null) return
+  clearTimeout(nodeClickTimer)
+  nodeClickTimer = null
+}
+
 function exitFocus(): void {
+  cancelPendingNodeClick()
   if (!focusKey && !focusSet) return
   clearFocusState()
   renderer?.refresh()
@@ -345,6 +357,7 @@ window.addEventListener('keydown', (event) => {
 })
 
 async function renderCanvas(data: GraphDayData): Promise<void> {
+  cancelPendingNodeClick()
   const current = await ensureModules()
   renderer?.kill()
   renderer = null
@@ -513,18 +526,16 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
     }
   })
 
+  // 单击 = 局部图，双击 = 详情抽屉。sigma 默认 300ms 内第二次点击才算双击，
+  // 所以单击延迟到 320ms 再聚焦；双击事件到达时取消待执行的聚焦（不再叠开局部图）。
   renderer.on('clickNode', (payload: { node: string }) => {
-    if (payload.node.startsWith('ev-')) {
-      const evId = Number(payload.node.slice(3))
-      const ev = (lastData.events ?? []).find((item) => item.id === evId)
-      if (ev) {
-        const parentId = eventParentMap.get(evId)
-        const parent = parentId ? lastData.nodes.find((n) => n.id === parentId) : undefined
-        panel.showEvent(ev, parent)
-      }
-    } else {
-      void openNode(Number(payload.node))
-    }
+    cancelPendingNodeClick()
+    const node = payload.node
+    nodeClickTimer = setTimeout(() => {
+      nodeClickTimer = null
+      panel.hide()
+      enterFocus(node)
+    }, NODE_CLICK_DELAY_MS)
   })
   renderer.on('enterNode', (payload: { node: string }) => {
     hoveredKey = payload.node
@@ -534,14 +545,31 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
     hoveredKey = null
     renderer?.refresh()
   })
-  renderer.on('doubleClickNode', (payload: { node: string; preventSigmaDefault?: () => void }) => {
-    payload.preventSigmaDefault?.()
-    enterFocus(payload.node)
-  })
+  renderer.on(
+    'doubleClickNode',
+    (payload: { node: string; preventSigmaDefault?: () => void }) => {
+      cancelPendingNodeClick()
+      payload.preventSigmaDefault?.()
+      if (payload.node.startsWith('ev-')) {
+        const evId = Number(payload.node.slice(3))
+        const ev = (lastData.events ?? []).find((item) => item.id === evId)
+        if (ev) {
+          const parentId = eventParentMap.get(evId)
+          const parent = parentId
+            ? lastData.nodes.find((node) => node.id === parentId)
+            : undefined
+          panel.showEvent(ev, parent)
+        }
+        return
+      }
+      void openNode(Number(payload.node))
+    }
+  )
   renderer.on('doubleClickStage', () => {
     if (focusKey) exitFocus()
   })
   renderer.on('clickStage', () => {
+    cancelPendingNodeClick()
     panel.hide()
     if (focusKey) exitFocus()
   })
@@ -673,6 +701,15 @@ window.__gotchaGraphView = {
   },
   focus: (nodeId: number | string) => enterFocus(String(nodeId)),
   clearFocus: () => exitFocus(),
+  position: (nodeId: number) => {
+    const key = String(nodeId)
+    if (!renderer || !graph?.hasNode(key)) return null
+    const attrs = graph.getNodeAttributes(key) as { x: number; y: number }
+    if (!Number.isFinite(attrs.x) || !Number.isFinite(attrs.y)) return null
+    const point = renderer.graphToViewport({ x: attrs.x, y: attrs.y })
+    const rect = els.container.getBoundingClientRect()
+    return { x: rect.left + point.x, y: rect.top + point.y }
+  },
   filters: () => ({ ...visibleTypes }),
   visibleCounts: () => {
     if (!graph) return { nodes: 0, edges: 0 }

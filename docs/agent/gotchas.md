@@ -39,6 +39,7 @@
 | 启动恢复读 settings 别用 `openDatabase` | 为读 `capture.resume_on_start` 直接 `openDatabase()` 会给空 userData 建库、跑迁移，破坏 A3「无显式交互零磁盘写入」 | 先 `existsSync(memory.db)`：没有就直接暂停（不建库）；有库用只读连接（`CaptureDbConnections.queryDb()`）读两键；只有用户显式开启 / 暂停 / 取消恢复时才 `ensureWritable()` 写盘（`src/main/capture-switch.ts`） |
 | 暂停先写 0/0 再关闸 | 若先 `await stop()`（flush、释放屏幕流可能耗时）再写 settings，中途崩溃 / 强杀会留下 `resume_on_start=1`，下次启动违背用户刚做的暂停（自动恢复） | `toggleCapture()` 在 `controller.stop()` 前同步 `persistSwitch(db, false)`；反过来的残留最多是「已暂停但键仍 1/1」，只会在下次启动多一次可取消的 3s 倒计时，属安全方向 |
 | 每次 Alt+P 恢复都卡 1–2s；倒计时末尾 Alt+P / 点球失效 | `CaptureController` 每次恢复新建 `ScreenCapture`，对象级 `sources` 缓存随暂停销毁，故每次都重跑会同步冻结主进程 1.2–2.3s 的 `desktopCapturer.getSources()`；同时倒计时到点先把自己标成不可取消，再进入 `starting`，冻结期间排队的 Alt+P 被 `toggleEnabled(starting)=false` 忽略，点球也只能取消一个已失效计时器（2026-10-23 真机复现） | 进程级复用 `ScreenCapture`：暂停仍 `dispose()` 隐藏窗口 / 媒体流（D13 Q6），只保留显示源映射缓存；`StartupResumeCountdown` 到点后保持 active，直到起流成功/失败显式 `complete()`，点球在 `starting` 阶段排队 stop，Alt+P 接管同一个 in-flight start 并在成功后写 1/1。E2E 用慢假启动稳定卡在 `starting` 覆盖两条交互 |
+| 用 `dev:capture` 验证开关持久化会误判 | `--capture` / `GOTCHA_CAPTURE=1` 直开按设计不写两键，查 `settings` 永远是 0/0；容易误以为「落盘坏了」（2026-10-23 实际发生） | 验证落盘用普通 `npm run dev` + `Alt+P`：起流成功后两键应为 1/1，暂停后 0/0；`dev:capture` 只用来验证「直开不写」 |
 
 ## 规则
 

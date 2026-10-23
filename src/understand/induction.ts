@@ -178,6 +178,11 @@ function addUsage(db: Db, now: number, usage: InductionUsage | undefined): void 
   )
 }
 
+/** 失败 / 取消批也记账（独立事务；不推进游标，不写节点） */
+export function recordUsage(db: Db, now: number, usage: InductionUsage): void {
+  db.transaction(() => addUsage(db, now, usage))()
+}
+
 /** 读今日用量（预算判断用） */
 export function readUsage(db: Db, now: number): InductionUsage {
   const raw = getSetting(db, `${USAGE_KEY_PREFIX}${localDayKey(now)}`)
@@ -255,7 +260,8 @@ export function persistInduction(db: Db, input: InductionPersistInput): Inductio
     for (const edge of input.result.edges) {
       const src = nodeIds[edge.from]
       const dst = nodeIds[edge.to]
-      if (src === undefined || dst === undefined || src < 0 || dst < 0) continue
+      // 两个输出节点可能被合并到同一 DB 节点（同日本地 + 标题相同）：跳过自环边
+      if (src === undefined || dst === undefined || src < 0 || dst < 0 || src === dst) continue
       const kind = upsertAiEdge(db, src, dst, edge.weight, edge.evidence)
       if (kind === 'inserted') stats.edgesInserted += 1
       else stats.edgesUpdated += 1

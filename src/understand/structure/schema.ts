@@ -71,7 +71,8 @@ export function validateInduction(
   const fail = (): InductionValidation => ({ ok: false, errors: errors.slice(0, 10) })
 
   if (!isRecord(json)) return { ok: false, errors: ['根节点必须是 json 对象'] }
-  for (const key of unknownKeys(json, ROOT_KEYS)) errors.push(`未知字段 ${key}`)
+  // 不回显未知字段名：字段名来自模型输出，拼进修复提示会变成 prompt 注入通道
+  if (unknownKeys(json, ROOT_KEYS).length > 0) errors.push('根节点含契约外字段')
 
   if (!Array.isArray(json.nodes) || json.nodes.length === 0) {
     errors.push('nodes 必须是非空数组')
@@ -87,7 +88,7 @@ export function validateInduction(
       errors.push(`${label} 必须是对象`)
       return
     }
-    for (const key of unknownKeys(raw, NODE_KEYS)) errors.push(`${label} 含未知字段 ${key}`)
+    if (unknownKeys(raw, NODE_KEYS).length > 0) errors.push(`${label} 含契约外字段`)
 
     const title = raw.title
     if (!isNonEmptyString(title)) errors.push(`${label}.title 必须是非空字符串`)
@@ -140,7 +141,7 @@ export function validateInduction(
           errors.push(`${label} 必须是对象`)
           return
         }
-        for (const key of unknownKeys(raw, EDGE_KEYS)) errors.push(`${label} 含未知字段 ${key}`)
+        if (unknownKeys(raw, EDGE_KEYS).length > 0) errors.push(`${label} 含契约外字段`)
         const { from, to, weight, evidence } = raw
         if (typeof from !== 'number' || !Number.isInteger(from) || from < 0 || from >= nodes.length) {
           errors.push(`${label}.from 必须是本次 nodes 下标`)

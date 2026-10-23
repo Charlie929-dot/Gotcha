@@ -105,6 +105,26 @@ describe('buildCloudPayload · 出云唯一出口', () => {
     expect(result.redactedIds).toEqual([])
   })
 
+  it('时刻载荷序列化后不含 golden 敏感串（app / title / ocr 同一脱敏墙）', () => {
+    const result = buildCloudMomentPayload([
+      {
+        app: 'chrome.exe',
+        title: SECRET_EMAIL,
+        startTs: 1_700_000_000_000,
+        endTs: 1_700_000_030_000,
+        ocr: `token ${SECRET_JWT} 手机 ${SECRET_PHONE} 密钥 ${SECRET_API_KEY}`,
+        eventIds: [21, 22]
+      }
+    ])
+    const serialized = JSON.stringify(result.payload)
+    expect(serialized).not.toContain(SECRET_API_KEY)
+    expect(serialized).not.toContain(SECRET_EMAIL)
+    expect(serialized).not.toContain(SECRET_PHONE)
+    expect(serialized).not.toContain(SECRET_JWT)
+    expect(serialized).toContain('[已脱敏]')
+    expect(result.redactedIds).toEqual([21, 22])
+  })
+
   it('非 sensitive 事件若含敏感形态也剥离（双保险），序列化后不含原文', () => {
     const result = buildCloudPayload([
       event({ id: 7, ocrText: `密钥 ${SECRET_API_KEY}，邮箱 ${SECRET_EMAIL}，手机 ${SECRET_PHONE}` })

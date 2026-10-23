@@ -157,9 +157,9 @@ export function mergeMoments(
   return { moments, consumed: events.slice(0, consumedCount) }
 }
 
-/** 取一批（读库 + 合并）；无新事件返回空 moments */
-export function readBatch(db: Db, now: number): ReadBatchResult {
+/** 取一批（读库 + 合并）；无新事件返回空 moments。maxMoments 可由 settings 覆盖（D22） */
+export function readBatch(db: Db, now: number, options: { maxMoments?: number } = {}): ReadBatchResult {
   const cursor = readCursor(db)
   const events = selectBatchEvents(db, cursor, now)
-  return mergeMoments(events)
+  return mergeMoments(events, { maxMoments: options.maxMoments })
 }

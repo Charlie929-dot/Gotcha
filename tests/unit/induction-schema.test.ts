@@ -31,10 +31,8 @@ describe('validateInduction · 手写校验器', () => {
   it('拒绝非对象 / 零节点 / 未知字段', () => {
     expect(validateInduction('nope', ALLOWED)).toMatchObject({ ok: false })
     expect(validateInduction({ nodes: [], edges: [] }, ALLOWED)).toMatchObject({ ok: false })
-    expect(errorsOf({ nodes: [{ ...okNode(), extra: 1 }] })).toContain(
-      'nodes[0] 含未知字段 extra'
-    )
-    expect(errorsOf({ ...(okJson() as object), total: 2 })).toContain('未知字段 total')
+    expect(errorsOf({ nodes: [{ ...okNode(), extra: 1 }] })).toContain('nodes[0] 含契约外字段')
+    expect(errorsOf({ ...(okJson() as object), total: 2 })).toContain('根节点含契约外字段')
   })
 
   it('拒绝未知 id / 跨节点重复归属 / 未覆盖全部输入 id', () => {
@@ -91,7 +89,7 @@ describe('validateInduction · 手写校验器', () => {
     expect(errors).toContain('edges[1] 不允许自环')
     expect(errors).toContain('edges[2].weight 必须在 0–1 之间')
     expect(errors).toContain('edges[3].evidence 必须是非空字符串')
-    expect(errors).toContain('edges[4] 含未知字段 extra')
+    expect(errors).toContain('edges[4] 含契约外字段')
   })
 
   it('错误条目最多 10 条（修复提示不膨胀）', () => {

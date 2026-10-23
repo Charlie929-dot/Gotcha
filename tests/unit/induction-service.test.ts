@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openDatabase, insertEvent } from '../../src/db'
 import { setSetting } from '../../src/db/settings'
 import { readCursor } from '../../src/understand/cloud/batch'
-import { FakeLlmClient, LlmAbortError, type LlmClient } from '../../src/understand/cloud/llm-client'
+import { FakeLlmClient, LlmAbortError, LlmParseError, type LlmClient } from '../../src/understand/cloud/llm-client'
 import { createInductionService, type InductionService } from '../../src/understand/service'
 import { localDayKey, readUsage } from '../../src/understand/induction'
 
@@ -68,8 +68,24 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
 
       expect(outcome).toMatchObject({ status: 'ok', nodes: 2 })
       expect(client.optionCalls).toHaveLength(2)
-      expect(client.optionCalls[1].repairHint).toContain('未被任何节点覆盖')
+      expect(client.optionCalls[1].repair?.errors.join('；')).toContain('未被任何节点覆盖')
       expect(readUsage(db, NOW)).toMatchObject({ calls: 2 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('解析层失败（空 content / 非法 JSON）也走 1 次修复重试', async () => {
+    const db = makeDb()
+    try {
+      const client = new FakeLlmClient([new LlmParseError('LLM 返回空 content'), { json: VALID }])
+      const outcome = await makeService(db, client).runOnce()
+
+      expect(outcome.status).toBe('ok')
+      expect(client.optionCalls).toHaveLength(2)
+      expect(client.optionCalls[0].repair).toBeUndefined()
+      expect(client.optionCalls[1].repair?.errors[0]).toContain('合法 json')
+      expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 2 })
     } finally {
       db.close()
     }
@@ -79,14 +95,18 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
     const db = makeDb()
     try {
       const invalid = { nodes: [{ title: '只有一条', summary: '漏了事件 2', type: 'knowledge', event_ids: [1] }] }
-      const client = new FakeLlmClient([{ json: invalid }, { json: invalid }])
+      const client = new FakeLlmClient([
+        { json: invalid, usage: { promptTokens: 10, completionTokens: 2 } },
+        { json: invalid, usage: { promptTokens: 10, completionTokens: 2 } }
+      ])
       const service = makeService(db, client)
       const outcome = await service.runOnce()
 
       expect(outcome.status).toBe('error')
       expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 0 })
       expect(readCursor(db)).toEqual({ ts: 0, id: 0 })
-      expect(readUsage(db, NOW)).toEqual({ calls: 0, promptTokens: 0, completionTokens: 0 })
+      // 失败重试也已消耗 token：照实记账，预算才拦得住
+      expect(readUsage(db, NOW)).toEqual({ calls: 2, promptTokens: 20, completionTokens: 4 })
       expect(service.getState().lastError).toBeTruthy()
     } finally {
       db.close()
@@ -111,6 +131,8 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
       expect(outcome.status).toBe('aborted')
       expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 0 })
       expect(readCursor(db)).toEqual({ ts: 0, id: 0 })
+      // 暂停后（含 Phase 2「立即归纳」）一律跳过：零出网
+      expect(await service.runOnce({ manual: true })).toEqual({ status: 'skipped', reason: 'paused' })
     } finally {
       db.close()
     }
@@ -126,6 +148,28 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
       expect(client.requests).toHaveLength(0)
       const row = db.prepare('SELECT type, title FROM nodes').get() as Record<string, unknown>
       expect(row).toMatchObject({ type: 'protected', title: '内容已保护' })
+      expect(readCursor(db)).toEqual({ ts: NOW - 9 * 60_000, id: 2 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('混合批：可出云时刻正常归纳，不可剥离时刻生成占位节点', async () => {
+    const db = openDatabase(':memory:')
+    try {
+      insertEvent(db, { ts: NOW - 10 * 60_000, app: 'code.exe', windowTitle: 'a.ts', ocrText: '正常内容' })
+      insertEvent(db, { ts: NOW - 9 * 60_000, app: '1password.exe', windowTitle: 'Vault', ocrText: '请输入密码' })
+      const client = new FakeLlmClient([
+        { json: { nodes: [{ title: '读代码', summary: 'S', type: 'activity', event_ids: [1] }], edges: [] } }
+      ])
+      const outcome = await makeService(db, client).runOnce()
+
+      expect(outcome).toMatchObject({ status: 'ok', nodes: 2, placeholders: 1, consumed: 2 })
+      const rows = db.prepare('SELECT type, title FROM nodes ORDER BY id').all() as Array<Record<string, unknown>>
+      expect(rows).toEqual([
+        { type: 'activity', title: '读代码' },
+        { type: 'protected', title: '内容已保护' }
+      ])
       expect(readCursor(db)).toEqual({ ts: NOW - 9 * 60_000, id: 2 })
     } finally {
       db.close()
@@ -200,6 +244,80 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
       expect(service.getState().status).toBe('stopped')
       await vi.advanceTimersByTimeAsync(600_000)
       expect(client.requests).toHaveLength(1)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('失败按 1m / 5m / 15m 退避（上限 30m），成功复位', async () => {
+    vi.useFakeTimers()
+    const db = makeDb()
+    try {
+      const invalid = { nodes: [{ title: '只有一条', summary: '漏了事件 2', type: 'knowledge', event_ids: [1] }] }
+      const client = new FakeLlmClient(Array.from({ length: 6 }, () => ({ json: invalid })))
+      const service = createInductionService({
+        db,
+        getClient: () => client,
+        now: () => NOW,
+        firstDelayMs: 5_000,
+        intervalMs: 600_000
+      })
+      service.start()
+
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(service.getState().status).toBe('backoff')
+      expect(service.getState().nextRunAt).toBe(NOW + 60_000)
+
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(service.getState().nextRunAt).toBe(NOW + 300_000)
+
+      await vi.advanceTimersByTimeAsync(300_000)
+      expect(service.getState().nextRunAt).toBe(NOW + 900_000)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('graph.batch_max_moments 可调：单批时刻上限来自 settings', async () => {
+    const db = openDatabase(':memory:')
+    try {
+      insertEvent(db, { ts: NOW - 10 * 60_000, app: 'a.exe', windowTitle: 'A' })
+      insertEvent(db, { ts: NOW - 9 * 60_000, app: 'b.exe', windowTitle: 'B' })
+      setSetting(db, 'graph.batch_max_moments', '1')
+      const client = new FakeLlmClient([
+        { json: { nodes: [{ title: 'A', summary: 'S', type: 'knowledge', event_ids: [1] }], edges: [] } },
+        { json: { nodes: [{ title: 'B', summary: 'S', type: 'knowledge', event_ids: [2] }], edges: [] } }
+      ])
+      const service = makeService(db, client)
+
+      expect(await service.runOnce()).toMatchObject({ status: 'ok', consumed: 1 })
+      expect(readCursor(db)).toEqual({ ts: NOW - 10 * 60_000, id: 1 })
+      expect((await service.runOnce()).status).toBe('ok')
+      expect(readCursor(db)).toEqual({ ts: NOW - 9 * 60_000, id: 2 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('stop 后再 start 可重入（暂停解除后恢复调度）', () => {
+    const db = makeDb()
+    try {
+      const service = createInductionService({
+        db,
+        getClient: () => new FakeLlmClient([]),
+        now: () => NOW,
+        firstDelayMs: 5_000,
+        intervalMs: 600_000
+      })
+      service.start()
+      service.stop()
+      expect(service.isActive()).toBe(false)
+      expect(service.getState().status).toBe('stopped')
+
+      service.start()
+      expect(service.isActive()).toBe(true)
+      expect(service.getState().nextRunAt).toBe(NOW + 5_000)
+      service.stop()
     } finally {
       db.close()
     }

@@ -11,7 +11,9 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'graph.auto': '1',
   'graph.interval_minutes': '10',
   'graph.budget_tokens_per_day': '1000000',
-  'graph.retry_backoff_minutes': '1,5,15'
+  'graph.retry_backoff_minutes': '1,5,15',
+  'graph.batch_max_moments': '20',
+  'graph.max_tokens': '2000'
 }
 
 export function getSetting(db: Db, key: string): string {

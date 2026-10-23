@@ -23,16 +23,21 @@ export interface LlmJsonResult {
   usage: LlmUsage
 }
 
+export interface LlmRepairContext {
+  errors: readonly string[]
+}
+
 export interface LlmCompleteOptions {
   /** 暂停 / 退出时由上层传入，中止在途请求（D18） */
   signal?: AbortSignal
   maxTokens?: number
   temperature?: number
   /**
-   * 修复重试提示：上一次输出未通过校验时的错误摘要。
-   * 只允许校验器生成的固定文案（字段名 / 下标 / id / 上限），不得包含事件原文。
+   * 修复重试上下文：上一次输出未通过校验时的错误摘要。
+   * 只允许校验器生成的固定文案（字段名 / 下标 / id / 上限）；客户端会再截断
+   * （每条 ≤120 字、最多 5 条），避免业务代码借自由文本把内容注入 prompt。
    */
-  repairHint?: string
+  repair?: LlmRepairContext
 }
 
 export interface LlmClient {

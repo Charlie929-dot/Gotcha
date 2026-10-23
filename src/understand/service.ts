@@ -3,8 +3,11 @@
  *
  * - 采集 running 后 5s 首次，之后每 `graph.interval_minutes`（默认 10）分钟一次；
  * - 同一时刻只允许一个作业在途；暂停 = 停定时器 + abort 在途 + 结果丢弃；
+ *   暂停期间 `runOnce()` 直接跳过（含「立即归纳」），保证零出网；
  * - 失败退避 `graph.retry_backoff_minutes`（默认 1,5,15，上限 30），成功复位；
  * - 每日 token 超 `graph.budget_tokens_per_day`（默认 1M）停自动归纳；
+ * - 空 content / 非法 JSON 与校验失败都各走 1 次修复重试（错误摘要为固定文案）；
+ * - 失败 / 取消也把已消耗的 token 记账，避免失败循环绕过预算；
  * - 未配置供应商（getClient 返回 null）时跳过、不抛到采集链路。
  *
  * 说明：Phase 1 只提供可注入时钟/客户端的调度核心；主进程接线（采集 running 联动、
@@ -14,17 +17,24 @@
 import type { Db } from '../db'
 import { getNumberSetting, getSetting } from '../db/settings'
 import { readBatch, readCursor } from './cloud/batch'
-import { LlmAbortError, LlmParseError, type LlmClient } from './cloud/llm-client'
+import { LLM_DEFAULTS } from './cloud/constants'
+import { LlmAbortError, LlmParseError, type LlmClient, type LlmJsonResult } from './cloud/llm-client'
 import { buildCloudMomentPayload } from './cloud/redact'
-import { persistInduction, readUsage } from './induction'
-import { validateInduction, type InductionResult } from './structure/schema'
+import { persistInduction, readUsage, recordUsage, type InductionUsage } from './induction'
+import { validateInduction, type InductionResult, type InductionValidation } from './structure/schema'
 
-export type InductionStatus = 'idle' | 'running' | 'backoff' | 'error' | 'budget-exhausted' | 'stopped'
+export type InductionStatus =
+  | 'idle'
+  | 'running'
+  | 'backoff'
+  | 'error'
+  | 'budget-exhausted'
+  | 'stopped'
 
 export type RunOutcome =
   | { status: 'ok'; nodes: number; edges: number; placeholders: number; consumed: number }
   | { status: 'empty' }
-  | { status: 'skipped'; reason: 'auto-off' | 'in-flight' | 'not-configured' | 'budget' }
+  | { status: 'skipped'; reason: 'auto-off' | 'in-flight' | 'not-configured' | 'budget' | 'paused' }
   | { status: 'aborted' }
   | { status: 'error'; error: Error }
 
@@ -57,6 +67,9 @@ const DEFAULT_FIRST_DELAY_MS = 5_000
 const DEFAULT_INTERVAL_MS = 10 * 60_000
 const MAX_BACKOFF_MS = 30 * 60_000
 
+/** 解析层失败的修复提示（固定文案，不含模型输出） */
+const PARSE_REPAIR_ERROR = '上一次输出不是合法 json（可能为空 content 或截断），请只输出完整 json 并覆盖全部输入 id'
+
 function parseBackoffMinutes(raw: string): number[] {
   const minutes = raw
     .split(',')
@@ -72,8 +85,10 @@ export function createInductionService(options: InductionServiceOptions): Induct
     const minutes = getNumberSetting(db, 'graph.interval_minutes', 0)
     return minutes > 0 ? minutes * 60_000 : (options.intervalMs ?? DEFAULT_INTERVAL_MS)
   }
-  const budgetTokens = (): number =>
-    getNumberSetting(db, 'graph.budget_tokens_per_day', 1_000_000)
+  const budgetTokens = (): number => getNumberSetting(db, 'graph.budget_tokens_per_day', 1_000_000)
+  const maxMoments = (): number =>
+    Math.max(1, getNumberSetting(db, 'graph.batch_max_moments', LLM_DEFAULTS.maxMoments))
+  const maxTokens = (): number => Math.max(256, getNumberSetting(db, 'graph.max_tokens', LLM_DEFAULTS.maxTokens))
   const backoffMs = (attempt: number): number => {
     const minutes = parseBackoffMinutes(getSetting(db, 'graph.retry_backoff_minutes'))
     return Math.min(minutes[Math.min(attempt, minutes.length - 1)] * 60_000, MAX_BACKOFF_MS)
@@ -83,6 +98,8 @@ export function createInductionService(options: InductionServiceOptions): Induct
   let timer: ReturnType<typeof setTimeout> | null = null
   let activeController: AbortController | null = null
   let busy = false
+  /** true = 已暂停（stop 之后）；暂停期间任何跑批都跳过，保证零出网 */
+  let paused = false
   let stopped = true
   let backoffAttempt = 0
 
@@ -111,10 +128,14 @@ export function createInductionService(options: InductionServiceOptions): Induct
 
   async function runOnce(runOptions: { manual?: boolean } = {}): Promise<RunOutcome> {
     if (busy) return { status: 'skipped', reason: 'in-flight' }
+    if (paused) return { status: 'skipped', reason: 'paused' }
     busy = true
     const controller = new AbortController()
     activeController = controller
     setState({ status: 'running', lastError: undefined })
+    let currentNow = now()
+    let callsMade = 0
+    const spent = { promptTokens: 0, completionTokens: 0 }
 
     try {
       if (!runOptions.manual && getSetting(db, 'graph.auto') !== '1') {
@@ -122,7 +143,7 @@ export function createInductionService(options: InductionServiceOptions): Induct
         return { status: 'skipped', reason: 'auto-off' }
       }
 
-      const currentNow = now()
+      currentNow = now()
       const usage = readUsage(db, currentNow)
       if (usage.promptTokens + usage.completionTokens >= budgetTokens()) {
         setState({ status: 'budget-exhausted' })
@@ -136,7 +157,7 @@ export function createInductionService(options: InductionServiceOptions): Induct
       }
 
       const cursorBefore = readCursor(db)
-      const batch = readBatch(db, currentNow)
+      const batch = readBatch(db, currentNow, { maxMoments: maxMoments() })
       if (batch.moments.length === 0) {
         setState({ status: 'idle' })
         return { status: 'empty' }
@@ -148,29 +169,45 @@ export function createInductionService(options: InductionServiceOptions): Induct
       const cursorAfter = lastConsumed ? { ts: lastConsumed.ts, id: lastConsumed.id } : cursorBefore
 
       let result: InductionResult = { nodes: [], edges: [] }
-      let usageTotals: { calls: number; promptTokens: number; completionTokens: number } | undefined
+      let usageTotals: InductionUsage | undefined
 
       if (built.payload.events.length > 0) {
-        let response = await client.completeJson(built.payload, { signal: controller.signal })
-        let validation = validateInduction(response.json, allowedEventIds)
-        // 修复重试会计两次调用，token 也要两次都记账
-        let calls = 1
-        let promptTokens = response.usage.promptTokens
-        let completionTokens = response.usage.completionTokens
-        if (!validation.ok) {
-          // 首轮非法 → 用错误摘要做 1 次修复重试（错误文案不含事件原文）
-          response = await client.completeJson(built.payload, {
+        const call = async (repair?: { errors: readonly string[] }): Promise<LlmJsonResult> => {
+          callsMade += 1
+          const response = await client.completeJson(built.payload, {
             signal: controller.signal,
-            repairHint: validation.errors.join('；')
+            maxTokens: maxTokens(),
+            repair
           })
-          calls += 1
-          promptTokens += response.usage.promptTokens
-          completionTokens += response.usage.completionTokens
-          validation = validateInduction(response.json, allowedEventIds)
+          spent.promptTokens += response.usage.promptTokens
+          spent.completionTokens += response.usage.completionTokens
+          return response
+        }
+
+        let validation: InductionValidation | undefined
+        let firstCallFailed = false
+        try {
+          const first = await call()
+          validation = validateInduction(first.json, allowedEventIds)
+        } catch (error) {
+          if (!(error instanceof LlmParseError)) throw error
+          firstCallFailed = true
+        }
+
+        if (firstCallFailed) {
+          // 空 content / 非法 JSON：同样给 1 次修复重试（m2-plan §4.2 / §6）
+          const repaired = await call({ errors: [PARSE_REPAIR_ERROR] })
+          validation = validateInduction(repaired.json, allowedEventIds)
+          if (!validation.ok) throw new LlmParseError('LLM 输出未通过校验')
+        } else if (validation && !validation.ok) {
+          // 首轮结构非法 → 用错误摘要做 1 次修复重试（错误文案不含事件原文）
+          const repaired = await call({ errors: validation.errors })
+          validation = validateInduction(repaired.json, allowedEventIds)
           if (!validation.ok) throw new LlmParseError('LLM 输出未通过校验')
         }
+        if (!validation) throw new LlmParseError('LLM 输出未通过校验')
         result = validation.result
-        usageTotals = { calls, promptTokens, completionTokens }
+        usageTotals = { calls: callsMade, promptTokens: spent.promptTokens, completionTokens: spent.completionTokens }
       }
 
       // 暂停期间返回的结果一律丢弃（D18）：落库前再确认一次未取消
@@ -193,8 +230,20 @@ export function createInductionService(options: InductionServiceOptions): Induct
         consumed: batch.consumed.length
       }
     } catch (error) {
+      // 失败 / 取消也已经消耗了 token：照实记账，否则失败循环永远绕得过每日预算
+      if (spent.promptTokens + spent.completionTokens > 0) {
+        try {
+          recordUsage(db, currentNow, {
+            calls: callsMade,
+            promptTokens: spent.promptTokens,
+            completionTokens: spent.completionTokens
+          })
+        } catch {
+          // 记账失败不影响主错误
+        }
+      }
       if (error instanceof LlmAbortError) {
-        setState({ status: 'idle' })
+        setState({ status: paused ? 'stopped' : 'idle' })
         return { status: 'aborted' }
       }
       const normalized = error instanceof Error ? error : new Error(String(error))
@@ -225,10 +274,12 @@ export function createInductionService(options: InductionServiceOptions): Induct
     start(): void {
       if (!stopped) return
       stopped = false
+      paused = false
       backoffAttempt = 0
       schedule(options.firstDelayMs ?? DEFAULT_FIRST_DELAY_MS)
     },
     stop(): void {
+      paused = true
       stopped = true
       clearTimer()
       activeController?.abort()
@@ -239,7 +290,7 @@ export function createInductionService(options: InductionServiceOptions): Induct
       return { ...state }
     },
     isActive(): boolean {
-      return !stopped
+      return !stopped && !paused
     }
   }
 }

@@ -6,7 +6,12 @@ import type { Db } from './index'
 
 export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'capture.diff_threshold': '8',
-  'capture.save_shots': '0'
+  'capture.save_shots': '0',
+  // M2 归纳（D18/D22；m2-plan §3 Phase 1）
+  'graph.auto': '1',
+  'graph.interval_minutes': '10',
+  'graph.budget_tokens_per_day': '1000000',
+  'graph.retry_backoff_minutes': '1,5,15'
 }
 
 export function getSetting(db: Db, key: string): string {

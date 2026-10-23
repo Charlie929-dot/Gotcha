@@ -18,5 +18,18 @@ export const LLM_DEFAULTS = {
   /** 出云字段截断（D19 / 成本控制） */
   appMaxChars: 80,
   titleMaxChars: 120,
-  ocrMaxChars: 200
+  ocrMaxChars: 200,
+  /** 取批：只处理 now - 5min 之前的事件（留出相邻事件合并窗口） */
+  batchLagMs: 5 * 60_000,
+  /** 同一 app + 标题、相邻 ≤ 90s 的事件合并为一个「时刻」 */
+  mergeGapMs: 90_000,
+  /** 单批最多时刻数 */
+  maxMoments: 20,
+  /** 单次查询事件上限（防止长期停机后一次拉爆内存；游标仍逐批推进） */
+  batchEventLimit: 5_000,
+  /** 归纳节点标题 / 摘要上限（prompt 与校验器共用） */
+  nodeTitleMaxChars: 24,
+  nodeSummaryMaxChars: 80,
+  /** 边 evidence 上限 */
+  edgeEvidenceMaxChars: 120
 } as const

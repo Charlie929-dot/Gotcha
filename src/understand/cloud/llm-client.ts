@@ -28,6 +28,11 @@ export interface LlmCompleteOptions {
   signal?: AbortSignal
   maxTokens?: number
   temperature?: number
+  /**
+   * 修复重试提示：上一次输出未通过校验时的错误摘要。
+   * 只允许校验器生成的固定文案（字段名 / 下标 / id / 上限），不得包含事件原文。
+   */
+  repairHint?: string
 }
 
 export interface LlmClient {
@@ -88,6 +93,8 @@ export type FakeLlmReply =
 /** 假客户端：按队列返回预置结果，记录请求供断言（测试 / E2E 专用） */
 export class FakeLlmClient implements LlmClient {
   readonly requests: CloudPayload[] = []
+  /** 每次调用的选项（signal / repairHint 等），供暂停 / 修复重试断言 */
+  readonly optionCalls: LlmCompleteOptions[] = []
   private readonly replies: FakeLlmReply[]
 
   constructor(replies: FakeLlmReply[] = []) {
@@ -107,6 +114,7 @@ export class FakeLlmClient implements LlmClient {
     options: LlmCompleteOptions = {}
   ): Promise<LlmJsonResult> {
     this.requests.push(payload)
+    this.optionCalls.push(options)
     if (options.signal?.aborted) throw new LlmAbortError()
     const reply = this.replies.shift()
     if (!reply) throw new Error('FakeLlmClient: 没有预置回复')

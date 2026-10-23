@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildCloudPayload, type CloudPayload, type RedactableEvent } from '../../src/understand/cloud/redact'
+import { buildCloudPayload, buildCloudMomentPayload, type CloudPayload, type RedactableEvent } from '../../src/understand/cloud/redact'
 import { LLM_DEFAULTS } from '../../src/understand/cloud/constants'
 
 function event(overrides: Partial<RedactableEvent> = {}): RedactableEvent {
@@ -23,7 +23,15 @@ describe('buildCloudPayload · 出云唯一出口', () => {
   it('只输出必要字段并做空白归一化', () => {
     const result = buildCloudPayload([event({ windowTitle: '  标题\n  第二行 ', ocrText: ' a   b\t c ' })])
     expect(result.payload.events).toEqual([
-      { id: 1, ts: 1_700_000_000_000, app: 'notepad.exe', title: '标题 第二行', ocr: 'a b c' }
+      {
+        id: 1,
+        ts: 1_700_000_000_000,
+        tsEnd: 1_700_000_000_000,
+        app: 'notepad.exe',
+        title: '标题 第二行',
+        ocr: 'a b c',
+        eventIds: [1]
+      }
     ])
     expect(result.redactedIds).toEqual([])
     expect(result.excludedIds).toEqual([])
@@ -52,13 +60,49 @@ describe('buildCloudPayload · 出云唯一出口', () => {
           {
             id: 1,
             ts: 1_700_000_000_000,
+            tsEnd: 1_700_000_000_000,
             app: 'notepad.exe',
             title: '未命名 - 记事本',
-            ocr: '普通内容'
+            ocr: '普通内容',
+            eventIds: [1]
           }
         ]
       })
     )
+  })
+
+  it('时刻载荷：ts 区间、event_ids 合并；整条不可剥离时其所有事件 id 进 excludedIds', () => {
+    const result = buildCloudMomentPayload([
+      {
+        app: 'chrome.exe',
+        title: '搜索结果',
+        startTs: 1_700_000_000_000,
+        endTs: 1_700_000_030_000,
+        ocr: 'rust 生命周期',
+        eventIds: [11, 12]
+      },
+      {
+        app: '1password.exe',
+        title: '密码库',
+        startTs: 1_700_000_100_000,
+        endTs: 1_700_000_100_000,
+        ocr: 'vault',
+        eventIds: [13, 14]
+      }
+    ])
+    expect(result.payload.events).toEqual([
+      {
+        id: 11,
+        ts: 1_700_000_000_000,
+        tsEnd: 1_700_000_030_000,
+        app: 'chrome.exe',
+        title: '搜索结果',
+        ocr: 'rust 生命周期',
+        eventIds: [11, 12]
+      }
+    ])
+    expect(result.excludedIds).toEqual([13, 14])
+    expect(result.redactedIds).toEqual([])
   })
 
   it('非 sensitive 事件若含敏感形态也剥离（双保险），序列化后不含原文', () => {

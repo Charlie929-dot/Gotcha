@@ -213,4 +213,111 @@ describe('CapturePipeline · 管线语义', () => {
       db.close()
     }
   })
+
+  it('OCR 失败后同帧下个 tick 可重试成功（失败不当作已记录）', async () => {
+    let calls = 0
+    const recognize = vi.fn(async () => {
+      calls++
+      if (calls === 1) throw new Error('transient ocr failure')
+      return { text: '项目计划', ms: 4 }
+    })
+    const { db, pipeline } = makeHarness({ ocr: { recognize, dispose: vi.fn() } })
+    try {
+      await pipeline.tick()
+      await pipeline.flush()
+      expect(eventCount(db)).toBe(0)
+
+      await pipeline.tick() // 同帧、同 hash
+      await pipeline.flush()
+      expect(recognize).toHaveBeenCalledTimes(2)
+      expect(eventCount(db)).toBe(1)
+      expect(pipeline.getStats()).toMatchObject({ frames_same: 0, capture_errors: 1 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('同帧连续 OCR 失败到上限后停止重试，内容变化后恢复记录', async () => {
+    let current = 1
+    const recognize = vi.fn(async () => {
+      throw new Error('ocr down')
+    })
+    const { db, pipeline } = makeHarness({
+      captureWindow: async () => frame(current),
+      dedupMaxRetries: 2,
+      ocr: { recognize, dispose: vi.fn() }
+    })
+    try {
+      await pipeline.tick()
+      await pipeline.flush() // 失败 1
+      await pipeline.tick()
+      await pipeline.flush() // 失败 2 → 到顶，提交指纹
+      expect(recognize).toHaveBeenCalledTimes(2)
+
+      await pipeline.tick() // 同帧：已提交，不再 OCR
+      await pipeline.flush()
+      expect(recognize).toHaveBeenCalledTimes(2)
+      expect(pipeline.getStats().frames_same).toBe(1)
+
+      current = 2 // 内容变化 → 重新尝试
+      await pipeline.tick()
+      await pipeline.flush()
+      expect(recognize).toHaveBeenCalledTimes(3)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('跨应用相同像素不互相吞帧（去重按 app+title 分 key）', async () => {
+    let win: WindowInfo = { ...WINDOW }
+    const { db, pipeline } = makeHarness({
+      getActiveWindow: async () => win,
+      captureWindow: async () => frame(1)
+    })
+    try {
+      await pipeline.tick()
+      await pipeline.flush()
+
+      win = { ...WINDOW, app: 'chrome', title: '另一个窗口' }
+      await pipeline.tick()
+      await pipeline.flush()
+
+      const rows = queryTimeline(db, 0, 10_000)
+      expect(rows).toHaveLength(2)
+      expect(rows.map((row) => row.app)).toEqual(['notepad', 'chrome'])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('队列满丢帧不算已记录：同帧下个 tick 仍会尝试入队', async () => {
+    const { db, pipeline, ocr } = makeHarness({ queue: new OcrQueue(0) })
+    try {
+      await pipeline.tick()
+      await pipeline.flush()
+      await pipeline.tick()
+      await pipeline.flush()
+      expect(ocr.recognize).not.toHaveBeenCalled()
+      expect(pipeline.getStats()).toMatchObject({ queue_dropped: 2, frames_same: 0 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('密码规则整帧丢弃后同帧不再重复 OCR', async () => {
+    const { db, pipeline, ocr } = makeHarness({}, () => '请输入密码')
+    try {
+      await pipeline.tick()
+      await pipeline.flush()
+      expect(ocr.recognize).toHaveBeenCalledTimes(1)
+
+      await pipeline.tick()
+      await pipeline.flush()
+      expect(ocr.recognize).toHaveBeenCalledTimes(1)
+      expect(pipeline.getStats().frames_same).toBe(1)
+      expect(eventCount(db)).toBe(0)
+    } finally {
+      db.close()
+    }
+  })
 })

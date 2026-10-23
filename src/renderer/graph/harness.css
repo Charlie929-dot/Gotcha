@@ -1,0 +1,416 @@
+:root {
+  color-scheme: dark;
+  --bg: #121218;
+  --panel: #1b1b23;
+  --panel-2: #22222c;
+  --border: #2e2e3a;
+  --text: #e8e8ef;
+  --muted: #9a9aab;
+  --knowledge: #4fc3f7;
+  --activity: #81c784;
+  --protected: #9e9e9e;
+  --moment: #58677c;
+  --accent: #ffd166;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 system-ui, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  overflow: hidden;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status[data-kind="error"] {
+  color: #ef5350;
+}
+
+.status[data-kind="ready"] {
+  color: var(--activity);
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+}
+
+.chip select {
+  background: transparent;
+  color: var(--text);
+  border: 0;
+  font: inherit;
+  outline: none;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: #46505f;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button.primary {
+  background: var(--knowledge);
+  border-color: var(--knowledge);
+  color: #0b1016;
+  font-weight: 600;
+}
+
+.stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.canvas-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+foam-graph {
+  position: absolute;
+  inset: 0;
+}
+
+.count,
+.hud {
+  position: absolute;
+  top: 12px;
+  z-index: 3;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgb(18 18 24 / 78%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 9px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.count {
+  left: 12px;
+}
+
+.hud {
+  right: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  z-index: 4;
+}
+
+.state[hidden] {
+  display: none;
+}
+
+.calendar {
+  position: absolute;
+  top: 52px;
+  left: 12px;
+  width: 296px;
+  z-index: 6;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px 12px;
+  box-shadow: 0 14px 40px rgb(0 0 0 / 45%);
+}
+
+.calendar[hidden] {
+  display: none;
+}
+
+.cal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.cal-head strong {
+  font-size: 13px;
+}
+
+.cal-weekdays,
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 3px;
+}
+
+.cal-weekdays {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  margin-bottom: 4px;
+}
+
+.cal-grid button {
+  position: relative;
+  height: 32px;
+  padding: 0;
+  font-size: 12px;
+  border-radius: 7px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+}
+
+.cal-grid button.dim {
+  color: #5c5c6b;
+}
+
+.cal-grid button:hover {
+  background: var(--panel-2);
+}
+
+.cal-grid button.on {
+  background: rgb(79 195 247 / 18%);
+  border-color: rgb(79 195 247 / 55%);
+  color: #bfeaff;
+}
+
+.cal-grid button.today {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.cal-grid button.today::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 3px;
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.cal-presets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.cal-presets button {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.cal-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.focus-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 6px 14px;
+  background: rgb(27 27 35 / 92%);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  z-index: 5;
+}
+
+.focus-bar[hidden] {
+  display: none;
+}
+
+.legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  z-index: 3;
+  pointer-events: none;
+}
+
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot.knowledge {
+  background: var(--knowledge);
+}
+
+.dot.activity {
+  background: var(--activity);
+}
+
+.dot.protected {
+  background: var(--protected);
+}
+
+.dot.moment {
+  width: 6px;
+  height: 6px;
+  background: var(--moment);
+}
+
+.panel {
+  flex: 0 0 320px;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: 12px 14px 18px;
+  overflow-y: auto;
+}
+
+.panel[hidden] {
+  display: none;
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-head h2 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.panel-meta {
+  margin: 8px 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.panel-body h3 {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.panel-body ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.panel-body li {
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #cfd8dc;
+  cursor: pointer;
+}
+
+.panel-body li:hover {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+
+.panel-body .hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.footer {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  background: var(--panel);
+}

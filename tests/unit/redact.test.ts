@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildCloudPayload, type RedactableEvent } from '../../src/understand/cloud/redact'
+import { buildCloudPayload, type CloudPayload, type RedactableEvent } from '../../src/understand/cloud/redact'
 import { LLM_DEFAULTS } from '../../src/understand/cloud/constants'
 
 function event(overrides: Partial<RedactableEvent> = {}): RedactableEvent {
@@ -115,5 +115,16 @@ describe('buildCloudPayload · 出云唯一出口', () => {
     const result = buildCloudPayload([event({ ocrText: text })], { ocrMaxChars: 10 })
     expect(result.payload.events[0].ocr).toBe('[已脱敏] xxxx')
     expect(JSON.stringify(result.payload)).not.toContain(SECRET_API_KEY.slice(0, 10))
+  })
+
+  it('brand 只接受 buildCloudPayload 产出（typecheck 兜底：字面量 / 改写字段都编译不过）', () => {
+    const real = buildCloudPayload([event()]).payload
+    // @ts-expect-error 业务代码不能直接用字面量伪造 CloudPayload（缺 brand）
+    const fake: CloudPayload = { events: [] }
+    expect(fake.events).toEqual([])
+    // @ts-expect-error 事件字段只读，不能把已脱敏载荷改回原文
+    real.events[0].ocr = 'RAW'
+    // 运行时仍以类型为准：以上两行由图外 typecheck（tsconfig include tests）兜住
+    expect(typeof real.events[0].ocr).toBe('string')
   })
 })

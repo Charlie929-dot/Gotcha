@@ -97,7 +97,7 @@ tests/
   - `sensitive=1` 事件按 Q3 结论处理：先剥离命中片段替换为 `[已脱敏]`，再二次扫描；仍命中（或命中密码类 drop 规则）则整条不进载荷（`excludedIds`），本地记「内容已保护」占位（Phase 1 生成占位节点）。
   - 产出 `CloudPayload` 带 nominal brand：LLM 客户端只接收该类型，业务代码无法直接拼 messages 绕过脱敏；**单测断言 `JSON.stringify(payload)` 不包含任何 golden 敏感串**。
 - **`llm-client.ts` / `deepseek.ts` / `providers.ts`**：契约 `completeJson(payload: CloudPayload, { signal?, maxTokens?, temperature? })`；实现含 AbortController 超时 60s、外部 `AbortSignal` 取消（暂停 D18，取消不重试）、429/5xx/网络错误指数退避重试 2 次（1s / 4s）、4xx（除 429）不重试、JSON 解析失败抛类型化错误；`response_format: {type: 'json_object'}`、`temperature: 0`、`max_tokens: 2000`；`redirect: 'error'` 禁止跟随重定向（避免 Authorization 头被 302 带走）。供应商层按 D21 支持预设 + 自定义 OpenAI 兼容配置（baseUrl / model / apiKeyEnv），**URL 仅 https，本机网关（localhost / 127.0.0.1 / ::1）允许 http；拒绝 URL 内凭据 / query / fragment**；不引 HTTP 依赖（Electron/Node 内置 fetch）。
-- **key 载入**：`userData/.env` 解析 + 环境变量回退；只读不落库；缺失 → 返回「未配置」状态，不抛到采集链路。测试覆盖 `.env` 解析（注释/空行/引号/CRLF）、env 回退、多供应商选择与未知供应商回退。
+- **key 载入**：`userData/.env` 解析 + 环境变量回退；只读不落库；缺失 → 返回「未配置」状态，不抛到采集链路。测试覆盖 `.env` 解析（注释/空行/引号/CRLF）、env 回退、多供应商选择；未知供应商 / 非法 providers JSON / 缺密钥都返回明确原因（不静默回退默认供应商，避免数据发往用户以为已替换的远端）。
 - **测试**：迁移（含备份）、redact golden（含 app 字段 / 先剥离后截断）、客户端重试/超时/取消/重定向禁用/用量（假 fetch 注入）、供应商解析与 URL 策略、无 key 分支。全程零真实网络。
 
 ### Phase 1 · 归纳管线（约 2–3 天）

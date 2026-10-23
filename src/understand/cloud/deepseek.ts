@@ -10,6 +10,7 @@
  */
 
 import { LLM_DEFAULTS } from './constants'
+import { normalizeBaseUrl } from './providers'
 import {
   LlmAbortError,
   LlmError,
@@ -92,7 +93,10 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient {
-  const baseUrl = options.baseUrl.replace(/\/+$/, '')
+  // 客户端自己再校验一次 URL 策略：直接构造客户端也绕不过「仅 https / 本机 http」，
+  // 避免密钥被明文发出（providers.ts 的校验只覆盖经过 settings 的路径）
+  const baseUrl = normalizeBaseUrl(options.baseUrl)
+  if (!baseUrl) throw new LlmError('baseUrl 不合法（仅允许 https，或本机 http）', 'config')
   const timeoutMs = options.timeoutMs ?? LLM_DEFAULTS.timeoutMs
   const maxRetries = options.maxRetries ?? LLM_DEFAULTS.maxRetries
   const retryBaseMs = options.retryBaseMs ?? LLM_DEFAULTS.retryBaseMs

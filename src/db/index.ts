@@ -61,14 +61,27 @@ export function backupStamp(date = new Date()): string {
 
 /**
  * 迁移前备份：先 checkpoint 把 WAL 落进主库，再整文件复制。
- * 备份失败直接抛错（宁可启动失败，也不在无备份的情况下改用户库）。
+ * - better-sqlite3 的 `wal_checkpoint(TRUNCATE)` 在被占用时**不抛错**，而是返回
+ *   `[{ busy: 1, checkpointed: 0 }]`（PR #23 复审实测）；因此必须检查返回值，
+ *   busy 时中止迁移——否则备份缺 WAL 里的已提交数据，回滚不成立；
+ * - 备份失败 / checkpoint 未完成都中止启动（宁可启动失败，也不在无备份的情况下改用户库）。
  */
 function backupBeforeMigration(db: Db, filePath: string): string {
-  try {
-    db.pragma('wal_checkpoint(TRUNCATE)')
-  } catch {
-    // checkpoint 被占用时仍继续复制主库文件；WAL 内容会在备份中缺失，
-    // 但下一次启动会重新尝试，不静默跳过备份。
+  const checkpoint = (db.pragma('wal_checkpoint(TRUNCATE)') ?? []) as Array<{
+    busy?: number
+    checkpointed?: number
+    log?: number
+  }>
+  // busy=1 表示 WAL 未截断，但已提交帧可能都进了主库（checkpointed == log），此时整文件复制是完整的；
+  // 只有 checkpointed < log 才说明有已提交数据还在 WAL 里，复制主库会丢数据 → 中止迁移。
+  const incomplete = checkpoint.some(
+    (row) =>
+      typeof row.log === 'number' && typeof row.checkpointed === 'number' && row.checkpointed < row.log
+  )
+  if (incomplete) {
+    throw new Error(
+      `迁移前 WAL checkpoint 未完成（数据库被占用）：${filePath}；请关闭占用该库的进程后重试`
+    )
   }
   const backupPath = `${filePath}.bak.${backupStamp()}`
   copyFileSync(filePath, backupPath)
@@ -85,10 +98,16 @@ export function openDatabase(filePath: string): Db {
   }
   db.pragma('busy_timeout = 5000')
 
-  if (existed && getSchemaVersion(db) < LATEST_SCHEMA_VERSION) {
-    backupBeforeMigration(db, filePath)
+  try {
+    if (existed && getSchemaVersion(db) < LATEST_SCHEMA_VERSION) {
+      backupBeforeMigration(db, filePath)
+    }
+    applyMigrations(db)
+  } catch (error) {
+    // 迁移失败必须释放句柄（Windows 上不 close 会让用户无法用 .bak 覆盖恢复，EBUSY）
+    db.close()
+    throw error
   }
-  applyMigrations(db)
   return db
 }
 

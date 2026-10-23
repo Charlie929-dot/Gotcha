@@ -21,11 +21,11 @@ export interface RedactableEvent {
 }
 
 export interface CloudEvent {
-  id: number
-  ts: number
-  app: string
-  title: string
-  ocr: string
+  readonly id: number
+  readonly ts: number
+  readonly app: string
+  readonly title: string
+  readonly ocr: string
 }
 
 declare const cloudPayloadBrand: unique symbol

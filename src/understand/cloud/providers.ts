@@ -5,7 +5,9 @@
  * - 预设 DeepSeek；可加自定义 OpenAI 兼容供应商（baseUrl / model）；
  * - 只存环境变量名，密钥值从进程环境 / `userData/.env` 读取，不进 settings、不落日志；
  * - URL 只允许 https；本地网关（localhost / 127.0.0.1 / ::1）允许 http；拒绝 URL 内凭据、
- *   query、fragment（审查发现「自定义供应商允许任意 HTTP」与凭据回落风险）。
+ *   query、fragment（审查发现「自定义供应商允许任意 HTTP」与凭据回落风险）；
+ * - providers 缺失 / `[]` → 默认 DeepSeek；非空但 JSON 坏 / 结构非法 → `invalid-providers`
+ *   （不静默回退默认远端，避免把数据发给用户以为已替换掉的供应商）。
  */
 
 import { LLM_DEFAULTS } from './constants'
@@ -36,6 +38,7 @@ export const DEFAULT_ACTIVE_PROVIDER = DEFAULT_PROVIDER.id
 export type ResolvedLlmProvider =
   | { ok: true; provider: LlmProvider; apiKey: string }
   | { ok: false; reason: 'unknown-provider'; providerId: string }
+  | { ok: false; reason: 'invalid-providers' }
   | { ok: false; reason: 'missing-key'; providerId: string; apiKeyEnv: string }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -86,23 +89,39 @@ export function parseProvider(raw: unknown): LlmProvider | null {
   }
 }
 
-/** 解析 settings.llm.providers（JSON 数组）；缺失 / 非法 / 空列表 → 默认 DeepSeek 预设 */
-export function parseProviders(raw: string | null | undefined): LlmProvider[] {
-  if (!raw) return [{ ...DEFAULT_PROVIDER }]
+export interface ProvidersConfigResult {
+  providers: LlmProvider[]
+  /** true = 配置存在但无法解析（调用方必须报配置错误，不得静默回退默认远端供应商） */
+  invalid: boolean
+}
+
+/**
+ * 解析 settings.llm.providers（JSON 数组）。
+ * - 缺失 / 空串 / `[]` → 默认 DeepSeek 预设（未配置即默认，属正常路径）；
+ * - 非空但 JSON 坏 / 不是数组 / 所有项都非法 → `invalid: true`：用户明明配了供应商却解析失败，
+ *   静默回落 DeepSeek 会把数据发给用户以为已替换掉的远端（PR #23 复审 finding）。
+ */
+export function parseProvidersConfig(raw: string | null | undefined): ProvidersConfigResult {
+  if (raw == null || raw.trim() === '') return { providers: [{ ...DEFAULT_PROVIDER }], invalid: false }
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch {
-    return [{ ...DEFAULT_PROVIDER }]
+    return { providers: [], invalid: true }
   }
-  if (!Array.isArray(parsed)) return [{ ...DEFAULT_PROVIDER }]
+  if (!Array.isArray(parsed)) return { providers: [], invalid: true }
   const providers: LlmProvider[] = []
   for (const item of parsed) {
     const provider = parseProvider(item)
     // 同 id 去重：先出现者生效，避免重复键导致不可预期选择
     if (provider && !providers.some((p) => p.id === provider.id)) providers.push(provider)
   }
-  return providers.length > 0 ? providers : [{ ...DEFAULT_PROVIDER }]
+  if (providers.length === 0) {
+    return parsed.length === 0
+      ? { providers: [{ ...DEFAULT_PROVIDER }], invalid: false }
+      : { providers: [], invalid: true }
+  }
+  return { providers, invalid: false }
 }
 
 /**
@@ -138,11 +157,16 @@ export function resolveLlmProvider(
   return { ok: true, provider, apiKey }
 }
 
-/** 从 settings 两键直接解析（Phase 1 调度层用） */
+/**
+ * 从 settings 两键直接解析（Phase 1 调度层用）。
+ * providers JSON 坏 / 结构非法 → `invalid-providers`，不得回退默认供应商。
+ */
 export function resolveFromSettings(
   settings: LlmProvidersSettings,
   env: Record<string, string | undefined>,
   fileEnv: Record<string, string> = {}
 ): ResolvedLlmProvider {
-  return resolveLlmProvider(settings.active, parseProviders(settings.providers), env, fileEnv)
+  const parsed = parseProvidersConfig(settings.providers)
+  if (parsed.invalid) return { ok: false, reason: 'invalid-providers' }
+  return resolveLlmProvider(settings.active, parsed.providers, env, fileEnv)
 }

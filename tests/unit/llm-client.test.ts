@@ -103,6 +103,21 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
     expect(fetchImpl.mock.calls[0][0]).toBe('https://api.deepseek.com/chat/completions')
   })
 
+  it('直接构造客户端也执行 URL 策略：远端明文 http 拒绝，本机 http 允许', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => okResponse('{}'))
+    expect(() => makeClient(fetchImpl as unknown as typeof fetch, { baseUrl: 'http://evil.example.com' })).toThrow(
+      LlmError
+    )
+    expect(() =>
+      makeClient(fetchImpl as unknown as typeof fetch, { baseUrl: 'https://user:pass@example.com' })
+    ).toThrow(LlmError)
+    expect(fetchImpl).not.toHaveBeenCalled()
+
+    const local = makeClient(fetchImpl as unknown as typeof fetch, { baseUrl: 'http://127.0.0.1:8000/v1' })
+    await local.completeJson(payload())
+    expect(fetchImpl.mock.calls[0][0]).toBe('http://127.0.0.1:8000/v1/chat/completions')
+  })
+
   it('500 后重试成功，退避按 1x 基数（注入 sleep 不真等）', async () => {
     const responses = [new Response('', { status: 500 }), okResponse('{"ok":true}')]
     const fetchImpl = vi.fn(async () => responses.shift()!)

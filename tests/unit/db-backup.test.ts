@@ -84,6 +84,37 @@ describe('openDatabase · 迁移前自动备份', () => {
     }
   })
 
+  it('WAL 有已提交数据且 checkpoint 不完整（其它连接持旧快照）时中止迁移，不产出不完整备份', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gotcha-backup-busy-'))
+    const file = join(dir, 'memory.db')
+    const writer = new Database(file)
+    const reader = new Database(file)
+    try {
+      applyMigrations(writer)
+      revertMigrations(writer, 1)
+      writer.pragma('journal_mode = WAL')
+      writer.prepare("INSERT INTO events (ts, app) VALUES (1, 'before-snapshot')").run()
+
+      // 读者拿旧快照：之后写入的帧无法被 checkpoint 到主库
+      reader.pragma('busy_timeout = 5000')
+      reader.exec('BEGIN')
+      reader.prepare('SELECT COUNT(*) FROM events').get()
+      writer.prepare("INSERT INTO events (ts, app) VALUES (2, 'after-snapshot')").run()
+
+      // checkpoint 5s 后被占用 → checkpointed < log → 必须中止启动（备份会是残缺的）
+      expect(() => openDatabase(file)).toThrow(/checkpoint 未完成/)
+      expect(backups(dir)).toHaveLength(0)
+    } finally {
+      try {
+        reader.exec('ROLLBACK')
+      } finally {
+        reader.close()
+        writer.close()
+        rmSync(dir, { recursive: true, force: true })
+      }
+    }
+  }, 15_000)
+
   it(':memory: 库不备份', () => {
     const db = openDatabase(':memory:')
     try {

@@ -41,7 +41,8 @@
 ## 破坏性操作
 
 - 删除/覆盖/迁移数据：先确认路径与范围 → 备份（库文件命名 `<库名>.db.bak.<日期>`，库名以 M1 建库定稿为准，暂定 `memory.db`）→ 执行 → 保证可回滚。
-- schema 迁移由 `openDatabase()` 自动执行：**文件库 schema 落后时先 checkpoint 再整文件备份**为 `memory.db.bak.<yyyy-MM-dd-HHmmss>`；备份失败则中止启动，不在无备份时改用户库（M2 Phase 0）。
+- schema 迁移由 `openDatabase()` 自动执行：**文件库 schema 落后时先 checkpoint 再整文件备份**为 `memory.db.bak.<yyyy-MM-dd-HHmmss>`；checkpoint 不完整（checkpointed < log，库被其它连接占用）或备份失败则**中止启动**，不在无备份时改用户库（M2 Phase 0）。
+- 用 `.bak` 恢复：先关应用、**删除同目录的 `memory.db-wal` / `memory.db-shm`** 再把备份复制回 `memory.db`；否则残留 WAL 会被重放，备份看起来「没生效」。
 - 清空事件/截图/整库前必须得到明确确认。
 
 ## 权限与 AV

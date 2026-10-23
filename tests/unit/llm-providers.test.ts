@@ -7,7 +7,7 @@ import {
   DEFAULT_PROVIDER,
   normalizeBaseUrl,
   parseProvider,
-  parseProviders,
+  parseProvidersConfig,
   resolveFromSettings,
   resolveLlmProvider
 } from '../../src/understand/cloud/providers'
@@ -59,16 +59,20 @@ describe('providers · 多供应商配置（D21）', () => {
     apiKeyEnv: 'LOCAL_KEY'
   }
 
-  it('缺失 / 非法配置回退默认 DeepSeek 预设', () => {
-    expect(parseProviders(null)).toEqual([{ ...DEFAULT_PROVIDER }])
-    expect(parseProviders('{oops')).toEqual([{ ...DEFAULT_PROVIDER }])
-    expect(parseProviders('{"active":"x"}')).toEqual([{ ...DEFAULT_PROVIDER }])
-    expect(parseProviders('[]')).toEqual([{ ...DEFAULT_PROVIDER }])
-    expect(parseProviders('[{"id":""}]')).toEqual([{ ...DEFAULT_PROVIDER }])
+  it('缺失 / 空串 / 空数组回退默认 DeepSeek 预设（未配置属正常路径）', () => {
+    expect(parseProvidersConfig(null)).toEqual({ providers: [{ ...DEFAULT_PROVIDER }], invalid: false })
+    expect(parseProvidersConfig('')).toEqual({ providers: [{ ...DEFAULT_PROVIDER }], invalid: false })
+    expect(parseProvidersConfig('[]')).toEqual({ providers: [{ ...DEFAULT_PROVIDER }], invalid: false })
+  })
+
+  it('非空但 JSON 坏 / 非数组 / 全部非法 → invalid，不静默回退远端默认供应商', () => {
+    for (const raw of ['{oops', '{"active":"x"}', '[{"id":""}]', '[]oops']) {
+      expect(parseProvidersConfig(raw), raw).toEqual({ providers: [], invalid: true })
+    }
   })
 
   it('解析自定义 OpenAI 兼容供应商、去重并拒绝不安全 URL', () => {
-    const providers = parseProviders(
+    const providers = parseProvidersConfig(
       JSON.stringify([
         { ...DEFAULT_PROVIDER, baseUrl: 'https://api.deepseek.com/' },
         CUSTOM,
@@ -77,7 +81,7 @@ describe('providers · 多供应商配置（D21）', () => {
         { id: 'bad-http', label: '明文远程', baseUrl: 'http://evil.example.com', model: 'x', apiKeyEnv: 'X' },
         { id: 'bad-cred', label: 'URL 带凭据', baseUrl: 'https://user:pass@example.com', model: 'x', apiKeyEnv: 'X' }
       ])
-    )
+    ).providers
     expect(providers.map((p) => p.id)).toEqual(['deepseek', 'local'])
     // 末尾斜杠被规范化掉，避免拼出 //chat/completions
     expect(providers[0].baseUrl).toBe('https://api.deepseek.com')
@@ -105,7 +109,7 @@ describe('providers · 多供应商配置（D21）', () => {
   })
 
   it('密钥优先取进程环境，其次 .env；空环境变量不遮蔽 .env', () => {
-    const providers = parseProviders(JSON.stringify([DEFAULT_PROVIDER]))
+    const providers = parseProvidersConfig(JSON.stringify([DEFAULT_PROVIDER])).providers
     expect(
       resolveLlmProvider('deepseek', providers, { DEEPSEEK_API_KEY: 'from-env' }, { DEEPSEEK_API_KEY: 'from-file' })
     ).toMatchObject({ ok: true, apiKey: 'from-env' })
@@ -131,20 +135,20 @@ describe('providers · 多供应商配置（D21）', () => {
   })
 
   it('active 缺省时优先 DeepSeek，否则取第一个', () => {
-    const onlyCustom = parseProviders(JSON.stringify([CUSTOM]))
+    const onlyCustom = parseProvidersConfig(JSON.stringify([CUSTOM])).providers
     expect(resolveLlmProvider(null, onlyCustom, {}, {})).toMatchObject({
       ok: false,
       reason: 'missing-key',
       providerId: 'local'
     })
-    const withDefault = parseProviders(JSON.stringify([CUSTOM, DEFAULT_PROVIDER]))
+    const withDefault = parseProvidersConfig(JSON.stringify([CUSTOM, DEFAULT_PROVIDER])).providers
     expect(resolveLlmProvider(undefined, withDefault, { DEEPSEEK_API_KEY: 'k' }, {})).toMatchObject({
       ok: true,
       provider: { id: 'deepseek' }
     })
   })
 
-  it('resolveFromSettings 读取 llm.active_provider + llm.providers 两键契约', () => {
+  it('resolveFromSettings 按 llm.active_provider + llm.providers 两键契约解析；非法 JSON 报配置错误', () => {
     expect(
       resolveFromSettings(
         { active: 'local', providers: JSON.stringify([DEFAULT_PROVIDER, CUSTOM]) },
@@ -158,6 +162,12 @@ describe('providers · 多供应商配置（D21）', () => {
       reason: 'missing-key',
       providerId: 'deepseek',
       apiKeyEnv: 'DEEPSEEK_API_KEY'
+    })
+
+    // 用户配了自定义供应商但 JSON 写坏：必须报错，不能静默换成 DeepSeek（数据发错远端）
+    expect(resolveFromSettings({ active: 'local', providers: '{oops' }, { DEEPSEEK_API_KEY: 'sk-x' })).toEqual({
+      ok: false,
+      reason: 'invalid-providers'
     })
   })
 })

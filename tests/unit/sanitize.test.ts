@@ -36,7 +36,10 @@ describe('sanitize · 脱敏标记（D10：本地保留原文）', () => {
     const cases = [
       'Authorization: Bearer abcDEF123._-xyz',
       'curl -H "Authorization: Basic dXNlcjpwYXNzd29yZA=="',
-      'Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature'
+      'Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature',
+      // percent-encoded / 冒号分隔等非 RFC 6750 b64token 形态也要兜住（PR #23 复审发现漏检）
+      'Bearer abc%2Fdef%3Dxyz',
+      'Bearer abc:def:ghijkl'
     ]
     for (const text of cases) {
       expect(sanitize(text).sensitive, text).toBe(true)

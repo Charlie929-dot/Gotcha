@@ -1,6 +1,7 @@
-# M2 知识行为图谱 · 实施方案（v0.1 草案）
+# M2 知识行为图谱 · 实施方案（v0.2）
 
-> 状态：**待拍板（2026-10-23 起草）**。§8 的 Q1–Q8 需拍板人书面结论后才动代码；本文件批准后作为 M2 事实源，收口时归档至 `docs/archive/m2-plan.md`。
+> 状态：**已获书面拍板（2026-10-23）**，本文件作为 M2 事实源，收口时归档至 `docs/archive/m2-plan.md`。Q1–Q8 结论见 §8，留痕 decisions.md D17–D23。
+> v0.1 → v0.2：按拍板结论修订——Q4 改为注册 `Alt+Space` 且热键可配置 + 冲突检测；Q6 改为多供应商 / 自定义 OpenAI 兼容供应商配置；Q7 改为归纳参数全部可调（不写死）；补 Phase 2 设置面板与快捷键管理。
 > 上游依据：技术方案 §3 / §4 / §5.1 / §6.2 / §7（M2 行）/ §7.1；策划案 §6 模块二、§8.2、§9（V0.5）；decisions D5 / D8 / D10 / D12 / D14；security.md、testing.md、workflow.md、gotchas.md。
 > 范围边界：M2 只做「L1 知识/行为节点 + 带权边 + sigma.js 力导向画布 + 点击节点看原始记录」。**不做**：L2+ 日/周/月归纳与完整 LOD 语义（M3）、解说五区块（M4）、主动弱提示（M4）、数据清理/导出/Obsidian（M5）、embedding 与向量检索（M3）、本地模型（二期）。
 > 修订轨迹：v0.1 初稿（2026-10-23）。
@@ -44,7 +45,9 @@ src/
 │  ├─ cloud/
 │  │  ├─ redact.ts          # 出云唯一出口：字段裁剪 / 截断 / sensitive 剥离 / 二次校验
 │  │  ├─ llm-client.ts      # 客户端契约 completeJson() + 假实现（测试 / E2E）
-│  │  └─ deepseek.ts        # OpenAI 兼容实现：超时、429/5xx 退避重试、用量提取
+│  │  ├─ providers.ts       # 多供应商配置：预设 + 自定义 OpenAI 兼容（baseUrl / model / 密钥来源）
+│  │  ├─ env-file.ts        # userData/.env 手写解析（KEY=VALUE，不引 dotenv）
+│  │  └─ deepseek.ts        # OpenAI 兼容客户端实现：超时、429/5xx 退避重试、用量提取
 │  └─ structure/
 │     ├─ schema.ts          # 归纳结果 JSON 契约 + 手写校验器（零依赖）
 │     └─ prompt.ts          # system / user prompt 构造（含 schema 示例，满足 JSON Output 要求）
@@ -59,24 +62,29 @@ src/
 │  └─ migrations.ts         # v2 迁移（up / down）
 ├─ main/
 │  ├─ graph-window.ts       # 图谱窗口（单例、lazy 创建、关闭即销毁）
+│  ├─ hotkeys.ts            # 热键注册重构：可配置 + 冲突检测 + 失败提示 + 重新注册（D20）
 │  └─ index.ts              # 接线：IPC、toggle 联动、退出收口
 └─ renderer/
    ├─ graph/
    │  ├─ graph.html / graph.css
    │  ├─ graph.ts           # sigma 初始化、数据加载、交互接线
    │  ├─ graph-view.ts      # 纯函数：样式映射、邻域高亮、时间窗过滤（可单测）
-   │  └─ graph-panel.ts     # 节点详情侧栏：成员事件 + 跳时间线
-   └─ graph-preload.ts      # 最小权限：查询 / 状态订阅 / 手动归纳 / 自动归纳开关
+   │  ├─ graph-panel.ts     # 节点详情侧栏：成员事件 + 跳时间线
+   │  └─ graph-settings.ts  # 设置抽屉：归纳参数 / 供应商与模型 / 快捷键（D21/D22）
+   └─ graph-preload.ts      # 最小权限：查询 / 状态订阅 / 手动归纳 / 设置读写 / 热键重绑
 tests/
 ├─ unit/redact.test.ts / structure-schema.test.ts / batch.test.ts / induction.test.ts /
 │       graph-repository.test.ts / graph-query.test.ts / graph-view.test.ts /
-│       graph-service.test.ts（+ migrations / timeline 既有用例扩展）
+│       graph-service.test.ts / providers.test.ts / hotkeys-config.test.ts（+ migrations / timeline 既有用例扩展）
 └─ e2e/graph.spec.ts
 ```
 
 - **schema v2**（按技术方案 §4 原文，不改字段名）：`nodes(id, level, type, title, summary, ts_start, ts_end, source_events, meta_json)`、`edges(id, src, dst, weight, kind, evidence)`；索引 `idx_nodes_ts_start`、`idx_nodes_level`、`idx_edges_src`、`idx_edges_dst`。不新增表（`node_events` 之类不建，`source_events` 用 `json_each` 解析）。
-- **settings 键**（不建新表）：`graph.cursor_ts` / `graph.cursor_id`（归纳游标）、`graph.auto`（`1` 默认 = 采集运行中自动归纳，`0` 关闭）、`graph.usage.<yyyy-mm-dd>`（JSON：calls / prompt_tokens / completion_tokens）、`graph.budget_tokens_per_day`（默认 `1000000`）。
-- **API key**：`userData/.env`（手写解析 `KEY=VALUE`，30 行内，不引 dotenv）→ 回退 `process.env.DEEPSEEK_API_KEY`；仓库只提交 `.env.example`（`.env` 已在 `.gitignore`）。模型默认 `deepseek-flash`，base URL 默认 `https://api.deepseek.com`，可用环境变量覆盖（供测试/换模型）。
+- **settings 键**（不建新表，全部有默认值、可在图谱窗口设置抽屉里调整，D22）：
+  - 归纳：`graph.cursor_ts` / `graph.cursor_id`（游标，内部维护）、`graph.auto`（`1` 默认 = 采集运行中自动归纳）、`graph.interval_minutes`（默认 `10`）、`graph.budget_tokens_per_day`（默认 `1000000`）、`graph.retry_backoff_minutes`（默认 `1,5,15`）、`graph.usage.<yyyy-mm-dd>`（JSON：calls / prompt_tokens / completion_tokens）。
+  - 供应商：`llm.active_provider`（默认 `deepseek`）、`llm.providers`（JSON 数组：`{id, label, baseUrl, model, apiKeyEnv}`，默认含 DeepSeek 预设；可加自定义 OpenAI 兼容供应商）。
+  - 快捷键：`hotkey.toggle_capture`（默认 `Alt+P`）、`hotkey.open_graph`（默认 `Alt+Space`）；注册失败时提示冲突并引导改键。
+- **API key**：只从 `process.env` 或 `userData/.env` 读取（`KEY=VALUE`，手写解析 30 行内，不引 dotenv）；供应商配置里只存环境变量名（`apiKeyEnv`），**密钥不写 settings、不落库、不落日志**；仓库只提交 `.env.example`（`.env` 已在 `.gitignore`）。模型默认 `deepseek-flash`，base URL 默认 `https://api.deepseek.com`，均可在设置中改（供换供应商/换模型）。
 - `electron.vite.config.ts`：renderer 增加 `graph` 入口，preload 增加 `graph` 入口；时间线 preload 不追加图谱写接口。
 
 ## 3. 阶段拆分（每 Phase 独立验收，各一支短命分支）
@@ -88,9 +96,9 @@ tests/
   - 输入一批事件，输出只含 `{events: [{id, ts, app, title, ocr}]}` 的载荷；`title` 截断 120 字、`ocr` 截断 200 字、去空白。
   - `sensitive=1` 事件按 Q3 结论处理：先对 `title` / `ocr` 跑统一脱敏函数把命中片段替换为 `[已脱敏]`，再二次扫描；仍命中（或命中密码类 drop 规则）则整条不进载荷，本地记「内容已保护」占位（Phase 1 生成占位节点）。
   - 暴露 `redactForCloud(events): {payload, redactedIds, droppedIds}`；**单测断言 `JSON.stringify(payload)` 不包含任何 golden 敏感串**。
-- **`llm-client.ts` / `deepseek.ts`**：契约 `completeJson(request): Promise<{json: unknown; usage: {prompt, completion}}>`；实现含 AbortController 超时 60s、429/5xx/网络错误指数退避重试 2 次（1s / 4s）、4xx（除 429）不重试、JSON 解析失败抛类型化错误；`response_format: {type: 'json_object'}`、`temperature: 0`、`max_tokens: 2000`。不引 HTTP 依赖（Electron/Node 内置 fetch）。
-- **key 载入**：只读不落库；缺失 → 返回「未配置」状态，不抛到采集链路。测试覆盖 `.env` 解析（注释/空行/引号）与 env 回退。
-- **测试**：迁移、redact golden、客户端重试/超时/用量（假 fetch 注入）、无 key 分支。
+- **`llm-client.ts` / `deepseek.ts` / `providers.ts`**：契约 `completeJson(request): Promise<{json: unknown; usage: {prompt, completion}}>`；实现含 AbortController 超时 60s、429/5xx/网络错误指数退避重试 2 次（1s / 4s）、4xx（除 429）不重试、JSON 解析失败抛类型化错误；`response_format: {type: 'json_object'}`、`temperature: 0`、`max_tokens: 2000`。供应商层按 D21 支持预设 + 自定义 OpenAI 兼容配置（baseUrl / model / apiKeyEnv），不引 HTTP 依赖（Electron/Node 内置 fetch）。
+- **key 载入**：`userData/.env` 解析 + 环境变量回退；只读不落库；缺失 → 返回「未配置」状态，不抛到采集链路。测试覆盖 `.env` 解析（注释/空行/引号/CRLF）、env 回退、多供应商选择与未知供应商回退。
+- **测试**：迁移、redact golden、客户端重试/超时/用量（假 fetch 注入）、供应商解析、无 key 分支。全程零真实网络。
 
 ### Phase 1 · 归纳管线（约 2–3 天）
 
@@ -104,12 +112,14 @@ tests/
 ### Phase 2 · 图谱画布（约 2–3 天）
 
 - **依赖**：`sigma@4.0.3` + `graphology@0.26.0` + `graphology-layout-forceatlas2@0.10.1`（均 MIT，见 §5）。renderer 动态 `import()` 懒加载，时间线页不背图谱体积。
-- **图谱窗口**（按 Q4 结论）：独立 `BrowserWindow`（1100×800，深色画布），工具栏含日期（今天/前一天/后一天）、刷新、自动归纳开关、立即归纳、状态徽标、打开时间线。
+- **图谱窗口**（D20）：独立 `BrowserWindow`（1100×800，深色画布），工具栏含日期（今天/前一天/后一天）、刷新、自动归纳开关、立即归纳、设置、状态徽标、打开时间线。
+- **热键（D20）**：`hotkeys.ts` 重构为注册表——`hotkey.toggle_capture`（默认 `Alt+P`）+ `hotkey.open_graph`（默认 `Alt+Space`）；启动注册、失败即冲突检测（`globalShortcut.register` 返回 false / `isRegistered`）→ 球角标 + 日志提示，并在图谱设置抽屉里标红该键要求更换；设置保存后立即重注册（先 `unregister` 旧键）；结构预留后续更多可自定义快捷键，不写死两条。
+- **设置抽屉 `graph-settings.ts`（D21/D22）**：归纳（自动开关 / 间隔分钟 / 每日 token 预算 / 退避分钟）、供应商（预设 + 自定义 OpenAI 兼容：baseUrl / model / apiKeyEnv，密钥本身不回显）、快捷键（两键编辑 + 冲突提示 + 保存重注册）；写 settings（SQLite），密钥永不进库。
 - **数据**：IPC `graph:query(from, to)` 走只读连接（与时间线共用），返回节点/边 DTO；`graph:induce-now`、`graph:set-auto` 走主进程并校验 sender。
 - **视觉与交互**：六色按技术方案 §6.2（M2 实际只出现知识 `#4FC3F7` / 行为 `#81C784`）；节点尺寸随度数对数增长；**边宽 ∝ weight + ForceAtlas2 `edgeWeightInfluence=1`** 双重编码（D8）；滚轮缩放、拖拽平移、悬停高亮邻域（其余降透明度）、点击节点开侧栏。
 - **侧栏 `graph-panel.ts`**：节点标题/摘要/时间范围/成员事件列表（时间、应用、标题、OCR 摘要 80 字、敏感「内容已保护」徽标）；「在时间线中查看」→ 打开/聚焦时间线窗口并定位到该节点日期。
 - **空状态**：未配置 key / 自动归纳关闭 / 该日无节点 / 采集中断时「归纳暂停」；均带 `data-kind` 供 E2E 断言。
-- **测试**：`graph-view` 纯函数（颜色、尺寸、邻域、时间窗过滤）；E2E 用合成库（事件 + 节点 + 边）打开图谱、断言节点计数钩子、点击节点后侧栏出现成员事件、跳时间线；假 LLM（`GOTCHA_FAKE_LLM=1` + `GOTCHA_USER_DATA` + 非打包态）跑「立即归纳 → 图谱出现节点」全链路，**无真实网络**。
+- **测试**：`graph-view` 纯函数（颜色、尺寸、邻域、时间窗过滤）；热键注册表单测（自定义键、注册失败冲突检测、改键后旧键注销、`unregisterAll` 收口）；设置读写单测（非法值回退默认、密钥不落库断言）；E2E 用合成库（事件 + 节点 + 边）打开图谱、断言节点计数钩子、点击节点后侧栏出现成员事件、跳时间线；假 LLM（`GOTCHA_FAKE_LLM=1` + `GOTCHA_USER_DATA` + 非打包态）跑「立即归纳 → 图谱出现节点」全链路，**无真实网络**。
 
 ### Phase 3 · 验收与收口（约 1–1.5 天）
 
@@ -125,10 +135,12 @@ tests/
 4. **节点合并**：同本地日 + 同 type + 归一化标题合并（并集 `source_events`、扩展时间范围、摘要取更长）；跨批的同一主题因此收敛为一个节点，避免图谱被同一话题刷屏。
 5. **边**：只在本批节点间生成（`kind='ai'`），跨批相关靠节点合并自然连起来；M2 不做「AI 找历史旧节点连边」，避免无界检索与成本（M3/M4 再议）。
 6. **归纳在主进程异步执行，M2 不引 worker**：调用是 IO 密集型、批 ≤20 时刻、JSON 很小，主进程 await 不阻塞 UI；技术方案 §3.1 的「归纳走 worker + 队列」留到 M3 上量后再评估（届时补队列与背压）。
-7. **图谱窗口独立**（待 Q4 确认）：不改时间线页结构，回归面最小；sigma 懒加载。窗口关闭即销毁，球点击 / 工具栏重新打开。
+7. **图谱窗口独立 + 可配置热键**（D20）：不改时间线页结构，回归面最小；sigma 懒加载；窗口关闭即销毁。热键走「注册表 + settings」，`Alt+P` / `Alt+Space` 默认值可在设置里改，注册失败做冲突检测并提示更换；球点击默认开图谱，时间线入口保留在工具栏/侧栏。
 8. **布局与编码**：ForceAtlas2 布局、权重作吸引强度、线宽另映射 weight（D8「双重编码」）；M2 不做 LOD 完整语义，日期筛选承担「只看某天」。
 9. **用量记账**：`graph.usage.<date>` 存 JSON（calls / prompt_tokens / completion_tokens），成本按官方价格常量（可改）在 UI 展示；不新增表，避免 schema 膨胀。
-10. **暂停联动**（按 Q2 结论）：暂停 = 采集停 + 归纳停 + 在途 abort；恢复后按游标续跑，不补采、不重复。
+10. **暂停联动**（D18）：暂停 = 采集停 + 归纳停 + 在途 abort；恢复后按游标续跑，不补采、不重复。
+11. **供应商抽象**（D21）：`LlmProvider` 只要求 OpenAI 兼容（baseUrl / model / apiKeyEnv），预设 DeepSeek；自定义供应商零代码接入。不直接读取 DSH harness 配置文件——只采用同形配置（多供应商 + 自定义 base URL），避免与宿主隐式耦合和密钥扩散；密钥名存配置、值只放 `.env` / 环境变量。
+12. **参数可调**（D22）：间隔、预算、退避、超时、批量上限都有默认值并存 settings，设置抽屉可改；代码不写死数字（默认值集中在一个常量模块，测试引用同一常量）。
 
 ## 5. 依赖报备
 
@@ -157,34 +169,37 @@ tests/
 
 ## 7. 工期与提交计划
 
-- 总量 **7–9 个工作日**：P0 1.5–2 / P1 2–3 / P2 2–3 / P3 1–1.5，缓冲 0.5–1。
+- 总量 **8–10 个工作日**：P0 1.5–2 / P1 2–3 / P2 2.5–3.5（含热键与设置抽屉）/ P3 1–1.5，缓冲 0.5–1。
 - 分支（workflow §3.1）：`feat/m2-p0-llm-foundation`、`feat/m2-p1-induction`、`feat/m2-p2-graph-ui`、`feat/m2-p3-acceptance`，每 Phase PR squash 合入；PR 标题 `feat: M2 Phase N ...`。
 - 代码与文档同一次提交；M2 收口时本方案归档。
 
-## 8. 待拍板清单（显式批准制）
+## 8. 待拍板清单（已批结论）
 
-> 拍板人：项目所有者；有效载体：当前对话的书面结论（decisions.md「拍板人与授权载体」）。下列为**建议**，未拍板前不动代码。
+> 拍板人：项目所有者；来源：2026-10-23 对话（M2 方案 v0.1 复审）；留痕：decisions.md D17–D23。下表为**已批结论**，无「待批」项。
 
-| # | 问题 | 建议（推荐项在前） | 阻塞 | 影响 |
+| # | 问题 | 结论（2026-10-23 拍板） | 阻塞 | 状态 |
 | - | - | - | - | - |
-| Q1 | M2 范围边界 | 只做 L1 知识/行为节点 + 边 + 画布 + 下钻；L2 日/周/月、LOD 完整语义归 M3；解说五区块 / 主动提示归 M4 | Phase 1 | 范围；防止 M2 膨胀成 M3+M4 |
-| Q2 | 隐私暂停是否约束归纳/出云（D14 结案） | **A**：暂停 = 采集停 + 归纳停 + 在途 abort，恢复续跑（与 M1b halt 语义一致）；B：暂停只停采集，归纳继续；C：暂停停自动归纳但允许手动触发一次 | Phase 1 | 隐私承诺；security.md 需同步改写 |
-| Q3 | `sensitive=1` 事件出云策略（D10「出云前剥离」落地） | **A**：命中片段替换为 `[已脱敏]` 后仍可出云；无法安全剥离的整条不出云，本地生成「内容已保护」占位节点；B：敏感事件一律不出云、全部本地占位；C：敏感事件完全不进图谱 | Phase 0/1 | 隐私边界与图谱完整性 |
-| Q4 | 图谱入口与 `Alt+Space` | **A**：独立图谱窗口；球点击默认打开图谱（替代 M1b 的时间线落地页），面板内再开时间线；`Alt+Space` **不注册**（系统窗口菜单冲突风险，M1b Q5 遗留）；B：独立窗口 + 注册 `Alt+Space`（失败回退 A）；C：同窗口标签页 | Phase 2 | 交互形态；球点击行为变更 |
-| Q5 | 新增依赖（sigma / graphology / ForceAtlas2） | 批准（MIT、3 个、懒加载；技术方案 §3 已选 sigma.js） | Phase 2 | 依赖面与包体积 |
-| Q6 | 模型与密钥 | `deepseek-flash`（官方 JSON Output 支持；可配 `DEEPSEEK_MODEL` 覆盖）；key 从 `userData/.env` 或环境变量读，不落库/日志；仓库提交 `.env.example` | Phase 0 | 成本、隐私、配置方式 |
-| Q7 | 归纳触发与预算 | 采集运行中每 10 分钟自动 + 手动「立即归纳」按钮；每日 token 预算默认 1M，超限停自动归纳并提示；失败退避 1m/5m/15m | Phase 1 | 成本上限与新鲜度 |
-| Q8 | 验收数据与真实调用 | 用拍板人真实 key + 一个有数据的日子（如 10-22：00:00–02:00、18:00–23:00 有数据）跑 C1–C4；成本从拍板人账户扣（估算 ¥0.5–2/日）；C1–C8 结果由拍板人真机确认 | Phase 3 | 验收可行性与费用 |
+| Q1 | M2 范围边界 | 只做 L1 知识/行为节点 + 边 + 画布 + 下钻；L2 日/周/月与 LOD 完整语义归 M3；解说五区块 / 主动提示归 M4 | Phase 1 | ✅ 已批（D17） |
+| Q2 | 隐私暂停是否约束归纳/出云（D14 结案） | **A**：暂停 = 采集停 + 归纳停 + 在途请求 abort 且结果丢弃；恢复后从游标续跑，不补采、不重复（D18 结案 D14 悬置） | Phase 1 | ✅ 已批（D18） |
+| Q3 | `sensitive=1` 事件出云策略（D10 落地） | **A**：命中片段替换为 `[已脱敏]` 后可出云；无法安全剥离（含密码类命中）整条不出云，本地生成「内容已保护」占位节点 | Phase 0/1 | ✅ 已批（D19） |
+| Q4 | 图谱入口与 `Alt+Space` | **B（拍板人要求）**：独立图谱窗口；球点击默认打开图谱；**注册 `Alt+Space`**；两个热键都可由设置修改，注册失败自动冲突检测并提示更换；结构上支持后续扩展更多自定义快捷键 | Phase 2 | ✅ 已批（D20） |
+| Q5 | 新增依赖（sigma / graphology / ForceAtlas2） | 批准：3 个 MIT 依赖，懒加载；技术方案 §3 已选 sigma.js | Phase 2 | ✅ 已批（对话 2026-10-23） |
+| Q6 | 模型与密钥 | **多供应商 + 自定义 OpenAI 兼容供应商**（参照 harness 模型配置形态：provider 预设 / 自定义 baseUrl+model）；预设 DeepSeek（`https://api.deepseek.com` + `deepseek-flash`）；供应商配置存 settings，密钥只从环境变量 / `userData/.env` 读，不入库、不入日志；仓库提交 `.env.example` | Phase 0 | ✅ 已批（D21） |
+| Q7 | 归纳触发与预算 | 默认按建议（每 10 分钟 / 每日 1M token / 退避 1m·5m·15m），但**参数不写死**：间隔、预算、退避、超时、批量上限均可配置（settings + 设置抽屉） | Phase 1 | ✅ 已批（D22） |
+| Q8 | 验收数据与真实调用 | 同意：真实 key + 10-22 有数据的一天跑 C1–C8；成本从拍板人账户扣（估算 ¥0.5–2/日）；结果由拍板人真机确认 | Phase 3 | ✅ 已批（D23） |
 
-## 9. 合并条件（v0.1 → v0.2）
+## 9. 合并条件核对（v0.2）
 
-1. Q1–Q8 全部有书面结论并留痕 decisions.md（新增 D17 起）。
-2. Q2/Q3 的结论同步改写 security.md（暂停语义 / 出云剥离表述）。
-3. Q4/Q5 结论写入 §2/§3/§4 与 electron.vite.config（若选独立窗口）。
-4. 本文件更新为 v0.2 并标注拍板日期；未拍板项不得标 ✅。
+1. ✅ Q1–Q8 全部书面拍板，留痕 decisions.md D17–D23。
+2. ✅ Q2/Q3 结论已同步改写 security.md（暂停语义 / 出云剥离与占位）。
+3. ✅ Q4/Q5/Q6/Q7 结论已写入 §2/§3/§4/§8（独立图谱窗口、热键注册与冲突检测、多供应商配置、参数可调）。
+4. ✅ 本文件已更新为 v0.2 并标注拍板日期；无遗留「待批」项。
+
+后续任何改动走 PR + decisions.md 留痕，不直接改本文件结论。
 
 ## 10. 变更记录
 
 | # | 位置 | 变更 | 依据 |
 | - | - | - | - |
 | 1 | 全篇 | v0.1 初稿：范围、C1–C8、Phase 0–3、Q1–Q8 | 技术方案 §7 M2 行 / 策划案 §6 模块二 / 2026-10-23 本机数据核对 |
+| 2 | 全篇 | v0.2 拍板落定：Q4=B（注册 Alt+Space + 热键可配置 + 冲突检测，D20）、Q6 多供应商/自定义供应商（D21）、Q7 参数可调（D22）、其余按建议（D17–D19、D23）；Phase 2 增加热键注册表与设置抽屉，工期 7–9 → 8–10 天 | 2026-10-23 对话拍板 |

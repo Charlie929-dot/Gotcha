@@ -9,6 +9,8 @@ export interface OcrJob {
   app: string
   title: string
   imagePath: string
+  /** 帧差指纹（管线入队时填充，用于成功后提交 / 失败重试） */
+  hash?: bigint
 }
 
 export class OcrQueue {

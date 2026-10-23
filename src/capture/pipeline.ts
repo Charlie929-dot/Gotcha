@@ -1,7 +1,8 @@
 /**
  * 采集管线（m1a-plan §3 Phase 2c）
  *
- * tick：取前台窗口 → 截窗口区域 → dHash 帧差（未变丢帧）→ 黑名单只记元数据
+ * tick：取前台窗口 → 截窗口区域 → dHash 帧差（按 app+title 分 key：已入库 /
+ *      在队的内容丢帧；OCR 失败只对同帧有限重试）→ 黑名单只记元数据
  *      → 入 OCR 队列 → 异步 worker 识别 → sanitize → insertEvent。
  *
  * 所有外部依赖（时钟/截屏/OCR/删帧/日志）注入，便于合成数据单测。
@@ -46,20 +47,41 @@ export interface CaptureDeps {
   diffThreshold?: number
   queue?: OcrQueue
   initialStats?: Partial<CaptureStats>
+  /** 同一窗口同一内容 OCR / 落库连续失败上限；到顶后提交该指纹、停止重试（默认 3） */
+  dedupMaxRetries?: number
+  /** 去重状态 LRU 上限；标题频繁变化时不无界增长（默认 64） */
+  dedupKeyLimit?: number
   log?(entry: PipelineLog): void
 }
 
 export const DEFAULT_DIFF_THRESHOLD = 8
+/** 同帧连续失败到顶就把指纹当作已提交：不无限重试，内容变化后自然恢复 */
+export const DEFAULT_MAX_RETRIES = 3
+/** 去重状态最多保留的 app+title 数（LRU） */
+export const DEDUP_KEY_LIMIT = 64
+
+interface DedupEntry {
+  /** 最近一次「已确认记下」的帧指纹（入库成功 / 黑名单元数据 / 敏感整帧丢弃） */
+  committed: bigint | null
+  /** 已入队、尚未出结果的帧指纹（FIFO；同一内容不重复排队） */
+  queued: bigint[]
+  /** 最近一次失败指纹与连续失败次数（跨帧累计会把无关重试算到一帧上） */
+  failure: { hash: bigint; attempts: number } | null
+}
 
 export class CapturePipeline {
   private readonly queue: OcrQueue
   private readonly stats: CaptureStats = zeroStats()
-  private lastHash: bigint | null = null
+  private readonly dedup = new Map<string, DedupEntry>()
+  private readonly dedupMaxRetries: number
+  private readonly dedupKeyLimit: number
   private currentDrain: Promise<void> | null = null
   private halted = false
 
   constructor(private readonly deps: CaptureDeps) {
     this.queue = deps.queue ?? new OcrQueue()
+    this.dedupMaxRetries = deps.dedupMaxRetries ?? DEFAULT_MAX_RETRIES
+    this.dedupKeyLimit = deps.dedupKeyLimit ?? DEDUP_KEY_LIMIT
     Object.assign(this.stats, deps.initialStats ?? {})
   }
 
@@ -67,7 +89,7 @@ export class CapturePipeline {
     return { ...this.stats }
   }
 
-  /** 跨午夜换 stats key 时清零当日累计（lastHash 保留，帧差与采集不中断） */
+  /** 跨午夜换 stats key 时清零当日累计（去重状态保留，帧差与采集不中断） */
   resetStats(): void {
     Object.assign(this.stats, zeroStats())
   }
@@ -136,17 +158,17 @@ export class CapturePipeline {
 
     this.stats.frames_total++
     const hash = frame.diffHash
-    const threshold = this.deps.diffThreshold ?? DEFAULT_DIFF_THRESHOLD
-    if (this.lastHash !== null && hammingDistance(this.lastHash, hash) <= threshold) {
+    const entry = this.dedupEntry(window.app, window.title)
+    if (this.isDuplicate(entry, hash)) {
       this.stats.frames_same++
       this.discard(frame.imagePath)
       return
     }
-    this.lastHash = hash
 
     if (this.deps.isBlacklisted(window)) {
       // 黑名单进程：只记元数据，绝不 OCR（security.md 第 2 层）
       insertEvent(this.deps.db, { ts: now, app: window.app, windowTitle: window.title })
+      this.commit(entry, hash)
       this.discard(frame.imagePath)
       return
     }
@@ -155,9 +177,11 @@ export class CapturePipeline {
       ts: now,
       app: window.app,
       title: window.title,
-      imagePath: frame.imagePath
+      imagePath: frame.imagePath,
+      hash
     }
     if (!this.queue.push(job)) {
+      // 未入队就没有「已记录 / 在途」状态：同帧下个 tick 还会再试
       this.stats.queue_dropped++
       this.deps.log?.({
         level: 'warn',
@@ -167,6 +191,7 @@ export class CapturePipeline {
       this.discard(frame.imagePath)
       return
     }
+    entry.queued.push(hash)
     void this.drain()
   }
 
@@ -193,6 +218,7 @@ export class CapturePipeline {
   }
 
   private async process(job: OcrJob): Promise<void> {
+    const entry = job.hash === undefined ? null : this.dedupEntry(job.app, job.title)
     try {
       const result = await this.deps.ocr.recognize(job.imagePath)
       this.stats.ocr_runs++
@@ -208,6 +234,8 @@ export class CapturePipeline {
       }
       const sanitized = sanitize(result.text)
       if (sanitized.drop) {
+        // 整帧丢弃也是一次确定结果：提交指纹，避免同一密码界面每个 tick 重复 OCR
+        if (entry && job.hash !== undefined) this.commit(entry, job.hash)
         this.deps.log?.({
           level: 'info',
           msg: 'frame dropped by password rule',
@@ -223,6 +251,8 @@ export class CapturePipeline {
         sensitive: sanitized.sensitive ? 1 : 0
       })
       this.deps.saveShot?.(eventId, job.imagePath)
+      // 只有落库成功才提交指纹；失败时保留旧状态，同帧下个 tick 可重试
+      if (entry && job.hash !== undefined) this.commit(entry, job.hash)
       this.deps.log?.({
         level: 'info',
         msg: 'event inserted',
@@ -236,14 +266,69 @@ export class CapturePipeline {
       })
     } catch (error) {
       this.stats.capture_errors++
+      if (entry && job.hash !== undefined) this.retryLater(entry, job.hash, job)
       this.deps.log?.({
         level: 'warn',
         msg: 'ocr failed',
         data: { app: job.app, error: String(error) }
       })
     } finally {
+      // 出结果即出队；失败时 queued 清空，同帧下个 tick 才会重新入队
+      if (entry && job.hash !== undefined) this.dequeue(entry, job.hash)
       this.discard(job.imagePath)
     }
+  }
+
+  /** 按 app+title 取去重状态（命中即刷新 LRU；超上限淘汰最旧 key） */
+  private dedupEntry(app: string, title: string): DedupEntry {
+    const key = `${app}\u0000${title}`
+    let entry = this.dedup.get(key)
+    if (entry) {
+      this.dedup.delete(key)
+      this.dedup.set(key, entry)
+      return entry
+    }
+    entry = { committed: null, queued: [], failure: null }
+    if (this.dedup.size >= this.dedupKeyLimit) {
+      const oldest = this.dedup.keys().next().value
+      if (oldest !== undefined) this.dedup.delete(oldest)
+    }
+    this.dedup.set(key, entry)
+    return entry
+  }
+
+  /** 与「已提交」或「任一在途帧」相近即视为未变（监听器式去重） */
+  private isDuplicate(entry: DedupEntry, hash: bigint): boolean {
+    const threshold = this.deps.diffThreshold ?? DEFAULT_DIFF_THRESHOLD
+    const same = (seen: bigint) => hammingDistance(seen, hash) <= threshold
+    return (entry.committed !== null && same(entry.committed)) || entry.queued.some(same)
+  }
+
+  private commit(entry: DedupEntry, hash: bigint): void {
+    entry.committed = hash
+    entry.failure = null
+  }
+
+  private retryLater(entry: DedupEntry, hash: bigint, job: OcrJob): void {
+    const attempts = entry.failure?.hash === hash ? entry.failure.attempts + 1 : 1
+    if (attempts >= this.dedupMaxRetries) {
+      // 同帧连续失败到顶：提交指纹停止重试，避免每个采样周期都白跑一次 OCR。
+      // 不是永久放弃该窗口——内容一变（hash 超出阈值）就会重新入队。
+      entry.committed = hash
+      entry.failure = null
+      this.deps.log?.({
+        level: 'warn',
+        msg: 'ocr retry exhausted, frame marked as seen',
+        data: { app: job.app, attempts }
+      })
+      return
+    }
+    entry.failure = { hash, attempts }
+  }
+
+  private dequeue(entry: DedupEntry, hash: bigint): void {
+    const index = entry.queued.indexOf(hash)
+    if (index >= 0) entry.queued.splice(index, 1)
   }
 
   private discard(imagePath: string): void {

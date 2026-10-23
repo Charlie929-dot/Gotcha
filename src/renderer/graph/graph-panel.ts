@@ -6,7 +6,7 @@
  * `missingIds` 非空要显式提示（C4 要求来源 100% 可溯，不允许静默丢来源）。
  */
 
-import type { GraphNodeDto, NodeEventsResult } from '../../understand/graph-query'
+import type { GraphDayData, GraphEventDto, GraphNodeDto, NodeEventsResult } from '../../understand/graph-query'
 import { formatTime, summary } from '../timeline'
 
 export interface NodePanelElements {
@@ -26,6 +26,7 @@ const TYPE_LABEL: Record<string, string> = {
 
 export interface NodePanel {
   show(node: GraphNodeDto, result: NodeEventsResult): void
+  showEvent(event: GraphEventDto, parentNode?: GraphNodeDto): void
   hide(): void
 }
 
@@ -33,16 +34,15 @@ export function createNodePanel(
   elements: NodePanelElements,
   options: { openTimeline(ts: number): void }
 ): NodePanel {
-  let current: GraphNodeDto | null = null
+  let currentTs: number | null = null
 
   elements.timelineButton.addEventListener('click', () => {
-    if (!current) return
-    options.openTimeline(current.tsStart)
+    if (currentTs !== null) options.openTimeline(currentTs)
   })
 
   return {
     show(node, result) {
-      current = node
+      currentTs = node.tsStart
       elements.panel.hidden = false
       elements.title.textContent = node.title || '（无标题）'
       elements.summary.textContent = node.summary
@@ -100,8 +100,40 @@ export function createNodePanel(
       elements.timelineButton.disabled = !result.found
     },
 
+    showEvent(event, parentNode) {
+      currentTs = event.ts
+      elements.panel.hidden = false
+      elements.title.textContent = event.windowTitle || event.app || '事件记录'
+      elements.summary.textContent = `应用：${event.app} · 事件编号 #${event.id}`
+      elements.meta.textContent = `${formatTime(event.ts)}${parentNode ? ` · 归属于「${parentNode.title}」` : ' · 游离事件'}`
+      elements.events.replaceChildren()
+
+      const li = document.createElement('li')
+      li.dataset.eventId = String(event.id)
+      const head = document.createElement('div')
+      head.className = 'ev-head'
+      const time = document.createElement('span')
+      time.textContent = formatTime(event.ts)
+      const app = document.createElement('span')
+      app.textContent = event.app
+      head.append(time, app)
+      if (event.sensitive === 1) {
+        const badge = document.createElement('span')
+        badge.className = 'badge'
+        badge.textContent = '敏感'
+        head.append(badge)
+      }
+      const title = document.createElement('div')
+      title.className = 'ev-title'
+      title.textContent = event.windowTitle ?? ''
+      li.append(head, title)
+      elements.events.append(li)
+
+      elements.timelineButton.disabled = false
+    },
+
     hide() {
-      current = null
+      currentTs = null
       elements.panel.hidden = true
     }
   }

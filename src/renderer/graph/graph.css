@@ -169,7 +169,7 @@ main {
   position: relative;
   border-radius: 6px;
   overflow: hidden;
-  background: radial-gradient(circle at 50% 45%, #1c1c26 0%, #121218 70%);
+  background: #0d0e14;
 }
 
 .sigma-container canvas {
@@ -272,11 +272,17 @@ main {
 }
 
 .panel-head {
+  position: sticky;
+  top: -14px;
+  margin: -14px -16px 14px;
+  padding: 14px 16px 12px;
+  background: var(--panel);
+  z-index: 10;
+  border-bottom: 1px solid var(--border);
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 8px;
 }
 
 .panel-head h2 {
@@ -471,10 +477,76 @@ main {
   color: var(--muted);
 }
 
-.provider-advanced summary {
-  cursor: pointer;
-  padding: 2px 0;
+.combobox-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
 }
+
+.combobox-wrap input {
+  padding-right: 28px !important;
+}
+
+.combobox-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent !important;
+  border: none !important;
+  color: var(--muted) !important;
+  cursor: pointer;
+  padding: 4px 6px !important;
+  font-size: 10px !important;
+  line-height: 1;
+}
+
+.combobox-toggle:hover {
+  color: var(--text) !important;
+}
+
+.model-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  background: #1c1c26;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  z-index: 50;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-option {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.model-option:hover,
+.model-option.selected {
+  background: #2b2b3a;
+  color: #fff;
+}
+
+.model-option.selected {
+  font-weight: 600;
+  border-left: 2px solid var(--knowledge);
+}
+
 
 .hint {
   color: #77778a;

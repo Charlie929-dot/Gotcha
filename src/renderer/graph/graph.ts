@@ -18,9 +18,12 @@ import type { GraphSettingsView } from '../../main/graph-settings'
 import type { InductionSnapshot } from '../../main/induction-runtime'
 import {
   EDGE_COLOR,
+  EVENT_NODE_SIZE,
+  SUB_EDGE_COLOR,
   edgeSize,
   maxDegree,
   neighborIds,
+  neighborKeys,
   nodeColor,
   nodeLabel,
   nodeSize
@@ -116,7 +119,7 @@ let lastData: GraphDayData = { nodes: [], edges: [] }
 let graph: GraphInstance | null = null
 let renderer: SigmaInstance | null = null
 let modules: SigmaModules | null = null
-let hovered: number | null = null
+let hoveredKey: string | null = null
 let loading = false
 
 const panel = createNodePanel(
@@ -209,9 +212,9 @@ function renderEmpty(): void {
   } else if (snapshot && !snapshot.captureRunning) {
     kind = 'paused'
     text = '采集暂停中；恢复记录后继续归纳'
-  } else if (lastData.nodes.length === 0) {
+  } else if (lastData.nodes.length === 0 && (lastData.events?.length ?? 0) === 0) {
     kind = 'no-nodes'
-    text = '这一天还没有归纳出的节点'
+    text = '这一天还没有记录到任何事件'
   }
   els.empty.hidden = kind === ''
   if (kind !== '') {
@@ -228,9 +231,17 @@ function renderMeta(): void {
 
 function renderCount(data: GraphDayData): void {
   const count = data.nodes.length
-  els.count.textContent = count === 0 ? '' : `${count} 个节点 · ${data.edges.length} 条边`
+  const eventCount = data.events?.length ?? 0
+  const totalEdges = data.edges.length
+  if (count === 0 && eventCount === 0) {
+    els.count.textContent = ''
+  } else if (eventCount > 0) {
+    els.count.textContent = `${count} 个节点（${count} 个主题 · ${eventCount} 个事件） · ${totalEdges} 条边`
+  } else {
+    els.count.textContent = `${count} 个节点 · ${totalEdges} 条边`
+  }
   els.count.dataset.nodes = String(count)
-  els.count.dataset.edges = String(data.edges.length)
+  els.count.dataset.edges = String(totalEdges)
 }
 
 async function ensureModules(): Promise<SigmaModules> {
@@ -253,44 +264,117 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
   renderer?.kill()
   renderer = null
   graph = null
-  hovered = null
+  hoveredKey = null
 
   const maxDeg = maxDegree(data)
   const graphInstance = new current.Graph({ multi: false, type: 'undirected' })
+  const allEdges: Array<{ source: string; target: string }> = []
+  const edgeById = new Map<string, { source: string; target: string }>()
+
+  // 1. 概念 Hub 节点分布：根据主题数量分配充沛的星系半径
+  const hubRadius = 140 + 26 * Math.sqrt(Math.max(1, data.nodes.length))
+  const nodeCenterMap = new Map<number, { x: number; y: number }>()
+
   data.nodes.forEach((node, index) => {
     const angle = (2 * Math.PI * index) / Math.max(1, data.nodes.length)
-    const radius = 40 + 14 * Math.sqrt(data.nodes.length)
+    const x = Math.cos(angle) * hubRadius
+    const y = Math.sin(angle) * hubRadius
+    nodeCenterMap.set(node.id, { x, y })
     graphInstance.addNode(String(node.id), {
-      x: Math.cos(angle) * radius,
-      y: Math.sin(angle) * radius,
+      x,
+      y,
       size: nodeSize(node.degree, maxDeg),
       color: nodeColor(node.type),
-      label: nodeLabel(node.title)
+      label: nodeLabel(node.title),
+      fullLabel: node.title,
+      nodeType: 'concept'
     })
   })
-  const edgeById = new Map<string, { source: number; target: number }>()
+
+  // 2. 概念节点之间的语义边
   for (const edge of data.edges) {
-    if (!graphInstance.hasNode(String(edge.source)) || !graphInstance.hasNode(String(edge.target))) {
-      continue
-    }
-    if (graphInstance.hasEdge(edge.source, edge.target)) continue
-    graphInstance.addEdgeWithKey(String(edge.id), String(edge.source), String(edge.target), {
+    const srcKey = String(edge.source)
+    const dstKey = String(edge.target)
+    if (!graphInstance.hasNode(srcKey) || !graphInstance.hasNode(dstKey)) continue
+    if (graphInstance.hasEdge(srcKey, dstKey)) continue
+    const edgeKey = String(edge.id)
+    graphInstance.addEdgeWithKey(edgeKey, srcKey, dstKey, {
       size: edgeSize(edge.weight),
       color: EDGE_COLOR,
-      weight: edge.weight
+      weight: edge.weight,
+      edgeType: 'concept'
     })
-    edgeById.set(String(edge.id), { source: edge.source, target: edge.target })
+    edgeById.set(edgeKey, { source: srcKey, target: dstKey })
+    allEdges.push({ source: srcKey, target: dstKey })
   }
 
+  // 3. 事件 Leaf 节点与从属边
+  const events = data.events ?? []
+  const eventParentMap = new Map<number, number>()
+  for (const node of data.nodes) {
+    if (node.eventIds) {
+      for (const evId of node.eventIds) {
+        if (!eventParentMap.has(evId)) eventParentMap.set(evId, node.id)
+      }
+    }
+  }
+
+  events.forEach((ev, i) => {
+    const evKey = `ev-${ev.id}`
+    const parentNodeId = eventParentMap.get(ev.id)
+    let initX = 0
+    let initY = 0
+    if (parentNodeId !== undefined && nodeCenterMap.has(parentNodeId)) {
+      const parentPos = nodeCenterMap.get(parentNodeId)!
+      const leafAngle = (2 * Math.PI * (i % 24)) / 24
+      const leafDist = 28 + (i % 5) * 8
+      initX = parentPos.x + Math.cos(leafAngle) * leafDist
+      initY = parentPos.y + Math.sin(leafAngle) * leafDist
+    } else {
+      const outerAngle = (2 * Math.PI * i) / Math.max(1, events.length)
+      const outerRadius = hubRadius + 90
+      initX = Math.cos(outerAngle) * outerRadius
+      initY = Math.sin(outerAngle) * outerRadius
+    }
+
+    graphInstance.addNode(evKey, {
+      x: initX,
+      y: initY,
+      size: EVENT_NODE_SIZE,
+      color: '#58677c',
+      label: '', // 事件节点默认不显式文字，悬停才显示，防止遮挡
+      fullLabel: ev.windowTitle || ev.app,
+      nodeType: 'event',
+      eventId: ev.id
+    })
+
+    if (parentNodeId !== undefined && graphInstance.hasNode(String(parentNodeId))) {
+      const edgeKey = `sub-${parentNodeId}-${ev.id}`
+      const parentKey = String(parentNodeId)
+      if (!graphInstance.hasEdge(parentKey, evKey)) {
+        graphInstance.addEdgeWithKey(edgeKey, parentKey, evKey, {
+          size: 1,
+          color: SUB_EDGE_COLOR,
+          weight: 0.25,
+          edgeType: 'sub'
+        })
+        edgeById.set(edgeKey, { source: parentKey, target: evKey })
+        allEdges.push({ source: parentKey, target: evKey })
+      }
+    }
+  })
+
+  // 4. ForceAtlas2 力导向布局：通过连线体现联系，通过远近体现相关性
   current.forceAtlas2.assign(graphInstance, {
-    iterations: 160,
+    iterations: 180,
     settings: {
       ...current.forceAtlas2.inferSettings(graphInstance),
-      edgeWeightInfluence: 1,
-      gravity: 1,
-      scalingRatio: 12,
-      slowDown: 5,
-      barnesHutOptimize: false
+      edgeWeightInfluence: 1.2,
+      gravity: 0.04, // 低向心引力，星团自然舒展
+      scalingRatio: 30, // 充沛斥力，拉开优雅间距
+      slowDown: 4,
+      barnesHutOptimize: true,
+      adjustSizes: true // 节点尺寸碰撞防重叠
     }
   })
 
@@ -298,41 +382,61 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
   els.container.hidden = false
   renderer = new current.Sigma(graphInstance, els.container, {
     renderLabels: true,
-    labelDensity: 0.7,
-    labelGridCellSize: 70,
-    labelRenderedSizeThreshold: 2,
-    labelColor: { color: '#c9c9d6' },
-    labelSize: 12,
-    labelFont: 'Segoe UI, Microsoft YaHei, sans-serif',
-    defaultEdgeColor: EDGE_COLOR,
+    itemSizesReference: 'screen', // 关键！锁定物理像素，防止缩放膨胀成巨球
+    labelDensity: 0.25,
+    labelGridCellSize: 80,
+    labelRenderedSizeThreshold: 4,
+    labelColor: { color: '#abb2bf' },
+    labelSize: 11,
+    labelFont: 'Segoe UI, -apple-system, BlinkMacSystemFont, "Microsoft YaHei", sans-serif',
+    defaultEdgeColor: '#20242c',
     minCameraRatio: 0.05,
-    maxCameraRatio: 12,
-    nodeReducer: (node: string, attrs: Record<string, unknown>) => {
-      if (hovered === null) return attrs
-      const keep = neighborIds(lastData.edges, hovered)
-      if (!keep.has(Number(node))) return { ...attrs, color: '#2f2f3b', label: '' }
-      return Number(node) === hovered
-        ? { ...attrs, size: Number(attrs.size ?? 8) * 1.25 }
+    maxCameraRatio: 10,
+    nodeReducer: (nodeKey: string, attrs: Record<string, unknown>) => {
+      if (hoveredKey === null) return attrs
+      const keep = neighborKeys(allEdges, hoveredKey)
+      if (!keep.has(nodeKey)) {
+        return { ...attrs, color: '#161820', label: '' }
+      }
+      return nodeKey === hoveredKey
+        ? {
+            ...attrs,
+            size: Number(attrs.size ?? 4) * 1.35,
+            label: (attrs.fullLabel as string) || (attrs.label as string) || ''
+          }
         : attrs
     },
-    edgeReducer: (edge: string, attrs: Record<string, unknown>) => {
-      if (hovered === null) return attrs
-      const endpoints = edgeById.get(edge)
+    edgeReducer: (edgeKey: string, attrs: Record<string, unknown>) => {
+      if (hoveredKey === null) return attrs
+      const endpoints = edgeById.get(edgeKey)
       if (!endpoints) return attrs
-      const keep = neighborIds(lastData.edges, hovered)
-      if (keep.has(endpoints.source) && keep.has(endpoints.target)) return attrs
-      return { ...attrs, color: '#242430' }
+      const relates = endpoints.source === hoveredKey || endpoints.target === hoveredKey
+      if (relates) {
+        return { ...attrs, color: '#4fc3f7', size: Math.max(1.5, Number(attrs.size ?? 1) * 1.4) }
+      }
+      return { ...attrs, color: '#14151c' }
     }
   })
+
   renderer.on('clickNode', (payload: { node: string }) => {
-    void openNode(Number(payload.node))
+    if (payload.node.startsWith('ev-')) {
+      const evId = Number(payload.node.slice(3))
+      const ev = (lastData.events ?? []).find((item) => item.id === evId)
+      if (ev) {
+        const parentId = eventParentMap.get(evId)
+        const parent = parentId ? lastData.nodes.find((n) => n.id === parentId) : undefined
+        panel.showEvent(ev, parent)
+      }
+    } else {
+      void openNode(Number(payload.node))
+    }
   })
   renderer.on('enterNode', (payload: { node: string }) => {
-    hovered = Number(payload.node)
+    hoveredKey = payload.node
     renderer?.refresh()
   })
   renderer.on('leaveNode', () => {
-    hovered = null
+    hoveredKey = null
     renderer?.refresh()
   })
   renderer.on('clickStage', () => panel.hide())
@@ -355,7 +459,8 @@ async function load(): Promise<void> {
     lastData = await window.gotchaGraph.query(from, to)
     renderCount(lastData)
     renderEmpty()
-    if (lastData.nodes.length > 0) {
+    const totalItems = lastData.nodes.length + (lastData.events?.length ?? 0)
+    if (totalItems > 0) {
       await renderCanvas(lastData)
     } else {
       renderer?.kill()
@@ -455,10 +560,10 @@ els.consentButton.addEventListener('click', async () => {
 window.gotchaGraph.onStatus(applySnapshot)
 
 window.__gotchaGraphView = {
-  count: () => graph?.order ?? 0,
+  count: () => lastData.nodes.length,
   select: (nodeId: number) => openNode(nodeId),
   hover: (nodeId: number | null) => {
-    hovered = nodeId
+    hoveredKey = nodeId === null ? null : String(nodeId)
     renderer?.refresh()
   }
 }

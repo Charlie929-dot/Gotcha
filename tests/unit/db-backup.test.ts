@@ -5,7 +5,7 @@
  */
 
 import Database from 'better-sqlite3'
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -36,12 +36,26 @@ describe('openDatabase · 迁移前自动备份', () => {
 
         const backup = new Database(join(dir, files[0]), { readonly: true })
         try {
+          expect(getSchemaVersion(backup)).toBe(1)
           expect(backup.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
           expect(
             backup.prepare("SELECT name FROM sqlite_master WHERE name = 'nodes'").get()
           ).toBeUndefined()
         } finally {
           backup.close()
+        }
+
+        // 恢复演练：把备份复制回一个新库并升级，原有事件不丢
+        const restoredPath = join(dir, 'restored.db')
+        copyFileSync(join(dir, files[0]), restoredPath)
+        const restored = openDatabase(restoredPath)
+        try {
+          expect(restored.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
+          expect(
+            restored.prepare("SELECT name FROM sqlite_master WHERE name = 'nodes'").get()
+          ).toBeTruthy()
+        } finally {
+          restored.close()
         }
 
         expect(

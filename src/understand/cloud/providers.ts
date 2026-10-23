@@ -123,7 +123,10 @@ export function resolveLlmProvider(
           : providers[0]?.id ?? DEFAULT_ACTIVE_PROVIDER)
   const provider = providers.find((item) => item.id === activeId)
   if (!provider) return { ok: false, reason: 'unknown-provider', providerId: activeId }
-  const apiKey = env[provider.apiKeyEnv] ?? fileEnv[provider.apiKeyEnv] ?? ''
+  const fromEnv = env[provider.apiKeyEnv]
+  const fromFile = fileEnv[provider.apiKeyEnv]
+  // 空字符串视同未设置：CI / shell 常见的 `FOO=` 不能遮蔽 .env 里的有效密钥
+  const apiKey = isNonEmptyString(fromEnv) ? fromEnv.trim() : isNonEmptyString(fromFile) ? fromFile.trim() : ''
   if (!apiKey) {
     return {
       ok: false,

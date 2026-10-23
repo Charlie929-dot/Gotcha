@@ -115,7 +115,7 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
     expect(sleep.mock.calls[0][0]).toBe(1_000)
   })
 
-  it('429 可重试，第二次 1000ms、第三次 2000ms', async () => {
+  it('429 可重试，退避 1000ms、4000ms（方案 1s/4s）', async () => {
     const responses = [
       new Response('', { status: 429 }),
       new Response('', { status: 429 }),
@@ -126,7 +126,7 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
     const client = makeClient(fetchImpl as unknown as typeof fetch, { sleep })
     await client.completeJson(payload())
     expect(fetchImpl).toHaveBeenCalledTimes(3)
-    expect(sleep.mock.calls.map((call) => call[0])).toEqual([1_000, 2_000])
+    expect(sleep.mock.calls.map((call) => call[0])).toEqual([1_000, 4_000])
   })
 
   it('400 不重试，抛 LlmHttpError(400)', async () => {
@@ -186,6 +186,60 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
       LlmAbortError
     )
     expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('超时覆盖响应体读取：响应头已到但 body 卡住也按 LlmTimeoutError 结束', async () => {
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      return {
+        ok: true,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+          })
+      } as unknown as Response
+    })
+    const client = makeClient(fetchImpl as unknown as typeof fetch, { timeoutMs: 5, maxRetries: 0 })
+    await expect(client.completeJson(payload())).rejects.toBeInstanceOf(LlmTimeoutError)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('响应体读取阶段被暂停取消：抛 LlmAbortError', async () => {
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      return {
+        ok: true,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+          })
+      } as unknown as Response
+    })
+    const client = makeClient(fetchImpl as unknown as typeof fetch, { maxRetries: 0 })
+    const aborter = new AbortController()
+    const promise = client.completeJson(payload(), { signal: aborter.signal })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    aborter.abort()
+    await expect(promise).rejects.toBeInstanceOf(LlmAbortError)
+  })
+
+  it('退避等待期间暂停：立即中止、不继续重试', async () => {
+    const fetchImpl = vi.fn(async () => new Response('', { status: 500 }))
+    const sleep = vi.fn(
+      (_ms: number, signal?: AbortSignal) =>
+        new Promise<void>((_resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new LlmAbortError())
+            return
+          }
+          signal?.addEventListener('abort', () => reject(new LlmAbortError()))
+        })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch, { sleep })
+    const aborter = new AbortController()
+    const promise = client.completeJson(payload(), { signal: aborter.signal })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    aborter.abort()
+    await expect(promise).rejects.toBeInstanceOf(LlmAbortError)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   it('空 content / 非法 JSON / 坏响应体都按 LlmParseError 处理且不重试', async () => {

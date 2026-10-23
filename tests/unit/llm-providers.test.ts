@@ -104,7 +104,7 @@ describe('providers · 多供应商配置（D21）', () => {
     ).toBeNull()
   })
 
-  it('密钥优先取进程环境，其次 .env；缺失 / 未知供应商给出原因', () => {
+  it('密钥优先取进程环境，其次 .env；空环境变量不遮蔽 .env', () => {
     const providers = parseProviders(JSON.stringify([DEFAULT_PROVIDER]))
     expect(
       resolveLlmProvider('deepseek', providers, { DEEPSEEK_API_KEY: 'from-env' }, { DEEPSEEK_API_KEY: 'from-file' })
@@ -113,6 +113,10 @@ describe('providers · 多供应商配置（D21）', () => {
       ok: true,
       apiKey: 'from-file'
     })
+    // `FOO=` 在 shell / CI 里常见，视同未设置；不能遮蔽 .env 里的有效密钥
+    expect(
+      resolveLlmProvider('deepseek', providers, { DEEPSEEK_API_KEY: '' }, { DEEPSEEK_API_KEY: 'from-file' })
+    ).toMatchObject({ ok: true, apiKey: 'from-file' })
     expect(resolveLlmProvider('deepseek', providers, {}, {})).toEqual({
       ok: false,
       reason: 'missing-key',

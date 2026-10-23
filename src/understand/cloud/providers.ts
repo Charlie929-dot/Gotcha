@@ -41,6 +41,19 @@ export type ResolvedLlmProvider =
   | { ok: false; reason: 'invalid-providers' }
   | { ok: false; reason: 'missing-key'; providerId: string; apiKeyEnv: string }
 
+/** 密钥来源（只回给设置界面显示状态，不回密钥值）：进程环境 > userData/.env */
+export type ApiKeySource = 'env' | 'file' | 'none'
+
+export function apiKeySource(
+  apiKeyEnv: string,
+  env: Record<string, string | undefined>,
+  fileEnv: Record<string, string> = {}
+): ApiKeySource {
+  if (isNonEmptyString(env[apiKeyEnv])) return 'env'
+  if (isNonEmptyString(fileEnv[apiKeyEnv])) return 'file'
+  return 'none'
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== ''
 }

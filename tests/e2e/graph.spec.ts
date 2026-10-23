@@ -14,7 +14,7 @@
 
 import { expect, test } from '@playwright/test'
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { insertEvent, openDatabase } from '../../src/db'
@@ -104,6 +104,8 @@ test.beforeAll(async () => {
     args: [...APP_ARGS],
     env: {
       ...process.env,
+      // 隔离宿主机环境变量：密钥状态测试要求从空 .env 开始
+      DEEPSEEK_API_KEY: '',
       GOTCHA_USER_DATA: userDataDir,
       GOTCHA_FAKE_CAPTURE: '1',
       GOTCHA_FAKE_LLM: '1'
@@ -196,10 +198,14 @@ test.describe.serial('图谱闭环（假采集 + 假 LLM）', () => {
     await expect(graph.locator('#panel')).toBeHidden()
   })
 
-  test('设置抽屉：读取并保存归纳参数，热键状态可见', async () => {
+  test('设置抽屉：读取并保存归纳参数，供应商 API Key 直接填写即生效', async () => {
     await graph.locator('#settings').click()
     await expect(graph.locator('#drawer')).toBeVisible()
     await expect(graph.locator('#set-interval')).toHaveValue('10')
+
+    const keyStatus = graph.locator('[data-role="provider"] [data-role="key-status"]').first()
+    await expect(keyStatus).toHaveText('未配置密钥')
+    await graph.locator('[data-role="provider"] [data-field="apiKey"]').first().fill('sk-e2e-test-key')
 
     await graph.locator('#set-interval').fill('15')
     await graph.locator('#settings-save').click()
@@ -209,6 +215,12 @@ test.describe.serial('图谱闭环（假采集 + 假 LLM）', () => {
       (window as unknown as { gotchaGraph: GraphWindowApi }).gotchaGraph.settings()
     )
     expect(saved.intervalMinutes).toBe(15)
+
+    // 直接填写的密钥写入 userData/.env（不是 settings 表），界面只显示来源不回显值
+    await expect(keyStatus).toHaveText('已配置（userData/.env）')
+    expect(readFileSync(join(userDataDir, '.env'), 'utf8')).toContain(
+      'DEEPSEEK_API_KEY=sk-e2e-test-key'
+    )
     await expect(graph.locator('#set-hotkey-status')).not.toHaveText('')
     await graph.locator('#settings-close').click()
     await expect(graph.locator('#drawer')).toBeHidden()

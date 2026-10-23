@@ -12,6 +12,7 @@
 
 - `DEEPSEEK_API_KEY` 等用 `.env` / 环境变量；示例配置可提交，真实配置不提交。
 - M2 多供应商（D21）：供应商配置只存环境变量名（`apiKeyEnv`），密钥值只从 `process.env` 或 `userData/.env` 读取；密钥、token 不进 settings 表、代码、日志、提交、命令参数、截图。
+- **设置界面直接填写密钥（D26，2026-10-23）**：主进程把输入写入 `userData/.env` 的 `apiKeyEnv` 行（原子替换、保留其它行与注释、权限尽力 0600），渲染进程只拿「已配置 / 未配置 / 来源」，值永不回显；settings 写入通道出现 apiKey 类字段仍整单拒绝；同名环境变量优先，UI 如实提示。密钥只经独立通道 `graph:provider:key`（`providerId` + 一次性输入），主进程按已保存供应商反查变量名，不接受渲染进程指定任意变量名。
 
 ## 三层脱敏墙（出云唯一出口）
 
@@ -38,7 +39,8 @@
 - **真实出云需一次性确认（D24，2026-10-23）**：`graph.outbound_consent=1` 之前，自动归纳不启动、手动「立即归纳」也零请求（返回 `consent` 跳过）；确认入口必须在图谱窗口明示「会把脱敏后的标题 / OCR 摘要发往供应商」；设置撤销后立即停调度。确认门不替代 D18：采集暂停时无论是否确认都零出网。
 - **供应商 URL 策略（D21）**：只允许 https；本机网关（`localhost` / `127.0.0.1` / `::1`）允许 http；拒绝 URL 内凭据、query、fragment；携带 API key 的请求禁止跟随重定向（`redirect: 'error'`），避免 Authorization 头被 302 带到别处。
 - 出网数据最小化：只发必要字段。
-- **图谱 IPC 边界**：`graph:*` 只接受图谱窗口**主 frame**（`event.sender.id` + `event.senderFrame === mainFrame`），iframe / 其它窗口一律拒绝；`graph-preload` 只暴露查询 / 状态 / 立即归纳 / 确认门 / 设置读写 / 打开时间线，不暴露任意 SQL、文件路径或密钥；设置读写里出现的 apiKey 类字段整单拒绝（密钥只走 env / `.env`，D21）。
+- **图谱 IPC 边界**：`graph:*` 只接受图谱窗口**主 frame**（`event.sender.id` + `event.senderFrame === mainFrame`），iframe / 其它窗口一律拒绝；`graph-preload` 只暴露查询 / 状态 / 立即归纳 / 确认门 / 设置读写 / 供应商模型拉取 / 密钥写入 / 打开时间线，不暴露任意 SQL、文件路径或已保存的密钥；设置读写里出现的 apiKey 类字段整单拒绝（密钥只走 env / `.env`，D21/D26）。
+- **获取模型（D26）**：用户点击「获取模型」才向当前填写的供应商发 `GET {baseUrl}/models`（Bearer + `redirect: 'error'` + 10s 超时 + 响应体上限）；只携带密钥本身，不发送任何采集内容；错误消息不包含密钥、URL 凭据或响应正文，日志只记「获取失败」。
 
 ## 破坏性操作
 

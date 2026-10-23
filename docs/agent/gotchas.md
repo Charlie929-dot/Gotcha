@@ -59,6 +59,10 @@
 | sigma v4 没有 `camera.animatedReset()` | 照旧版 API 调会报未定义；v4 相机是 `reset()` / `animate()` / `setState()`（2026-10-23 查类型确认） | 初始居中用 `void renderer.getCamera().reset()`；改视角用 `animate(state)` / `setState(state)` |
 | sigma 打包体积 | `sigma` 只有图谱窗口用，但若被时间线入口静态引用会把 ~687KB ESM 塞进时间线 chunk | 用 `await import('sigma')` 懒加载；Vite 自动拆独立 chunk（本机 build：sigma 686KB / graphology 154KB / FA2 31KB，仅图谱窗口加载） |
 | 侧栏遮住工具栏 | 节点侧栏固定在右侧全高，会盖住 Toolbar 的「设置 / 刷新」；E2E 直接点会被侧栏拦截 | 侧栏是覆盖层：先点 `#panel-close` 再做工具栏操作；或后续把侧栏改为工具栏下方布局（P3 真机看手感再定） |
+| 把 API Key 填进「环境变量名」输入框 | 界面只显示「未配置密钥（sk-...）」：密钥被当成变量名去查 env / `.env`，自然查不到（2026-10-23 用户报告） | 供应商表单必须有独立 `type=password` 的 API Key 输入框（写后不回显）；变量名收进「高级」，新供应商由 id 自动派生；保存后显示来源（env / `.env` / 未配置） |
+| `.env` 写入不能直接追加 | 同名重复行按「后者覆盖」解析，旧值会把新密钥顶掉，看起来「保存了却没生效」 | 先读旧内容：命中同名行（含 `export X=`）原位替换、丢弃重复行、其它行原样保留；先写临时文件再 `rename`，权限尽力 0600（`src/main/provider-keys.ts`，`tests/unit/provider-keys.test.ts`） |
+| 「获取模型」的鉴权与重定向 | `/models` 若跟随 302，Authorization 头会被带到别处；无超时会挂住设置界面 | `redirect:'error'` + 10s AbortController 超时 + 响应体上限；错误只映射状态码 / 网络原因，不回显密钥或响应正文；用注入 fetch 单测（`tests/unit/cloud-models.test.ts`） |
+| 已保存密钥回显给渲染进程 | 一旦回显，密钥会进 DOM / 截图 / 调试日志，违反 D21；把密钥塞进 settings 也会随数据库备份扩散 | 设置读取只回「env / file / none」来源；写入走独立 IPC `graph:provider:key`（providerId + 一次性输入，主进程反查 apiKeyEnv）；settings 通道继续整单拒绝 apiKey 字段 |
 
 ## 规则
 

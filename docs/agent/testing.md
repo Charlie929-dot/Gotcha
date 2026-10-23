@@ -14,7 +14,7 @@
 - **静默时段默认值单一来源**：`23:00–08:00` 只在本条定义；技术方案 §6.3 与代码默认值一律引用此处，改这里即全局生效。
 - **只用合成数据**：不把真实截图/OCR 文本写进仓库或测试夹具；临时产物进 `.tmp/`（gitignore，跑完清理）。
 - **E2E 不启真实录屏 / OCR / 网络**：开关与状态类用例用假采集 `GOTCHA_FAKE_CAPTURE=1`（同时要求 `GOTCHA_USER_DATA` 临时目录、非打包态），并断言 `events` 行数不增长；图谱归纳链路再加 `GOTCHA_FAKE_LLM=1`（同样三条件，输出确定性且能过 `validateInduction`），用测试钩子 `__gotchaTest.fakeLlm()` 断言请求次数（确认门前 / 暂停后必须零新增）。全局热键无法用合成按键触发，走假采集模式下主进程的 `__gotchaTest` 钩子（见 gotchas）。
-- **图谱 E2E**：合成 `events` + `nodes` + `edges` 库 → 打开图谱断言节点计数 / 成员事件；假采集 + 假 LLM 跑「确认出网 → 立即归纳 → 图谱出现节点 → 来源可溯 → 暂停零请求」（`tests/e2e/graph.spec.ts`）。
+- **图谱 E2E**：假采集 + 假 LLM 跑「确认出网 → 立即归纳 → sigma 画布出现节点（`#node-count` 的 `data-nodes` + `window.__gotchaGraphView.count()`）→ 来源可溯 → 点击节点侧栏成员事件 →「在时间线中查看」定位到节点日期 → 设置抽屉保存 → 暂停零请求」（`tests/e2e/graph.spec.ts`）。画布交互不按像素点击：`__gotchaGraphView.select(id)` 走与 `clickNode` 相同的 `openNode` 路径。
 - **隐私用例**：脱敏管道有 golden 用例（密钥/token/证件号/手机/卡号/邮箱/IP/URL 参数）；黑名单进程命中整帧丢弃要有断言。
 - 不许注释用例、加跳过标记、放宽断言来「变绿」。
 - **空用例不构成验证**：`npm test` 零断言（或 `expect(true)` 类凑数）通过不算过闸门；任何阶段首次过闸门至少含 1 条真实行为断言。

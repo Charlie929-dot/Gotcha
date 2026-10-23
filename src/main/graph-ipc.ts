@@ -10,10 +10,8 @@ import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { GraphDayData, NodeEventsResult } from '../understand/graph-query'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
-import type {
-  InductionRunOutcome,
-  InductionSnapshot
-} from './induction-runtime'
+import type { InductionRunOutcome, InductionSnapshot } from './induction-runtime'
+import type { HotkeyRegisterResult } from './hotkeys'
 
 /** 跨进程返回时把 Error 摊平成字符串（structured clone 对 Error 的 message 不可靠） */
 export type GraphInduceResult =
@@ -30,7 +28,8 @@ export interface GraphIpcDeps {
   readSettings(): GraphSettingsView
   saveSettings(patch: unknown): GraphSettingsSaveResult
   onSettingsSaved(settings: GraphSettingsView): void
-  openTimeline(): void
+  getHotkeys(): readonly HotkeyRegisterResult[]
+  openTimeline(day?: number): void
   log(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>): void
 }
 
@@ -145,10 +144,16 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
       }
     ],
     [
+      'graph:hotkeys',
+      (event) => (ensureSender(event) ? deps.getHotkeys() : [])
+    ],
+    [
       'graph:open-timeline',
-      (event) => {
+      (event, day) => {
         if (!ensureSender(event)) return false
-        deps.openTimeline()
+        const target =
+          typeof day === 'number' && Number.isFinite(day) ? day : undefined
+        deps.openTimeline(target)
         return true
       }
     ]

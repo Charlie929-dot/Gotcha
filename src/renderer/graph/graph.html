@@ -20,6 +20,7 @@
         <button id="refresh" type="button">刷新</button>
         <span class="spacer"></span>
         <button id="induce" type="button">立即归纳</button>
+        <button id="settings" type="button">设置</button>
         <button id="timeline" type="button">打开时间线</button>
       </div>
     </header>
@@ -36,9 +37,61 @@
       <section class="canvas-wrap">
         <div id="node-count" class="count"></div>
         <div id="empty" class="state" data-kind="loading">加载中…</div>
-        <ul id="node-list" class="node-list"></ul>
+        <div id="sigma-container" class="sigma-container"></div>
       </section>
     </main>
+
+    <aside id="panel" class="panel" hidden>
+      <header class="panel-head">
+        <h2 id="panel-title"></h2>
+        <button id="panel-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <p id="panel-summary" class="panel-summary"></p>
+      <p id="panel-meta" class="panel-meta"></p>
+      <h3>成员事件</h3>
+      <ul id="panel-events" class="panel-events"></ul>
+      <button id="panel-timeline" type="button">在时间线中查看</button>
+    </aside>
+
+    <aside id="drawer" class="drawer" hidden>
+      <header class="panel-head">
+        <h2>设置</h2>
+        <button id="settings-close" type="button" aria-label="关闭">×</button>
+      </header>
+      <form id="settings-form">
+        <section>
+          <h3>归纳</h3>
+          <label class="check"><input id="set-auto" type="checkbox" /> 采集运行中自动归纳</label>
+          <label>间隔（分钟）<input id="set-interval" type="number" min="1" max="1440" /></label>
+          <label>每日 token 预算<input id="set-budget" type="number" min="1000" max="100000000" /></label>
+          <label>失败退避（分钟，逗号分隔）<input id="set-backoff" type="text" /></label>
+          <label>单批时刻上限<input id="set-batch" type="number" min="1" max="100" /></label>
+          <label>输出 token 上限<input id="set-max-tokens" type="number" min="256" max="8192" /></label>
+          <label class="check"><input id="set-consent" type="checkbox" /> 已确认出网（D24）</label>
+          <p id="usage" class="hint"></p>
+        </section>
+
+        <section>
+          <h3>供应商</h3>
+          <p class="hint">密钥只从环境变量 / userData/.env 读取；这里只填变量名，密钥值不回显、不入库。</p>
+          <label>当前供应商<select id="set-active"></select></label>
+          <div id="set-providers" class="providers"></div>
+          <button id="set-add-provider" type="button">添加供应商</button>
+        </section>
+
+        <section>
+          <h3>快捷键</h3>
+          <label>切换记录<input id="set-hotkey-toggle" type="text" /></label>
+          <label>打开图谱<input id="set-hotkey-graph" type="text" /></label>
+          <p id="set-hotkey-status" class="hint"></p>
+        </section>
+
+        <div class="form-actions">
+          <button id="settings-save" type="submit">保存</button>
+          <span id="settings-msg" class="hint"></span>
+        </div>
+      </form>
+    </aside>
 
     <footer id="meta" class="meta"></footer>
     <script type="module" src="./graph.ts"></script>

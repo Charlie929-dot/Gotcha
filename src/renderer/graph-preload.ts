@@ -10,6 +10,7 @@ import type { GraphDayData, NodeEventsResult } from '../understand/graph-query'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
 import type { GraphInduceResult } from '../main/graph-ipc'
 import type { InductionSnapshot } from '../main/induction-runtime'
+import type { HotkeyRegisterResult } from '../main/hotkeys'
 
 export interface GraphApi {
   query(from: number, to: number): Promise<GraphDayData>
@@ -20,7 +21,8 @@ export interface GraphApi {
   setConsent(consented: boolean): Promise<InductionSnapshot>
   settings(): Promise<GraphSettingsView>
   saveSettings(patch: unknown): Promise<GraphSettingsSaveResult>
-  openTimeline(): Promise<boolean>
+  hotkeys(): Promise<HotkeyRegisterResult[]>
+  openTimeline(day?: number): Promise<boolean>
 }
 
 const api: GraphApi = {
@@ -43,7 +45,8 @@ const api: GraphApi = {
   settings: () => ipcRenderer.invoke('graph:settings:get') as Promise<GraphSettingsView>,
   saveSettings: (patch) =>
     ipcRenderer.invoke('graph:settings:save', patch) as Promise<GraphSettingsSaveResult>,
-  openTimeline: () => ipcRenderer.invoke('graph:open-timeline') as Promise<boolean>
+  hotkeys: () => ipcRenderer.invoke('graph:hotkeys') as Promise<HotkeyRegisterResult[]>,
+  openTimeline: (day) => ipcRenderer.invoke('graph:open-timeline', day) as Promise<boolean>
 }
 
 contextBridge.exposeInMainWorld('gotchaGraph', api)

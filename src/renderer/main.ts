@@ -10,6 +10,7 @@ declare global {
     gotcha: {
       timeline: {
         query(from: number, to: number): Promise<EventRow[]>
+        onSetDay(callback: (ts: number) => void): () => void
       }
     }
   }
@@ -23,10 +24,17 @@ const todayButton = document.getElementById('today')
 const refreshButton = document.getElementById('refresh')
 const liveBadge = document.getElementById('live')
 
-let day = startOfDay(Date.now())
+let day = startOfDay(initialDayFromUrl())
 let rendering = false
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let lastRenderedSignature = ''
+
+/** 图谱下钻带 `?day=<ts>` 打开时间线；无参数 = 今天 */
+function initialDayFromUrl(): number {
+  const raw = new URLSearchParams(window.location.search).get('day')
+  const value = raw === null ? Number.NaN : Number(raw)
+  return Number.isFinite(value) ? value : Date.now()
+}
 
 function state(text: string): HTMLElement {
   const p = document.createElement('p')
@@ -148,6 +156,13 @@ todayButton?.addEventListener('click', () => {
   void render()
 })
 refreshButton?.addEventListener('click', () => {
+  lastRenderedSignature = ''
+  void render()
+})
+
+// C4：图谱节点「在时间线中查看」→ 主进程发 set-day；窗口已开时切日而不是重建
+window.gotcha?.timeline?.onSetDay((ts) => {
+  day = startOfDay(ts)
   lastRenderedSignature = ''
   void render()
 })

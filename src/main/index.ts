@@ -343,7 +343,24 @@ function openTimeline(): void {
   showTimelineWindow()
 }
 
-function createMainWindow(): void {
+/**
+ * 从节点下钻打开时间线并定位到某一天（C4）：
+ * - 窗口已存在：发 `timeline:set-day` 并聚焦，不重建；
+ * - 未创建：带 `?day=<ts>` 初始化，渲染进程据此切日。
+ */
+function openTimelineDay(day: number | null): void {
+  cancelStartupResume(true)
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (day !== null) mainWindow.webContents.send('timeline:set-day', day)
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+    return
+  }
+  createMainWindow(day)
+}
+
+function createMainWindow(initialDay: number | null = null): void {
   mainWindow = new BrowserWindow({
     show: true,
     width: 1100,
@@ -355,10 +372,16 @@ function createMainWindow(): void {
       nodeIntegration: false
     }
   })
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    void mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+  const devServerUrl = process.env['ELECTRON_RENDERER_URL']
+  if (devServerUrl) {
+    const url = new URL(devServerUrl)
+    if (initialDay !== null) url.searchParams.set('day', String(initialDay))
+    void mainWindow.loadURL(url.toString())
   } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    void mainWindow.loadFile(
+      join(__dirname, '../renderer/index.html'),
+      initialDay !== null ? { query: { day: String(initialDay) } } : undefined
+    )
   }
   mainWindow.on('closed', () => {
     mainWindow = null
@@ -698,7 +721,8 @@ if (primaryInstance) {
         return saveGraphSettings(db, patch)
       },
       onSettingsSaved: applyGraphSettings,
-      openTimeline: () => openTimeline(),
+      getHotkeys: () => hotkeyHandle?.results ?? [],
+      openTimeline: (day) => openTimelineDay(day ?? null),
       log: captureLog
     })
 

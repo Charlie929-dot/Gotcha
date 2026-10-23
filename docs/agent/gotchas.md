@@ -54,6 +54,11 @@
 | 退出时 `controller.stop()` 会重入归纳接线 | `before-quit` 里 stop 触发 `onStatusChange('paused')`，若回调无守卫会重新创建归纳 runtime / 重写快照，退出路径多出写库与定时器（2026-10-23 接线时规避） | 退出前先置 `shuttingDown`，`onStatusChange` 中 `if (!shuttingDown)` 才联动归纳 / 推送图谱状态；`before-quit` 先 dispose 归纳 runtime 再 stop 采集 |
 | 球点击改开图谱后既有 E2E 断链 | D20 把球点击从时间线改成图谱，旧用例等 `#list` 直接超时；时间线入口改到图谱工具栏（2026-10-23 已改） | `ball.spec` 点击后断言图谱 `#status` / `#empty`；`timeline.spec` 点击球 → 图谱 `#timeline` → 时间线；开关 E2E 里「点球取消倒计时」语义不变（打开图谱也算一次交互） |
 | 图谱窗口 `sandbox: true` 下 preload 只能走 electron 内置 | preload 想 `require` 本地模块会失败；图谱 preload 只 import type + `contextBridge` / `ipcRenderer`（Electron 45 实测可用） | 类型全部 `import type`（打包时擦除），运行时只依赖 electron；窗口能力走 IPC，不把业务模块塞进 preload |
+| 对元素本身 `querySelector('#自身id')` 返回 null | 设置抽屉把 `drawer` 元素当 root 传进去，`root.querySelector('#drawer')` 找不到自己，模块初始化抛错 → 图谱页停在「读取中…」（2026-10-23 E2E 暴露） | 设置抽屉 root 传 `document.body` / `document`，或用 `document.getElementById`；元素自身的查找不要用自身作 root |
+| graphology 默认边 key 不是 `src->dst` | 想用边 key 做 reducer 映射，按 `src->dst` 解析会全部对不上；默认 key 是内部 `geid_<n>`（graphology 0.26） | 加边时显式 `addEdgeWithKey(String(edge.id), src, dst, attrs)`，reducer 直接按数据库边 id 查端点 |
+| sigma v4 没有 `camera.animatedReset()` | 照旧版 API 调会报未定义；v4 相机是 `reset()` / `animate()` / `setState()`（2026-10-23 查类型确认） | 初始居中用 `void renderer.getCamera().reset()`；改视角用 `animate(state)` / `setState(state)` |
+| sigma 打包体积 | `sigma` 只有图谱窗口用，但若被时间线入口静态引用会把 ~687KB ESM 塞进时间线 chunk | 用 `await import('sigma')` 懒加载；Vite 自动拆独立 chunk（本机 build：sigma 686KB / graphology 154KB / FA2 31KB，仅图谱窗口加载） |
+| 侧栏遮住工具栏 | 节点侧栏固定在右侧全高，会盖住 Toolbar 的「设置 / 刷新」；E2E 直接点会被侧栏拦截 | 侧栏是覆盖层：先点 `#panel-close` 再做工具栏操作；或后续把侧栏改为工具栏下方布局（P3 真机看手感再定） |
 
 ## 规则
 

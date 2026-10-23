@@ -19,6 +19,9 @@
     "@types/node": "^26.6.5",
     "electron": "^45.0.0",
     "electron-vite": "^6.0.0",
+    "graphology": "0.26.0",
+    "graphology-layout-forceatlas2": "0.10.1",
+    "sigma": "4.0.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vitest": "^5.0.5"

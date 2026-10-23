@@ -74,12 +74,13 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
     expect(body.messages[0].content).toContain('json')
     expect(body.messages[1].role).toBe('user')
     const userContent = JSON.parse(body.messages[1].content) as {
-      events: Array<{ id: number; app: string; title: string; ocr: string }>
+      events: Array<{ event_ids: number[]; app: string; title: string; ocr: string }>
     }
-    expect(userContent.events.map((e) => e.id)).toEqual([1, 2])
+    expect(userContent.events.map((e) => e.event_ids[0])).toEqual([1, 2])
     expect(userContent.events[0]).toEqual({
-      id: 1,
+      event_ids: [1],
       ts: 1_700_000_000_000,
+      ts_end: 1_700_000_000_000,
       app: 'notepad.exe',
       title: '标题',
       ocr: '正文'

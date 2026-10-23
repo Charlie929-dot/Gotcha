@@ -77,7 +77,11 @@ export class LlmNetworkError extends LlmError {
 }
 
 export class LlmParseError extends LlmError {
-  constructor(message = 'LLM 返回内容不是合法 JSON') {
+  constructor(
+    message = 'LLM 返回内容不是合法 JSON',
+    /** 响应已带回的用量：解析失败同样消耗了 token，必须能交给上层记账（F03） */
+    readonly usage?: LlmUsage
+  ) {
     super(message, 'parse')
     this.name = 'LlmParseError'
   }

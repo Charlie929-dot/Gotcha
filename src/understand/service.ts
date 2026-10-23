@@ -174,14 +174,23 @@ export function createInductionService(options: InductionServiceOptions): Induct
       if (built.payload.events.length > 0) {
         const call = async (repair?: { errors: readonly string[] }): Promise<LlmJsonResult> => {
           callsMade += 1
-          const response = await client.completeJson(built.payload, {
-            signal: controller.signal,
-            maxTokens: maxTokens(),
-            repair
-          })
-          spent.promptTokens += response.usage.promptTokens
-          spent.completionTokens += response.usage.completionTokens
-          return response
+          try {
+            const response = await client.completeJson(built.payload, {
+              signal: controller.signal,
+              maxTokens: maxTokens(),
+              repair
+            })
+            spent.promptTokens += response.usage.promptTokens
+            spent.completionTokens += response.usage.completionTokens
+            return response
+          } catch (error) {
+            // 解析层失败（空 content / 非法 JSON）也可能已消耗 token：照实累计，失败循环才绕不过预算（F03）
+            if (error instanceof LlmParseError && error.usage) {
+              spent.promptTokens += error.usage.promptTokens
+              spent.completionTokens += error.usage.completionTokens
+            }
+            throw error
+          }
         }
 
         let validation: InductionValidation | undefined

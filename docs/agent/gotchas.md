@@ -43,6 +43,8 @@
 | 脱敏「唯一出口」被客户端签名绕过 | LLM 客户端若接受任意 `messages`，业务代码可以直接把未脱敏文本发出去，`buildCloudPayload` 只是摆设（PR #23 审查发现） | 客户端只接受 `buildCloudPayload()` 产出的 `CloudPayload`（nominal brand），prompt 在客户端内部拼装；单测断言 `JSON.stringify(payload)` 不含敏感原文。另：`app` 也要过脱敏，Bearer/Basic 认证头要有规则 |
 | better-sqlite3 的 `wal_checkpoint(TRUNCATE)` 被占用时不抛错 | busy 时返回 `[{busy:1,checkpointed,log}]`；只 try/catch 会把「备份缺 WAL 里已提交的帧」当成功，回滚不成立（PR #23 复审实测：checkpointed=0、log=3 仍返回正常行） | 检查 `checkpointed < log` 才中止迁移（`src/db/index.ts`）；恢复备份前先关应用并删同目录 `memory.db-wal` / `memory.db-shm`，否则旧 WAL 被重放、备份看起来「没生效」（见 security.md） |
 | 脱敏正则的键名要求过窄 | `secret-assignment` 旧规则 `key\s*[:=]` 只认「键名后直接空白或冒号/等号」，JSON 的 `{"api_key":"…"}` 因键名后有引号而整条漏检；合成复现：值原样留在 `redactSensitive` 输出里（F02，2026-10-23） | 键名后允许可选引号（`(?:api[_-]?key|access[_-]?token|…|token)["']?\s*[:=]`），值支持带引号字符串；**带引号值用 lookahead 停在收尾引号前**（`"[^"\n]{6,}(?=")`），否则整个匹配被占位符替换会把收尾引号一并吞掉、破坏 JSON；用例覆盖 JSON / 单引号 / 裸 token / 短值不误报，并断言序列化 payload 不含原文（`tests/unit/redact.test.ts`） |
+| 异常路径丢了真实用量 | DeepSeek 客户端 200 响应带 `usage`，但 `content` 为空 / 非法 JSON 时直接抛 `LlmParseError`；调度层只在 `completeJson` 成功后累计 spent，两次解析都失败时 spent=0 → 修复失败循环不增长预算账本，真实费用却已发生（F03，2026-10-23 静态确认，未做真实云调用） | `LlmParseError` 携带可选 `usage`（响应体本身不是 JSON 时没有可用 usage，不伪造 0）；`service.ts` 的 `call()` 失败也累计 `spent`；用例：两次解析失败记 200 token、首败+修复成功合计 170（`tests/unit/induction-service.test.ts` / `llm-client.test.ts`） |
+| 只限时刻数、不限「必须回显的 id 数」 | 输出契约要求 `nodes.event_ids` 覆盖全部输入 id；旧逻辑只限 20 时刻 / 单次查询 5000 事件，一个时刻可汇集上千 id → 2000 token 输出被截断，校验失败后同批重试、游标不前进，可能长期卡住并消耗预算（F04，2026-10-23） | 单时刻 ≤40 id、单批 ≤400 id（`LLM_DEFAULTS`），超限确定性切分/留待下一批；`mergeMoments` 只把已关闭时刻计入 `consumed`，游标照常前进；用例：1000 个同 app 事件切成 10 个时刻、消费 400 后下一批从 401 继续（`tests/unit/batch.test.ts`） |
 
 ## 规则
 

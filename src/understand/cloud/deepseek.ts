@@ -201,24 +201,23 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
         throw new LlmParseError('LLM 响应不是合法 JSON')
       }
 
+      // 先取 usage：空 content / 非法 JSON 时响应可能已消耗 token，随错误上交记账（F03）
+      const usage = {
+        promptTokens: toCount(data.usage?.prompt_tokens),
+        completionTokens: toCount(data.usage?.completion_tokens)
+      }
       const content = data.choices?.[0]?.message?.content
       if (typeof content !== 'string' || content.trim() === '') {
         // JSON Output 官方已知可能返回空 content：按非法输出处理，交给上层修复重试
-        throw new LlmParseError('LLM 返回空 content')
+        throw new LlmParseError('LLM 返回空 content', usage)
       }
       let json: unknown
       try {
         json = JSON.parse(content)
       } catch {
-        throw new LlmParseError()
+        throw new LlmParseError(undefined, usage)
       }
-      return {
-        json,
-        usage: {
-          promptTokens: toCount(data.usage?.prompt_tokens),
-          completionTokens: toCount(data.usage?.completion_tokens)
-        }
-      }
+      return { json, usage }
     } finally {
       clearTimeout(timer)
       externalSignal?.removeEventListener('abort', onExternalAbort)

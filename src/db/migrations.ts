@@ -8,7 +8,17 @@
  */
 
 import type Database from 'better-sqlite3'
-import { EVENTS_DDL, EVENTS_TS_INDEX_DDL, SETTINGS_DDL } from './schema'
+import {
+  EDGES_DDL,
+  EDGES_DST_INDEX_DDL,
+  EDGES_SRC_INDEX_DDL,
+  EVENTS_DDL,
+  EVENTS_TS_INDEX_DDL,
+  NODES_DDL,
+  NODES_LEVEL_INDEX_DDL,
+  NODES_TS_START_INDEX_DDL,
+  SETTINGS_DDL
+} from './schema'
 
 export interface Migration {
   version: number
@@ -28,6 +38,25 @@ export const migrations: Migration[] = [
       db.exec('DROP INDEX IF EXISTS idx_events_ts')
       db.exec('DROP TABLE IF EXISTS events')
       db.exec('DROP TABLE IF EXISTS settings')
+    }
+  },
+  {
+    version: 2,
+    up(db) {
+      db.exec(NODES_DDL)
+      db.exec(EDGES_DDL)
+      db.exec(NODES_TS_START_INDEX_DDL)
+      db.exec(NODES_LEVEL_INDEX_DDL)
+      db.exec(EDGES_SRC_INDEX_DDL)
+      db.exec(EDGES_DST_INDEX_DDL)
+    },
+    down(db) {
+      db.exec('DROP INDEX IF EXISTS idx_edges_dst')
+      db.exec('DROP INDEX IF EXISTS idx_edges_src')
+      db.exec('DROP INDEX IF EXISTS idx_nodes_level')
+      db.exec('DROP INDEX IF EXISTS idx_nodes_ts_start')
+      db.exec('DROP TABLE IF EXISTS edges')
+      db.exec('DROP TABLE IF EXISTS nodes')
     }
   }
 ]

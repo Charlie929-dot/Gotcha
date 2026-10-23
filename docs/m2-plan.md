@@ -91,14 +91,14 @@ tests/
 
 ### Phase 0 · 出云底座与数据契约（约 1.5–2 天）
 
-- **迁移 v2**：`nodes` / `edges` + 索引；`up` 幂等、`down` 可回滚；回归用例「up → down → up 结构一致」。
+- **迁移 v2**：`nodes` / `edges` + 索引；`up` 幂等、`down` 可回滚；回归用例「up → down → up 结构一致」。**文件库在 schema 落后时先自动备份**（`memory.db.bak.<yyyy-MM-dd-HHmmss>`，checkpoint 后整文件复制；备份失败则中止启动，不在无备份时改用户库）。
 - **`redact.ts`（唯一出云出口）**：
-  - 输入一批事件，输出只含 `{events: [{id, ts, app, title, ocr}]}` 的载荷；`title` 截断 120 字、`ocr` 截断 200 字、去空白。
-  - `sensitive=1` 事件按 Q3 结论处理：先对 `title` / `ocr` 跑统一脱敏函数把命中片段替换为 `[已脱敏]`，再二次扫描；仍命中（或命中密码类 drop 规则）则整条不进载荷，本地记「内容已保护」占位（Phase 1 生成占位节点）。
-  - 暴露 `redactForCloud(events): {payload, redactedIds, droppedIds}`；**单测断言 `JSON.stringify(payload)` 不包含任何 golden 敏感串**。
-- **`llm-client.ts` / `deepseek.ts` / `providers.ts`**：契约 `completeJson(request): Promise<{json: unknown; usage: {prompt, completion}}>`；实现含 AbortController 超时 60s、429/5xx/网络错误指数退避重试 2 次（1s / 4s）、4xx（除 429）不重试、JSON 解析失败抛类型化错误；`response_format: {type: 'json_object'}`、`temperature: 0`、`max_tokens: 2000`。供应商层按 D21 支持预设 + 自定义 OpenAI 兼容配置（baseUrl / model / apiKeyEnv），不引 HTTP 依赖（Electron/Node 内置 fetch）。
-- **key 载入**：`userData/.env` 解析 + 环境变量回退；只读不落库；缺失 → 返回「未配置」状态，不抛到采集链路。测试覆盖 `.env` 解析（注释/空行/引号/CRLF）、env 回退、多供应商选择与未知供应商回退。
-- **测试**：迁移、redact golden、客户端重试/超时/用量（假 fetch 注入）、供应商解析、无 key 分支。全程零真实网络。
+  - 输入一批事件，输出只含 `{events: [{id, ts, app, title, ocr}]}` 的载荷；`app` / `title` / `ocr` **三个文本字段全部过同一脱敏函数**，分别截断 80 / 120 / 200 字、去空白。
+  - `sensitive=1` 事件按 Q3 结论处理：先剥离命中片段替换为 `[已脱敏]`，再二次扫描；仍命中（或命中密码类 drop 规则）则整条不进载荷（`excludedIds`），本地记「内容已保护」占位（Phase 1 生成占位节点）。
+  - 产出 `CloudPayload` 带 nominal brand：LLM 客户端只接收该类型，业务代码无法直接拼 messages 绕过脱敏；**单测断言 `JSON.stringify(payload)` 不包含任何 golden 敏感串**。
+- **`llm-client.ts` / `deepseek.ts` / `providers.ts`**：契约 `completeJson(payload: CloudPayload, { signal?, maxTokens?, temperature? })`；实现含 AbortController 超时 60s、外部 `AbortSignal` 取消（暂停 D18，取消不重试）、429/5xx/网络错误指数退避重试 2 次（1s / 4s）、4xx（除 429）不重试、JSON 解析失败抛类型化错误；`response_format: {type: 'json_object'}`、`temperature: 0`、`max_tokens: 2000`；`redirect: 'error'` 禁止跟随重定向（避免 Authorization 头被 302 带走）。供应商层按 D21 支持预设 + 自定义 OpenAI 兼容配置（baseUrl / model / apiKeyEnv），**URL 仅 https，本机网关（localhost / 127.0.0.1 / ::1）允许 http；拒绝 URL 内凭据 / query / fragment**；不引 HTTP 依赖（Electron/Node 内置 fetch）。
+- **key 载入**：`userData/.env` 解析 + 环境变量回退；只读不落库；缺失 → 返回「未配置」状态，不抛到采集链路。测试覆盖 `.env` 解析（注释/空行/引号/CRLF）、env 回退、多供应商选择；未知供应商 / 非法 providers JSON / 缺密钥都返回明确原因（不静默回退默认供应商，避免数据发往用户以为已替换的远端）。
+- **测试**：迁移（含备份）、redact golden（含 app 字段 / 先剥离后截断）、客户端重试/超时/取消/重定向禁用/用量（假 fetch 注入）、供应商解析与 URL 策略、无 key 分支。全程零真实网络。
 
 ### Phase 1 · 归纳管线（约 2–3 天）
 
@@ -129,7 +129,7 @@ tests/
 
 ## 4. 关键设计决策（方案内定，有异议请标出）
 
-1. **出云唯一出口 + 字段最小化**：`redact.ts` 是唯一构造上云载荷的地方；LLM 客户端只接收已脱敏载荷，不接触 `EventRow`。测试以「序列化后不含敏感串」为硬断言，而不是只测函数返回值。
+1. **出云唯一出口 + 字段最小化**：`redact.ts` 是唯一构造上云载荷的地方；`CloudPayload` 带 nominal brand，LLM 客户端只接收该类型且 prompt 由客户端拼装，业务代码无法注入自由文本（PR #23 审查修复）。测试以「序列化后不含敏感串」为硬断言，而不是只测函数返回值。
 2. **JSON Output 契约**：`response_format=json_object`、prompt 含 json 示例、`temperature=0`、`max_tokens=2000`；官方文档提示 JSON 模式可能返回空 content（2026-10 核对），按「空 content = 非法输出」走修复重试，不静默接受。
 3. **游标幂等**：以 `(ts, id)` 为游标、只在落库事务内推进；同一批事件重复处理只会合并、不新增重复节点；失败不推进，下一次退避后重试同批。事件不因归纳删除或改写。
 4. **节点合并**：同本地日 + 同 type + 归一化标题合并（并集 `source_events`、扩展时间范围、摘要取更长）；跨批的同一主题因此收敛为一个节点，避免图谱被同一话题刷屏。
@@ -139,7 +139,7 @@ tests/
 8. **布局与编码**：ForceAtlas2 布局、权重作吸引强度、线宽另映射 weight（D8「双重编码」）；M2 不做 LOD 完整语义，日期筛选承担「只看某天」。
 9. **用量记账**：`graph.usage.<date>` 存 JSON（calls / prompt_tokens / completion_tokens），成本按官方价格常量（可改）在 UI 展示；不新增表，避免 schema 膨胀。
 10. **暂停联动**（D18）：暂停 = 采集停 + 归纳停 + 在途 abort；恢复后按游标续跑，不补采、不重复。
-11. **供应商抽象**（D21）：`LlmProvider` 只要求 OpenAI 兼容（baseUrl / model / apiKeyEnv），预设 DeepSeek；自定义供应商零代码接入。不直接读取 DSH harness 配置文件——只采用同形配置（多供应商 + 自定义 base URL），避免与宿主隐式耦合和密钥扩散；密钥名存配置、值只放 `.env` / 环境变量。
+11. **供应商抽象**（D21）：`LlmProvider` 只要求 OpenAI 兼容（baseUrl / model / apiKeyEnv），预设 DeepSeek；自定义供应商零代码接入。不直接读取 DSH harness 配置文件——只采用同形配置（多供应商 + 自定义 base URL），避免与宿主隐式耦合和密钥扩散；密钥名存配置、值只放 `.env` / 环境变量。URL 只允许 https（本机网关 localhost/127.0.0.1/::1 允许 http），拒绝 URL 内凭据 / query / fragment，客户端禁止跟随重定向（PR #23 审查修复）。
 12. **参数可调**（D22）：间隔、预算、退避、超时、批量上限都有默认值并存 settings，设置抽屉可改；代码不写死数字（默认值集中在一个常量模块，测试引用同一常量）。
 
 ## 5. 依赖报备

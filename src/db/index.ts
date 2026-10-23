@@ -1,18 +1,23 @@
 /**
  * SQLite 打开 / 迁移 / events 读写（m1a-plan §3 Phase 1）
  *
- * - 打开 → WAL（文件库）→ 跑迁移 → 返回实例；测试传 `:memory:`。
- * - 库文件：`userData/memory.db`（m1a-plan §2；security.md 暂定名）。
+ * - 打开 → WAL（文件库）→ 迁移前备份（security.md：迁移前必须可回滚）→ 跑迁移 → 返回实例；
+ * - 库文件：`userData/memory.db`（m1a-plan §2；security.md 暂定名）；
+ * - 备份名：`memory.db.bak.<yyyy-MM-dd-HHmmss>`（已在 .gitignore，不进仓库）；
  * - 时间线查询 ts 区间为**闭区间** [from, to]，按 ts 升序、同 ts 按 id 升序。
  */
 
 import Database from 'better-sqlite3'
-import { applyMigrations } from './migrations'
+import { copyFileSync, existsSync, statSync } from 'node:fs'
+import { applyMigrations, getSchemaVersion, migrations } from './migrations'
 
 export type Db = Database.Database
 
 /** 库文件名（m1a-plan §2 定稿名） */
 export const DB_FILE_NAME = 'memory.db'
+
+/** 当前 schema 版本（迁移数组最后一项） */
+export const LATEST_SCHEMA_VERSION = migrations[migrations.length - 1].version
 
 /** 新事件输入（官方字段；可选列缺省为 NULL，sensitive 缺省 0） */
 export interface NewEvent {
@@ -37,14 +42,72 @@ export interface EventRow {
   sensitive: number
 }
 
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/** 备份文件名时间戳（本地时区，避免 Windows 文件名冒号） */
+export function backupStamp(date = new Date()): string {
+  return [
+    date.getFullYear(),
+    pad2(date.getMonth() + 1),
+    pad2(date.getDate()),
+    '-',
+    pad2(date.getHours()),
+    pad2(date.getMinutes()),
+    pad2(date.getSeconds())
+  ].join('')
+}
+
+/**
+ * 迁移前备份：先 checkpoint 把 WAL 落进主库，再整文件复制。
+ * - better-sqlite3 的 `wal_checkpoint(TRUNCATE)` 在被占用时**不抛错**，而是返回
+ *   `[{ busy: 1, checkpointed: 0 }]`（PR #23 复审实测）；因此必须检查返回值，
+ *   busy 时中止迁移——否则备份缺 WAL 里的已提交数据，回滚不成立；
+ * - 备份失败 / checkpoint 未完成都中止启动（宁可启动失败，也不在无备份的情况下改用户库）。
+ */
+function backupBeforeMigration(db: Db, filePath: string): string {
+  const checkpoint = (db.pragma('wal_checkpoint(TRUNCATE)') ?? []) as Array<{
+    busy?: number
+    checkpointed?: number
+    log?: number
+  }>
+  // busy=1 表示 WAL 未截断，但已提交帧可能都进了主库（checkpointed == log），此时整文件复制是完整的；
+  // 只有 checkpointed < log 才说明有已提交数据还在 WAL 里，复制主库会丢数据 → 中止迁移。
+  const incomplete = checkpoint.some(
+    (row) =>
+      typeof row.log === 'number' && typeof row.checkpointed === 'number' && row.checkpointed < row.log
+  )
+  if (incomplete) {
+    throw new Error(
+      `迁移前 WAL checkpoint 未完成（数据库被占用）：${filePath}；请关闭占用该库的进程后重试`
+    )
+  }
+  const backupPath = `${filePath}.bak.${backupStamp()}`
+  copyFileSync(filePath, backupPath)
+  return backupPath
+}
+
 /** 打开库并迁移到最新版本。文件库开 WAL（采集高频小写入）。 */
 export function openDatabase(filePath: string): Db {
+  const isFile = filePath !== ':memory:'
+  const existed = isFile && existsSync(filePath) && statSync(filePath).size > 0
   const db = new Database(filePath)
-  if (filePath !== ':memory:') {
+  if (isFile) {
     db.pragma('journal_mode = WAL')
   }
   db.pragma('busy_timeout = 5000')
-  applyMigrations(db)
+
+  try {
+    if (existed && getSchemaVersion(db) < LATEST_SCHEMA_VERSION) {
+      backupBeforeMigration(db, filePath)
+    }
+    applyMigrations(db)
+  } catch (error) {
+    // 迁移失败必须释放句柄（Windows 上不 close 会让用户无法用 .bak 覆盖恢复，EBUSY）
+    db.close()
+    throw error
+  }
   return db
 }
 

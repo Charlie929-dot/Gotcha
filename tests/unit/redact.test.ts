@@ -137,6 +137,44 @@ describe('buildCloudPayload · 出云唯一出口', () => {
     expect(serialized).toContain('[已脱敏]')
   })
 
+  it('带引号 JSON 凭据在序列化载荷中不残留（F02 golden）', () => {
+    const quotedKey = 'Qx7mB2vN9pR4cT8z'
+    const quotedToken = 'Zt9Lp3Wq8Rk1'
+    const result = buildCloudPayload([
+      event({
+        id: 31,
+        windowTitle: `config {"api_key":"${quotedKey}"}`,
+        ocrText: `{"token":"${quotedToken}"}`
+      })
+    ])
+
+    const serialized = JSON.stringify(result.payload)
+    expect(serialized).not.toContain(quotedKey)
+    expect(serialized).not.toContain(quotedToken)
+    expect(serialized).toContain('[已脱敏]')
+    expect(result.redactedIds).toEqual([31])
+    expect(result.payload.events[0].ocr).toBe('{"[已脱敏]"}')
+    expect(result.payload.events[0].title).toBe('config {"[已脱敏]"}')
+  })
+
+  it('时刻载荷：带引号 JSON 凭据同样剥离（F02）', () => {
+    const quotedKey = 'Qx7mB2vN9pR4cT8z'
+    const result = buildCloudMomentPayload([
+      {
+        app: 'code.exe',
+        title: 'settings.json',
+        startTs: 1_700_000_000_000,
+        endTs: 1_700_000_030_000,
+        ocr: `{"api_key":"${quotedKey}"}`,
+        eventIds: [41, 42]
+      }
+    ])
+
+    expect(JSON.stringify(result.payload)).not.toContain(quotedKey)
+    expect(result.payload.events[0].ocr).toContain('[已脱敏]')
+    expect(result.redactedIds).toEqual([41, 42])
+  })
+
   it('sensitive=1 事件剥离命中片段后仍可出云', () => {
     const result = buildCloudPayload([
       event({ id: 2, sensitive: 1, ocrText: `登录 token: ${SECRET_JWT}` })

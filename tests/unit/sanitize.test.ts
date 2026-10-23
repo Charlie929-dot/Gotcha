@@ -48,6 +48,26 @@ describe('sanitize · 脱敏标记（D10：本地保留原文）', () => {
     expect(sanitize('Bearer token 很短').sensitive).toBe(false)
   })
 
+  it('带引号的 JSON / 配置赋值也命中（F02：{"api_key":"…"} 曾整条漏检）', () => {
+    const cases = [
+      '{"api_key":"Qx7mB2vN9pR4cT8z"}',
+      '{ "api_key" : "Qx7mB2vN9pR4cT8z" }',
+      "{'secret': 'abc123456'}",
+      '"access_token" : "abc123456789"',
+      '"refresh_token":"abc123456789"',
+      '"client_secret":"abc123456789"',
+      'token: "abcdef123456"',
+      "apiKey = 'abcdef123'",
+      'secret_key=abcdef123456'
+    ]
+    for (const text of cases) {
+      expect(sanitize(text).sensitive, text).toBe(true)
+    }
+    // 值不足 6 字符、普通引号对话不误报
+    expect(sanitize('{"api_key":"abc"}').sensitive).toBe(false)
+    expect(sanitize('他说："这个功能做完了，请查看"').sensitive).toBe(false)
+  })
+
   it('密码类特征词 → 整帧丢弃（drop 优先，不标 sensitive）', () => {
     for (const text of ['请输入密码', 'Reset password', 'passwd:', 'PIN 码', 'passphrase']) {
       expect(sanitize(text)).toEqual({ text, sensitive: false, drop: true })

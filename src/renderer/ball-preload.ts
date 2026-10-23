@@ -46,6 +46,8 @@ export interface BallApi {
   dragStart(point: BallScreenPoint): void
   dragMove(point: BallScreenPoint): void
   dragEnd(payload: BallDragEndPayload): void
+  /** D20：球点击默认打开图谱 */
+  openGraph(): void
   openTimeline(): void
   openContextMenu(): void
 }
@@ -93,6 +95,7 @@ const api: BallApi = {
   dragStart: (point) => ipcRenderer.send('ball:drag-start', point),
   dragMove: (point) => ipcRenderer.send('ball:drag-move', point),
   dragEnd: (payload) => ipcRenderer.send('ball:drag-end', payload),
+  openGraph: () => ipcRenderer.send('ball:open-graph'),
   openTimeline: () => ipcRenderer.send('ball:open-timeline'),
   openContextMenu: () => ipcRenderer.send('ball:context-menu')
 }

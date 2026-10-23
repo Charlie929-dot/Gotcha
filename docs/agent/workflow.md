@@ -141,11 +141,12 @@ Gotcha/
 | M0 | 策划 + 技术方案 | ✅ 完成（2026-10-20） |
 | M1a | 采集存储底座（帧差截图/OCR/事件流/时间线） | ✅ 完成（2026-10-22 收口；A1 为能力验证，15:00 段样本不足见 `docs/archive/m1a-plan.md` §0） |
 | M1b | 悬浮球壳（收起/悬停/拖动/暂停态视觉/隐私总开关） | ✅ 完成（2026-10-23 收口；Phase 0 采集控制器 / Phase 1 球窗口与视觉 / Phase 2 隐私总开关 + Alt+P / Phase 3 B1–B8 真机验收 全部通过；方案 v0.3 归档至 `docs/archive/m1b-plan.md`；Q1=B 见 decisions D13） |
-| M2 | 知识行为图谱（DeepSeek 结构化/节点边/sigma.js 画布） | 🟡 进行中：Phase 0 ✅（PR #23）、Phase 1 ✅（PR #24）；Phase 2 图谱画布待开工 |
+| M2 | 知识行为图谱（DeepSeek 结构化/节点边/sigma.js 画布） | 🟡 进行中：Phase 0 ✅（PR #23）、Phase 1 ✅（PR #24）、Phase 2a ✅（2026-10-23，归纳接线/只读查询/热键注册表/设置校验/图谱窗口壳）；Phase 2b 画布与下钻待开工 |
 | M3 | 分层记忆（日/周/月归纳/LOD/下钻） | ⬜ 未开工 |
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-23：M2 Phase 2a 归纳接线与图谱数据通道（`feat/m2-p2-wiring`）：新增归纳运行时（`graph.outbound_consent` 一次性确认门 D24、采集 running 启停 / 暂停 abort D18、供应商状态快照）；只读 `graph-query`（按日节点与边、节点成员事件、`missingIds` 可溯）；`hotkeys` 重构为注册表（`Alt+P` + `Alt+Space` 可配置、冲突检测、保存后重绑）；`graph-settings` 白名单校验（拒绝密钥字段 / 非法供应商 / 越界参数 / 非法热键，单事务回滚）；独立图谱窗口壳 + `graph-preload` / `graph:*` IPC（sender 主 frame 校验）；球点击改开图谱（D20）、托盘与球右键加「打开图谱」、时间线入口移到图谱工具栏；E2E 用假采集 + 假 LLM 覆盖确认门零请求 / 立即归纳落库 / 来源可溯 / 暂停零请求。新增 25 条单测（graph-query 6 / graph-settings 7 / induction-runtime 6 / fake-llm 2 / hotkeys 4）、3 条 E2E；`npm test` 312 条 + typecheck + build + E2E 22 条全绿。
 - 2026-10-23：临时截图政策落地（`fix/temp-shot-policy`，评估稿 F06，拍板选 A 保留文件桥 + 受控清理）：黑名单在截图前判断（不落 PNG；同一窗口连续采样只记一条元数据，切走再回来重记）；新增 `src/capture/temp-store.ts` 启动清理 `userData/tmp` 里的 `frame-<ts>.png` 残留（文件名白名单，不碰其它文件）；删除临时帧失败计入 `temp_delete_failed` 并 warn（只记错误码，不记路径）；「处理完即删」保持不变。新增 6 条单测（temp-store 3 / pipeline 3），`npm test` 287 条 + typecheck + build 全绿；E2E 19 条通过。
 - 2026-10-23：帧差去重状态修复（`fix/frame-dedup-state`，评估稿 F05）：旧管线在入 OCR 队列前就写 `lastHash`，OCR 失败 / 队列满后同帧永久判「未变」；状态也不分窗口，跨应用同像素会吞掉后一个来源。改为按 `app\0title` 分 key（LRU 64）的 `{ committed, queued, failure }`：`committed` 只在入库成功 / 黑名单元数据 / 密码整帧丢弃后提交，`queued` 记在途指纹（同一内容不重复排队），失败只出队不提交、同帧下个 tick 重试，同帧连续 3 次失败才提交指纹停止重试（`dedupMaxRetries`，内容变化即恢复），队列满不写状态。新增 5 条单测（失败重试成功 / 失败到顶停止 / 跨应用同像素 / 队列满不吞帧 / 密码帧不重复 OCR），`npm test` 281 条 + typecheck + build 全绿；E2E 19 条通过。
 - 2026-10-23：采集层稳定性与录屏边界修复（`fix/ocr-screen-guard`，评估稿 F07/F08）：F07 OCR 桥 ready 等待加启动超时（默认 15s），error / exit / stdin 错误统一拒绝在途请求与 ready 等待并重置状态，下次调用重拉子进程（默认 5s 冷却），`dispose` 直接拒绝等待；`stop()` 先取消 OCR（`disposeOcr`）再 `flush`，启动挂起时不再无限等待；F08 录屏授权只放行采集窗口主 frame（`request.frame === webContents.mainFrame`，跨进程 wrapper 重建按 `processId + routingId` 兜底），其它窗口 / iframe / 非视频请求一律拒绝。新增 11 条单测（winrt-bridge 6 / display-media 5；capture-controller 停序 +1），`npm test` 269 条 + typecheck + build 全绿；E2E 19 条通过。

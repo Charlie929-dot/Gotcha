@@ -1,6 +1,6 @@
 /**
- * M1a Phase 3 E2E：预置合成 events（固定时间戳）→ 启动应用 → 点击球打开时间线
- * → 时间线渲染出对应行（M1b Phase 1 起时间线由球点击打开，Q3）
+ * M1a Phase 3 E2E：预置合成 events（固定时间戳）→ 启动应用 → 点击球打开图谱（D20）
+ * → 图谱工具栏「打开时间线」→ 时间线渲染出对应行。
  *
  * 隔离：GOTCHA_USER_DATA 指向临时目录（main 里 app.setPath 覆盖），不碰真实 userData。
  */
@@ -55,7 +55,7 @@ test.beforeAll(async () => {
     args: [...APP_ARGS],
     env: { ...process.env, GOTCHA_USER_DATA: userDataDir }
   })
-  // M1b Phase 1：启动只有球（常驻外壳），点击球打开时间线窗口（Q3）
+  // M1b Phase 1：启动只有球（常驻外壳）；D20 起点击球打开图谱，再从图谱工具栏进时间线
   const ballPage = await app.firstWindow()
   await ballPage.waitForSelector('#ball')
   // 停靠缩入态先悬停展开再点：窗口穿透时「move → down」几乎同时到达，
@@ -66,8 +66,14 @@ test.beforeAll(async () => {
   const visibleX = box.width > 48 ? box.x + box.width / 2 : box.x + box.width / 4
   await ballPage.mouse.move(visibleX, box.y + box.height / 2)
   await ballPage.waitForTimeout(350)
-  const timelinePromise = app.waitForEvent('window')
+  const graphPromise = app.waitForEvent('window')
   await ballPage.mouse.click(32, 32)
+  const graph = await graphPromise
+  await graph.waitForLoadState('domcontentloaded')
+  await graph.waitForSelector('#timeline')
+
+  const timelinePromise = app.waitForEvent('window')
+  await graph.locator('#timeline').click()
   page = await timelinePromise
   await page.waitForLoadState('domcontentloaded')
 })

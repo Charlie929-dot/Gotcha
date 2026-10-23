@@ -1,7 +1,7 @@
 import { defineConfig } from 'electron-vite'
 import { resolve } from 'node:path'
 
-// M1b Phase 1：main + 双 preload（时间线 / 球）+ renderer（时间线 / 隐藏采集窗口 / 球）
+// M2 Phase 2：main + 三 preload（时间线 / 球 / 图谱）+ renderer（时间线 / 隐藏采集窗口 / 球 / 图谱）
 export default defineConfig({
   main: {
     build: {
@@ -15,7 +15,8 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/renderer/preload.ts'),
-          ball: resolve(__dirname, 'src/renderer/ball-preload.ts')
+          ball: resolve(__dirname, 'src/renderer/ball-preload.ts'),
+          graph: resolve(__dirname, 'src/renderer/graph-preload.ts')
         }
       }
     }
@@ -27,7 +28,8 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/renderer/index.html'),
           capture: resolve(__dirname, 'src/renderer/capture.html'),
-          ball: resolve(__dirname, 'src/renderer/ball/ball.html')
+          ball: resolve(__dirname, 'src/renderer/ball/ball.html'),
+          graph: resolve(__dirname, 'src/renderer/graph/graph.html')
         }
       }
     }

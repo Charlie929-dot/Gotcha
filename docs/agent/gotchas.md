@@ -49,6 +49,11 @@
 | 只限时刻数、不限「必须回显的 id 数」 | 输出契约要求 `nodes.event_ids` 覆盖全部输入 id；旧逻辑只限 20 时刻 / 单次查询 5000 事件，一个时刻可汇集上千 id → 2000 token 输出被截断，校验失败后同批重试、游标不前进，可能长期卡住并消耗预算（F04，2026-10-23） | 单时刻 ≤40 id、单批 ≤400 id（`LLM_DEFAULTS`），超限确定性切分/留待下一批；`mergeMoments` 只把已关闭时刻计入 `consumed`，游标照常前进；用例：1000 个同 app 事件切成 10 个时刻、消费 400 后下一批从 401 继续（`tests/unit/batch.test.ts`） |
 | 帧差状态在落库前就提交，且所有窗口共用 | 旧 `tick()` 在入 OCR 队列前就写 `lastHash`：OCR 失败 / 队列满时同帧以后全被判「未变」，屏幕不动就永久漏记；状态也不分 app/title，两个窗口像素相同（或切回同一标题）时后一个来源被吞（F05，2026-10-23 静态确认 + 合成用例） | 去重状态按 `app\0title` 分 key（LRU 64）：`committed` 只在入库成功 / 黑名单元数据 / 密码整帧丢弃后写；`queued` 记在途指纹，同一内容不重复排队；OCR / 落库失败只出队不提交，同帧下个 tick 重试，同帧连续 3 次失败才提交指纹停止重试（`dedupMaxRetries`，内容变化即恢复）；队列满不写任何状态。用例：失败后同帧重试成功、失败到顶后停止、跨应用同像素各记一条、队列满不吞帧、密码帧不重复 OCR（`tests/unit/pipeline.test.ts`） |
 | 「默认不存截图」不等于从未落盘 | `save_shots=0` 只关长期另存；文件桥 OCR 需要先把整帧 PNG 写 `userData/tmp`，强退 / 崩溃 / 删除失败会残留原始像素；旧黑名单判断又在截图之后，密码管理器窗口也会先被截一帧（F06，2026-10-23） | 黑名单在截图前判断（不落 PNG，只记元数据；同一窗口连续采样去重，切走回来再记）；每帧写 `frame-<ts>.png`、处理完即删；启动时 `cleanStaleFrames` 只清 `userData/tmp` 里匹配 `frame-\d+\.png` 的残留（其它文件不动）；删除失败计 `temp_delete_failed` + warn 只带错误码不带路径。合成目录用例覆盖（`tests/unit/temp-store.test.ts`）；真实崩溃残留未注入验证 |
+| `hidden` 属性被 class 的 display 覆盖 | 图谱确认门 `<section hidden>` 仍显示、Playwright `toBeHidden()` 失败：`.banner { display:flex }` 是作者样式，覆盖 UA 的 `[hidden]{display:none}`（2026-10-23 E2E 实测） | 全局补 `[hidden] { display: none !important; }`，或不要给需要 hidden 的元素写无条件 display；E2E 用 `toBeHidden()` 兜底 |
+| 密钥字段匹配用 `includes('key')` 会误伤 | 设置校验把合法字段 `hotkeys` 判成密钥字段（`hotkeys`.includes('key')），整单拒绝（2026-10-23 单测暴露） | 密钥白名单用**精确字段名**（`apikey` / `api_key` / `token` / `secret` / `password` 等）；供应商字段先按契约白名单放行，再看未知字段 |
+| 退出时 `controller.stop()` 会重入归纳接线 | `before-quit` 里 stop 触发 `onStatusChange('paused')`，若回调无守卫会重新创建归纳 runtime / 重写快照，退出路径多出写库与定时器（2026-10-23 接线时规避） | 退出前先置 `shuttingDown`，`onStatusChange` 中 `if (!shuttingDown)` 才联动归纳 / 推送图谱状态；`before-quit` 先 dispose 归纳 runtime 再 stop 采集 |
+| 球点击改开图谱后既有 E2E 断链 | D20 把球点击从时间线改成图谱，旧用例等 `#list` 直接超时；时间线入口改到图谱工具栏（2026-10-23 已改） | `ball.spec` 点击后断言图谱 `#status` / `#empty`；`timeline.spec` 点击球 → 图谱 `#timeline` → 时间线；开关 E2E 里「点球取消倒计时」语义不变（打开图谱也算一次交互） |
+| 图谱窗口 `sandbox: true` 下 preload 只能走 electron 内置 | preload 想 `require` 本地模块会失败；图谱 preload 只 import type + `contextBridge` / `ipcRenderer`（Electron 45 实测可用） | 类型全部 `import type`（打包时擦除），运行时只依赖 electron；窗口能力走 IPC，不把业务模块塞进 preload |
 
 ## 规则
 

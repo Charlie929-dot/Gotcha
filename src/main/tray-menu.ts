@@ -9,7 +9,7 @@
 import type { CaptureStatus } from './capture-controller'
 import type { MenuItemConstructorOptions } from 'electron'
 
-export type TrayMenuActionId = 'open-timeline' | 'toggle-capture' | 'quit'
+export type TrayMenuActionId = 'open-graph' | 'open-timeline' | 'toggle-capture' | 'quit'
 
 export interface TrayMenuAction {
   id: TrayMenuActionId
@@ -25,6 +25,8 @@ export interface TrayMenuSeparator {
 export type TrayMenuEntry = TrayMenuAction | TrayMenuSeparator
 
 export interface TrayMenuActions {
+  /** D20：球点击默认打开图谱 */
+  openGraph(): void
   openTimeline(): void
   toggleCapture(): void
   quit(): void
@@ -45,6 +47,7 @@ export function toggleEnabled(status: CaptureStatus): boolean {
 
 export function buildTrayMenu(status: CaptureStatus, actions: TrayMenuActions): TrayMenuEntry[] {
   return [
+    { id: 'open-graph', label: '打开图谱', enabled: true, click: actions.openGraph },
     { id: 'open-timeline', label: '打开时间线', enabled: true, click: actions.openTimeline },
     { type: 'separator' },
     {

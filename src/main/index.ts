@@ -4,10 +4,20 @@ import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import log from 'electron-log/main'
 import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
+import { getSetting } from '../db/settings'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
 import { cleanStaleFrames } from '../capture/temp-store'
+import { queryGraphDay, queryNodeEvents } from '../understand/graph-query'
+import { loadEnvFile } from '../understand/cloud/env-file'
+import { createDeepSeekClient } from '../understand/cloud/deepseek'
+import { resolveFromSettings } from '../understand/cloud/providers'
+import { createInductionRuntime, type ClientResolution, type InductionRuntime, type InductionSnapshot } from './induction-runtime'
+import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSettingsView } from './graph-settings'
+import { createDeterministicFakeLlm } from './fake-llm'
+import { createGraphWindow } from './graph-window'
+import { registerGraphIpc } from './graph-ipc'
 import {
   CaptureController,
   CaptureDbConnections,
@@ -21,7 +31,13 @@ import { BALL_STATE_FILE } from './ball-state'
 import { createBallShell, type BallShell } from './ball'
 import { installTray, type TrayShell } from './tray'
 import { toggleEnabled } from './tray-menu'
-import { registerToggleHotkey, type HotkeyHandle } from './hotkeys'
+import {
+  DEFAULT_HOTKEYS,
+  HOTKEY_SETTING_KEYS,
+  registerHotkeys,
+  type HotkeyBindings,
+  type HotkeyHandle
+} from './hotkeys'
 import { persistSwitch, pauseCapture, readSwitchSettings, StartupResumeCountdown } from './capture-switch'
 import { createFakeCaptureSession } from './fake-capture'
 
@@ -45,6 +61,20 @@ const fakeCapture =
   Boolean(process.env.GOTCHA_USER_DATA) &&
   !app.isPackaged
 
+/**
+ * E2E 假 LLM：同样要求「显式开关 + 临时 userData + 非打包态」，且只在假采集链路里用。
+ * 只要不是三个条件同时满足就按真实供应商配置解析，绝不静默降级成假数据。
+ */
+const fakeLlm =
+  process.env.GOTCHA_FAKE_LLM === '1' &&
+  Boolean(process.env.GOTCHA_USER_DATA) &&
+  !app.isPackaged
+const fakeLlmBundle = fakeLlm
+  ? createDeterministicFakeLlm({
+      delayMs: Math.max(0, Number(process.env.GOTCHA_FAKE_LLM_DELAY_MS) || 0)
+    })
+  : null
+
 const dbPath = join(app.getPath('userData'), DB_FILE_NAME)
 /**
  * 进程级复用：dispose() 仍销毁隐藏窗口 / 媒体流（Q6），但 ScreenCapture 保留一次
@@ -59,9 +89,13 @@ const screenCapture = fakeCapture
     })
 
 let mainWindow: BrowserWindow | null = null
+let graphWindow: BrowserWindow | null = null
 let ballShell: BallShell | null = null
 let trayShell: TrayShell | null = null
 let hotkeyHandle: HotkeyHandle | null = null
+let hotkeyNoticeShown = false
+let inductionRuntime: InductionRuntime | null = null
+let disposeGraphIpc: (() => void) | null = null
 let startupCountdown: StartupResumeCountdown | null = null
 /** 倒计时到点后的 starting 阶段，Alt+P 可把自动恢复接管为显式开启 */
 let startupResumeClaimedExplicitly = false
@@ -102,6 +136,165 @@ function cleanTempFramesOnStartup(): void {
   })
 }
 
+/* ------------------------------------------------------------------ *
+ * 图谱 / 归纳接线（M2 Phase 2）
+ * ------------------------------------------------------------------ */
+
+/** 用户目录 `.env`（KEY=VALUE）；缺失 / 读失败都返回空对象。密钥只从 env / .env 读。 */
+function loadUserEnv(): Record<string, string> {
+  try {
+    return loadEnvFile(join(app.getPath('userData'), '.env'))
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 解析当前生效供应商 → 客户端。失败只返回原因（missing-key / invalid-providers /
+ * unknown-provider / invalid-config），不抛到采集与 UI。
+ */
+function resolveClient(): ClientResolution {
+  if (fakeLlmBundle) return { ok: true, client: fakeLlmBundle.client }
+  const db = connections.queryDb()
+  const resolved = resolveFromSettings(
+    {
+      active: db ? getSetting(db, GRAPH_SETTING_KEYS.activeProvider) : '',
+      providers: db ? getSetting(db, GRAPH_SETTING_KEYS.providers) : ''
+    },
+    process.env,
+    loadUserEnv()
+  )
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      reason: resolved.reason,
+      apiKeyEnv: resolved.reason === 'missing-key' ? resolved.apiKeyEnv : undefined
+    }
+  }
+  try {
+    return {
+      ok: true,
+      client: createDeepSeekClient({
+        baseUrl: resolved.provider.baseUrl,
+        model: resolved.provider.model,
+        apiKey: resolved.apiKey
+      })
+    }
+  } catch (error) {
+    captureLog('warn', 'llm client init failed', { error: String(error) })
+    return { ok: false, reason: 'invalid-config' }
+  }
+}
+
+/** 归纳运行时未创建时的只读快照（不建库；图谱窗口在采集暂停时也能显示原因） */
+function currentInductionSnapshot(): InductionSnapshot {
+  if (inductionRuntime) return inductionRuntime.getSnapshot()
+  const db = connections.queryDb()
+  const resolved = resolveClient()
+  return {
+    status: 'stopped',
+    consent: db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false,
+    captureRunning: controller.status() === 'running',
+    client: resolved.ok
+      ? { ok: true }
+      : { ok: false, reason: resolved.reason, apiKeyEnv: resolved.apiKeyEnv }
+  }
+}
+
+function pushGraphSnapshot(snapshot?: InductionSnapshot): void {
+  if (!graphWindow || graphWindow.isDestroyed()) return
+  graphWindow.webContents.send('graph:status', snapshot ?? currentInductionSnapshot())
+}
+
+/** 懒创建：只有采集真正跑起来 / 图谱窗口需要动作时才拿写连接，默认暂停不建库（A3） */
+function ensureInductionRuntime(): InductionRuntime {
+  if (inductionRuntime) return inductionRuntime
+  inductionRuntime = createInductionRuntime({
+    getDb: () => connections.ensureWritable().db,
+    resolveClient,
+    readConsent: () => {
+      const db = connections.queryDb()
+      return db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
+    },
+    onSnapshot: (snapshot) => pushGraphSnapshot(snapshot),
+    log: captureLog
+  })
+  return inductionRuntime
+}
+
+function readHotkeyBindings(): HotkeyBindings {
+  const db = connections.queryDb()
+  if (!db) return { ...DEFAULT_HOTKEYS }
+  return {
+    toggleCapture:
+      getSetting(db, HOTKEY_SETTING_KEYS.toggleCapture).trim() || DEFAULT_HOTKEYS.toggleCapture,
+    openGraph:
+      getSetting(db, HOTKEY_SETTING_KEYS.openGraph).trim() || DEFAULT_HOTKEYS.openGraph
+  }
+}
+
+/** 注册 / 重绑（设置保存后调用）：冲突在球上提示，托盘菜单仍可兜底 */
+function registerGlobalHotkeys(): void {
+  hotkeyHandle?.dispose()
+  hotkeyHandle = registerHotkeys(
+    globalShortcut,
+    {
+      toggleCapture: () => {
+        void toggleCapture()
+      },
+      openGraph: () => openGraph()
+    },
+    readHotkeyBindings(),
+    captureLog
+  )
+  const failed = hotkeyHandle.results.filter((result) => !result.ok)
+  if (failed.length > 0) {
+    const detail = failed.map((result) => `${result.accelerator}（${result.reason}）`).join('、')
+    ballShell?.showNotice({
+      kind: 'hotkey-unavailable',
+      text: `全局热键不可用：${detail}，可修改设置或从菜单打开`
+    })
+    hotkeyNoticeShown = true
+  } else if (hotkeyNoticeShown) {
+    ballShell?.showNotice(null)
+    hotkeyNoticeShown = false
+  }
+}
+
+/** 设置保存后：重绑热键；确认门变化时启停归纳（授权 / 撤销） */
+function applyGraphSettings(settings: GraphSettingsView): void {
+  registerGlobalHotkeys()
+  if (!inductionRuntime) return
+  const previousConsent = inductionRuntime.getSnapshot().consent
+  if (previousConsent !== settings.outboundConsent) {
+    inductionRuntime.setConsent(settings.outboundConsent)
+  }
+}
+
+function showGraphWindow(): void {
+  if (!app.isReady()) return
+  if (graphWindow && !graphWindow.isDestroyed()) {
+    if (graphWindow.isMinimized()) graphWindow.restore()
+    graphWindow.show()
+    graphWindow.focus()
+    return
+  }
+  graphWindow = createGraphWindow({
+    devServerUrl: process.env['ELECTRON_RENDERER_URL'],
+    htmlPath: join(__dirname, '../renderer/graph/graph.html'),
+    preloadPath: join(__dirname, '../preload/graph.js'),
+    onClosed: () => {
+      graphWindow = null
+    }
+  })
+}
+
+/** D20：球点击 / Alt+Space 默认打开图谱；打开即视为一次交互（取消启动自动恢复倒计时） */
+function openGraph(): void {
+  cancelStartupResume(true)
+  showGraphWindow()
+}
+
 app.on('window-all-closed', () => {
   // 球窗口常驻，正常不会触发；仅当球没起来（窗口全关）时按旧行为退出
   if (!quitRequested) app.quit()
@@ -113,6 +306,9 @@ app.on('before-quit', (event) => {
   shuttingDown = true
   startupCountdown?.cancel()
   hotkeyHandle?.dispose()
+  disposeGraphIpc?.()
+  inductionRuntime?.dispose()
+  inductionRuntime = null
   // 退出前等 stop 收口（在途 OCR 丢弃、stats 落盘、流释放）；3s 超时后放弃并强退。
   // 用 before-quit + preventDefault：will-quit 阶段再拦会被 Electron 当成 quit 已在进行。
   event.preventDefault()
@@ -124,7 +320,7 @@ app.on('before-quit', (event) => {
     }
     connections.closeAll()
     trayShell?.dispose()
-    if (fakeCapture) globalThis.__gotchaTest = undefined
+    if (fakeCapture || fakeLlm) globalThis.__gotchaTest = undefined
     app.quit()
   })()
 })
@@ -242,6 +438,10 @@ const controller = new CaptureController({
   onStatusChange: (status) => {
     ballShell?.setStatus(status)
     trayShell?.update(status)
+    if (!shuttingDown && (status === 'running' || status === 'paused' || status === 'stopping')) {
+      ensureInductionRuntime().onCaptureStatus(status)
+    }
+    if (!shuttingDown) pushGraphSnapshot()
   }
 })
 
@@ -407,6 +607,12 @@ interface GotchaTestHook {
   toggle(): Promise<void>
   status(): string
   notice(notice: unknown): void
+  /** D20：全局热键无法用合成按键触发，E2E 走同一入口 */
+  openGraph(): void
+  openTimeline(): void
+  /** 假 LLM 请求计数（断言暂停后零新增请求 / 零真实网络） */
+  fakeLlm(): { requests: number; aborted: number } | null
+  induction(): InductionSnapshot
 }
 
 declare global {
@@ -420,7 +626,14 @@ function installTestHook(): void {
     notice: (notice) => {
       if (notice === null) ballShell?.showNotice(null)
       else ballShell?.showNotice(notice as Parameters<BallShell['showNotice']>[0])
-    }
+    },
+    openGraph: () => openGraph(),
+    openTimeline: () => openTimeline(),
+    fakeLlm: () =>
+      fakeLlmBundle
+        ? { requests: fakeLlmBundle.counters.requests, aborted: fakeLlmBundle.counters.aborted }
+        : null,
+    induction: () => currentInductionSnapshot()
   }
 }
 
@@ -463,6 +676,32 @@ if (primaryInstance) {
 
     registerTimelineIpc()
 
+    disposeGraphIpc = registerGraphIpc({
+      getGraphWindow: () => graphWindow,
+      queryGraph: (from, to) => {
+        const db = connections.queryDb()
+        return db ? queryGraphDay(db, from, to) : { nodes: [], edges: [] }
+      },
+      queryNodeEvents: (nodeId) => {
+        const db = connections.queryDb()
+        return db
+          ? queryNodeEvents(db, nodeId)
+          : { found: false, events: [], missingIds: [], malformed: false }
+      },
+      getSnapshot: currentInductionSnapshot,
+      runInductionNow: () => ensureInductionRuntime().runOnce({ manual: true }),
+      setConsent: (consented) => ensureInductionRuntime().setConsent(consented),
+      readSettings: () => readGraphSettings(connections.queryDb()),
+      saveSettings: (patch) => {
+        // 显式 UI 动作：允许打开写连接（默认暂停仍不建库）
+        const db = connections.ensureWritable().db
+        return saveGraphSettings(db, patch)
+      },
+      onSettingsSaved: applyGraphSettings,
+      openTimeline: () => openTimeline(),
+      log: captureLog
+    })
+
     ballShell = createBallShell({
       preloadPath: join(__dirname, '../preload/ball.js'),
       devServerUrl: process.env['ELECTRON_RENDERER_URL'],
@@ -470,6 +709,7 @@ if (primaryInstance) {
       stateFilePath: join(app.getPath('userData'), BALL_STATE_FILE),
       getStatus: () => controller.status(),
       openTimeline,
+      openGraph,
       toggleCapture: () => {
         void toggleCapture()
       },
@@ -482,6 +722,7 @@ if (primaryInstance) {
 
     trayShell = installTray(
       {
+        openGraph,
         openTimeline,
         toggleCapture: () => {
           void toggleCapture()
@@ -499,21 +740,9 @@ if (primaryInstance) {
       if (!quitRequested) app.quit()
     })
 
-    if (fakeCapture) installTestHook()
+    if (fakeCapture || fakeLlm) installTestHook()
 
-    hotkeyHandle = registerToggleHotkey(
-      globalShortcut,
-      () => {
-        void toggleCapture()
-      },
-      captureLog
-    )
-    if (!hotkeyHandle.registered) {
-      ballShell.showNotice({
-        kind: 'hotkey-unavailable',
-        text: 'Alt+P 已被其他应用占用，可从托盘菜单切换记录'
-      })
-    }
+    registerGlobalHotkeys()
 
     // Q1=B：只有上次显式开启（resume_on_start=1）才延迟 3s 自动恢复，且可被任意交互取消
     if (!launchCapture && readResumeOnStart()) scheduleStartupResume()

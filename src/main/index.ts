@@ -21,7 +21,7 @@ import { createBallShell, type BallShell } from './ball'
 import { installTray, type TrayShell } from './tray'
 import { toggleEnabled } from './tray-menu'
 import { registerToggleHotkey, type HotkeyHandle } from './hotkeys'
-import { persistSwitch, readSwitchSettings, StartupResumeCountdown } from './capture-switch'
+import { persistSwitch, pauseCapture, readSwitchSettings, StartupResumeCountdown } from './capture-switch'
 import { createFakeCaptureSession } from './fake-capture'
 
 // 测试隔离钩子：E2E 用临时 userData，绝不碰真实数据（gotchas.md）
@@ -324,6 +324,7 @@ function readResumeOnStart(): boolean {
 /**
  * 唯一 toggle 入口（Alt+P / 托盘 / 球右键共用，§3 Phase 2）：
  * - 暂停：先落 0/0 再关闸（顺序反了会在退出 / 崩溃中途残留「已授权恢复」）；
+ *   写库失败也必须关闸（F01：隐私暂停不能依赖磁盘可用），失败在球上可见；
  * - 恢复：`await start()` 成功后才切亮，失败保持暂停 + 角标提示，绝不「显示运行但没采」。
  * 转换在途（starting / stopping）忽略重复触发，避免连点排队。
  */
@@ -345,14 +346,34 @@ async function toggleCapture(): Promise<void> {
   if (!toggleEnabled(status)) return
 
   if (status === 'running') {
-    if (persistsSwitch) {
-      const db = switchDb()
-      if (db) persistSwitch(db, false)
+    const result = await pauseCapture({
+      persist: persistsSwitch
+        ? () => {
+            const db = switchDb()
+            if (!db) throw new Error('capture switch db unavailable')
+            persistSwitch(db, false)
+          }
+        : undefined,
+      stop: () => controller.stop()
+    })
+    if (result.persistError) {
+      captureLog('error', 'capture switch pause persist failed', {
+        error: String(result.persistError)
+      })
     }
-    try {
-      await controller.stop()
-    } catch (error) {
-      captureLog('error', 'capture stop failed', { error: String(error) })
+    if (result.stopError) {
+      captureLog('error', 'capture stop failed', { error: String(result.stopError) })
+    }
+    if (!result.stopped) {
+      ballShell?.showNotice({
+        kind: 'error',
+        text: result.saved ? '暂停未完成，仍在记录，请重试' : '暂停未完成且授权未保存，请重试'
+      })
+    } else if (!result.saved) {
+      ballShell?.showNotice({
+        kind: 'error',
+        text: '已暂停记录，但授权未保存，下次启动仍可能自动恢复'
+      })
     }
     return
   }

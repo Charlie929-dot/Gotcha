@@ -9,7 +9,10 @@
  * 启动恢复：`resume_on_start=1` 时先显示暂停视觉 + 3s 倒计时角标，期间任意交互即取消
  * （两键置 0），超时才真正 `start()`；`start()` 失败仍保持暂停并提示。
  *
- * 本文件保持 Electron-free：单测直接跑倒计时与持久化，不依赖 app / BrowserWindow。
+ * 暂停顺序（F01）：先写 0/0 再关闸——中途崩溃不会残留「已授权恢复」；但写库失败
+ * **绝不阻断关闸**（用户按下暂停，采集就必须停），失败由 `pauseCapture` 回报给界面。
+ *
+ * 本文件保持 Electron-free：单测直接跑倒计时、持久化与暂停编排，不依赖 app / BrowserWindow。
  */
 
 import type { Db } from '../db'
@@ -39,11 +42,61 @@ export function readSwitchSettings(db: Db | null): SwitchSettings {
   }
 }
 
-/** 显式开启 / 暂停：两键同值写入（D13） */
+/**
+ * 显式开启 / 暂停：两键同值写入（D13）。
+ *
+ * 单事务写入：第二键失败时第一键回滚，避免出现「enabled=0 但 resume_on_start=1」
+ * 这类半套状态；失败向上抛，由调用方决定是否仍执行停止（F01）。
+ */
 export function persistSwitch(db: Db, running: boolean): void {
   const value = running ? '1' : '0'
-  setSetting(db, SWITCH_ENABLED_KEY, value)
-  setSetting(db, SWITCH_RESUME_ON_START_KEY, value)
+  db.transaction(() => {
+    setSetting(db, SWITCH_ENABLED_KEY, value)
+    setSetting(db, SWITCH_RESUME_ON_START_KEY, value)
+  })()
+}
+
+/** 暂停编排的依赖（可注入，单测不碰 Electron / 真实库） */
+export interface PauseDeps {
+  /** 写 0/0；省略 = 本次不需要落盘（`--capture` / `GOTCHA_CAPTURE=1` 直开） */
+  persist?: () => void
+  /** 真正关闸（调用方接 `controller.stop()`） */
+  stop: () => Promise<void>
+}
+
+export interface PauseResult {
+  /** 两键已确认落 0/0（persist 省略时为 true） */
+  saved: boolean
+  /** 关闸正常完成 */
+  stopped: boolean
+  persistError?: unknown
+  stopError?: unknown
+}
+
+/**
+ * 暂停编排（F01，decisions D13）：
+ *
+ * 1. 先写 0/0（顺序反了会在退出 / 崩溃中途残留「已授权恢复」）；
+ * 2. **无论写库成功与否都必须关闸**——隐私暂停不能依赖磁盘写入；
+ * 3. 两个失败都回报给调用方做可见提示，本函数自身不抛错。
+ */
+export async function pauseCapture(deps: PauseDeps): Promise<PauseResult> {
+  const result: PauseResult = { saved: true, stopped: true }
+  if (deps.persist) {
+    try {
+      deps.persist()
+    } catch (error) {
+      result.saved = false
+      result.persistError = error
+    }
+  }
+  try {
+    await deps.stop()
+  } catch (error) {
+    result.stopped = false
+    result.stopError = error
+  }
+  return result
 }
 
 export interface StartupResumeDeps {

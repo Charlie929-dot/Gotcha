@@ -33,7 +33,14 @@ const RULES: Rule[] = [
   { name: 'basic-auth', re: /\bBasic\s+\S{8,}/i },
   // 常见密钥形态
   { name: 'api-key', re: /\b(?:sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b/ },
-  { name: 'secret-assignment', re: /(?:api[_-]?key|secret|token)\s*[:=]\s*[^\s]{6,}/i },
+  // 字段名可带引号（JSON / 配置片段），键值间允许空白与引号，值支持带引号字符串或裸 token。
+  // 旧规则要求字段名后直接接空白或 :/=，导致 {"api_key":"…"} 整条漏检（F02，2026-10-23）；
+  // 键名按「最长优先」排列，避免 access_token 只从 token 处开始匹配、留下半截键名。
+  // 带引号的值用 lookahead 停在收尾引号前（不把它替换掉），剥离后仍是合法 JSON 片段。
+  {
+    name: 'secret-assignment',
+    re: /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret[_-]?key|secret|token)["']?\s*[:=]\s*(?:"[^"\n]{6,}(?=")|'[^'\n]{6,}(?=')|[^\s"',;}{]{6,})/i
+  },
   { name: 'jwt', re: /\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}\b/ },
   // 证件 / 卡号 / 手机号
   { name: 'id-card', re: /(?<!\d)\d{17}[\dXx](?!\d)/ },

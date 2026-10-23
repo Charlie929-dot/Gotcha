@@ -244,8 +244,11 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
       try {
         json = JSON.parse(content)
       } catch {
+        // 不带正文，只给可定位的结构信息：非截断的非法 JSON 仍需要知道长度 / 结束原因
         throw new LlmParseError(
-          truncated ? `LLM 输出被 max_tokens（${maxTokens}）截断` : undefined,
+          truncated
+            ? `LLM 输出被 max_tokens（${maxTokens}）截断`
+            : `LLM 返回内容不是合法 JSON（长度 ${content.length}，finish_reason=${finishReason ?? 'unknown'}）`,
           usage
         )
       }

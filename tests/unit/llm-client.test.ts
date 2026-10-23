@@ -140,6 +140,18 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
     expect((error as Error).message).toContain('截断')
   })
 
+  it('非截断的非法 JSON 报长度与 finish_reason（不泄露正文）', async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse('not-json', { prompt_tokens: 7, completion_tokens: 9 }, 'stop')
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const error = await client.completeJson(payload()).catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(LlmParseError)
+    expect((error as Error).message).toContain('长度 8')
+    expect((error as Error).message).toContain('finish_reason=stop')
+    expect((error as Error).message).not.toContain('not-json')
+  })
+
   it('baseUrl 末尾斜杠不会拼出双斜杠', async () => {
     const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => okResponse('{}'))
     const client = makeClient(fetchImpl as unknown as typeof fetch, {

@@ -48,6 +48,7 @@
 | 异常路径丢了真实用量 | DeepSeek 客户端 200 响应带 `usage`，但 `content` 为空 / 非法 JSON 时直接抛 `LlmParseError`；调度层只在 `completeJson` 成功后累计 spent，两次解析都失败时 spent=0 → 修复失败循环不增长预算账本，真实费用却已发生（F03，2026-10-23 静态确认，未做真实云调用） | `LlmParseError` 携带可选 `usage`（响应体本身不是 JSON 时没有可用 usage，不伪造 0）；`service.ts` 的 `call()` 失败也累计 `spent`；用例：两次解析失败记 200 token、首败+修复成功合计 170（`tests/unit/induction-service.test.ts` / `llm-client.test.ts`） |
 | 只限时刻数、不限「必须回显的 id 数」 | 输出契约要求 `nodes.event_ids` 覆盖全部输入 id；旧逻辑只限 20 时刻 / 单次查询 5000 事件，一个时刻可汇集上千 id → 2000 token 输出被截断，校验失败后同批重试、游标不前进，可能长期卡住并消耗预算（F04，2026-10-23） | 单时刻 ≤40 id、单批 ≤400 id（`LLM_DEFAULTS`），超限确定性切分/留待下一批；`mergeMoments` 只把已关闭时刻计入 `consumed`，游标照常前进；用例：1000 个同 app 事件切成 10 个时刻、消费 400 后下一批从 401 继续（`tests/unit/batch.test.ts`） |
 | 帧差状态在落库前就提交，且所有窗口共用 | 旧 `tick()` 在入 OCR 队列前就写 `lastHash`：OCR 失败 / 队列满时同帧以后全被判「未变」，屏幕不动就永久漏记；状态也不分 app/title，两个窗口像素相同（或切回同一标题）时后一个来源被吞（F05，2026-10-23 静态确认 + 合成用例） | 去重状态按 `app\0title` 分 key（LRU 64）：`committed` 只在入库成功 / 黑名单元数据 / 密码整帧丢弃后写；`queued` 记在途指纹，同一内容不重复排队；OCR / 落库失败只出队不提交，同帧下个 tick 重试，同帧连续 3 次失败才提交指纹停止重试（`dedupMaxRetries`，内容变化即恢复）；队列满不写任何状态。用例：失败后同帧重试成功、失败到顶后停止、跨应用同像素各记一条、队列满不吞帧、密码帧不重复 OCR（`tests/unit/pipeline.test.ts`） |
+| 「默认不存截图」不等于从未落盘 | `save_shots=0` 只关长期另存；文件桥 OCR 需要先把整帧 PNG 写 `userData/tmp`，强退 / 崩溃 / 删除失败会残留原始像素；旧黑名单判断又在截图之后，密码管理器窗口也会先被截一帧（F06，2026-10-23） | 黑名单在截图前判断（不落 PNG，只记元数据；同一窗口连续采样去重，切走回来再记）；每帧写 `frame-<ts>.png`、处理完即删；启动时 `cleanStaleFrames` 只清 `userData/tmp` 里匹配 `frame-\d+\.png` 的残留（其它文件不动）；删除失败计 `temp_delete_failed` + warn 只带错误码不带路径。合成目录用例覆盖（`tests/unit/temp-store.test.ts`）；真实崩溃残留未注入验证 |
 
 ## 规则
 

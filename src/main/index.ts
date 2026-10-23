@@ -7,6 +7,7 @@ import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
+import { cleanStaleFrames } from '../capture/temp-store'
 import {
   CaptureController,
   CaptureDbConnections,
@@ -89,6 +90,16 @@ const captureLog: CaptureLog = (level, msg, data) => {
   if (level === 'error') log.error(line)
   else if (level === 'warn') log.warn(line)
   else log.info(line)
+}
+
+/** 启动清理上次崩溃 / 删除失败留下的临时帧（F06）：只删 userData/tmp 下的 frame-*.png */
+function cleanTempFramesOnStartup(): void {
+  const cleaned = cleanStaleFrames(join(app.getPath('userData'), 'tmp'))
+  if (cleaned.removed === 0 && cleaned.failed === 0) return
+  captureLog(cleaned.failed > 0 ? 'warn' : 'info', 'temp frames cleaned on startup', {
+    removed: cleaned.removed,
+    failed: cleaned.failed
+  })
 }
 
 app.on('window-all-closed', () => {
@@ -436,6 +447,7 @@ const primaryInstance = claimSingleInstance(app, () => {
 
 if (primaryInstance) {
   app.whenReady().then(async () => {
+    cleanTempFramesOnStartup()
     const capture = resolveCapture(process.argv, process.env)
     if (capture) {
       try {

@@ -142,6 +142,74 @@ describe('CapturePipeline · 管线语义', () => {
     }
   })
 
+  it('黑名单窗口在截图前判断：不截帧，同一窗口只记一条元数据（F06）', async () => {
+    const captureWindow = vi.fn(async () => frame(1))
+    const { db, pipeline, ocr } = makeHarness({ isBlacklisted: () => true, captureWindow })
+    try {
+      await pipeline.tick()
+      await pipeline.flush()
+      await pipeline.tick()
+      await pipeline.flush()
+
+      expect(captureWindow).not.toHaveBeenCalled()
+      expect(ocr.recognize).not.toHaveBeenCalled()
+      expect(queryTimeline(db, 0, 10_000)).toHaveLength(1)
+      expect(pipeline.getStats()).toMatchObject({ frames_total: 0, frames_same: 0 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('黑名单窗口切走再回来会重新记一条元数据（F06）', async () => {
+    let blacklisted = true
+    const { db, pipeline } = makeHarness({ isBlacklisted: () => blacklisted })
+    try {
+      await pipeline.tick()
+      await pipeline.flush() // 进入黑名单：元数据 1
+      await pipeline.tick()
+      await pipeline.flush() // 同窗口连续采样：不重复
+
+      blacklisted = false
+      await pipeline.tick()
+      await pipeline.flush() // 普通窗口：OCR 事件
+
+      blacklisted = true
+      await pipeline.tick()
+      await pipeline.flush() // 再次进入黑名单：元数据 2
+
+      const rows = queryTimeline(db, 0, 10_000)
+      expect(rows).toHaveLength(3)
+      expect(rows[0].ocr_text).toBeNull()
+      expect(rows[2].ocr_text).toBeNull()
+    } finally {
+      db.close()
+    }
+  })
+
+  it('删除帧失败会计数并告警，日志不含路径原文（F06）', async () => {
+    const log = vi.fn()
+    const deleteFrame = vi.fn(() => {
+      throw Object.assign(new Error('EACCES: permission denied, rm C:\\Users\\alice\\frame-1.png'), {
+        code: 'EACCES'
+      })
+    })
+    const { db, pipeline } = makeHarness({ deleteFrame, log })
+    try {
+      await pipeline.tick()
+      await pipeline.flush()
+      expect(pipeline.getStats().temp_delete_failed).toBe(1)
+      const warn = log.mock.calls
+        .map(([entry]) => entry)
+        .find((entry) => entry.msg === 'temp frame delete failed')
+      expect(warn).toBeDefined()
+      const text = JSON.stringify(warn)
+      expect(text).not.toContain('frame-1.png')
+      expect(text).not.toContain('alice')
+    } finally {
+      db.close()
+    }
+  })
+
   it('截图失败计 capture_errors，不中断后续 tick', async () => {
     let fail = true
     const { db, pipeline } = makeHarness({

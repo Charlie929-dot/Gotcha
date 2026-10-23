@@ -1,9 +1,9 @@
 /**
  * 采集管线（m1a-plan §3 Phase 2c）
  *
- * tick：取前台窗口 → 截窗口区域 → dHash 帧差（按 app+title 分 key：已入库 /
- *      在队的内容丢帧；OCR 失败只对同帧有限重试）→ 黑名单只记元数据
- *      → 入 OCR 队列 → 异步 worker 识别 → sanitize → insertEvent。
+ * tick：取前台窗口 → 黑名单（截图前判断，只记元数据）→ 截窗口区域 →
+ *      dHash 帧差（按 app+title 分 key：已入库 / 在队的内容丢帧；OCR 失败只对
+ *      同帧有限重试）→ 入 OCR 队列 → 异步 worker 识别 → sanitize → insertEvent。
  *
  * 所有外部依赖（时钟/截屏/OCR/删帧/日志）注入，便于合成数据单测。
  */
@@ -75,6 +75,8 @@ export class CapturePipeline {
   private readonly dedup = new Map<string, DedupEntry>()
   private readonly dedupMaxRetries: number
   private readonly dedupKeyLimit: number
+  /** 上次记录元数据的黑名单窗口（同窗口连续采样只记一条；切走再回来重新记） */
+  private lastBlacklistedKey: string | null = null
   private currentDrain: Promise<void> | null = null
   private halted = false
 
@@ -140,6 +142,14 @@ export class CapturePipeline {
       return
     }
 
+    if (this.deps.isBlacklisted(window)) {
+      // 黑名单在截图前判断：不落 PNG、不写 OCR（security.md 第 2 层；F06）
+      this.recordBlacklisted(window, now)
+      return
+    }
+    // 离开黑名单窗口：清掉「上次记录」，切回同一黑名单窗口时重新记一条
+    this.lastBlacklistedKey = null
+
     let frame: CapturedFrame | null = null
     try {
       frame = await this.deps.captureWindow(window.bounds)
@@ -161,14 +171,6 @@ export class CapturePipeline {
     const entry = this.dedupEntry(window.app, window.title)
     if (this.isDuplicate(entry, hash)) {
       this.stats.frames_same++
-      this.discard(frame.imagePath)
-      return
-    }
-
-    if (this.deps.isBlacklisted(window)) {
-      // 黑名单进程：只记元数据，绝不 OCR（security.md 第 2 层）
-      insertEvent(this.deps.db, { ts: now, app: window.app, windowTitle: window.title })
-      this.commit(entry, hash)
       this.discard(frame.imagePath)
       return
     }
@@ -297,6 +299,14 @@ export class CapturePipeline {
     return entry
   }
 
+  /** 黑名单窗口只记元数据：同窗口连续采样不重复写；切走再回来按新聚焦记一条 */
+  private recordBlacklisted(window: WindowInfo, now: number): void {
+    const key = `${window.app}\u0000${window.title}`
+    if (key === this.lastBlacklistedKey) return
+    this.lastBlacklistedKey = key
+    insertEvent(this.deps.db, { ts: now, app: window.app, windowTitle: window.title })
+  }
+
   /** 与「已提交」或「任一在途帧」相近即视为未变（监听器式去重） */
   private isDuplicate(entry: DedupEntry, hash: bigint): boolean {
     const threshold = this.deps.diffThreshold ?? DEFAULT_DIFF_THRESHOLD
@@ -334,8 +344,14 @@ export class CapturePipeline {
   private discard(imagePath: string): void {
     try {
       this.deps.deleteFrame(imagePath)
-    } catch {
-      // 清理失败不阻断采集
+    } catch (error) {
+      // 删除失败可见（计数 + 告警）但不记录路径原文；残留由下次启动的受控清理兜底
+      this.stats.temp_delete_failed++
+      this.deps.log?.({
+        level: 'warn',
+        msg: 'temp frame delete failed',
+        data: { code: (error as NodeJS.ErrnoException).code ?? 'unknown' }
+      })
     }
   }
 }

@@ -153,23 +153,24 @@ export function createInductionService(options: InductionServiceOptions): Induct
       if (built.payload.events.length > 0) {
         let response = await client.completeJson(built.payload, { signal: controller.signal })
         let validation = validateInduction(response.json, allowedEventIds)
+        // 修复重试会计两次调用，token 也要两次都记账
         let calls = 1
+        let promptTokens = response.usage.promptTokens
+        let completionTokens = response.usage.completionTokens
         if (!validation.ok) {
           // 首轮非法 → 用错误摘要做 1 次修复重试（错误文案不含事件原文）
           response = await client.completeJson(built.payload, {
             signal: controller.signal,
             repairHint: validation.errors.join('；')
           })
-          calls = 2
+          calls += 1
+          promptTokens += response.usage.promptTokens
+          completionTokens += response.usage.completionTokens
           validation = validateInduction(response.json, allowedEventIds)
           if (!validation.ok) throw new LlmParseError('LLM 输出未通过校验')
         }
         result = validation.result
-        usageTotals = {
-          calls,
-          promptTokens: response.usage.promptTokens,
-          completionTokens: response.usage.completionTokens
-        }
+        usageTotals = { calls, promptTokens, completionTokens }
       }
 
       // 暂停期间返回的结果一律丢弃（D18）：落库前再确认一次未取消

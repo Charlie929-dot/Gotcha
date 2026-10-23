@@ -60,6 +60,7 @@ interface ProviderRow {
   baseUrlInput: HTMLInputElement
   modelInput: HTMLInputElement
   modelList: HTMLDataListElement
+  modelDropdown: HTMLElement
   apiKeyInput: HTMLInputElement
   keyStatus: HTMLElement
   apiKeyEnvInput: HTMLInputElement
@@ -165,7 +166,7 @@ export function createSettingsPanel(
             : '密钥状态未知'
   }
 
-  function applyCatalog(row: ProviderRow, models: string[]): void {
+  function applyCatalog(row: ProviderRow, models: string[], autoOpen = false): void {
     row.modelList.replaceChildren(
       ...models.map((id) => {
         const option = document.createElement('option')
@@ -173,8 +174,25 @@ export function createSettingsPanel(
         return option
       })
     )
+    row.modelDropdown.replaceChildren(
+      ...models.map((id) => {
+        const item = document.createElement('div')
+        item.className = 'model-option'
+        if (id === row.modelInput.value.trim()) item.classList.add('selected')
+        item.textContent = id
+        item.addEventListener('click', (e) => {
+          e.stopPropagation()
+          row.modelInput.value = id
+          row.modelDropdown.hidden = true
+        })
+        return item
+      })
+    )
     if (models.length > 0 && row.modelInput.value.trim() === '') {
       row.modelInput.value = models[0]
+    }
+    if (autoOpen && models.length > 0) {
+      row.modelDropdown.hidden = false
     }
   }
 
@@ -199,8 +217,8 @@ export function createSettingsPanel(
         return
       }
       modelCatalogs.set(row.idInput.value, result.models)
-      applyCatalog(row, result.models)
-      row.modelsStatus.textContent = `已获取 ${result.models.length} 个模型，点模型输入框选择`
+      applyCatalog(row, result.models, true)
+      row.modelsStatus.textContent = `已获取 ${result.models.length} 个模型（已展开选择）`
     } catch (error) {
       row.modelsStatus.textContent = `获取失败：${String(error)}`
     } finally {
@@ -247,7 +265,22 @@ export function createSettingsPanel(
     modelField.input.value = provider?.model ?? ''
     const modelList = document.createElement('datalist')
     modelList.id = datalistId
-    modelField.label.append(modelList)
+
+    const comboboxWrap = document.createElement('div')
+    comboboxWrap.className = 'combobox-wrap'
+    const toggleButton = document.createElement('button')
+    toggleButton.type = 'button'
+    toggleButton.className = 'combobox-toggle'
+    toggleButton.textContent = '▼'
+    toggleButton.title = '展开模型列表'
+    const modelDropdown = document.createElement('div')
+    modelDropdown.className = 'model-dropdown'
+    modelDropdown.hidden = true
+
+    // 重新组装 modelField
+    modelField.label.removeChild(modelField.input)
+    comboboxWrap.append(modelField.input, toggleButton, modelDropdown, modelList)
+    modelField.label.append(comboboxWrap)
 
     const actions = document.createElement('div')
     actions.className = 'provider-actions'
@@ -292,6 +325,7 @@ export function createSettingsPanel(
       baseUrlInput: baseUrlField.input,
       modelInput: modelField.input,
       modelList,
+      modelDropdown,
       apiKeyInput: keyField.input,
       keyStatus,
       apiKeyEnvInput: envField.input,
@@ -300,6 +334,23 @@ export function createSettingsPanel(
       removeButton
     }
     rows.push(row)
+
+    toggleButton.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const willOpen = modelDropdown.hidden
+      // 关闭其他下拉
+      for (const other of rows) other.modelDropdown.hidden = true
+      if (willOpen) {
+        applyCatalog(row, modelCatalogs.get(id) ?? [], true)
+      }
+    })
+
+    modelField.input.addEventListener('click', () => {
+      const catalog = modelCatalogs.get(id) ?? []
+      if (catalog.length > 0 && modelDropdown.hidden) {
+        applyCatalog(row, catalog, true)
+      }
+    })
 
     nameField.input.addEventListener('input', () => syncActiveOptions())
     removeButton.addEventListener('click', () => {
@@ -400,7 +451,16 @@ export function createSettingsPanel(
 
   function close(): void {
     drawer.hidden = true
+    for (const row of rows) row.modelDropdown.hidden = true
   }
+
+  document.addEventListener('click', (e) => {
+    for (const row of rows) {
+      if (!row.root.contains(e.target as Node)) {
+        row.modelDropdown.hidden = true
+      }
+    }
+  })
 
   addProviderButton.addEventListener('click', () => addProviderRow())
   closeButton.addEventListener('click', close)

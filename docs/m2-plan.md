@@ -5,6 +5,7 @@
 > 上游依据：技术方案 §3 / §4 / §5.1 / §6.2 / §7（M2 行）/ §7.1；策划案 §6 模块二、§8.2、§9（V0.5）；decisions D5 / D8 / D10 / D12 / D14；security.md、testing.md、workflow.md、gotchas.md。
 > 范围边界：M2 只做「L1 知识/行为节点 + 带权边 + sigma.js 力导向画布 + 点击节点看原始记录」。**不做**：L2+ 日/周/月归纳与完整 LOD 语义（M3）、解说五区块（M4）、主动弱提示（M4）、数据清理/导出/Obsidian（M5）、embedding 与向量检索（M3）、本地模型（二期）。
 > 修订轨迹：v0.1 初稿（2026-10-23）。
+> **2026-10-23 图谱重做（superseded）**：§0 C3/C4、§3 Phase 2、§5 图谱依赖与 §8 Q5 已被 `docs/m2-graph-redesign.md` 取代；D8 / D17 / D20 / D23 / D25 归档至 `docs/archive/graph-decisions.md`。归纳（§3 Phase 1）、隐私、供应商、设置部分仍有效。
 
 ## 0. 目标与验收
 

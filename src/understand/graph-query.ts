@@ -18,6 +18,7 @@ export interface GraphNodeDto {
   tsEnd: number
   sourceCount: number
   degree: number
+  eventIds?: number[]
 }
 
 export interface GraphEdgeDto {
@@ -29,14 +30,25 @@ export interface GraphEdgeDto {
   evidence: string
 }
 
+export interface GraphEventDto {
+  id: number
+  ts: number
+  app: string
+  windowTitle: string | null
+  sensitive: number
+}
+
 export interface GraphDayData {
   nodes: GraphNodeDto[]
   edges: GraphEdgeDto[]
+  events?: GraphEventDto[]
 }
 
 export interface GraphQueryOptions {
   /** 只取该 level（默认 1；M3 起 LOD 可传其它层） */
   level?: number
+  /** 是否一并查出窗口内的原始采集事件（用于全量事件星图展示） */
+  includeEvents?: boolean
 }
 
 export interface NodeEventDto {
@@ -130,11 +142,39 @@ export function queryGraphDay(
       tsStart,
       tsEnd: row.ts_end ?? tsStart,
       sourceCount: parsed.ids.length,
-      degree: 0
+      degree: 0,
+      ...(options.includeEvents ? { eventIds: parsed.ids } : {})
     }
   })
 
-  if (nodes.length === 0) return { nodes, edges: [] }
+  let events: GraphEventDto[] | undefined
+  if (options.includeEvents) {
+    const eventRows = db
+      .prepare(
+        `SELECT id, ts, app, window_title, sensitive
+         FROM events
+         WHERE ts >= ? AND ts <= ?
+         ORDER BY ts ASC`
+      )
+      .all(from, to) as {
+        id: number
+        ts: number
+        app: string
+        window_title: string | null
+        sensitive: number | null
+      }[]
+    events = eventRows.map((row) => ({
+      id: row.id,
+      ts: row.ts,
+      app: row.app,
+      windowTitle: row.window_title,
+      sensitive: row.sensitive === 1 ? 1 : 0
+    }))
+  }
+
+  if (nodes.length === 0) {
+    return options.includeEvents ? { nodes, edges: [], events: events ?? [] } : { nodes, edges: [] }
+  }
 
   const byId = new Map<number, GraphNodeDto>()
   for (const node of nodes) byId.set(node.id, node)
@@ -165,7 +205,7 @@ export function queryGraphDay(
     dstNode.degree += 1
   }
 
-  return { nodes, edges }
+  return { nodes, edges, ...(events !== undefined ? { events } : {}) }
 }
 
 /** 单次 IN 查询的事件 id 上限（SQLite 变量上限内的保守值） */

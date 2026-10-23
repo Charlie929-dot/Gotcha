@@ -761,7 +761,7 @@ if (primaryInstance) {
       getGraphWindow: () => graphWindow,
       queryGraph: (from, to) => {
         const db = connections.queryDb()
-        return db ? queryGraphDay(db, from, to) : { nodes: [], edges: [] }
+        return db ? queryGraphDay(db, from, to, { includeEvents: true }) : { nodes: [], edges: [] }
       },
       queryNodeEvents: (nodeId) => {
         const db = connections.queryDb()

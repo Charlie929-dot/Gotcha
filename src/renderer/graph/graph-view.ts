@@ -13,12 +13,15 @@ export const NODE_COLORS = {
   knowledge: '#4FC3F7',
   activity: '#81C784',
   protected: '#9E9E9E',
+  event: '#58677c',
   unknown: '#B0BEC5'
 } as const
 
-export const EDGE_COLOR = '#5b5b6e'
+export const EDGE_COLOR = '#3e4451'
+export const SUB_EDGE_COLOR = '#232731'
 export const NODE_SIZE_MIN = 6
 export const NODE_SIZE_MAX = 22
+export const EVENT_NODE_SIZE = 3.5
 
 export function nodeColor(type: string): string {
   return (NODE_COLORS as Record<string, string>)[type] ?? NODE_COLORS.unknown
@@ -51,6 +54,19 @@ export function neighborIds(edges: readonly GraphEdgeDto[], nodeId: number): Set
     else if (edge.target === nodeId) ids.add(edge.source)
   }
   return ids
+}
+
+/** 字符串 Key 邻域集合（支持事件节点与从属边） */
+export function neighborKeys(
+  edges: Iterable<{ source: string; target: string }>,
+  nodeKey: string
+): Set<string> {
+  const keys = new Set<string>([nodeKey])
+  for (const edge of edges) {
+    if (edge.source === nodeKey) keys.add(edge.target)
+    else if (edge.target === nodeKey) keys.add(edge.source)
+  }
+  return keys
 }
 
 /** 时间窗过滤（客户端二次过滤；M3 分日查询前的兜底） */

@@ -7,6 +7,8 @@ import {
   revertMigrations
 } from '../../src/db/migrations'
 
+const LATEST = migrations[migrations.length - 1].version
+
 interface MasterRow {
   type: string
   name: string
@@ -25,15 +27,16 @@ function structureSnapshot(db: Database.Database): MasterRow[] {
 }
 
 describe('migrations · :memory: 库', () => {
-  it('全新库从 0 迁到 v2，重复执行幂等且数据保留', () => {
+  it('全新库从 0 迁到最新版本，重复执行幂等且数据保留', () => {
     const db = new Database(':memory:')
     try {
       expect(getSchemaVersion(db)).toBe(0)
-      expect(applyMigrations(db)).toBe(2)
+      expect(applyMigrations(db)).toBe(LATEST)
+      expect(LATEST).toBe(3)
 
       db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
       // 第二次跑同一套迁移：不应抛错、版本不倒退、已有数据不丢
-      expect(applyMigrations(db)).toBe(2)
+      expect(applyMigrations(db)).toBe(LATEST)
       expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
     } finally {
       db.close()
@@ -55,6 +58,13 @@ describe('migrations · :memory: 库', () => {
       expect(names).toContain('idx_nodes_level')
       expect(names).toContain('idx_edges_src')
       expect(names).toContain('idx_edges_dst')
+      // v3：时刻层 + 多归属 + 向量/位置
+      expect(names).toContain('moments')
+      expect(names).toContain('theme_moments')
+      expect(names).toContain('node_embeddings')
+      expect(names).toContain('node_positions')
+      expect(names).toContain('idx_moments_day')
+      expect(names).toContain('idx_theme_moments_moment')
 
       revertMigrations(db)
       expect(getSchemaVersion(db)).toBe(0)
@@ -66,9 +76,48 @@ describe('migrations · :memory: 库', () => {
       expect(afterDown).not.toContain('idx_events_ts')
       expect(afterDown).not.toContain('idx_nodes_ts_start')
       expect(afterDown).not.toContain('idx_edges_dst')
+      expect(afterDown).not.toContain('moments')
+      expect(afterDown).not.toContain('theme_moments')
+      expect(afterDown).not.toContain('node_embeddings')
+      expect(afterDown).not.toContain('node_positions')
 
-      expect(applyMigrations(db)).toBe(2)
+      expect(applyMigrations(db)).toBe(LATEST)
       expect(structureSnapshot(db)).toEqual(before)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v3 只回滚时刻层：回退到 v2 保留 nodes/edges 与数据', () => {
+    const db = new Database(':memory:')
+    try {
+      applyMigrations(db)
+      db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
+      db.prepare(
+        `INSERT INTO nodes (level, type, title, summary, ts_start, ts_end, source_events)
+         VALUES (1, 'knowledge', '测试节点', '摘要', 1, 2, '[1]')`
+      ).run()
+      db.prepare(
+        "INSERT INTO edges (src, dst, weight, kind, evidence) VALUES (1, 1, 0.5, 'ai', '同批')"
+      ).run()
+
+      revertMigrations(db, 2)
+      expect(getSchemaVersion(db)).toBe(2)
+      const names = structureSnapshot(db).map((r) => r.name)
+      expect(names).toContain('events')
+      expect(names).toContain('nodes')
+      expect(names).toContain('edges')
+      expect(names).not.toContain('moments')
+      expect(names).not.toContain('theme_moments')
+      expect(names).not.toContain('node_embeddings')
+      expect(names).not.toContain('node_positions')
+      expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 1 })
+
+      // 再迁回 v3：时刻层重建为空表，nodes/edges 数据仍在
+      expect(applyMigrations(db)).toBe(LATEST)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM moments').get()).toEqual({ n: 0 })
+      expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 1 })
+      expect(db.prepare('SELECT COUNT(*) AS n FROM edges').get()).toEqual({ n: 1 })
     } finally {
       db.close()
     }
@@ -99,8 +148,8 @@ describe('migrations · :memory: 库', () => {
       expect(names).not.toContain('nodes')
       expect(names).not.toContain('edges')
 
-      // 再迁回 v2：图谱表重建为空表，events 数据仍在
-      expect(applyMigrations(db)).toBe(2)
+      // 再迁回最新版本：图谱表重建为空表，events 数据仍在
+      expect(applyMigrations(db)).toBe(LATEST)
       expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 0 })
       expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
     } finally {

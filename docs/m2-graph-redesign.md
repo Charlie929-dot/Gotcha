@@ -141,6 +141,17 @@ CREATE TABLE IF NOT EXISTS node_positions (
   4. 全局 top-k/互选生成 embedding 边。
 - 回填期间图谱可只读展示旧 `ai` 边或空边，不阻塞采集/时间线。
 
+**实施（2026-10-24，PR #37；P1 数据层）**
+
+- 建表：`src/db/schema.ts` + `src/db/migrations.ts` v3（`moments` / `theme_moments` / `node_embeddings` / `node_positions` 及索引；up/down/幂等，文件库迁移前自动备份沿用 Phase 0）。
+- 编排：`src/understand/graph-backfill.ts#backfillGraphStructures` = 时刻 → 主归属 →（有向量时）embedding 边，每步幂等可重入。
+- 时刻：`src/understand/moments.ts`。对**全部** events 生成（含还没进主题的事件），给 P2 的 assigner 留池子；分组条件在 batch 的「同 app+标题、≤90s」之上**加 day_key**，时刻不跨本地日。`queryGlobalGraph` 默认只返回有归属的时刻（悬空点不画），`includeOrphanMoments` 可显式取。
+- 归属：`src/understand/theme-membership.ts` 以 `source_events` 回填 owner；`INSERT OR IGNORE` 幂等，缺失事件 id / 悬空时刻如实计数。
+- 边：`src/understand/graph-edges.ts` 纯函数（余弦 → 阈值 → top-k → 互选 → 无向去重），全量重写只碰 `kind='embedding'`，旧 `ai` 边不动；向量 BLOB 小端 Float32。
+- 查询：`queryGlobalGraph` 出全局 DTO（主题 / 时刻 / 归属 / 边 / 位置 + stats），旧 `queryGraphDay` 保留给当前 UI。
+- **未做（需拍板）**：主题向量与 embedding 边要本地向量运行时（`onnxruntime-node` + bge 模型文件，属依赖与模型分发决策）；启动/后台接线（把回填写进应用生命周期）与 UI 切全局图放 P1 尾部 / P3。
+
+
 ## 5. 主题合并与多归属
 
 ### 5.1 主题合并（先做，否则多归属是假的）
@@ -385,6 +396,7 @@ CREATE TABLE IF NOT EXISTS node_positions (
 | P3 | 主题/时刻 UI、日历、设置、E2E、验收、文档 | 3–4 天 |
 
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
+- 进度：P0 ✅（#36）；P1 数据层 ✅（v3 schema + 回填编排 + 全局查询 DTO，#37）；P1 剩余 = 向量回填 + 启动接线；P0.5 依赖向量运行时。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 
 ## 15. 风险与回退
@@ -451,6 +463,14 @@ base 210 主题 + 800 时刻：1010 节点 / 1344 连线，沉降约 3.1 s，布
 2k（1000 + 1000）：沉降约 3.4 s，布局中 56 fps
 日历单日（10-23：8 主题 / 17 时刻）：调暗 985 / 1010 个节点，节点数不变；双击主题开侧栏；「只看主题」剩 210 节点
 调暗/高亮只改透明度、不删节点；相机按 focused 子集包围盒适配（空范围不移动）
+
+# v3 回填预演（2026-10-24，真实库只读副本 .tmp/realdb，只跑结构回填、未算向量）
+events 7,423；level=1 主题 229；旧 ai 边 201
+时刻 1,949（4 个本地日；含未被任何主题覆盖的事件）；owner 归属 828；缺失事件 id 0
+全局 DTO：主题 229 / 有归属时刻 823 / 归属 828 / embedding 边 0（未算向量）/ 位置 0
+悬空时刻 1,126（10-21~10-24 未归纳的积压，D28 只自动归纳今天）
+首次回填 536 ms（含迁移）；重跑新增 0（460 ms）
+> 时刻数 1,949 明显高于 §12 的 500–800 估算：那是我按 2,689 个「成员事件」估的，实际池子是全部事件。画布上默认只画有归属的 823 个时刻，仍在 §12 目标内。
 
 # 模型（沿用 v0.2）
 bge-small-zh-v1.5 512d；model.onnx 94,851,877 B；Electron 45 主进程 3 条 7.2 ms；首次加载约 0.47 s

@@ -66,6 +66,9 @@
 | DeepSeek V4 默认 thinking 吃满 `max_tokens` | 归纳一直报「LLM 返回空 content」；响应 `finish_reason=length`，`completion_tokens` 全是 `reasoning_tokens`。2026-10-23 合成批次实测：400 个 event_id + `max_tokens=2000` → reasoning 2000/2000、content 0；小批次/短输入不会复现，容易被误判成 JSON 模式的偶发空响应 | 结构化 JSON 归纳显式关闭 thinking：请求体加 `thinking:{type:'disabled'}`（只对 `*.deepseek.com` 发送，避免严格网关因未知参数 400）。关闭后同批 content_len=3282、completion_tokens=1512、`finish_reason=stop`。`finish_reason=length` 时把空 content / 残 JSON 报成「被 max_tokens（N）截断」，不要只报「空 content」 |
 | 归纳按旧游标补历史，今天的图长期为空 | 自动归纳从 `graph.cursor_*` 一路从 10-21 补到 10-22，今天 2,000+ 条排在后面；按 10 分钟一批要十几小时才轮到今天，用户看到的是「昨天突然多出节点、今天不动」 | 改为按本地日取批（D28）：自动只归纳今天，手动「立即归纳」只归纳图谱当前查看日；用节点 `source_events` 去重，重复点击幂等；旧游标仅保留兼容，不再驱动自动归纳（`src/understand/cloud/batch.ts` 的 `readDayBatch` / `service.ts`） |
 
+| 只拷 `memory.db` 做真实库预演会缺数据 | WAL 模式下已提交但未 checkpoint 的帧在 `memory.db-wal` 里；只复制主库，副本可能少最后一批事件/主题（2026-10-24 复制 19.8MB 库时 `-wal` 还有 57KB 未落主库） | 预演副本必须连 `memory.db-wal` / `memory.db-shm` 一起复制（或先关应用让它 checkpoint）；在副本上跑 `openDatabase()` 还会生成 `.bak.*`，别在用户库目录里做实验 |
+| 时刻按「≤90s」分组会跨本地日 | `batch.ts` 的合并只看 app/标题/间隔，没有 day_key；直接拿来生成 `moments` 会把 23:59:50 与 00:00:10 并成一条，日历按 `day_key` 筛选时两边都错位（v0.3 §4.1） | 持久化时刻的分组条件必须带 `localDayKey(ts)`（`src/understand/moments.ts#groupMoments`），用例覆盖跨午夜；归纳取批仍用 batch 口径，两者用「同日等价」用例钉住 |
+
 ## 规则
 
 - 同一个坑第二次出现，说明这里没记住——先补本文件，再修代码。

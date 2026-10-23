@@ -14,10 +14,16 @@ import {
   EDGES_SRC_INDEX_DDL,
   EVENTS_DDL,
   EVENTS_TS_INDEX_DDL,
+  MOMENTS_DDL,
+  MOMENTS_DAY_INDEX_DDL,
   NODES_DDL,
   NODES_LEVEL_INDEX_DDL,
   NODES_TS_START_INDEX_DDL,
-  SETTINGS_DDL
+  NODE_EMBEDDINGS_DDL,
+  NODE_POSITIONS_DDL,
+  SETTINGS_DDL,
+  THEME_MOMENTS_DDL,
+  THEME_MOMENTS_MOMENT_INDEX_DDL
 } from './schema'
 
 export interface Migration {
@@ -57,6 +63,29 @@ export const migrations: Migration[] = [
       db.exec('DROP INDEX IF EXISTS idx_nodes_ts_start')
       db.exec('DROP TABLE IF EXISTS edges')
       db.exec('DROP TABLE IF EXISTS nodes')
+    }
+  },
+  {
+    /**
+     * v3：时刻层 + 多归属 + 主题向量/位置（docs/m2-graph-redesign.md §4.5）。
+     * 只建表与索引；数据回填由 `src/understand/graph-backfill.ts` 另行执行（可重入、不阻塞启动）。
+     */
+    version: 3,
+    up(db) {
+      db.exec(MOMENTS_DDL)
+      db.exec(MOMENTS_DAY_INDEX_DDL)
+      db.exec(THEME_MOMENTS_DDL)
+      db.exec(THEME_MOMENTS_MOMENT_INDEX_DDL)
+      db.exec(NODE_EMBEDDINGS_DDL)
+      db.exec(NODE_POSITIONS_DDL)
+    },
+    down(db) {
+      db.exec('DROP TABLE IF EXISTS node_positions')
+      db.exec('DROP TABLE IF EXISTS node_embeddings')
+      db.exec('DROP INDEX IF EXISTS idx_theme_moments_moment')
+      db.exec('DROP TABLE IF EXISTS theme_moments')
+      db.exec('DROP INDEX IF EXISTS idx_moments_day')
+      db.exec('DROP TABLE IF EXISTS moments')
     }
   }
 ]

@@ -135,12 +135,49 @@ describe('CaptureController · 状态机', () => {
       'halt',
       'stopTimers',
       'disposeScreenStream',
+      'disposeOcr',
       'flush',
-      'flushStats',
-      'disposeOcr'
+      'flushStats'
     ])
     expect(controller.status()).toBe('paused')
     expect(changes).toEqual(['starting', 'running', 'stopping', 'paused'])
+  })
+
+  it('stop 先取消 OCR 再 flush：仍在等 OCR 启动时也不会无限等待（F07）', async () => {
+    let releaseFlush: (() => void) | null = null
+    let ocrDisposed = false
+    const calls: string[] = []
+    const session = {
+      pipeline: {
+        halt: () => {
+          calls.push('halt')
+        },
+        flush: () =>
+          new Promise<void>((resolve) => {
+            calls.push('flush')
+            if (ocrDisposed) resolve()
+            else releaseFlush = resolve
+          }),
+        getStats: () => zeroStats(),
+        resetStats: () => {}
+      } as unknown as CapturePipeline,
+      stopTimers: () => {},
+      flushStats: () => {},
+      disposeScreenStream: async () => {},
+      disposeOcr: async () => {
+        ocrDisposed = true
+        calls.push('disposeOcr')
+      }
+    } as unknown as CaptureSession
+    const controller = new CaptureController({ createSession: async () => session })
+
+    await controller.start()
+    await controller.stop()
+
+    // 旧顺序（flush 在 disposeOcr 之前）会在这里一直等下去
+    expect(calls).toEqual(['halt', 'disposeOcr', 'flush'])
+    expect(releaseFlush).toBeNull()
+    expect(controller.status()).toBe('paused')
   })
 
   it('start 失败：状态回落 paused、记录错因、后续可重试', async () => {

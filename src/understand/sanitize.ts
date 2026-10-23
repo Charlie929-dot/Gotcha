@@ -48,3 +48,42 @@ export function sanitize(text: string): SanitizeResult {
   const sensitive = RULES.some((rule) => !rule.drop && rule.re.test(text))
   return { text, sensitive, drop: false }
 }
+
+/** M2 出云剥离占位符（D19） */
+export const REDACTION_PLACEHOLDER = '[已脱敏]'
+
+export interface RedactTextResult {
+  /** 命中片段替换为占位符后的文本 */
+  text: string
+  /** 是否命中过非 drop 规则（替换过） */
+  redacted: boolean
+  /** true = 仍不安全（命中密码类规则，或剥离后仍有残留），该条不得出云 */
+  blocked: boolean
+}
+
+function withGlobalFlag(re: RegExp): RegExp {
+  return new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
+}
+
+/**
+ * 出云前剥离（D19）：密码类命中整条 blocked；其余敏感规则命中片段替换为
+ * `[已脱敏]`，剥离后仍能匹配任一规则则同样 blocked（宁可少发、不可漏发）。
+ */
+export function redactSensitive(text: string): RedactTextResult {
+  for (const rule of RULES) {
+    if (rule.drop && rule.re.test(text)) {
+      return { text, redacted: false, blocked: true }
+    }
+  }
+  let redactedText = text
+  let redacted = false
+  for (const rule of RULES) {
+    if (rule.drop) continue
+    if (rule.re.test(redactedText)) {
+      redacted = true
+      redactedText = redactedText.replace(withGlobalFlag(rule.re), REDACTION_PLACEHOLDER)
+    }
+  }
+  const blocked = RULES.some((rule) => !rule.drop && rule.re.test(redactedText))
+  return { text: redactedText, redacted, blocked }
+}

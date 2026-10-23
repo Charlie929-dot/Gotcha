@@ -25,15 +25,15 @@ function structureSnapshot(db: Database.Database): MasterRow[] {
 }
 
 describe('migrations · :memory: 库', () => {
-  it('全新库从 0 迁到 v1，重复执行幂等且数据保留', () => {
+  it('全新库从 0 迁到 v2，重复执行幂等且数据保留', () => {
     const db = new Database(':memory:')
     try {
       expect(getSchemaVersion(db)).toBe(0)
-      expect(applyMigrations(db)).toBe(1)
+      expect(applyMigrations(db)).toBe(2)
 
       db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
       // 第二次跑同一套迁移：不应抛错、版本不倒退、已有数据不丢
-      expect(applyMigrations(db)).toBe(1)
+      expect(applyMigrations(db)).toBe(2)
       expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
     } finally {
       db.close()
@@ -48,17 +48,61 @@ describe('migrations · :memory: 库', () => {
       const names = before.map((r) => r.name)
       expect(names).toContain('events')
       expect(names).toContain('settings')
+      expect(names).toContain('nodes')
+      expect(names).toContain('edges')
       expect(names).toContain('idx_events_ts')
+      expect(names).toContain('idx_nodes_ts_start')
+      expect(names).toContain('idx_nodes_level')
+      expect(names).toContain('idx_edges_src')
+      expect(names).toContain('idx_edges_dst')
 
       revertMigrations(db)
       expect(getSchemaVersion(db)).toBe(0)
       const afterDown = structureSnapshot(db).map((r) => r.name)
       expect(afterDown).not.toContain('events')
       expect(afterDown).not.toContain('settings')
+      expect(afterDown).not.toContain('nodes')
+      expect(afterDown).not.toContain('edges')
       expect(afterDown).not.toContain('idx_events_ts')
+      expect(afterDown).not.toContain('idx_nodes_ts_start')
+      expect(afterDown).not.toContain('idx_edges_dst')
 
-      expect(applyMigrations(db)).toBe(1)
+      expect(applyMigrations(db)).toBe(2)
       expect(structureSnapshot(db)).toEqual(before)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v2 只回滚图谱表：回退到 v1 保留 events / settings 与数据', () => {
+    const db = new Database(':memory:')
+    try {
+      applyMigrations(db)
+      db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
+      db.prepare(
+        `INSERT INTO nodes (level, type, title, summary, ts_start, ts_end, source_events)
+         VALUES (1, 'knowledge', '测试节点', '摘要', 1, 2, '[1]')`
+      ).run()
+      const nodeId = Number(
+        (db.prepare('SELECT id FROM nodes LIMIT 1').get() as { id: number }).id
+      )
+      db.prepare(
+        `INSERT INTO edges (src, dst, weight, kind, evidence) VALUES (?, ?, 0.5, 'ai', '同批')`
+      ).run(nodeId, nodeId)
+
+      revertMigrations(db, 1)
+      expect(getSchemaVersion(db)).toBe(1)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
+      const names = structureSnapshot(db).map((r) => r.name)
+      expect(names).toContain('events')
+      expect(names).toContain('settings')
+      expect(names).not.toContain('nodes')
+      expect(names).not.toContain('edges')
+
+      // 再迁回 v2：图谱表重建为空表，events 数据仍在
+      expect(applyMigrations(db)).toBe(2)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 0 })
+      expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
     } finally {
       db.close()
     }

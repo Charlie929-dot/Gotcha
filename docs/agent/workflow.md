@@ -146,6 +146,7 @@ Gotcha/
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-23：M2 Phase 0 出云底座（`feat/m2-p0-llm-foundation`）：schema v2 迁移（`nodes` / `edges` + 4 索引，up/down/幂等）、出云唯一出口 `redact.ts`（字段裁剪 + 敏感剥离 + 不可剥离判定）、多供应商配置（预设 DeepSeek + 自定义 OpenAI 兼容，密钥只走 env / `userData/.env`）、DeepSeek JSON 客户端（超时 / 429·5xx 退避重试 / 空 content 处理 / usage）、`.env.example`；新增 25 条单测，`npm test` 193 条 + typecheck + build 全绿。PR 待审。
 - 2026-10-23：M2 方案 v0.2 拍板（`docs/m2-plan.md`）：Q1–Q8 → decisions D17–D23——只做 L1（L2+/LOD 归 M3、解说/主动提示归 M4）；暂停 = 采集停 + 归纳停 + 在途 abort（D18）；敏感事件剥离后出云、不可剥离本地占位（D19）；独立图谱窗口 + 球点击开图谱 + 注册 `Alt+Space`（热键可配置、冲突检测，D20）；多供应商 / 自定义 OpenAI 兼容供应商，密钥走 env/.env（D21）；归纳参数可调（D22）；真实 key + 10-22 数据验收（D23）。方案待 M2 收口归档。
 - 2026-10-23：M1b 收口（`feat/m1b-p3-acceptance`）：B1–B8 真机清单全部通过（拍板人确认），PR #20（`362ebe8`）合并 Phase 2；`docs/m1b-plan.md` 归档至 `docs/archive/`；workflow / AGENTS.md / gotchas 同步，M1b 状态 ✅。
 - 2026-10-23：M1b Phase 2 隐私总开关 + `Alt+P`（`feat/m1b-p2-switch`）：`hotkeys.ts` 注册 `Alt+P`（占用时球上挂「!」角标 + 日志，托盘菜单兜底）；热键 / 托盘 / 球右键共用 `toggleCapture()` 单一入口，暂停先落 0/0 再关闸、恢复 `await start()` 成功才切运行；两键 `capture.enabled` / `capture.resume_on_start` 只在显式操作时写（`--capture` 直开不写）；启动 `resume_on_start=1` 先保持暂停 + 3s 倒计时角标（托盘气球提示），点球 / 托盘 / 退出即取消并写 0/0，`Alt+P` 则取消倒计时后立刻显式开始。真机反馈修复：进程级复用 `ScreenCapture` 的显示源映射（暂停仍释放窗口 / 媒体流），避免每次恢复重跑 `desktopCapturer.getSources()` 卡 1–2s；倒计时到点后的 `starting` 阶段仍可取消，点球排队停止，Alt+P 接管同一 in-flight start。新增 12 条单测（hotkeys 3 / capture-switch 9）+ 6 条开关 E2E（含慢假启动竞态），`npm test` 168 条 / typecheck / 开关 E2E 6 条 / build 全绿。

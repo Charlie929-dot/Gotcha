@@ -1,8 +1,7 @@
 /**
- * SQLite v1 schema（字段按技术方案 §4 原文）
+ * SQLite schema（字段按技术方案 §4 原文）
  *
- * 分批建表（m1a-plan §4.1）：v1 只建 events + settings；
- * nodes / edges 由 M2 的 v2 迁移添加，避免空表漂移。
+ * v1：events + settings（M1a）；v2：nodes / edges + 索引（M2 Phase 0）。
  * 所有 DDL 带 IF NOT EXISTS，重复执行幂等。
  */
 
@@ -31,4 +30,50 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+`
+
+/** 图谱节点（L1~L4 一等公民；M2 只写 level=1） */
+export const NODES_DDL = `
+CREATE TABLE IF NOT EXISTS nodes (
+  id INTEGER PRIMARY KEY,
+  level INTEGER,
+  type TEXT,
+  title TEXT,
+  summary TEXT,
+  ts_start INTEGER,
+  ts_end INTEGER,
+  source_events TEXT,
+  meta_json TEXT
+);
+`
+
+/** 图谱边（带权重；M2 只写 kind='ai'） */
+export const EDGES_DDL = `
+CREATE TABLE IF NOT EXISTS edges (
+  id INTEGER PRIMARY KEY,
+  src INTEGER,
+  dst INTEGER,
+  weight REAL,
+  kind TEXT,
+  evidence TEXT
+);
+`
+
+/** 按日查询节点（时间窗过滤） */
+export const NODES_TS_START_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_nodes_ts_start ON nodes(ts_start);
+`
+
+/** 按层级过滤（M3 起 LOD 用；M2 也用于只取 L1） */
+export const NODES_LEVEL_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_nodes_level ON nodes(level);
+`
+
+/** 邻域查询 / 边去重按端点查 */
+export const EDGES_SRC_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
+`
+
+export const EDGES_DST_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 `

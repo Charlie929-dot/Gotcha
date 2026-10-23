@@ -1,13 +1,15 @@
 /**
- * M2 Phase 2a E2E：图谱数据通道 + 归纳接线（D20 / D24）
+ * M2 Phase 2 E2E：图谱画布 + 下钻 + 设置 + 归纳接线（D20 / D24 / C3 / C4）
  *
  * 隔离：`GOTCHA_USER_DATA` 临时目录 + `GOTCHA_FAKE_CAPTURE=1` + `GOTCHA_FAKE_LLM=1`
  * （三者都要求非打包态）——不启动真实录屏 / OCR、不发真实网络。
  *
  * 覆盖：
- * 1. 未确认出网时自动归纳零请求；确认后「立即归纳」落库，图谱出现节点；
+ * 1. 未确认出网时自动归纳零请求；确认后「立即归纳」落库，画布出现节点；
  * 2. 节点 source_events 全部可解析回事件行（C4 可溯）；
- * 3. 暂停后「立即归纳」零新增请求、不落库（D18）。
+ * 3. 点击节点 → 侧栏成员事件 →「在时间线中查看」定位到节点日期；
+ * 4. 设置抽屉保存归纳参数（D22）；
+ * 5. 暂停后「立即归纳」零新增请求、不落库（D18）。
  */
 
 import { expect, test } from '@playwright/test'
@@ -28,9 +30,24 @@ interface FakeLlmCounter {
   aborted: number
 }
 
+interface GraphNodeLite {
+  id: number
+  tsStart: number
+}
+
 interface GraphWindowApi {
+  query(
+    from: number,
+    to: number
+  ): Promise<{ nodes: GraphNodeLite[]; edges: Array<{ id: number }> }>
   nodeEvents(nodeId: number): Promise<{ found: boolean; events: unknown[]; missingIds: number[] }>
   induceNow(): Promise<{ status: string; reason?: string }>
+  settings(): Promise<{ intervalMinutes: number }>
+}
+
+interface GraphDebug {
+  count(): number
+  select(nodeId: number): Promise<void>
 }
 
 async function fakeLlm(): Promise<FakeLlmCounter> {
@@ -39,6 +56,27 @@ async function fakeLlm(): Promise<FakeLlmCounter> {
 
 async function captureStatus(): Promise<string> {
   return app.evaluate(() => globalThis.__gotchaTest!.status())
+}
+
+/** 取当天节点 id + ts（与 UI 同一天窗口） */
+async function nodesToday(): Promise<GraphNodeLite[]> {
+  return graph.evaluate(async () => {
+    const from = new Date()
+    from.setHours(0, 0, 0, 0)
+    const to = new Date(from)
+    to.setDate(to.getDate() + 1)
+    const data = await (window as unknown as { gotchaGraph: GraphWindowApi }).gotchaGraph.query(
+      from.getTime(),
+      to.getTime() - 1
+    )
+    return data.nodes
+  })
+}
+
+function dateStamp(ts: number): string {
+  const date = new Date(ts)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
 test.beforeAll(async () => {
@@ -87,7 +125,7 @@ test.afterAll(async () => {
   rmSync(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 
-test.describe.serial('图谱归纳闭环（假采集 + 假 LLM）', () => {
+test.describe.serial('图谱闭环（假采集 + 假 LLM）', () => {
   test('未确认出网：自动归纳零请求，图谱显示确认门', async () => {
     await expect(graph.locator('#status')).toHaveAttribute('data-kind', 'consent')
     await expect(graph.locator('#consent')).toBeVisible()
@@ -100,24 +138,31 @@ test.describe.serial('图谱归纳闭环（假采集 + 假 LLM）', () => {
     await expect(graph.locator('#consent')).toBeVisible()
   })
 
-  test('确认后立即归纳：节点落库可在图谱看到，来源事件 100% 可溯', async () => {
+  test('确认后立即归纳：节点落库、画布渲染、来源 100% 可溯', async () => {
     await graph.locator('#consent-btn').click()
 
     await expect.poll(async () => (await fakeLlm()).requests, { timeout: 10_000 }).toBe(1)
-    await expect(graph.locator('#node-list li')).toHaveCount(2, { timeout: 10_000 })
     await expect(graph.locator('#consent')).toBeHidden()
+    await expect(graph.locator('#node-count')).toHaveAttribute('data-nodes', '2', {
+      timeout: 15_000
+    })
     await expect(graph.locator('#node-count')).toContainText('2 个节点')
     await expect(graph.locator('#node-count')).toContainText('1 条边')
+    await expect(graph.locator('#sigma-container canvas')).toBeVisible({ timeout: 15_000 })
+    await expect(graph.locator('#empty')).toBeHidden()
 
-    const nodeIds = await graph
-      .locator('#node-list li')
-      .evaluateAll((nodes) => nodes.map((node) => Number((node as HTMLElement).dataset.id)))
-    expect(nodeIds.length).toBe(2)
+    const count = await graph.evaluate(
+      () => (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.count()
+    )
+    expect(count).toBe(2)
 
-    for (const nodeId of nodeIds) {
+    const nodes = await nodesToday()
+    expect(nodes.length).toBe(2)
+    for (const node of nodes) {
       const result = await graph.evaluate(
-        async (id) => (window as unknown as { gotchaGraph: GraphWindowApi }).gotchaGraph.nodeEvents(id),
-        nodeId
+        async (id) =>
+          (window as unknown as { gotchaGraph: GraphWindowApi }).gotchaGraph.nodeEvents(id),
+        node.id
       )
       expect(result.found).toBe(true)
       expect(result.events.length).toBeGreaterThan(0)
@@ -125,7 +170,51 @@ test.describe.serial('图谱归纳闭环（假采集 + 假 LLM）', () => {
     }
   })
 
-  test('暂停后立即归纳：零新增请求、不落库（D18）', async () => {
+  test('点击节点下钻：侧栏成员事件 + 在时间线中查看定位到节点日期', async () => {
+    const nodes = await nodesToday()
+    const target = nodes[0]
+    await graph.evaluate(
+      (id) =>
+        (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.select(id),
+      target.id
+    )
+
+    await expect(graph.locator('#panel')).toBeVisible()
+    await expect(graph.locator('#panel-title')).not.toHaveText('')
+    await expect(graph.locator('#panel-events li').first()).toContainText('notepad')
+
+    const timelinePromise = app.waitForEvent('window')
+    await graph.locator('#panel-timeline').click()
+    const timeline = await timelinePromise
+    await timeline.waitForLoadState('domcontentloaded')
+
+    await expect(timeline.locator('#date')).toContainText(dateStamp(target.tsStart))
+    await expect(timeline.locator('li')).toHaveCount(2)
+    await timeline.close()
+
+    await graph.locator('#panel-close').click()
+    await expect(graph.locator('#panel')).toBeHidden()
+  })
+
+  test('设置抽屉：读取并保存归纳参数，热键状态可见', async () => {
+    await graph.locator('#settings').click()
+    await expect(graph.locator('#drawer')).toBeVisible()
+    await expect(graph.locator('#set-interval')).toHaveValue('10')
+
+    await graph.locator('#set-interval').fill('15')
+    await graph.locator('#settings-save').click()
+    await expect(graph.locator('#settings-msg')).toHaveText('已保存')
+
+    const saved = await graph.evaluate(async () =>
+      (window as unknown as { gotchaGraph: GraphWindowApi }).gotchaGraph.settings()
+    )
+    expect(saved.intervalMinutes).toBe(15)
+    await expect(graph.locator('#set-hotkey-status')).not.toHaveText('')
+    await graph.locator('#settings-close').click()
+    await expect(graph.locator('#drawer')).toBeHidden()
+  })
+
+  test('暂停后立即归纳：零新增请求、不落库（D18），图谱仍可浏览', async () => {
     const before = await fakeLlm()
     await app.evaluate(() => globalThis.__gotchaTest!.toggle())
     await expect.poll(captureStatus, { timeout: 5_000 }).toBe('paused')
@@ -136,8 +225,8 @@ test.describe.serial('图谱归纳闭环（假采集 + 假 LLM）', () => {
     expect(outcome).toEqual({ status: 'skipped', reason: 'paused' })
     expect((await fakeLlm()).requests).toBe(before.requests)
 
-    // 图谱仍可浏览已有节点（暂停不影响只读）
     await graph.locator('#refresh').click()
-    await expect(graph.locator('#node-list li')).toHaveCount(2)
+    await expect(graph.locator('#node-count')).toHaveAttribute('data-nodes', '2')
+    await expect(graph.locator('#sigma-container canvas')).toBeVisible()
   })
 })

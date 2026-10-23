@@ -1,19 +1,58 @@
 /**
- * 图谱窗口 shell（M2 Phase 2a）
+ * 图谱窗口（M2 Phase 2b）
  *
- * 先接数据通道与状态：日期切换、节点/边计数、节点列表、出网确认、立即归纳、打开时间线。
- * sigma 画布 / 侧栏下钻 / 设置抽屉在 Phase 2b 接入（graph-view / graph-panel / graph-settings）。
+ * - 数据：`graph:query` 取当天节点/边 → graphology + sigma 力导向画布（懒加载，时间线不背图谱体积）；
+ * - 交互：滚轮缩放、拖拽平移、悬停高亮邻域（其余降透明度）、点击节点开侧栏（C4）；
+ * - 侧栏「在时间线中查看」带日期跳转；设置抽屉覆盖归纳参数 / 供应商 / 快捷键 / 出网确认（D21/D22/D24）；
+ * - 空状态（未配置 key / 未确认出网 / 采集暂停 / 无节点）与归纳状态徽标。
+ *
+ * 视觉映射在 `graph-view.ts`（纯函数），侧栏在 `graph-panel.ts`，设置抽屉在
+ * `graph-settings-panel.ts`；本文件只做 DOM / sigma / IPC 接线。
  */
 
-import { dayRange, formatDate, formatTime, startOfDay } from '../timeline'
-import type { GraphDayData, GraphNodeDto } from '../../understand/graph-query'
+import { dayRange, formatDate, startOfDay } from '../timeline'
+import type { GraphDayData } from '../../understand/graph-query'
 import type { GraphApi } from '../graph-preload'
 import type { GraphInduceResult } from '../../main/graph-ipc'
+import type { GraphSettingsView } from '../../main/graph-settings'
 import type { InductionSnapshot } from '../../main/induction-runtime'
+import {
+  EDGE_COLOR,
+  edgeSize,
+  maxDegree,
+  neighborIds,
+  nodeColor,
+  nodeLabel,
+  nodeSize
+} from './graph-view'
+import { createNodePanel } from './graph-panel'
+import { createSettingsPanel } from './graph-settings-panel'
 
 declare global {
   interface Window {
     gotchaGraph: GraphApi
+    /** E2E 只读钩子：sigma 画布不便于按像素点击，测试通过它走同一 openNode 路径 */
+    __gotchaGraphView?: {
+      count(): number
+      select(nodeId: number): Promise<void>
+      hover(nodeId: number | null): void
+    }
+  }
+}
+
+type GraphInstance = import('graphology').default
+type SigmaInstance = import('sigma').default
+
+interface SigmaModules {
+  Graph: new (options?: Record<string, unknown>) => GraphInstance
+  Sigma: new (
+    graph: GraphInstance,
+    container: HTMLElement,
+    settings?: Record<string, unknown>
+  ) => SigmaInstance
+  forceAtlas2: {
+    assign(graph: GraphInstance, options?: Record<string, unknown>): void
+    inferSettings(graph: GraphInstance): Record<string, unknown>
   }
 }
 
@@ -21,12 +60,35 @@ const statusEl = document.getElementById('status')
 const dateEl = document.getElementById('date')
 const emptyEl = document.getElementById('empty')
 const countEl = document.getElementById('node-count')
-const listEl = document.getElementById('node-list')
+const containerEl = document.getElementById('sigma-container')
 const consentEl = document.getElementById('consent')
 const consentButton = document.getElementById('consent-btn')
 const metaEl = document.getElementById('meta')
+const panelEl = document.getElementById('panel')
+const panelTitleEl = document.getElementById('panel-title')
+const panelSummaryEl = document.getElementById('panel-summary')
+const panelMetaEl = document.getElementById('panel-meta')
+const panelEventsEl = document.getElementById('panel-events')
+const panelTimelineEl = document.getElementById('panel-timeline')
+const drawerEl = document.getElementById('drawer')
 
-if (!statusEl || !dateEl || !emptyEl || !countEl || !listEl || !consentEl || !consentButton || !metaEl) {
+if (
+  !statusEl ||
+  !dateEl ||
+  !emptyEl ||
+  !countEl ||
+  !containerEl ||
+  !consentEl ||
+  !consentButton ||
+  !metaEl ||
+  !panelEl ||
+  !panelTitleEl ||
+  !panelSummaryEl ||
+  !panelMetaEl ||
+  !panelEventsEl ||
+  !panelTimelineEl ||
+  !drawerEl
+) {
   throw new Error('图谱页面 DOM 不完整')
 }
 
@@ -35,21 +97,48 @@ const els = {
   date: dateEl,
   empty: emptyEl,
   count: countEl,
-  list: listEl,
+  container: containerEl,
   consent: consentEl,
   consentButton,
-  meta: metaEl
+  meta: metaEl,
+  panel: panelEl,
+  panelTitle: panelTitleEl,
+  panelSummary: panelSummaryEl,
+  panelMeta: panelMetaEl,
+  panelEvents: panelEventsEl,
+  panelTimeline: panelTimelineEl as HTMLButtonElement,
+  drawer: drawerEl
 }
 
 let day = startOfDay(Date.now())
 let snapshot: InductionSnapshot | null = null
 let lastData: GraphDayData = { nodes: [], edges: [] }
+let graph: GraphInstance | null = null
+let renderer: SigmaInstance | null = null
+let modules: SigmaModules | null = null
+let hovered: number | null = null
+let loading = false
 
-const TYPE_LABEL: Record<string, string> = {
-  knowledge: '知识',
-  activity: '行为',
-  protected: '已保护'
-}
+const panel = createNodePanel(
+  {
+    panel: els.panel,
+    title: els.panelTitle,
+    summary: els.panelSummary,
+    meta: els.panelMeta,
+    events: els.panelEvents,
+    timelineButton: els.panelTimeline
+  },
+  { openTimeline: (ts) => void window.gotchaGraph.openTimeline(ts) }
+)
+
+document.getElementById('panel-close')?.addEventListener('click', () => panel.hide())
+
+const settingsPanel = createSettingsPanel(document.body, window.gotchaGraph, (settings) => {
+  void applySavedSettings(settings)
+})
+document.getElementById('settings')?.addEventListener('click', () => {
+  void settingsPanel.open()
+})
 
 const STATUS_LABEL: Record<string, string> = {
   idle: '空闲',
@@ -81,12 +170,13 @@ function statusView(current: InductionSnapshot | null): { kind: string; text: st
   if (current.status === 'budget-exhausted') {
     return { kind: 'budget', text: STATUS_LABEL[current.status] }
   }
-  if (current.status === 'error') {
-    return { kind: 'error', text: current.lastError ? '上次归纳失败' : '上次失败' }
-  }
+  if (current.status === 'error') return { kind: 'error', text: '上次归纳失败' }
   if (current.status === 'backoff') return { kind: 'backoff', text: STATUS_LABEL[current.status] }
   if (current.status === 'running') return { kind: 'running', text: STATUS_LABEL[current.status] }
-  return { kind: current.status === 'idle' ? 'ok' : 'idle', text: STATUS_LABEL[current.status] ?? current.status }
+  return {
+    kind: current.status === 'idle' ? 'ok' : 'idle',
+    text: STATUS_LABEL[current.status] ?? current.status
+  }
 }
 
 function applySnapshot(next: InductionSnapshot): void {
@@ -130,60 +220,158 @@ function renderEmpty(): void {
   }
 }
 
-function renderList(data: GraphDayData): void {
-  const count = data.nodes.length
-  els.count.textContent =
-    count === 0 ? '' : `${count} 个节点 · ${data.edges.length} 条边`
-  els.list.replaceChildren()
-  for (const node of data.nodes) els.list.append(renderNode(node))
-}
-
-function renderNode(node: GraphNodeDto): HTMLLIElement {
-  const li = document.createElement('li')
-  li.className = 'node'
-  li.dataset.id = String(node.id)
-  li.dataset.type = node.type
-
-  const title = document.createElement('div')
-  title.className = 'node-title'
-  const titleText = document.createElement('span')
-  titleText.textContent = node.title
-  const type = document.createElement('span')
-  type.className = 'node-type'
-  type.textContent = TYPE_LABEL[node.type] ?? node.type
-  title.append(titleText, type)
-
-  const desc = document.createElement('div')
-  desc.className = 'node-summary'
-  desc.textContent = node.summary
-
-  const meta = document.createElement('div')
-  meta.className = 'node-meta'
-  meta.textContent = `${formatTime(node.tsStart)} · ${node.sourceCount} 条来源 · 连接 ${node.degree}`
-
-  li.append(title, desc, meta)
-  return li
-}
-
 function renderMeta(): void {
   els.meta.textContent = snapshot?.consent
     ? '数据只存本地；出网内容经统一脱敏'
     : '确认出网前不会发送任何内容'
 }
 
+function renderCount(data: GraphDayData): void {
+  const count = data.nodes.length
+  els.count.textContent = count === 0 ? '' : `${count} 个节点 · ${data.edges.length} 条边`
+  els.count.dataset.nodes = String(count)
+  els.count.dataset.edges = String(data.edges.length)
+}
+
+async function ensureModules(): Promise<SigmaModules> {
+  if (modules) return modules
+  const [graphology, sigma, layout] = await Promise.all([
+    import('graphology'),
+    import('sigma'),
+    import('graphology-layout-forceatlas2')
+  ])
+  modules = {
+    Graph: graphology.default as SigmaModules['Graph'],
+    Sigma: sigma.default as SigmaModules['Sigma'],
+    forceAtlas2: layout.default as unknown as SigmaModules['forceAtlas2']
+  }
+  return modules
+}
+
+async function renderCanvas(data: GraphDayData): Promise<void> {
+  const current = await ensureModules()
+  renderer?.kill()
+  renderer = null
+  graph = null
+  hovered = null
+
+  const maxDeg = maxDegree(data)
+  const graphInstance = new current.Graph({ multi: false, type: 'undirected' })
+  data.nodes.forEach((node, index) => {
+    const angle = (2 * Math.PI * index) / Math.max(1, data.nodes.length)
+    const radius = 40 + 14 * Math.sqrt(data.nodes.length)
+    graphInstance.addNode(String(node.id), {
+      x: Math.cos(angle) * radius,
+      y: Math.sin(angle) * radius,
+      size: nodeSize(node.degree, maxDeg),
+      color: nodeColor(node.type),
+      label: nodeLabel(node.title)
+    })
+  })
+  const edgeById = new Map<string, { source: number; target: number }>()
+  for (const edge of data.edges) {
+    if (!graphInstance.hasNode(String(edge.source)) || !graphInstance.hasNode(String(edge.target))) {
+      continue
+    }
+    if (graphInstance.hasEdge(edge.source, edge.target)) continue
+    graphInstance.addEdgeWithKey(String(edge.id), String(edge.source), String(edge.target), {
+      size: edgeSize(edge.weight),
+      color: EDGE_COLOR,
+      weight: edge.weight
+    })
+    edgeById.set(String(edge.id), { source: edge.source, target: edge.target })
+  }
+
+  current.forceAtlas2.assign(graphInstance, {
+    iterations: 160,
+    settings: {
+      ...current.forceAtlas2.inferSettings(graphInstance),
+      edgeWeightInfluence: 1,
+      gravity: 1,
+      scalingRatio: 12,
+      slowDown: 5,
+      barnesHutOptimize: false
+    }
+  })
+
+  graph = graphInstance
+  els.container.hidden = false
+  renderer = new current.Sigma(graphInstance, els.container, {
+    renderLabels: true,
+    labelDensity: 0.7,
+    labelGridCellSize: 70,
+    labelRenderedSizeThreshold: 2,
+    labelColor: { color: '#c9c9d6' },
+    labelSize: 12,
+    labelFont: 'Segoe UI, Microsoft YaHei, sans-serif',
+    defaultEdgeColor: EDGE_COLOR,
+    minCameraRatio: 0.05,
+    maxCameraRatio: 12,
+    nodeReducer: (node: string, attrs: Record<string, unknown>) => {
+      if (hovered === null) return attrs
+      const keep = neighborIds(lastData.edges, hovered)
+      if (!keep.has(Number(node))) return { ...attrs, color: '#2f2f3b', label: '' }
+      return Number(node) === hovered
+        ? { ...attrs, size: Number(attrs.size ?? 8) * 1.25 }
+        : attrs
+    },
+    edgeReducer: (edge: string, attrs: Record<string, unknown>) => {
+      if (hovered === null) return attrs
+      const endpoints = edgeById.get(edge)
+      if (!endpoints) return attrs
+      const keep = neighborIds(lastData.edges, hovered)
+      if (keep.has(endpoints.source) && keep.has(endpoints.target)) return attrs
+      return { ...attrs, color: '#242430' }
+    }
+  })
+  renderer.on('clickNode', (payload: { node: string }) => {
+    void openNode(Number(payload.node))
+  })
+  renderer.on('enterNode', (payload: { node: string }) => {
+    hovered = Number(payload.node)
+    renderer?.refresh()
+  })
+  renderer.on('leaveNode', () => {
+    hovered = null
+    renderer?.refresh()
+  })
+  renderer.on('clickStage', () => panel.hide())
+  void renderer.getCamera().reset()
+}
+
+async function openNode(nodeId: number): Promise<void> {
+  const node = lastData.nodes.find((item) => item.id === nodeId)
+  if (!node) return
+  const result = await window.gotchaGraph.nodeEvents(nodeId)
+  panel.show(node, result)
+}
+
 async function load(): Promise<void> {
+  if (loading) return
+  loading = true
   els.date.textContent = formatDate(day)
   const { from, to } = dayRange(day)
   try {
     lastData = await window.gotchaGraph.query(from, to)
-    renderList(lastData)
+    renderCount(lastData)
     renderEmpty()
+    if (lastData.nodes.length > 0) {
+      await renderCanvas(lastData)
+    } else {
+      renderer?.kill()
+      renderer = null
+      graph = null
+      els.container.hidden = true
+    }
   } catch (error) {
     lastData = { nodes: [], edges: [] }
-    renderList(lastData)
+    renderCount(lastData)
+    els.container.hidden = true
     els.empty.hidden = false
     els.empty.dataset.kind = 'error'
     els.empty.textContent = `读取失败：${String(error)}`
+  } finally {
+    loading = false
   }
 }
 
@@ -194,27 +382,34 @@ function shiftDay(delta: number): void {
   void load()
 }
 
+async function refreshStatus(): Promise<void> {
+  try {
+    applySnapshot(await window.gotchaGraph.status())
+  } catch {
+    // 状态读取失败不阻塞列表
+  }
+}
+
+async function refresh(): Promise<void> {
+  await refreshStatus()
+  await load()
+}
+
+async function applySavedSettings(settings: GraphSettingsView): Promise<void> {
+  await refreshStatus()
+  if (settings.outboundConsent) await load()
+}
+
 document.getElementById('prev')?.addEventListener('click', () => shiftDay(-1))
 document.getElementById('next')?.addEventListener('click', () => shiftDay(1))
 document.getElementById('today')?.addEventListener('click', () => {
   day = startOfDay(Date.now())
   void load()
 })
-document.getElementById('refresh')?.addEventListener('click', () => {
-  void refresh()
-})
+document.getElementById('refresh')?.addEventListener('click', () => void refresh())
 document.getElementById('timeline')?.addEventListener('click', () => {
-  void window.gotchaGraph.openTimeline()
+  void window.gotchaGraph.openTimeline(day)
 })
-
-async function refresh(): Promise<void> {
-  try {
-    applySnapshot(await window.gotchaGraph.status())
-  } catch {
-    // 状态读取失败不阻塞列表
-  }
-  await load()
-}
 
 document.getElementById('induce')?.addEventListener('click', async () => {
   const result: GraphInduceResult = await window.gotchaGraph.induceNow()
@@ -258,5 +453,14 @@ els.consentButton.addEventListener('click', async () => {
 })
 
 window.gotchaGraph.onStatus(applySnapshot)
+
+window.__gotchaGraphView = {
+  count: () => graph?.order ?? 0,
+  select: (nodeId: number) => openNode(nodeId),
+  hover: (nodeId: number | null) => {
+    hovered = nodeId
+    renderer?.refresh()
+  }
+}
 
 void refresh()

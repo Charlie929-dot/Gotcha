@@ -58,6 +58,7 @@ interface BallApi {
   dragStart(point: BallScreenPoint): void
   dragMove(point: BallScreenPoint): void
   dragEnd(payload: BallScreenPoint & { moved: boolean }): void
+  openGraph(): void
   openTimeline(): void
   openContextMenu(): void
 }

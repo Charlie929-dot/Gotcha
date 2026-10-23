@@ -108,6 +108,25 @@ async function hoverVisibleHalf(ball: Page): Promise<void> {
   await ball.waitForTimeout(350)
 }
 
+/**
+ * 点击球并等图谱窗口出现：全量跑时主进程偶发在「hover → down」之间恢复穿透，
+ * mousedown 落到下层窗口（2026-10-23 观察到）。有界重试，避免把偶发穿透当功能回归。
+ */
+async function clickBallExpectWindow(ball: Page, app: ElectronApplication): Promise<Page> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await hoverVisibleHalf(ball)
+    const nextWindow = app.waitForEvent('window', { timeout: 4_000 }).catch(() => null)
+    await ball.mouse.click(32, 32)
+    const page = await nextWindow
+    if (page) {
+      await page.waitForLoadState('domcontentloaded')
+      return page
+    }
+    await ball.waitForTimeout(250)
+  }
+  throw new Error('点击球后 3 次都未打开窗口')
+}
+
 test.beforeAll(() => {
   // DSH 宿主会注入 ELECTRON_RUN_AS_NODE=1，子进程里必须清掉（gotchas.md）
   delete process.env.ELECTRON_RUN_AS_NODE
@@ -172,12 +191,8 @@ test('倒计时内点球即取消：保持暂停、两键置 0，3s 后也不自
     await expect(ball.locator('#ball')).toHaveClass(/paused/)
     await expect(ball.locator('#notice')).toBeVisible({ timeout: 3_000 })
 
-    // 停靠缩入态先悬停展开，再点击球心（未拖动 = 点击，Q3）
-    await hoverVisibleHalf(ball)
-    const timelinePromise = app.waitForEvent('window')
-    await ball.mouse.click(32, 32)
-    const timeline = await timelinePromise
-    await timeline.waitForLoadState('domcontentloaded')
+    // 停靠缩入态先悬停展开，再点击球心（未拖动 = 点击；D20 起打开图谱）
+    await clickBallExpectWindow(ball, app)
 
     await expect(ball.locator('#notice')).toBeHidden()
     await expect
@@ -204,11 +219,7 @@ test('倒计时到点且起流仍在 starting：点球仍取消并最终保持�
       .poll(() => app.evaluate(() => globalThis.__gotchaTest!.status()), { timeout: 6_000 })
       .toBe('starting')
 
-    await hoverVisibleHalf(ball)
-    const timelinePromise = app.waitForEvent('window')
-    await ball.mouse.click(32, 32)
-    const timeline = await timelinePromise
-    await timeline.waitForLoadState('domcontentloaded')
+    await clickBallExpectWindow(ball, app)
 
     await expect
       .poll(() => app.evaluate(() => globalThis.__gotchaTest!.status()), { timeout: 5_000 })

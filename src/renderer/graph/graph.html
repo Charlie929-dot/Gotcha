@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gotcha · 图谱</title>
+    <link rel="stylesheet" href="./graph.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="brand">
+        <h1>记忆球 · 图谱</h1>
+        <span id="status" class="status" data-kind="idle">读取中…</span>
+      </div>
+      <div class="nav">
+        <button id="prev" type="button">‹ 前一天</button>
+        <span id="date"></span>
+        <button id="next" type="button">后一天 ›</button>
+        <button id="today" type="button">今天</button>
+        <button id="refresh" type="button">刷新</button>
+        <span class="spacer"></span>
+        <button id="induce" type="button">立即归纳</button>
+        <button id="timeline" type="button">打开时间线</button>
+      </div>
+    </header>
+
+    <main>
+      <section id="consent" class="banner" hidden>
+        <div>
+          <strong>尚未确认出网</strong>
+          <p>归纳会把当天脱敏后的窗口标题与 OCR 摘要发往你配置的 LLM 供应商；确认前不会发送。</p>
+        </div>
+        <button id="consent-btn" type="button">确认并开始归纳</button>
+      </section>
+
+      <section class="canvas-wrap">
+        <div id="node-count" class="count"></div>
+        <div id="empty" class="state" data-kind="loading">加载中…</div>
+        <ul id="node-list" class="node-list"></ul>
+      </section>
+    </main>
+
+    <footer id="meta" class="meta"></footer>
+    <script type="module" src="./graph.ts"></script>
+  </body>
+</html>

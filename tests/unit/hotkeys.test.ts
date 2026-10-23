@@ -1,79 +1,166 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  registerToggleHotkey,
-  TOGGLE_ACCELERATOR,
-  type GlobalShortcutLike
+  DEFAULT_HOTKEYS,
+  isSupportedAccelerator,
+  registerHotkeys,
+  type GlobalShortcutLike,
+  type HotkeyAction
 } from '../../src/main/hotkeys'
 import type { CaptureLog } from '../../src/main/capture-controller'
 
-function fakeShortcuts(behavior: boolean | Error): {
+interface FakeShortcuts {
   shortcuts: GlobalShortcutLike
   register: ReturnType<typeof vi.fn>
+  unregister: ReturnType<typeof vi.fn>
   unregisterAll: ReturnType<typeof vi.fn>
-} {
-  const register = vi.fn((_accelerator: string, _callback: () => void) => {
-    if (behavior instanceof Error) throw behavior
-    return behavior
+}
+
+function fakeShortcuts(
+  behavior: (accelerator: string) => boolean | Error = () => true
+): FakeShortcuts {
+  const register = vi.fn((accelerator: string, _callback: () => void) => {
+    const result = behavior(accelerator)
+    if (result instanceof Error) throw result
+    return result
   })
+  const unregister = vi.fn((_accelerator: string) => {})
   const unregisterAll = vi.fn(() => {})
   return {
-    shortcuts: { register, unregisterAll },
+    shortcuts: { register, unregister, unregisterAll },
     register,
+    unregister,
     unregisterAll
   }
+}
+
+function actions(): Record<HotkeyAction, () => void> {
+  return { toggleCapture: vi.fn(), openGraph: vi.fn() }
 }
 
 function logSpy(): CaptureLog & ReturnType<typeof vi.fn> {
   return vi.fn() as unknown as CaptureLog & ReturnType<typeof vi.fn>
 }
 
-describe('registerToggleHotkey（Alt+P，B4）', () => {
-  it('注册成功：绑定 Alt+P 并把回调接到 toggle；dispose 释放全局热键', () => {
-    const { shortcuts, register, unregisterAll } = fakeShortcuts(true)
-    const toggle = vi.fn()
-    const log = logSpy()
+describe('isSupportedAccelerator', () => {
+  it('接受常见组合键与单键，拒绝空 / 未知键 / 重复修饰键', () => {
+    expect(isSupportedAccelerator('Alt+P')).toBe(true)
+    expect(isSupportedAccelerator('Alt+Space')).toBe(true)
+    expect(isSupportedAccelerator('CommandOrControl+Shift+F12')).toBe(true)
+    expect(isSupportedAccelerator('F5')).toBe(true)
+    expect(isSupportedAccelerator('  Alt+P  ')).toBe(true)
 
-    const handle = registerToggleHotkey(shortcuts, toggle, log)
+    expect(isSupportedAccelerator('')).toBe(false)
+    expect(isSupportedAccelerator('Alt+')).toBe(false)
+    expect(isSupportedAccelerator('+P')).toBe(false)
+    expect(isSupportedAccelerator('Alt+Alt+P')).toBe(false)
+    expect(isSupportedAccelerator('Hyper+P')).toBe(false)
+    expect(isSupportedAccelerator('Alt+NotAKey')).toBe(false)
+    expect(isSupportedAccelerator(123)).toBe(false)
+  })
+})
 
-    expect(register).toHaveBeenCalledTimes(1)
-    expect(register).toHaveBeenCalledWith(TOGGLE_ACCELERATOR, toggle)
-    expect(handle.registered).toBe(true)
+describe('registerHotkeys（D20：两键注册 / 冲突检测 / 重绑 / 收口）', () => {
+  it('默认注册 Alt+P 切记录 + Alt+Space 开图谱，回调分别接到对应动作', () => {
+    const fake = fakeShortcuts()
+    const handlers = actions()
+    const handle = registerHotkeys(fake.shortcuts, handlers, DEFAULT_HOTKEYS, logSpy())
 
-    const callback = register.mock.calls[0][1] as () => void
-    callback()
-    expect(toggle).toHaveBeenCalledTimes(1)
+    expect(fake.register.mock.calls.map((call) => call[0])).toEqual(['Alt+P', 'Alt+Space'])
+    expect(handle.results).toEqual([
+      { action: 'toggleCapture', accelerator: 'Alt+P', ok: true },
+      { action: 'openGraph', accelerator: 'Alt+Space', ok: true }
+    ])
+    expect(handle.isRegistered('toggleCapture')).toBe(true)
+    expect(handle.isRegistered('openGraph')).toBe(true)
+
+    const toggle = fake.register.mock.calls[0][1] as () => void
+    const graph = fake.register.mock.calls[1][1] as () => void
+    toggle()
+    graph()
+    expect(handlers.toggleCapture).toHaveBeenCalledTimes(1)
+    expect(handlers.openGraph).toHaveBeenCalledTimes(1)
 
     handle.dispose()
-    expect(unregisterAll).toHaveBeenCalledTimes(1)
-    expect(log).toHaveBeenCalledWith('info', 'global hotkey registered', {
-      accelerator: 'Alt+P'
-    })
+    expect(fake.unregisterAll).toHaveBeenCalledTimes(1)
   })
 
-  it('注册被占用（register 返回 false）：registered=false、记 warn、不抛错', () => {
-    const { shortcuts } = fakeShortcuts(false)
+  it('单个键被占用：只有该键 registered=false，另一个照常生效', () => {
+    const fake = fakeShortcuts((accelerator) => accelerator !== 'Alt+Space')
     const log = logSpy()
+    const handle = registerHotkeys(fake.shortcuts, actions(), DEFAULT_HOTKEYS, log)
 
-    const handle = registerToggleHotkey(shortcuts, vi.fn(), log)
-
-    expect(handle.registered).toBe(false)
+    expect(handle.isRegistered('toggleCapture')).toBe(true)
+    expect(handle.isRegistered('openGraph')).toBe(false)
+    expect(handle.results.find((result) => result.action === 'openGraph')).toMatchObject({
+      reason: 'occupied'
+    })
     expect(log).toHaveBeenCalledWith('warn', 'global hotkey unavailable (occupied)', {
-      accelerator: 'Alt+P'
+      accelerator: 'Alt+Space'
     })
-    // 失败也要能安全 dispose（退出路径统一调用）
-    expect(() => handle.dispose()).not.toThrow()
   })
 
-  it('register 抛错：按失败处理并记录错因，不打断启动', () => {
-    const { shortcuts } = fakeShortcuts(new Error('boom'))
+  it('register 抛错按占用处理并记录错因，不打断启动', () => {
+    const fake = fakeShortcuts(() => new Error('boom'))
     const log = logSpy()
+    const handle = registerHotkeys(fake.shortcuts, actions(), DEFAULT_HOTKEYS, log)
 
-    const handle = registerToggleHotkey(shortcuts, vi.fn(), log)
-
-    expect(handle.registered).toBe(false)
+    expect(handle.isRegistered('toggleCapture')).toBe(false)
+    expect(handle.isRegistered('openGraph')).toBe(false)
     expect(log).toHaveBeenCalledWith('warn', 'global hotkey register threw', {
       accelerator: 'Alt+P',
       error: 'Error: boom'
     })
+  })
+
+  it('两键相同：都标 duplicate 且一个都不注册', () => {
+    const fake = fakeShortcuts()
+    const handle = registerHotkeys(
+      fake.shortcuts,
+      actions(),
+      { toggleCapture: 'Alt+P', openGraph: 'alt+p' },
+      logSpy()
+    )
+
+    expect(fake.register).not.toHaveBeenCalled()
+    expect(handle.results.map((result) => result.reason)).toEqual(['duplicate', 'duplicate'])
+    expect(handle.isRegistered('toggleCapture')).toBe(false)
+    expect(handle.isRegistered('openGraph')).toBe(false)
+  })
+
+  it('非法键：不注册、标 invalid，另一个键不受影响', () => {
+    const fake = fakeShortcuts()
+    const handle = registerHotkeys(
+      fake.shortcuts,
+      actions(),
+      { toggleCapture: 'Alt+P', openGraph: 'Alt+' },
+      logSpy()
+    )
+
+    expect(fake.register).toHaveBeenCalledTimes(1)
+    expect(fake.register).toHaveBeenCalledWith('Alt+P', expect.any(Function))
+    expect(handle.results).toEqual([
+      { action: 'toggleCapture', accelerator: 'Alt+P', ok: true },
+      { action: 'openGraph', accelerator: 'Alt+', ok: false, reason: 'invalid' }
+    ])
+  })
+
+  it('reregister：先注销旧两键再注册新两键；dispose 只 unregisterAll 一次', () => {
+    const fake = fakeShortcuts()
+    const handle = registerHotkeys(fake.shortcuts, actions(), DEFAULT_HOTKEYS, logSpy())
+    fake.register.mockClear()
+
+    handle.reregister({ toggleCapture: 'Ctrl+Shift+P', openGraph: 'Ctrl+Shift+G' })
+
+    expect(fake.unregister.mock.calls.map((call) => call[0])).toEqual(['Alt+P', 'Alt+Space'])
+    expect(fake.register.mock.calls.map((call) => call[0])).toEqual([
+      'Ctrl+Shift+P',
+      'Ctrl+Shift+G'
+    ])
+    expect(handle.isRegistered('toggleCapture')).toBe(true)
+    expect(handle.isRegistered('openGraph')).toBe(true)
+    expect(fake.unregisterAll).not.toHaveBeenCalled()
+
+    handle.dispose()
+    expect(fake.unregisterAll).toHaveBeenCalledTimes(1)
   })
 })

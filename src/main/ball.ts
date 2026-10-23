@@ -62,6 +62,8 @@ export interface BallShellOptions {
   stateFilePath: string
   getStatus(): CaptureStatus
   openTimeline(): void
+  /** D20：球点击默认打开图谱；时间线入口保留在菜单 / 图谱工具栏 */
+  openGraph(): void
   toggleCapture(): void
   quit(): void
   log(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>): void
@@ -380,7 +382,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
     const end = (typeof payload === 'object' && payload !== null ? payload : {}) as DragEndPayload
     const moved = end.moved === true
     if (!moved) {
-      options.openTimeline()
+      options.openGraph()
       return
     }
     let position: BallPoint
@@ -399,6 +401,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
   const onContextMenu = (event: IpcMainEvent): void => {
     if (!ensureSender(event)) return
     const template = buildTrayMenu(options.getStatus(), {
+      openGraph: options.openGraph,
       openTimeline: options.openTimeline,
       toggleCapture: options.toggleCapture,
       quit: options.quit
@@ -411,7 +414,13 @@ export function createBallShell(options: BallShellOptions): BallShell {
     return options.getStatus()
   }
 
-  /** 球点击（未拖动）落地页：打开 / 聚焦时间线窗口（Q3） */
+  /** 球点击（未拖动）落地页：打开 / 聚焦图谱窗口（D20） */
+  const onOpenGraph = (event: IpcMainEvent): void => {
+    if (!ensureSender(event)) return
+    options.openGraph()
+  }
+
+  /** 球右键 / 菜单仍可单独打开时间线（D20 保留入口） */
   const onOpenTimeline = (event: IpcMainEvent): void => {
     if (!ensureSender(event)) return
     options.openTimeline()
@@ -423,6 +432,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
   ipcMain.on('ball:drag-move', onDragMove)
   ipcMain.on('ball:drag-end', onDragEnd)
   ipcMain.on('ball:context-menu', onContextMenu)
+  ipcMain.on('ball:open-graph', onOpenGraph)
   ipcMain.on('ball:open-timeline', onOpenTimeline)
   ipcMain.handle('ball:current-status', onCurrentStatus)
 
@@ -462,6 +472,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
       ipcMain.removeListener('ball:drag-move', onDragMove)
       ipcMain.removeListener('ball:drag-end', onDragEnd)
       ipcMain.removeListener('ball:context-menu', onContextMenu)
+      ipcMain.removeListener('ball:open-graph', onOpenGraph)
       ipcMain.removeListener('ball:open-timeline', onOpenTimeline)
       ipcMain.removeHandler('ball:current-status')
       if (!win.isDestroyed()) win.destroy()

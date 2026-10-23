@@ -41,13 +41,18 @@ interface GraphWindowApi {
     to: number
   ): Promise<{ nodes: GraphNodeLite[]; edges: Array<{ id: number }> }>
   nodeEvents(nodeId: number): Promise<{ found: boolean; events: unknown[]; missingIds: number[] }>
-  induceNow(): Promise<{ status: string; reason?: string }>
+  induceNow(dayStart?: number): Promise<{ status: string; reason?: string }>
   settings(): Promise<{ intervalMinutes: number }>
 }
 
 interface GraphDebug {
   count(): number
   select(nodeId: number): Promise<void>
+  focus(nodeId: number | string): void
+  clearFocus(): void
+  position(nodeId: number): { x: number; y: number } | null
+  filters(): Record<string, boolean>
+  visibleCounts(): { nodes: number; edges: number }
 }
 
 async function fakeLlm(): Promise<FakeLlmCounter> {
@@ -71,6 +76,13 @@ async function nodesToday(): Promise<GraphNodeLite[]> {
     )
     return data.nodes
   })
+}
+
+async function visibleCounts(): Promise<{ nodes: number; edges: number }> {
+  return graph.evaluate(
+    () =>
+      (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.visibleCounts()
+  )
 }
 
 function dateStamp(ts: number): string {
@@ -224,6 +236,84 @@ test.describe.serial('图谱闭环（假采集 + 假 LLM）', () => {
     await expect(graph.locator('#set-hotkey-status')).not.toHaveText('')
     await graph.locator('#settings-close').click()
     await expect(graph.locator('#drawer')).toBeHidden()
+  })
+
+  test('局部图与类型显隐：聚焦节点、返回全图、事件开关', async () => {
+    const nodes = await nodesToday()
+    const target = nodes[0]
+    await graph.evaluate(
+      (id) =>
+        (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.focus(id),
+      target.id
+    )
+    await expect(graph.locator('#focus-bar')).toBeVisible()
+    await expect(graph.locator('#focus-label')).not.toHaveText('')
+
+    await graph.locator('#focus-exit').click()
+    await expect(graph.locator('#focus-bar')).toBeHidden()
+
+    const eventFilter = graph.locator('[data-type-filter="event"]')
+    await expect(eventFilter).toBeChecked()
+    expect(await visibleCounts()).toEqual({ nodes: 4, edges: 3 })
+    await eventFilter.uncheck()
+    expect(await visibleCounts()).toEqual({ nodes: 2, edges: 1 })
+    expect(
+      await graph.evaluate(
+        () =>
+          (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.filters()
+            .event
+      )
+    ).toBe(false)
+    await eventFilter.check()
+    expect(await visibleCounts()).toEqual({ nodes: 4, edges: 3 })
+  })
+
+  test('单击节点进局部图，双击开详情抽屉（语义不串）', async () => {
+    const nodes = await nodesToday()
+
+    // 选一个不压在工具栏 / 侧栏 / 窗口边缘上的节点，按真实鼠标坐标点击
+    const candidates = await graph.evaluate((ids) => {
+      const api = (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView
+      const result: Array<{ id: number; x: number; y: number }> = []
+      for (const id of ids) {
+        const point = api.position(id)
+        if (
+          point &&
+          point.x > 260 &&
+          point.x < window.innerWidth - 300 &&
+          point.y > 160 &&
+          point.y < window.innerHeight - 140
+        ) {
+          result.push({ id, ...point })
+        }
+      }
+      return result
+    }, nodes.map((node) => node.id))
+    expect(candidates.length).toBeGreaterThan(0)
+    const target = candidates[0]
+
+    await graph.mouse.click(target.x, target.y)
+    // 单击有 320ms 双击判定延迟，之后才进入局部图；不应打开抽屉
+    await expect(graph.locator('#focus-bar')).toBeVisible({ timeout: 2_000 })
+    await expect(graph.locator('#focus-label')).not.toHaveText('')
+    await expect(graph.locator('#panel')).toBeHidden()
+
+    await graph.locator('#focus-exit').click()
+    await expect(graph.locator('#focus-bar')).toBeHidden()
+    // 聚焦时相机会移动到该节点，退出后等动画结束再取新坐标
+    await graph.waitForTimeout(450)
+
+    const point = await graph.evaluate(
+      (id) => (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.position(id),
+      target.id
+    )
+    expect(point).not.toBeNull()
+    await graph.mouse.dblclick(point!.x, point!.y, { delay: 40 })
+    await expect(graph.locator('#panel')).toBeVisible({ timeout: 3_000 })
+    // 双击不应顺带进入局部图
+    await expect(graph.locator('#focus-bar')).toBeHidden()
+    await graph.locator('#panel-close').click()
+    await expect(graph.locator('#panel')).toBeHidden()
   })
 
   test('暂停后立即归纳：零新增请求、不落库（D18），图谱仍可浏览', async () => {

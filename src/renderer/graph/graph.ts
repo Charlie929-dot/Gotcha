@@ -2,7 +2,7 @@
  * 图谱窗口（M2 Phase 2b）
  *
  * - 数据：`graph:query` 取当天节点/边 → graphology + sigma 力导向画布（懒加载，时间线不背图谱体积）；
- * - 交互：滚轮缩放、拖拽平移、悬停高亮邻域（其余降透明度）、点击节点开侧栏（C4）；
+ * - 交互：滚轮缩放、拖拽平移、悬停高亮邻域（其余降透明度）、单击节点进局部图、双击开侧栏（C4）；
  * - 侧栏「在时间线中查看」带日期跳转；设置抽屉覆盖归纳参数 / 供应商 / 快捷键 / 出网确认（D21/D22/D24）；
  * - 空状态（未配置 key / 未确认出网 / 采集暂停 / 无节点）与归纳状态徽标。
  *
@@ -22,12 +22,19 @@ import {
   SUB_EDGE_COLOR,
   edgeSize,
   maxDegree,
-  neighborIds,
   neighborKeys,
   nodeColor,
   nodeLabel,
   nodeSize
 } from './graph-view'
+import {
+  defaultVisibleTypes,
+  focusNodeSet,
+  isTypeVisible,
+  toggleVisibleType,
+  type GraphTypeKey,
+  type VisibleTypes
+} from './graph-interactions'
 import { createNodePanel } from './graph-panel'
 import { createSettingsPanel } from './graph-settings-panel'
 
@@ -39,6 +46,12 @@ declare global {
       count(): number
       select(nodeId: number): Promise<void>
       hover(nodeId: number | null): void
+      focus(nodeId: number | string): void
+      clearFocus(): void
+      /** 节点在页面坐标系中的位置（E2E 用真实鼠标事件验证单击 / 双击语义） */
+      position(nodeId: number): { x: number; y: number } | null
+      filters(): Record<string, boolean>
+      visibleCounts(): { nodes: number; edges: number }
     }
   }
 }
@@ -74,6 +87,12 @@ const panelMetaEl = document.getElementById('panel-meta')
 const panelEventsEl = document.getElementById('panel-events')
 const panelTimelineEl = document.getElementById('panel-timeline')
 const drawerEl = document.getElementById('drawer')
+const focusBarEl = document.getElementById('focus-bar')
+const focusLabelEl = document.getElementById('focus-label')
+const focusExitEl = document.getElementById('focus-exit')
+const filterInputs = Array.from(
+  document.querySelectorAll<HTMLInputElement>('[data-type-filter]')
+)
 
 if (
   !statusEl ||
@@ -90,7 +109,10 @@ if (
   !panelMetaEl ||
   !panelEventsEl ||
   !panelTimelineEl ||
-  !drawerEl
+  !drawerEl ||
+  !focusBarEl ||
+  !focusLabelEl ||
+  !focusExitEl
 ) {
   throw new Error('图谱页面 DOM 不完整')
 }
@@ -110,17 +132,29 @@ const els = {
   panelMeta: panelMetaEl,
   panelEvents: panelEventsEl,
   panelTimeline: panelTimelineEl as HTMLButtonElement,
-  drawer: drawerEl
+  drawer: drawerEl,
+  focusBar: focusBarEl,
+  focusLabel: focusLabelEl,
+  focusExit: focusExitEl
 }
 
 let day = startOfDay(Date.now())
 let snapshot: InductionSnapshot | null = null
+let statusFlashTimer: ReturnType<typeof setTimeout> | null = null
 let lastData: GraphDayData = { nodes: [], edges: [] }
 let graph: GraphInstance | null = null
 let renderer: SigmaInstance | null = null
 let modules: SigmaModules | null = null
 let hoveredKey: string | null = null
 let loading = false
+let visibleTypes: VisibleTypes = defaultVisibleTypes()
+let focusKey: string | null = null
+let focusSet: Set<string> | null = null
+let currentEdges: Array<{ source: string; target: string }> = []
+let nodeClickTimer: ReturnType<typeof setTimeout> | null = null
+const nodeTypeByKey = new Map<string, string>()
+/** 与 sigma 默认 doubleClickTimeout(300ms) 对齐：留 20ms 余量，双击时取消单击聚焦 */
+const NODE_CLICK_DELAY_MS = 320
 
 const panel = createNodePanel(
   {
@@ -183,6 +217,10 @@ function statusView(current: InductionSnapshot | null): { kind: string; text: st
 }
 
 function applySnapshot(next: InductionSnapshot): void {
+  if (statusFlashTimer !== null) {
+    clearTimeout(statusFlashTimer)
+    statusFlashTimer = null
+  }
   snapshot = next
   const view = statusView(next)
   els.status.dataset.kind = view.kind
@@ -195,6 +233,17 @@ function applySnapshot(next: InductionSnapshot): void {
   )
   renderEmpty()
   renderMeta()
+}
+
+/** 归纳完成 / 当天已最新时短暂替换状态徽标，4s 后恢复快照状态 */
+function flashStatus(text: string, kind: string): void {
+  if (statusFlashTimer !== null) clearTimeout(statusFlashTimer)
+  els.status.dataset.kind = kind
+  els.status.textContent = text
+  statusFlashTimer = setTimeout(() => {
+    statusFlashTimer = null
+    if (snapshot) applySnapshot(snapshot)
+  }, 4_000)
 }
 
 function renderEmpty(): void {
@@ -259,12 +308,80 @@ async function ensureModules(): Promise<SigmaModules> {
   return modules
 }
 
+function nodeTypeOf(key: string): string {
+  return nodeTypeByKey.get(key) ?? 'unknown'
+}
+
+function hiddenNode(key: string): boolean {
+  if (focusSet && !focusSet.has(key)) return true
+  return !isTypeVisible(nodeTypeOf(key), visibleTypes)
+}
+
+function clearFocusState(): void {
+  focusKey = null
+  focusSet = null
+  els.focusBar.hidden = true
+}
+
+function cancelPendingNodeClick(): void {
+  if (nodeClickTimer === null) return
+  clearTimeout(nodeClickTimer)
+  nodeClickTimer = null
+}
+
+function exitFocus(): void {
+  cancelPendingNodeClick()
+  if (!focusKey && !focusSet) return
+  clearFocusState()
+  renderer?.refresh()
+}
+
+function enterFocus(key: string): void {
+  if (!graph || !graph.hasNode(key)) return
+  if (!isTypeVisible(nodeTypeOf(key), visibleTypes)) return
+  focusSet = focusNodeSet(currentEdges, key)
+  focusKey = key
+  const label = (graph.getNodeAttribute(key, 'fullLabel') as string | undefined) || key
+  els.focusLabel.textContent = label
+  els.focusBar.hidden = false
+  renderer?.refresh()
+
+  // 聚焦时把相机移到该节点（不改缩放），避免局部图落在视野外
+  const position = graph.getNodeAttributes(key) as { x: number; y: number }
+  if (renderer && Number.isFinite(position.x) && Number.isFinite(position.y)) {
+    const framed = renderer.graphToFramedGraph({ x: position.x, y: position.y })
+    void renderer.getCamera().animate({ x: framed.x, y: framed.y }, { duration: 300 })
+  }
+}
+
+for (const input of filterInputs) {
+  input.addEventListener('change', () => {
+    const type = input.dataset.typeFilter as GraphTypeKey | undefined
+    if (!type || !(type in visibleTypes)) return
+    visibleTypes = toggleVisibleType(visibleTypes, type, input.checked)
+    if (focusKey && !isTypeVisible(nodeTypeOf(focusKey), visibleTypes)) {
+      exitFocus()
+    } else {
+      renderer?.refresh()
+    }
+  })
+}
+
+els.focusExit.addEventListener('click', () => exitFocus())
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && focusKey) exitFocus()
+})
+
 async function renderCanvas(data: GraphDayData): Promise<void> {
+  cancelPendingNodeClick()
   const current = await ensureModules()
   renderer?.kill()
   renderer = null
   graph = null
   hoveredKey = null
+  nodeTypeByKey.clear()
+  currentEdges = []
+  clearFocusState()
 
   const maxDeg = maxDegree(data)
   const graphInstance = new current.Graph({ multi: false, type: 'undirected' })
@@ -289,6 +406,7 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
       fullLabel: node.title,
       nodeType: 'concept'
     })
+    nodeTypeByKey.set(String(node.id), node.type)
   })
 
   // 2. 概念节点之间的语义边
@@ -347,6 +465,7 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
       nodeType: 'event',
       eventId: ev.id
     })
+    nodeTypeByKey.set(evKey, 'event')
 
     if (parentNodeId !== undefined && graphInstance.hasNode(String(parentNodeId))) {
       const edgeKey = `sub-${parentNodeId}-${ev.id}`
@@ -365,6 +484,7 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
   })
 
   // 4. ForceAtlas2 力导向布局：通过连线体现联系，通过远近体现相关性
+  currentEdges = allEdges
   current.forceAtlas2.assign(graphInstance, {
     iterations: 180,
     settings: {
@@ -393,6 +513,7 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
     minCameraRatio: 0.05,
     maxCameraRatio: 10,
     nodeReducer: (nodeKey: string, attrs: Record<string, unknown>) => {
+      if (hiddenNode(nodeKey)) return { ...attrs, visibility: 'hidden' as const }
       if (hoveredKey === null) return attrs
       const keep = neighborKeys(allEdges, hoveredKey)
       if (!keep.has(nodeKey)) {
@@ -407,8 +528,11 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
         : attrs
     },
     edgeReducer: (edgeKey: string, attrs: Record<string, unknown>) => {
-      if (hoveredKey === null) return attrs
       const endpoints = edgeById.get(edgeKey)
+      if (endpoints && (hiddenNode(endpoints.source) || hiddenNode(endpoints.target))) {
+        return { ...attrs, visibility: 'hidden' as const }
+      }
+      if (hoveredKey === null) return attrs
       if (!endpoints) return attrs
       const relates = endpoints.source === hoveredKey || endpoints.target === hoveredKey
       if (relates) {
@@ -418,18 +542,16 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
     }
   })
 
+  // 单击 = 局部图，双击 = 详情抽屉。sigma 默认 300ms 内第二次点击才算双击，
+  // 所以单击延迟到 320ms 再聚焦；双击事件到达时取消待执行的聚焦（不再叠开局部图）。
   renderer.on('clickNode', (payload: { node: string }) => {
-    if (payload.node.startsWith('ev-')) {
-      const evId = Number(payload.node.slice(3))
-      const ev = (lastData.events ?? []).find((item) => item.id === evId)
-      if (ev) {
-        const parentId = eventParentMap.get(evId)
-        const parent = parentId ? lastData.nodes.find((n) => n.id === parentId) : undefined
-        panel.showEvent(ev, parent)
-      }
-    } else {
-      void openNode(Number(payload.node))
-    }
+    cancelPendingNodeClick()
+    const node = payload.node
+    nodeClickTimer = setTimeout(() => {
+      nodeClickTimer = null
+      panel.hide()
+      enterFocus(node)
+    }, NODE_CLICK_DELAY_MS)
   })
   renderer.on('enterNode', (payload: { node: string }) => {
     hoveredKey = payload.node
@@ -439,7 +561,34 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
     hoveredKey = null
     renderer?.refresh()
   })
-  renderer.on('clickStage', () => panel.hide())
+  renderer.on(
+    'doubleClickNode',
+    (payload: { node: string; preventSigmaDefault?: () => void }) => {
+      cancelPendingNodeClick()
+      payload.preventSigmaDefault?.()
+      if (payload.node.startsWith('ev-')) {
+        const evId = Number(payload.node.slice(3))
+        const ev = (lastData.events ?? []).find((item) => item.id === evId)
+        if (ev) {
+          const parentId = eventParentMap.get(evId)
+          const parent = parentId
+            ? lastData.nodes.find((node) => node.id === parentId)
+            : undefined
+          panel.showEvent(ev, parent)
+        }
+        return
+      }
+      void openNode(Number(payload.node))
+    }
+  )
+  renderer.on('doubleClickStage', () => {
+    if (focusKey) exitFocus()
+  })
+  renderer.on('clickStage', () => {
+    cancelPendingNodeClick()
+    panel.hide()
+    if (focusKey) exitFocus()
+  })
   void renderer.getCamera().reset()
 }
 
@@ -517,28 +666,73 @@ document.getElementById('timeline')?.addEventListener('click', () => {
 })
 
 document.getElementById('induce')?.addEventListener('click', async () => {
-  const result: GraphInduceResult = await window.gotchaGraph.induceNow()
-  if (result.status === 'ok') {
+  // 手动归纳只处理当前查看日（D28）。单批最多 20 个时刻，这里连续拉取
+  // 最多 10 批，避免用户为了补齐一天点几十次；仍满批时提示可再点一次。
+  let nodes = 0
+  let edges = 0
+  let placeholders = 0
+  let more = false
+  let result: GraphInduceResult | null = null
+  for (let batch = 0; batch < 10; batch += 1) {
+    result = await window.gotchaGraph.induceNow(day)
+    if (result.status !== 'ok') break
+    nodes += result.nodes
+    edges += result.edges
+    placeholders += result.placeholders
+    more = result.more === true
+    if (!more) break
+  }
+
+  if (result?.status === 'ok') {
     await refresh()
+    const text =
+      nodes > 0
+        ? `已归纳 ${nodes} 个节点 · ${edges} 条边${more ? '（还有剩余，可再点一次）' : ''}`
+        : placeholders > 0
+          ? '已生成本地保护占位'
+          : '这一天已是最新'
+    flashStatus(text, 'ok')
     return
   }
-  if (result.status === 'skipped' && result.reason === 'consent') {
+
+  // 连续拉取中途遇到空批（上一批刚好处理完）也按本轮已归纳的结果收尾
+  if (result?.status === 'empty') {
+    if (nodes > 0) await refresh()
+    flashStatus(
+      nodes > 0 ? `已归纳 ${nodes} 个节点 · ${edges} 条边` : '这一天已是最新',
+      'ok'
+    )
+    return
+  }
+
+  if (result?.status === 'skipped' && result.reason === 'consent') {
     els.consent.hidden = false
     return
   }
-  if (result.status === 'skipped' && result.reason === 'paused') {
+  if (result?.status === 'skipped' && result.reason === 'paused') {
+    if (nodes > 0) await refresh()
     els.empty.hidden = false
     els.empty.dataset.kind = 'paused'
     els.empty.textContent = '采集暂停中；恢复记录后才能归纳'
     return
   }
-  if (result.status === 'skipped' && result.reason === 'not-configured') {
+  if (result?.status === 'skipped' && result.reason === 'in-flight') {
+    flashStatus('归纳进行中，请稍候', 'idle')
+    return
+  }
+  if (result?.status === 'skipped' && result.reason === 'not-configured') {
     els.empty.hidden = false
     els.empty.dataset.kind = 'no-key'
     els.empty.textContent = '未配置可用的 LLM 供应商'
     return
   }
-  if (result.status === 'error') {
+  if (result?.status === 'skipped' && result.reason === 'budget') {
+    if (nodes > 0) await refresh()
+    flashStatus(`今日预算已用尽${nodes > 0 ? '；已归纳的部分已保存' : ''}`, 'budget')
+    return
+  }
+  if (result?.status === 'error') {
+    if (nodes > 0) await refresh()
     els.empty.hidden = false
     els.empty.dataset.kind = 'error'
     els.empty.textContent = `归纳失败：${result.message}`
@@ -548,7 +742,7 @@ document.getElementById('induce')?.addEventListener('click', async () => {
 els.consentButton.addEventListener('click', async () => {
   try {
     applySnapshot(await window.gotchaGraph.setConsent(true))
-    await window.gotchaGraph.induceNow()
+    await window.gotchaGraph.induceNow(day)
     await refresh()
   } catch (error) {
     els.empty.hidden = false
@@ -565,6 +759,30 @@ window.__gotchaGraphView = {
   hover: (nodeId: number | null) => {
     hoveredKey = nodeId === null ? null : String(nodeId)
     renderer?.refresh()
+  },
+  focus: (nodeId: number | string) => enterFocus(String(nodeId)),
+  clearFocus: () => exitFocus(),
+  position: (nodeId: number) => {
+    const key = String(nodeId)
+    if (!renderer || !graph?.hasNode(key)) return null
+    const attrs = graph.getNodeAttributes(key) as { x: number; y: number }
+    if (!Number.isFinite(attrs.x) || !Number.isFinite(attrs.y)) return null
+    const point = renderer.graphToViewport({ x: attrs.x, y: attrs.y })
+    const rect = els.container.getBoundingClientRect()
+    return { x: rect.left + point.x, y: rect.top + point.y }
+  },
+  filters: () => ({ ...visibleTypes }),
+  visibleCounts: () => {
+    if (!graph) return { nodes: 0, edges: 0 }
+    let nodes = 0
+    let edges = 0
+    graph.forEachNode((key) => {
+      if (!hiddenNode(key)) nodes += 1
+    })
+    graph.forEachEdge((_edge, _attrs, source, target) => {
+      if (!hiddenNode(source) && !hiddenNode(target)) edges += 1
+    })
+    return { nodes, edges }
   }
 }
 

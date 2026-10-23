@@ -38,7 +38,10 @@ export interface DeepSeekClientOptions {
 }
 
 interface ChatCompletionResponse {
-  choices?: Array<{ message?: { content?: string | null } }>
+  choices?: Array<{
+    message?: { content?: string | null }
+    finish_reason?: string | null
+  }>
   usage?: { prompt_tokens?: number; completion_tokens?: number }
 }
 
@@ -94,6 +97,21 @@ function toCount(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.round(value) : 0
 }
 
+/**
+ * DeepSeek V4 系列默认开启 thinking（effort=high）。结构化归纳里思维链先写、
+ * 正文后写，CoT 会把 `max_tokens` 吃满（实测 400 个 event_id 时 reasoning_tokens=2000、
+ * finish_reason=length、content 为空）；非 DeepSeek 端点不发送这个字段，避免严格网关
+ * 因未知参数直接 400。
+ */
+function isDeepSeekEndpoint(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase()
+    return host === 'api.deepseek.com' || host.endsWith('.deepseek.com')
+  } catch {
+    return false
+  }
+}
+
 function isRetryable(error: unknown): boolean {
   if (error instanceof LlmTimeoutError || error instanceof LlmNetworkError) return true
   if (error instanceof LlmHttpError) return error.status === 429 || error.status >= 500
@@ -134,12 +152,14 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
   const fetchImpl = options.fetchImpl ?? fetch
   const sleep = options.sleep ?? abortableSleep
   if (!options.apiKey) throw new LlmError('缺少 API key', 'config')
+  const disableThinking = isDeepSeekEndpoint(baseUrl)
 
   async function requestOnce(
     payload: CloudPayload,
     callOptions: LlmCompleteOptions
   ): Promise<LlmJsonResult> {
     const controller = new AbortController()
+    const maxTokens = callOptions.maxTokens ?? LLM_DEFAULTS.maxTokens
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
@@ -175,8 +195,9 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
             messages: buildMessages(payload, callOptions.repair),
             response_format: { type: 'json_object' },
             temperature: callOptions.temperature ?? LLM_DEFAULTS.temperature,
-            max_tokens: callOptions.maxTokens ?? LLM_DEFAULTS.maxTokens,
-            stream: false
+            max_tokens: maxTokens,
+            stream: false,
+            ...(disableThinking ? { thinking: { type: 'disabled' } } : {})
           }),
           signal: controller.signal,
           // 不跟随重定向：避免 302 把带 Authorization 的请求带到别的地址
@@ -206,16 +227,30 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
         promptTokens: toCount(data.usage?.prompt_tokens),
         completionTokens: toCount(data.usage?.completion_tokens)
       }
+      const finishReason = data.choices?.[0]?.finish_reason
+      const truncated = finishReason === 'length'
       const content = data.choices?.[0]?.message?.content
       if (typeof content !== 'string' || content.trim() === '') {
-        // JSON Output 官方已知可能返回空 content：按非法输出处理，交给上层修复重试
-        throw new LlmParseError('LLM 返回空 content', usage)
+        // DeepSeek V4 默认 thinking：CoT 先吃满 max_tokens 时正文为空、finish_reason=length。
+        // 这类失败重试同一预算也不会变好，报错必须让用户看到「截断」而不是笼统的「空 content」。
+        throw new LlmParseError(
+          truncated
+            ? `LLM 输出被 max_tokens（${maxTokens}）截断（content 为空）`
+            : 'LLM 返回空 content',
+          usage
+        )
       }
       let json: unknown
       try {
         json = JSON.parse(content)
       } catch {
-        throw new LlmParseError(undefined, usage)
+        // 不带正文，只给可定位的结构信息：非截断的非法 JSON 仍需要知道长度 / 结束原因
+        throw new LlmParseError(
+          truncated
+            ? `LLM 输出被 max_tokens（${maxTokens}）截断`
+            : `LLM 返回内容不是合法 JSON（长度 ${content.length}，finish_reason=${finishReason ?? 'unknown'}）`,
+          usage
+        )
       }
       return { json, usage }
     } finally {

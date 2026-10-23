@@ -4,6 +4,8 @@ import {
   mergeMoments,
   readBatch,
   readCursor,
+  readDayBatch,
+  readInducedEventIds,
   selectBatchEvents,
   writeCursor,
   type BatchEvent
@@ -163,6 +165,54 @@ describe('取批游标与批窗口', () => {
       const { moments, consumed } = readBatch(db, NOW)
       expect(consumed.map((event) => event.id)).toEqual([4])
       expect(moments[0].eventIds).toEqual([4])
+    } finally {
+      db.close()
+    }
+  })
+})
+
+describe('按天取批（D28）', () => {
+  const DAY = new Date(2026, 9, 23, 0, 0, 0, 0).getTime()
+  const DAY_END = new Date(2026, 9, 24, 0, 0, 0, 0).getTime() - 1
+
+  function seedDay(): { db: ReturnType<typeof openDatabase>; ids: number[] } {
+    const db = openDatabase(':memory:')
+    const first = insertEvent(db, { ts: DAY + 60 * 60_000, app: 'a.exe', windowTitle: 'A', ocrText: 'a' })
+    const second = insertEvent(db, { ts: DAY + 2 * 60 * 60_000, app: 'b.exe', windowTitle: 'B', ocrText: 'b' })
+    insertEvent(db, { ts: DAY_END + 60 * 60_000, app: 'c.exe', windowTitle: 'C', ocrText: 'c' })
+    return { db, ids: [first, second] }
+  }
+
+  function markInduced(db: ReturnType<typeof openDatabase>, ids: number[], ts: number): void {
+    db.prepare(
+      `INSERT INTO nodes (level, type, title, summary, ts_start, ts_end, source_events, meta_json)
+       VALUES (1, 'knowledge', ?, 'S', ?, ?, ?, NULL)`
+    ).run(`已归纳 ${ids.join('-')}`, ts, ts, JSON.stringify(ids))
+  }
+
+  it('只取当天事件，不把相邻日带进来', () => {
+    const { db, ids } = seedDay()
+    try {
+      const { moments } = readDayBatch(db, DAY, DAY_END)
+      expect(moments).toHaveLength(2)
+      expect(moments.flatMap((moment) => moment.eventIds)).toEqual(ids)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('已归纳事件按 source_events 过滤：重复点击只处理剩余事件', () => {
+    const { db, ids } = seedDay()
+    try {
+      markInduced(db, [ids[0]], DAY + 60 * 60_000)
+      expect([...readInducedEventIds(db, DAY, DAY_END)]).toEqual([ids[0]])
+      const first = readDayBatch(db, DAY, DAY_END)
+      expect(first.moments.flatMap((moment) => moment.eventIds)).toEqual([ids[1]])
+
+      markInduced(db, [ids[1]], DAY + 2 * 60 * 60_000)
+      const second = readDayBatch(db, DAY, DAY_END)
+      expect(second.moments).toEqual([])
+      expect(second.consumed).toEqual([])
     } finally {
       db.close()
     }

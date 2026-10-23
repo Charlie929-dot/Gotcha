@@ -19,12 +19,16 @@ function payload() {
 
 function okResponse(
   content: string,
-  usage: { prompt_tokens?: number; completion_tokens?: number } = { prompt_tokens: 10, completion_tokens: 4 }
+  usage: { prompt_tokens?: number; completion_tokens?: number } = { prompt_tokens: 10, completion_tokens: 4 },
+  finishReason: string | null = null
 ): Response {
-  return new Response(JSON.stringify({ choices: [{ message: { content } }], usage }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' }
-  })
+  return new Response(
+    JSON.stringify({ choices: [{ message: { content }, finish_reason: finishReason }], usage }),
+    {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    }
+  )
 }
 
 function makeClient(
@@ -93,6 +97,59 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
     await client.completeJson(payload(), { maxTokens: 500, temperature: 0.2 })
     const body = JSON.parse(String((fetchImpl.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>
     expect(body).toMatchObject({ max_tokens: 500, temperature: 0.2 })
+  })
+
+  it('DeepSeek 端点显式关闭 thinking：V4 默认 CoT 会先吃满 max_tokens，正文为空', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => okResponse('{"nodes":[]}'))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await client.completeJson(payload())
+    const body = JSON.parse(String((fetchImpl.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>
+    expect(body.thinking).toEqual({ type: 'disabled' })
+  })
+
+  it('非 DeepSeek 端点不发送 thinking 字段（避免严格网关因未知参数 400）', async () => {
+    const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => okResponse('{"nodes":[]}'))
+    const client = makeClient(fetchImpl as unknown as typeof fetch, {
+      baseUrl: 'http://127.0.0.1:8000/v1'
+    })
+    await client.completeJson(payload())
+    const body = JSON.parse(String((fetchImpl.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>
+    expect(body).not.toHaveProperty('thinking')
+  })
+
+  it('finish_reason=length 的空 content 报「max_tokens 截断」并带当前上限与 usage', async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse('', { prompt_tokens: 100, completion_tokens: 512 }, 'length')
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const error = await client
+      .completeJson(payload(), { maxTokens: 512 })
+      .catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(LlmParseError)
+    expect((error as Error).message).toContain('max_tokens（512）')
+    expect((error as Error).message).toContain('截断')
+    expect((error as LlmParseError).usage).toEqual({ promptTokens: 100, completionTokens: 512 })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('finish_reason=length 的残缺 JSON 报截断，而不是笼统的「不是合法 JSON」', async () => {
+    const fetchImpl = vi.fn(async () => okResponse('{"nodes":[{"title":"未写完', undefined, 'length'))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const error = await client.completeJson(payload()).catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(LlmParseError)
+    expect((error as Error).message).toContain('截断')
+  })
+
+  it('非截断的非法 JSON 报长度与 finish_reason（不泄露正文）', async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse('not-json', { prompt_tokens: 7, completion_tokens: 9 }, 'stop')
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const error = await client.completeJson(payload()).catch((err: unknown) => err)
+    expect(error).toBeInstanceOf(LlmParseError)
+    expect((error as Error).message).toContain('长度 8')
+    expect((error as Error).message).toContain('finish_reason=stop')
+    expect((error as Error).message).not.toContain('not-json')
   })
 
   it('baseUrl 末尾斜杠不会拼出双斜杠', async () => {

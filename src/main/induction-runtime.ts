@@ -66,8 +66,8 @@ export interface InductionRuntimeOptions {
 
 export interface InductionRuntime {
   onCaptureStatus(status: CaptureStatus): void
-  /** 手动 / 定时入口；未确认出网或采集暂停时零请求 */
-  runOnce(options?: { manual?: boolean }): Promise<InductionRunOutcome>
+  /** 手动 / 定时入口；未确认出网或采集暂停时零请求。dayStart = 图谱当前查看日（按天归纳，D28） */
+  runOnce(options?: { manual?: boolean; dayStart?: number }): Promise<InductionRunOutcome>
   /** 用户在图谱窗口确认出网（写 settings 后，采集运行中则立即启动调度） */
   grantConsent(): void
   /** 设置抽屉保存确认门（true=授权，false=撤销并停调度） */
@@ -136,7 +136,7 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
       }
     },
 
-    async runOnce(runOptions: { manual?: boolean } = {}): Promise<InductionRunOutcome> {
+    async runOnce(runOptions: { manual?: boolean; dayStart?: number } = {}): Promise<InductionRunOutcome> {
       if (!readConsent()) return { status: 'skipped', reason: 'consent' }
       if (!captureRunning) return { status: 'skipped', reason: 'paused' }
       const outcome = await ensureService().runOnce(runOptions)

@@ -26,7 +26,10 @@ export interface InductionPersistInput {
   moments: readonly Moment[]
   /** 无法安全剥离、整条不出云的事件 id（来自 buildCloudMomentPayload） */
   excludedEventIds?: readonly number[]
-  cursor: BatchCursor
+  /**
+   * 旧游标：只有历史回填路径才传；按天归纳（D28）不传，避免把游标推到高层级日。
+   */
+  cursor?: BatchCursor
   usage?: InductionUsage
   now: number
 }
@@ -296,7 +299,7 @@ export function persistInduction(db: Db, input: InductionPersistInput): Inductio
       }
     }
 
-    writeCursor(db, input.cursor)
+    if (input.cursor) writeCursor(db, input.cursor)
     addUsage(db, input.now, input.usage)
   })()
 

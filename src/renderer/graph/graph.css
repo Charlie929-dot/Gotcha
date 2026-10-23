@@ -181,6 +181,83 @@ main {
   font-size: 12px;
 }
 
+.canvas-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 26px;
+}
+
+.tools-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--muted);
+  padding: 2px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.type-chip:has(input:checked) {
+  color: var(--text);
+  border-color: rgb(79 195 247 / 45%);
+}
+
+.type-chip input {
+  accent-color: var(--knowledge);
+  margin: 0;
+}
+
+.tools-hint {
+  margin-left: auto;
+  color: #77778a;
+  font-size: 11px;
+}
+
+.focus-bar {
+  position: absolute;
+  top: 74px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 24px);
+  padding: 5px 8px 5px 14px;
+  border: 1px solid rgb(79 195 247 / 55%);
+  border-radius: 999px;
+  background: rgb(27 27 35 / 96%);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.focus-bar strong {
+  display: inline-block;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  font-weight: 600;
+}
+
+.focus-bar button {
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
 .state {
   color: var(--muted);
   padding: 28px 8px;

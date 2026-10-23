@@ -22,12 +22,19 @@ import {
   SUB_EDGE_COLOR,
   edgeSize,
   maxDegree,
-  neighborIds,
   neighborKeys,
   nodeColor,
   nodeLabel,
   nodeSize
 } from './graph-view'
+import {
+  defaultVisibleTypes,
+  focusNodeSet,
+  isTypeVisible,
+  toggleVisibleType,
+  type GraphTypeKey,
+  type VisibleTypes
+} from './graph-interactions'
 import { createNodePanel } from './graph-panel'
 import { createSettingsPanel } from './graph-settings-panel'
 
@@ -39,6 +46,10 @@ declare global {
       count(): number
       select(nodeId: number): Promise<void>
       hover(nodeId: number | null): void
+      focus(nodeId: number | string): void
+      clearFocus(): void
+      filters(): Record<string, boolean>
+      visibleCounts(): { nodes: number; edges: number }
     }
   }
 }
@@ -74,6 +85,12 @@ const panelMetaEl = document.getElementById('panel-meta')
 const panelEventsEl = document.getElementById('panel-events')
 const panelTimelineEl = document.getElementById('panel-timeline')
 const drawerEl = document.getElementById('drawer')
+const focusBarEl = document.getElementById('focus-bar')
+const focusLabelEl = document.getElementById('focus-label')
+const focusExitEl = document.getElementById('focus-exit')
+const filterInputs = Array.from(
+  document.querySelectorAll<HTMLInputElement>('[data-type-filter]')
+)
 
 if (
   !statusEl ||
@@ -90,7 +107,10 @@ if (
   !panelMetaEl ||
   !panelEventsEl ||
   !panelTimelineEl ||
-  !drawerEl
+  !drawerEl ||
+  !focusBarEl ||
+  !focusLabelEl ||
+  !focusExitEl
 ) {
   throw new Error('图谱页面 DOM 不完整')
 }
@@ -110,7 +130,10 @@ const els = {
   panelMeta: panelMetaEl,
   panelEvents: panelEventsEl,
   panelTimeline: panelTimelineEl as HTMLButtonElement,
-  drawer: drawerEl
+  drawer: drawerEl,
+  focusBar: focusBarEl,
+  focusLabel: focusLabelEl,
+  focusExit: focusExitEl
 }
 
 let day = startOfDay(Date.now())
@@ -121,6 +144,11 @@ let renderer: SigmaInstance | null = null
 let modules: SigmaModules | null = null
 let hoveredKey: string | null = null
 let loading = false
+let visibleTypes: VisibleTypes = defaultVisibleTypes()
+let focusKey: string | null = null
+let focusSet: Set<string> | null = null
+let currentEdges: Array<{ source: string; target: string }> = []
+const nodeTypeByKey = new Map<string, string>()
 
 const panel = createNodePanel(
   {
@@ -259,12 +287,72 @@ async function ensureModules(): Promise<SigmaModules> {
   return modules
 }
 
+function nodeTypeOf(key: string): string {
+  return nodeTypeByKey.get(key) ?? 'unknown'
+}
+
+function hiddenNode(key: string): boolean {
+  if (focusSet && !focusSet.has(key)) return true
+  return !isTypeVisible(nodeTypeOf(key), visibleTypes)
+}
+
+function clearFocusState(): void {
+  focusKey = null
+  focusSet = null
+  els.focusBar.hidden = true
+}
+
+function exitFocus(): void {
+  if (!focusKey && !focusSet) return
+  clearFocusState()
+  renderer?.refresh()
+}
+
+function enterFocus(key: string): void {
+  if (!graph || !graph.hasNode(key)) return
+  if (!isTypeVisible(nodeTypeOf(key), visibleTypes)) return
+  focusSet = focusNodeSet(currentEdges, key)
+  focusKey = key
+  const label = (graph.getNodeAttribute(key, 'fullLabel') as string | undefined) || key
+  els.focusLabel.textContent = label
+  els.focusBar.hidden = false
+  renderer?.refresh()
+
+  // 聚焦时把相机移到该节点（不改缩放），避免局部图落在视野外
+  const position = graph.getNodeAttributes(key) as { x: number; y: number }
+  if (renderer && Number.isFinite(position.x) && Number.isFinite(position.y)) {
+    const framed = renderer.graphToFramedGraph({ x: position.x, y: position.y })
+    void renderer.getCamera().animate({ x: framed.x, y: framed.y }, { duration: 300 })
+  }
+}
+
+for (const input of filterInputs) {
+  input.addEventListener('change', () => {
+    const type = input.dataset.typeFilter as GraphTypeKey | undefined
+    if (!type || !(type in visibleTypes)) return
+    visibleTypes = toggleVisibleType(visibleTypes, type, input.checked)
+    if (focusKey && !isTypeVisible(nodeTypeOf(focusKey), visibleTypes)) {
+      exitFocus()
+    } else {
+      renderer?.refresh()
+    }
+  })
+}
+
+els.focusExit.addEventListener('click', () => exitFocus())
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && focusKey) exitFocus()
+})
+
 async function renderCanvas(data: GraphDayData): Promise<void> {
   const current = await ensureModules()
   renderer?.kill()
   renderer = null
   graph = null
   hoveredKey = null
+  nodeTypeByKey.clear()
+  currentEdges = []
+  clearFocusState()
 
   const maxDeg = maxDegree(data)
   const graphInstance = new current.Graph({ multi: false, type: 'undirected' })
@@ -289,6 +377,7 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
       fullLabel: node.title,
       nodeType: 'concept'
     })
+    nodeTypeByKey.set(String(node.id), node.type)
   })
 
   // 2. 概念节点之间的语义边
@@ -347,6 +436,7 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
       nodeType: 'event',
       eventId: ev.id
     })
+    nodeTypeByKey.set(evKey, 'event')
 
     if (parentNodeId !== undefined && graphInstance.hasNode(String(parentNodeId))) {
       const edgeKey = `sub-${parentNodeId}-${ev.id}`
@@ -365,6 +455,7 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
   })
 
   // 4. ForceAtlas2 力导向布局：通过连线体现联系，通过远近体现相关性
+  currentEdges = allEdges
   current.forceAtlas2.assign(graphInstance, {
     iterations: 180,
     settings: {
@@ -393,6 +484,7 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
     minCameraRatio: 0.05,
     maxCameraRatio: 10,
     nodeReducer: (nodeKey: string, attrs: Record<string, unknown>) => {
+      if (hiddenNode(nodeKey)) return { ...attrs, visibility: 'hidden' as const }
       if (hoveredKey === null) return attrs
       const keep = neighborKeys(allEdges, hoveredKey)
       if (!keep.has(nodeKey)) {
@@ -407,8 +499,11 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
         : attrs
     },
     edgeReducer: (edgeKey: string, attrs: Record<string, unknown>) => {
-      if (hoveredKey === null) return attrs
       const endpoints = edgeById.get(edgeKey)
+      if (endpoints && (hiddenNode(endpoints.source) || hiddenNode(endpoints.target))) {
+        return { ...attrs, visibility: 'hidden' as const }
+      }
+      if (hoveredKey === null) return attrs
       if (!endpoints) return attrs
       const relates = endpoints.source === hoveredKey || endpoints.target === hoveredKey
       if (relates) {
@@ -439,7 +534,17 @@ async function renderCanvas(data: GraphDayData): Promise<void> {
     hoveredKey = null
     renderer?.refresh()
   })
-  renderer.on('clickStage', () => panel.hide())
+  renderer.on('doubleClickNode', (payload: { node: string; preventSigmaDefault?: () => void }) => {
+    payload.preventSigmaDefault?.()
+    enterFocus(payload.node)
+  })
+  renderer.on('doubleClickStage', () => {
+    if (focusKey) exitFocus()
+  })
+  renderer.on('clickStage', () => {
+    panel.hide()
+    if (focusKey) exitFocus()
+  })
   void renderer.getCamera().reset()
 }
 
@@ -565,6 +670,21 @@ window.__gotchaGraphView = {
   hover: (nodeId: number | null) => {
     hoveredKey = nodeId === null ? null : String(nodeId)
     renderer?.refresh()
+  },
+  focus: (nodeId: number | string) => enterFocus(String(nodeId)),
+  clearFocus: () => exitFocus(),
+  filters: () => ({ ...visibleTypes }),
+  visibleCounts: () => {
+    if (!graph) return { nodes: 0, edges: 0 }
+    let nodes = 0
+    let edges = 0
+    graph.forEachNode((key) => {
+      if (!hiddenNode(key)) nodes += 1
+    })
+    graph.forEachEdge((_edge, _attrs, source, target) => {
+      if (!hiddenNode(source) && !hiddenNode(target)) edges += 1
+    })
+    return { nodes, edges }
   }
 }
 

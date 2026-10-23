@@ -48,6 +48,10 @@ interface GraphWindowApi {
 interface GraphDebug {
   count(): number
   select(nodeId: number): Promise<void>
+  focus(nodeId: number | string): void
+  clearFocus(): void
+  filters(): Record<string, boolean>
+  visibleCounts(): { nodes: number; edges: number }
 }
 
 async function fakeLlm(): Promise<FakeLlmCounter> {
@@ -71,6 +75,13 @@ async function nodesToday(): Promise<GraphNodeLite[]> {
     )
     return data.nodes
   })
+}
+
+async function visibleCounts(): Promise<{ nodes: number; edges: number }> {
+  return graph.evaluate(
+    () =>
+      (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.visibleCounts()
+  )
 }
 
 function dateStamp(ts: number): string {
@@ -224,6 +235,36 @@ test.describe.serial('图谱闭环（假采集 + 假 LLM）', () => {
     await expect(graph.locator('#set-hotkey-status')).not.toHaveText('')
     await graph.locator('#settings-close').click()
     await expect(graph.locator('#drawer')).toBeHidden()
+  })
+
+  test('局部图与类型显隐：聚焦节点、返回全图、事件开关', async () => {
+    const nodes = await nodesToday()
+    const target = nodes[0]
+    await graph.evaluate(
+      (id) =>
+        (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.focus(id),
+      target.id
+    )
+    await expect(graph.locator('#focus-bar')).toBeVisible()
+    await expect(graph.locator('#focus-label')).not.toHaveText('')
+
+    await graph.locator('#focus-exit').click()
+    await expect(graph.locator('#focus-bar')).toBeHidden()
+
+    const eventFilter = graph.locator('[data-type-filter="event"]')
+    await expect(eventFilter).toBeChecked()
+    expect(await visibleCounts()).toEqual({ nodes: 4, edges: 3 })
+    await eventFilter.uncheck()
+    expect(await visibleCounts()).toEqual({ nodes: 2, edges: 1 })
+    expect(
+      await graph.evaluate(
+        () =>
+          (window as unknown as { __gotchaGraphView: GraphDebug }).__gotchaGraphView.filters()
+            .event
+      )
+    ).toBe(false)
+    await eventFilter.check()
+    expect(await visibleCounts()).toEqual({ nodes: 4, edges: 3 })
   })
 
   test('暂停后立即归纳：零新增请求、不落库（D18），图谱仍可浏览', async () => {

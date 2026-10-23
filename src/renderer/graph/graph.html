@@ -36,6 +36,26 @@
 
       <section class="canvas-wrap">
         <div id="node-count" class="count"></div>
+        <div class="canvas-tools" role="group" aria-label="图谱视图">
+          <span class="tools-label">显示</span>
+          <label class="type-chip" title="显示/隐藏知识节点">
+            <input type="checkbox" data-type-filter="knowledge" checked /> 知识
+          </label>
+          <label class="type-chip" title="显示/隐藏行为节点">
+            <input type="checkbox" data-type-filter="activity" checked /> 行为
+          </label>
+          <label class="type-chip" title="显示/隐藏保护节点">
+            <input type="checkbox" data-type-filter="protected" checked /> 保护
+          </label>
+          <label class="type-chip" title="显示/隐藏事件节点">
+            <input type="checkbox" data-type-filter="event" checked /> 事件
+          </label>
+          <span class="tools-hint">双击节点进入局部图</span>
+        </div>
+        <div id="focus-bar" class="focus-bar" hidden>
+          <span>局部图：<strong id="focus-label"></strong></span>
+          <button id="focus-exit" type="button">返回全图</button>
+        </div>
         <div id="empty" class="state" data-kind="loading">加载中…</div>
         <div id="sigma-container" class="sigma-container"></div>
       </section>

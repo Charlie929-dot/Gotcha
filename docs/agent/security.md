@@ -48,6 +48,7 @@
 ## 权限与 AV
 
 - 只申请任务所需的最小权限；不关闭校验/沙箱/审批。
+- **录屏授权（`getDisplayMedia`）只放行采集窗口自己的主 frame**：`defaultSession` 的 handler 是全局的，仅凭 `pendingSource` 放行等于假设「只有采集窗口会请求录屏」；现在按 `request.frame === webContents.mainFrame`（跨进程 wrapper 按 `processId + routingId` 兜底）判定，其它窗口 / iframe / 非视频请求一律拒绝（F08，2026-10-23）。采集窗口仍使用共享 `defaultSession`，未来可换独立 session/partition 进一步隔离。
 - **M1 不上全局键鼠钩子**（AV 误报风险，见 gotchas.md）。
 
 ## 对外

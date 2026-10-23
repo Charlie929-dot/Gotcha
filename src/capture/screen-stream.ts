@@ -13,6 +13,7 @@ import { BrowserWindow, desktopCapturer, session, screen } from 'electron'
 import type { Display } from 'electron'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { isCaptureFrameRequest } from './display-media'
 import { dHash, rgbaToGray } from './frame-diff'
 import {
   computeCaptureGeometry,
@@ -164,7 +165,11 @@ export class ScreenCapture {
     if (this.handlerInstalled) return
     session.defaultSession.setDisplayMediaRequestHandler(
       (request, callback) => {
-        if (!request.videoRequested) {
+        // 只接受采集窗口自己的主 frame（F08）：defaultSession 是共享的，
+        // 仅凭 pendingSource 放行等于假设「只有采集窗口会请求录屏」
+        const win = this.win
+        const captureFrame = win && !win.isDestroyed() ? win.webContents.mainFrame : null
+        if (!isCaptureFrameRequest(request, captureFrame)) {
           callback(null)
           return
         }
@@ -173,7 +178,6 @@ export class ScreenCapture {
           callback({ video: { id: source.id, name: source.name } })
           return
         }
-        // 非采集窗口发起的请求一律拒绝（时间线只读，不允许录屏）
         callback(null)
       },
       { useSystemPicker: false }

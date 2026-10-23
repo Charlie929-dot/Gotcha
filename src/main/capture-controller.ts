@@ -356,11 +356,13 @@ export class CaptureController {
       }
     }
 
-    // ④ 屏幕流释放与在途 OCR 收尾并行；视觉已切，不阻塞
+    // ④ 屏幕流释放与在途 OCR 收尾并行；视觉已切，不阻塞。
+    // 先取消 OCR 再 flush：子进程启动挂起 / 无响应时 dispose 会拒绝在途 recognize，
+    // flush 不会无限等着一个永远不返回的 OCR（F07）。
     const streamDisposal = attempt(() => session.disposeScreenStream())
+    await attempt(() => session.disposeOcr())
     await attempt(() => session.pipeline.flush())
     await attempt(() => session.flushStats())
-    await attempt(() => session.disposeOcr())
     await streamDisposal
 
     this.setStatus('paused')

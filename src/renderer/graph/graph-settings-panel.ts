@@ -1,16 +1,18 @@
 /**
- * 设置抽屉（M2 Phase 2 / D21/D22/D24）
+ * 设置抽屉（M2 Phase 2 / D21/D22/D24，2026-10-23 增补）
  *
  * - 归纳参数（自动 / 间隔 / 预算 / 退避 / 批量 / 输出上限）；
- * - 供应商列表（id / 名称 / baseUrl / model / apiKeyEnv）+ 当前供应商；密钥值不回显、不落库；
+ * - 供应商：名称 / baseUrl / API Key（直接填写，写后不回显）/ 模型（可「获取模型」）/ 高级变量名；
+ *   密钥由主进程写入 userData/.env，settings 表只存 apiKeyEnv 名，永远不存密钥值；
  * - 快捷键两键 + 保存后注册冲突标红；
  * - 出网确认门（D24，可撤销）。
  *
- * 所有值都交给主进程 `graph:settings:save` 校验，这里不做「静默修正」；失败原样显示原因。
+ * 所有值都交给主进程校验，这里不做「静默修正」；失败原样显示原因。
  */
 
 import type { GraphSettingsView } from '../../main/graph-settings'
 import type { HotkeyRegisterResult } from '../../main/hotkeys'
+import type { LlmProvider } from '../../understand/cloud/providers'
 import type { GraphApi } from '../graph-preload'
 
 export interface SettingsPanel {
@@ -18,6 +20,8 @@ export interface SettingsPanel {
   close(): void
   isOpen(): boolean
 }
+
+type KeySource = 'env' | 'file' | 'none' | 'unknown'
 
 const ELEMENT_IDS = [
   'drawer',
@@ -50,13 +54,28 @@ function byId<T extends HTMLElement = HTMLElement>(root: HTMLElement, id: Elemen
 }
 
 interface ProviderRow {
-  id: HTMLInputElement
-  label: HTMLInputElement
-  baseUrl: HTMLInputElement
-  model: HTMLInputElement
-  apiKeyEnv: HTMLInputElement
-  remove: HTMLButtonElement
   root: HTMLElement
+  idInput: HTMLInputElement
+  nameInput: HTMLInputElement
+  baseUrlInput: HTMLInputElement
+  modelInput: HTMLInputElement
+  modelList: HTMLDataListElement
+  apiKeyInput: HTMLInputElement
+  keyStatus: HTMLElement
+  apiKeyEnvInput: HTMLInputElement
+  fetchModelsButton: HTMLButtonElement
+  modelsStatus: HTMLElement
+  removeButton: HTMLButtonElement
+}
+
+/** 新供应商的变量名：由 id 派生，用户可在「高级」里改 */
+function deriveEnvName(id: string): string {
+  const normalized = id
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return `GOTCHA_KEY_${normalized || 'PROVIDER'}`
 }
 
 export function createSettingsPanel(
@@ -85,21 +104,33 @@ export function createSettingsPanel(
   const saveButton = byId<HTMLButtonElement>(root, 'settings-save')
 
   const rows: ProviderRow[] = []
+  /** 拉取过的模型清单：按 provider id 缓存，保存后重建行时仍能下拉 */
+  const modelCatalogs = new Map<string, string[]>()
   let current: GraphSettingsView | null = null
+  let customSeq = 0
+  let rowSeq = 0
 
   function setMessage(text: string, kind: 'ok' | 'error' | 'muted' = 'muted'): void {
     messageEl.textContent = text
     messageEl.style.color = kind === 'error' ? 'var(--error)' : kind === 'ok' ? 'var(--activity)' : ''
   }
 
+  function nextCustomId(): string {
+    for (;;) {
+      customSeq += 1
+      const candidate = `custom-${customSeq}`
+      if (!rows.some((row) => row.idInput.value === candidate)) return candidate
+    }
+  }
+
   function syncActiveOptions(selected?: string): void {
     const previous = selected ?? activeSelect.value
     activeSelect.replaceChildren()
     for (const row of rows) {
-      const id = row.id.value.trim() || '（未命名）'
+      const id = row.idInput.value.trim() || '（未命名）'
       const option = document.createElement('option')
-      option.value = row.id.value.trim()
-      option.textContent = row.label.value.trim() || id
+      option.value = row.idInput.value.trim()
+      option.textContent = row.nameInput.value.trim() || id
       activeSelect.append(option)
     }
     if ([...activeSelect.options].some((option) => option.value === previous)) {
@@ -107,47 +138,178 @@ export function createSettingsPanel(
     }
   }
 
-  function addProviderRow(provider?: {
-    id: string
-    label: string
-    baseUrl: string
-    model: string
-    apiKeyEnv: string
-  }): void {
+  function makeField(labelText: string, placeholder: string): {
+    label: HTMLLabelElement
+    input: HTMLInputElement
+  } {
+    const label = document.createElement('label')
+    label.className = 'provider-line'
+    const text = document.createElement('span')
+    text.textContent = labelText
+    const input = document.createElement('input')
+    input.type = 'text'
+    input.placeholder = placeholder
+    label.append(text, input)
+    return { label, input }
+  }
+
+  function applyKeyStatus(row: ProviderRow, source: KeySource): void {
+    row.keyStatus.dataset.source = source
+    row.keyStatus.textContent =
+      source === 'env'
+        ? '已配置（环境变量优先）'
+        : source === 'file'
+          ? '已配置（userData/.env）'
+          : source === 'none'
+            ? '未配置密钥'
+            : '密钥状态未知'
+  }
+
+  function applyCatalog(row: ProviderRow, models: string[]): void {
+    row.modelList.replaceChildren(
+      ...models.map((id) => {
+        const option = document.createElement('option')
+        option.value = id
+        return option
+      })
+    )
+    if (models.length > 0 && row.modelInput.value.trim() === '') {
+      row.modelInput.value = models[0]
+    }
+  }
+
+  async function fetchModelsForRow(row: ProviderRow): Promise<void> {
+    const baseUrl = row.baseUrlInput.value.trim()
+    if (baseUrl === '') {
+      row.modelsStatus.textContent = '先填 Base URL'
+      return
+    }
+    row.fetchModelsButton.disabled = true
+    const original = row.fetchModelsButton.textContent
+    row.fetchModelsButton.textContent = '获取中…'
+    row.modelsStatus.textContent = ''
+    try {
+      const result = await api.providerModels({
+        providerId: row.idInput.value,
+        baseUrl,
+        apiKey: row.apiKeyInput.value.trim() || undefined
+      })
+      if (!result.ok) {
+        row.modelsStatus.textContent = result.error
+        return
+      }
+      modelCatalogs.set(row.idInput.value, result.models)
+      applyCatalog(row, result.models)
+      row.modelsStatus.textContent = `已获取 ${result.models.length} 个模型，点模型输入框选择`
+    } catch (error) {
+      row.modelsStatus.textContent = `获取失败：${String(error)}`
+    } finally {
+      row.fetchModelsButton.disabled = false
+      row.fetchModelsButton.textContent = original
+    }
+  }
+
+  function addProviderRow(provider?: LlmProvider): void {
+    rowSeq += 1
+    const id = provider?.id ?? nextCustomId()
     const rowEl = document.createElement('div')
     rowEl.className = 'provider-row'
     rowEl.dataset.role = 'provider'
 
-    const make = (field: string, placeholder: string, value: string): HTMLInputElement => {
-      const input = document.createElement('input')
-      input.type = 'text'
-      input.dataset.field = field
-      input.placeholder = placeholder
-      input.value = value
-      rowEl.append(input)
-      return input
-    }
+    const head = document.createElement('div')
+    head.className = 'provider-head'
+    const nameField = makeField('名称', '供应商名称')
+    nameField.input.dataset.field = 'name'
+    nameField.input.value = provider?.label ?? ''
+    const removeButton = document.createElement('button')
+    removeButton.type = 'button'
+    removeButton.dataset.role = 'remove'
+    removeButton.textContent = '删除'
+    head.append(nameField.label, removeButton)
 
-    const id = make('id', 'id（唯一）', provider?.id ?? '')
-    const label = make('label', '名称', provider?.label ?? '')
-    const baseUrl = make('baseUrl', 'baseUrl（https）', provider?.baseUrl ?? '')
-    const model = make('model', 'model', provider?.model ?? '')
-    const apiKeyEnv = make('apiKeyEnv', 'API key 环境变量名', provider?.apiKeyEnv ?? '')
-    const remove = document.createElement('button')
-    remove.type = 'button'
-    remove.textContent = '删除'
-    remove.addEventListener('click', () => {
-      const index = rows.findIndex((row) => row.root === rowEl)
+    const baseUrlField = makeField('Base URL', 'https://api.deepseek.com')
+    baseUrlField.input.dataset.field = 'baseUrl'
+    baseUrlField.input.value = provider?.baseUrl ?? ''
+
+    const keyField = makeField('API Key', 'sk-…（留空则沿用已保存的密钥）')
+    keyField.input.type = 'password'
+    keyField.input.autocomplete = 'new-password'
+    keyField.input.dataset.field = 'apiKey'
+    const keyStatus = document.createElement('p')
+    keyStatus.className = 'hint key-status'
+    keyStatus.dataset.role = 'key-status'
+    keyStatus.textContent = '未配置密钥'
+
+    const datalistId = `model-options-${rowSeq}`
+    const modelField = makeField('模型', 'deepseek-chat')
+    modelField.input.dataset.field = 'model'
+    modelField.input.setAttribute('list', datalistId)
+    modelField.input.value = provider?.model ?? ''
+    const modelList = document.createElement('datalist')
+    modelList.id = datalistId
+    modelField.label.append(modelList)
+
+    const actions = document.createElement('div')
+    actions.className = 'provider-actions'
+    const fetchModelsButton = document.createElement('button')
+    fetchModelsButton.type = 'button'
+    fetchModelsButton.dataset.role = 'fetch-models'
+    fetchModelsButton.textContent = '获取模型'
+    const modelsStatus = document.createElement('span')
+    modelsStatus.className = 'hint'
+    modelsStatus.dataset.role = 'models-status'
+    actions.append(fetchModelsButton, modelsStatus)
+
+    const advanced = document.createElement('details')
+    advanced.className = 'provider-advanced'
+    const summary = document.createElement('summary')
+    summary.textContent = '高级'
+    const envField = makeField('密钥变量名', 'DEEPSEEK_API_KEY')
+    envField.input.dataset.field = 'apiKeyEnv'
+    envField.input.value = provider?.apiKeyEnv ?? deriveEnvName(id)
+    envField.input.title = '密钥保存在 userData/.env 的这个变量名下'
+    const idInput = document.createElement('input')
+    idInput.type = 'hidden'
+    idInput.dataset.field = 'id'
+    idInput.value = id
+    advanced.append(summary, envField.label, idInput)
+
+    rowEl.append(
+      head,
+      baseUrlField.label,
+      keyField.label,
+      keyStatus,
+      modelField.label,
+      actions,
+      advanced
+    )
+    providersEl.append(rowEl)
+
+    const row: ProviderRow = {
+      root: rowEl,
+      idInput,
+      nameInput: nameField.input,
+      baseUrlInput: baseUrlField.input,
+      modelInput: modelField.input,
+      modelList,
+      apiKeyInput: keyField.input,
+      keyStatus,
+      apiKeyEnvInput: envField.input,
+      fetchModelsButton,
+      modelsStatus,
+      removeButton
+    }
+    rows.push(row)
+
+    nameField.input.addEventListener('input', () => syncActiveOptions())
+    removeButton.addEventListener('click', () => {
+      const index = rows.findIndex((item) => item.root === rowEl)
       if (index >= 0) rows.splice(index, 1)
       rowEl.remove()
       syncActiveOptions()
     })
-    rowEl.append(remove)
-    id.addEventListener('input', () => syncActiveOptions())
-    label.addEventListener('input', () => syncActiveOptions())
-
-    providersEl.append(rowEl)
-    rows.push({ id, label, baseUrl, model, apiKeyEnv, remove, root: rowEl })
+    fetchModelsButton.addEventListener('click', () => void fetchModelsForRow(row))
+    applyCatalog(row, modelCatalogs.get(id) ?? [])
     syncActiveOptions()
   }
 
@@ -157,6 +319,23 @@ export function createSettingsPanel(
     for (const provider of settings.providers) addProviderRow(provider)
     if (settings.providers.length === 0) addProviderRow()
     syncActiveOptions(settings.activeProvider)
+  }
+
+  async function refreshKeyStatus(): Promise<void> {
+    let statuses: Record<string, string> = {}
+    let failed = false
+    try {
+      statuses = await api.providerKeys()
+    } catch {
+      failed = true
+    }
+    for (const row of rows) {
+      const source = statuses[row.idInput.value]
+      applyKeyStatus(
+        row,
+        failed ? 'unknown' : source === 'env' || source === 'file' ? source : 'none'
+      )
+    }
   }
 
   async function refreshHotkeyStatus(): Promise<void> {
@@ -211,6 +390,7 @@ export function createSettingsPanel(
       hotkeyGraphInput.value = settings.hotkeys.openGraph
       usageEl.textContent = `今日用量：${settings.usage.calls} 次调用 / 输入 ${settings.usage.promptTokens} tokens / 输出 ${settings.usage.completionTokens} tokens`
       fillProviders(settings)
+      void refreshKeyStatus()
       setMessage('')
       void refreshHotkeyStatus()
     } catch (error) {
@@ -231,12 +411,12 @@ export function createSettingsPanel(
     saveButton.disabled = true
     setMessage('保存中…')
     try {
-      const providers = rows.map((row) => ({
-        id: row.id.value.trim(),
-        label: row.label.value.trim(),
-        baseUrl: row.baseUrl.value.trim(),
-        model: row.model.value.trim(),
-        apiKeyEnv: row.apiKeyEnv.value.trim()
+      const providers: LlmProvider[] = rows.map((row) => ({
+        id: row.idInput.value.trim(),
+        label: row.nameInput.value.trim(),
+        baseUrl: row.baseUrlInput.value.trim(),
+        model: row.modelInput.value.trim(),
+        apiKeyEnv: row.apiKeyEnvInput.value.trim() || deriveEnvName(row.idInput.value)
       }))
       const payload = {
         auto: autoInput.checked,
@@ -262,14 +442,48 @@ export function createSettingsPanel(
         setMessage(result.error, 'error')
         return
       }
+
+      // 设置落库后再写密钥：密钥单独走 userData/.env，不进 settings 表
+      const failures: string[] = []
+      const warnings: string[] = []
+      const failedKeys = new Map<string, string>()
+      for (const row of rows) {
+        const key = row.apiKeyInput.value.trim()
+        if (key === '') continue
+        const name = row.nameInput.value.trim() || row.idInput.value
+        try {
+          const saved = await api.saveProviderKey(row.idInput.value, key)
+          if (!saved.ok) {
+            failures.push(`${name}：${saved.error}`)
+            failedKeys.set(row.idInput.value, key)
+          } else if (saved.warning) {
+            warnings.push(`${name}：${saved.warning}`)
+          }
+        } catch (error) {
+          failures.push(`${name}：${String(error)}`)
+          failedKeys.set(row.idInput.value, key)
+        }
+      }
+
       current = result.settings
       fillProviders(result.settings)
+      for (const row of rows) {
+        const key = failedKeys.get(row.idInput.value)
+        if (key) row.apiKeyInput.value = key
+      }
       hotkeyToggleInput.value = result.settings.hotkeys.toggleCapture
       hotkeyGraphInput.value = result.settings.hotkeys.openGraph
       consentInput.checked = result.settings.outboundConsent
-      setMessage('已保存', 'ok')
-      onSaved(result.settings)
+      void refreshKeyStatus()
       void refreshHotkeyStatus()
+      onSaved(result.settings)
+      if (failures.length > 0) {
+        setMessage(`设置已保存，但密钥未保存：${failures.join('；')}`, 'error')
+      } else if (warnings.length > 0) {
+        setMessage(`已保存；${warnings.join('；')}`, 'ok')
+      } else {
+        setMessage('已保存', 'ok')
+      }
     } catch (error) {
       setMessage(`保存失败：${String(error)}`, 'error')
     } finally {

@@ -86,9 +86,9 @@ tests/
 - **schema v2**（按技术方案 §4 原文，不改字段名）：`nodes(id, level, type, title, summary, ts_start, ts_end, source_events, meta_json)`、`edges(id, src, dst, weight, kind, evidence)`；索引 `idx_nodes_ts_start`、`idx_nodes_level`、`idx_edges_src`、`idx_edges_dst`。不新增表（`node_events` 之类不建，`source_events` 用 `json_each` 解析）。
 - **settings 键**（不建新表，全部有默认值、可在图谱窗口设置抽屉里调整，D22）：
   - 归纳：`graph.cursor_ts` / `graph.cursor_id`（游标，内部维护）、`graph.auto`（`1` 默认 = 采集运行中自动归纳）、`graph.interval_minutes`（默认 `10`）、`graph.budget_tokens_per_day`（默认 `1000000`）、`graph.retry_backoff_minutes`（默认 `1,5,15`）、`graph.usage.<yyyy-mm-dd>`（JSON：calls / prompt_tokens / completion_tokens）。
-  - 供应商：`llm.active_provider`（默认 `deepseek`）、`llm.providers`（JSON 数组：`{id, label, baseUrl, model, apiKeyEnv}`，默认含 DeepSeek 预设；可加自定义 OpenAI 兼容供应商）。
+  - 供应商：`llm.active_provider`（默认 `deepseek`）、`llm.providers`（JSON 数组：`{id, label, baseUrl, model, apiKeyEnv}`，默认含 DeepSeek 预设；可加自定义 OpenAI 兼容供应商；设置界面可直接填 API Key 并拉取模型清单，见 D26）。
   - 快捷键：`hotkey.toggle_capture`（默认 `Alt+P`）、`hotkey.open_graph`（默认 `Alt+Space`）；注册失败时提示冲突并引导改键。
-- **API key**：只从 `process.env` 或 `userData/.env` 读取（`KEY=VALUE`，手写解析 30 行内，不引 dotenv）；供应商配置里只存环境变量名（`apiKeyEnv`），**密钥不写 settings、不落库、不落日志**；仓库只提交 `.env.example`（`.env` 已在 `.gitignore`）。模型默认 `deepseek-flash`，base URL 默认 `https://api.deepseek.com`，均可在设置中改（供换供应商/换模型）。
+- **API key**：只从 `process.env` 或 `userData/.env` 读取（`KEY=VALUE`，手写解析 30 行内，不引 dotenv）；供应商配置里只存环境变量名（`apiKeyEnv`），**密钥不写 settings、不落库、不落日志**；设置界面填写的密钥由主进程写入 `userData/.env`（D26，写后不回显，同名环境变量优先），仓库只提交 `.env.example`（`.env` 已在 `.gitignore`）。模型默认 `deepseek-flash`，base URL 默认 `https://api.deepseek.com`，均可在设置中改（供换供应商/换模型）；「获取模型」按需 `GET {baseUrl}/models` 填充下拉，失败可手填。
 - `electron.vite.config.ts`：renderer 增加 `graph` 入口，preload 增加 `graph` 入口；时间线 preload 不追加图谱写接口。
 
 ## 3. 阶段拆分（每 Phase 独立验收，各一支短命分支）
@@ -118,7 +118,7 @@ tests/
 - **依赖**：`sigma@4.0.3` + `graphology@0.26.0` + `graphology-layout-forceatlas2@0.10.1`（均 MIT，见 §5）。renderer 动态 `import()` 懒加载，时间线页不背图谱体积。
 - **图谱窗口**（D20）：独立 `BrowserWindow`（1100×800，深色画布），工具栏含日期（今天/前一天/后一天）、刷新、自动归纳开关、立即归纳、设置、状态徽标、打开时间线。
 - **热键（D20）**：`hotkeys.ts` 重构为注册表——`hotkey.toggle_capture`（默认 `Alt+P`）+ `hotkey.open_graph`（默认 `Alt+Space`）；启动注册、失败即冲突检测（`globalShortcut.register` 返回 false / `isRegistered`）→ 球角标 + 日志提示，并在图谱设置抽屉里标红该键要求更换；设置保存后立即重注册（先 `unregister` 旧键）；结构预留后续更多可自定义快捷键，不写死两条。
-- **设置抽屉 `graph-settings.ts`（D21/D22）**：归纳（自动开关 / 间隔分钟 / 每日 token 预算 / 退避分钟）、供应商（预设 + 自定义 OpenAI 兼容：baseUrl / model / apiKeyEnv，密钥本身不回显）、快捷键（两键编辑 + 冲突提示 + 保存重注册）；写 settings（SQLite），密钥永不进库。
+- **设置抽屉 `graph-settings.ts`（D21/D22/D26）**：归纳（自动开关 / 间隔分钟 / 每日 token 预算 / 退避分钟）、供应商（预设 + 自定义 OpenAI 兼容：名称 / baseUrl / API Key / 模型 / 高级变量名；API Key 直接填写写入 `userData/.env`、不回显，「获取模型」拉取 `/models` 填充下拉，失败可手填）、快捷键（两键编辑 + 冲突提示 + 保存重注册）；写 settings（SQLite），密钥永不进库。
 - **数据**：IPC `graph:query(from, to)` 走只读连接（与时间线共用），返回节点/边 DTO；`graph:induce-now`、`graph:set-auto` 走主进程并校验 sender。
 - **视觉与交互**：六色按技术方案 §6.2（M2 实际只出现知识 `#4FC3F7` / 行为 `#81C784`）；节点尺寸随度数对数增长；**边宽 ∝ weight + ForceAtlas2 `edgeWeightInfluence=1`** 双重编码（D8）；滚轮缩放、拖拽平移、悬停高亮邻域（其余降透明度）、点击节点开侧栏。
 - **侧栏 `graph-panel.ts`**：节点标题/摘要/时间范围/成员事件列表（时间、应用、标题、OCR 摘要 80 字、敏感「内容已保护」徽标）；「在时间线中查看」→ 打开/聚焦时间线窗口并定位到该节点日期。

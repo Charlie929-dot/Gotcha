@@ -12,12 +12,22 @@ import { cleanStaleFrames } from '../capture/temp-store'
 import { queryGraphDay, queryNodeEvents } from '../understand/graph-query'
 import { loadEnvFile } from '../understand/cloud/env-file'
 import { createDeepSeekClient } from '../understand/cloud/deepseek'
-import { resolveFromSettings } from '../understand/cloud/providers'
+import {
+  apiKeySource,
+  DEFAULT_PROVIDER,
+  parseProvidersConfig,
+  resolveFromSettings,
+  resolveLlmProvider,
+  type ApiKeySource,
+  type LlmProvider
+} from '../understand/cloud/providers'
+import { fetchProviderModels as fetchModelsFromProvider } from '../understand/cloud/models'
 import { createInductionRuntime, type ClientResolution, type InductionRuntime, type InductionSnapshot } from './induction-runtime'
 import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSettingsView } from './graph-settings'
 import { createDeterministicFakeLlm } from './fake-llm'
 import { createGraphWindow } from './graph-window'
-import { registerGraphIpc } from './graph-ipc'
+import { registerGraphIpc, type ProviderKeySaveResult } from './graph-ipc'
+import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
   CaptureController,
   CaptureDbConnections,
@@ -147,6 +157,54 @@ function loadUserEnv(): Record<string, string> {
   } catch {
     return {}
   }
+}
+
+/** 当前保存的供应商列表（无库时用默认预设；坏 JSON 返回空，设置界面据此提示） */
+function currentProviders(): LlmProvider[] {
+  const db = connections.queryDb()
+  if (!db) return [{ ...DEFAULT_PROVIDER }]
+  return parseProvidersConfig(getSetting(db, GRAPH_SETTING_KEYS.providers)).providers
+}
+
+/** 已保存供应商的密钥：进程环境变量 > userData/.env；未知供应商 / 未配置返回空串 */
+function storedProviderKey(providerId: string): string {
+  const provider = currentProviders().find((item) => item.id === providerId)
+  if (!provider) return ''
+  const resolved = resolveLlmProvider(providerId, [provider], process.env, loadUserEnv())
+  return resolved.ok ? resolved.apiKey : ''
+}
+
+/** 设置界面只显示密钥来源（env / .env / 未配置），不把值送到渲染进程 */
+function providerKeyStatus(): Record<string, ApiKeySource> {
+  const fileEnv = loadUserEnv()
+  const status: Record<string, ApiKeySource> = {}
+  for (const provider of currentProviders()) {
+    status[provider.id] = apiKeySource(provider.apiKeyEnv, process.env, fileEnv)
+  }
+  return status
+}
+
+/**
+ * 写入设置界面填写的 API Key：只进 `userData/.env`（与手写 .env 同一读取路径），
+ * 不进 settings 表、不进日志、不回显。同名环境变量存在时如实告知它优先。
+ */
+function saveProviderKey(providerId: string, apiKey: string): ProviderKeySaveResult {
+  const provider = currentProviders().find((item) => item.id === providerId)
+  if (!provider) return { ok: false, error: '供应商不存在，请先保存供应商配置' }
+  const validated = validateApiKey(apiKey)
+  if (!validated.ok) return validated
+  try {
+    writeEnvKey(join(app.getPath('userData'), '.env'), provider.apiKeyEnv, validated.key)
+  } catch (error) {
+    captureLog('warn', 'provider key write failed', { error: String(error) })
+    return { ok: false, error: '无法写入 userData/.env（检查文件权限）' }
+  }
+  // 密钥立即生效：刷新图谱窗口的供应商状态
+  pushGraphSnapshot()
+  const source = apiKeySource(provider.apiKeyEnv, process.env, loadUserEnv())
+  return source === 'env'
+    ? { ok: true, warning: `已写入 .env；但同名环境变量 ${provider.apiKeyEnv} 存在，实际仍用它` }
+    : { ok: true }
 }
 
 /**
@@ -723,6 +781,13 @@ if (primaryInstance) {
       onSettingsSaved: applyGraphSettings,
       getHotkeys: () => hotkeyHandle?.results ?? [],
       openTimeline: (day) => openTimelineDay(day ?? null),
+      fetchProviderModels: async (input) => {
+        // 输入框里未保存的密钥优先；留空则用已保存的（env > .env）
+        const apiKey = input.apiKey?.trim() ? input.apiKey.trim() : storedProviderKey(input.providerId)
+        return fetchModelsFromProvider({ baseUrl: input.baseUrl, apiKey })
+      },
+      saveProviderKey: (providerId, apiKey) => saveProviderKey(providerId, apiKey),
+      getProviderKeyStatus: () => providerKeyStatus(),
       log: captureLog
     })
 

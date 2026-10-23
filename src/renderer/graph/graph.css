@@ -410,22 +410,70 @@ main {
 .provider-row {
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 8px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   background: var(--panel-2);
+}
+
+.provider-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
+
+#settings-form .provider-row label.provider-line {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 8px;
+  align-items: center;
+  margin: 3px 0;
+  font-size: 12px;
 }
 
 .provider-row input {
   min-width: 0;
+  width: 100%;
 }
 
 .provider-row button {
-  grid-column: 1 / -1;
   justify-self: end;
   padding: 2px 8px;
   font-size: 11px;
+}
+
+.provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0 100px;
+}
+
+.provider-actions button {
+  justify-self: start;
+}
+
+.key-status[data-source='env'],
+.key-status[data-source='file'] {
+  color: var(--activity);
+}
+
+.key-status[data-source='unknown'],
+.key-status[data-source='none'] {
+  color: var(--warn);
+}
+
+.provider-advanced {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.provider-advanced summary {
+  cursor: pointer;
+  padding: 2px 0;
 }
 
 .hint {

@@ -73,7 +73,10 @@
 
         <section>
           <h3>供应商</h3>
-          <p class="hint">密钥只从环境变量 / userData/.env 读取；这里只填变量名，密钥值不回显、不入库。</p>
+          <p class="hint">
+            直接填写 API Key 即可（保存后立即生效）：密钥写入本机 userData/.env，不进设置库、不写日志、
+            不回显。同名环境变量存在时以环境变量为准。
+          </p>
           <label>当前供应商<select id="set-active"></select></label>
           <div id="set-providers" class="providers"></div>
           <button id="set-add-provider" type="button">添加供应商</button>

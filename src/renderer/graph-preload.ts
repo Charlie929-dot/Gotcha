@@ -7,8 +7,10 @@
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { GraphDayData, NodeEventsResult } from '../understand/graph-query'
+import type { ApiKeySource } from '../understand/cloud/providers'
+import type { FetchModelsResult } from '../understand/cloud/models'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
-import type { GraphInduceResult } from '../main/graph-ipc'
+import type { GraphInduceResult, ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { InductionSnapshot } from '../main/induction-runtime'
 import type { HotkeyRegisterResult } from '../main/hotkeys'
 
@@ -21,6 +23,9 @@ export interface GraphApi {
   setConsent(consented: boolean): Promise<InductionSnapshot>
   settings(): Promise<GraphSettingsView>
   saveSettings(patch: unknown): Promise<GraphSettingsSaveResult>
+  providerModels(input: ProviderModelsInput): Promise<FetchModelsResult>
+  saveProviderKey(providerId: string, apiKey: string): Promise<ProviderKeySaveResult>
+  providerKeys(): Promise<Record<string, ApiKeySource>>
   hotkeys(): Promise<HotkeyRegisterResult[]>
   openTimeline(day?: number): Promise<boolean>
 }
@@ -45,6 +50,12 @@ const api: GraphApi = {
   settings: () => ipcRenderer.invoke('graph:settings:get') as Promise<GraphSettingsView>,
   saveSettings: (patch) =>
     ipcRenderer.invoke('graph:settings:save', patch) as Promise<GraphSettingsSaveResult>,
+  providerModels: (input) =>
+    ipcRenderer.invoke('graph:provider:models', input) as Promise<FetchModelsResult>,
+  saveProviderKey: (providerId, apiKey) =>
+    ipcRenderer.invoke('graph:provider:key', { providerId, apiKey }) as Promise<ProviderKeySaveResult>,
+  providerKeys: () =>
+    ipcRenderer.invoke('graph:provider:keys') as Promise<Record<string, ApiKeySource>>,
   hotkeys: () => ipcRenderer.invoke('graph:hotkeys') as Promise<HotkeyRegisterResult[]>,
   openTimeline: (day) => ipcRenderer.invoke('graph:open-timeline', day) as Promise<boolean>
 }

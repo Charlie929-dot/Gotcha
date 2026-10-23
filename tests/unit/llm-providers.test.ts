@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { loadEnvFile, parseEnvFile } from '../../src/understand/cloud/env-file'
 import {
+  apiKeySource,
   DEFAULT_PROVIDER,
   normalizeBaseUrl,
   parseProvider,
@@ -134,8 +135,14 @@ describe('providers · 多供应商配置（D21）', () => {
     })
   })
 
-  it('active 缺省时优先 DeepSeek，否则取第一个', () => {
-    const onlyCustom = parseProvidersConfig(JSON.stringify([CUSTOM])).providers
+  it('apiKeySource：环境变量优先于 .env，空值视同未配置', () => {
+    expect(apiKeySource('K', { K: 'env' }, { K: 'file' })).toBe('env')
+    expect(apiKeySource('K', { K: '' }, { K: 'file' })).toBe('file')
+    expect(apiKeySource('K', {}, { K: 'file' })).toBe('file')
+    expect(apiKeySource('K', {}, {})).toBe('none')
+  })
+
+  it('active 缺省时优先 DeepSeek，否则取第一个', () => {    const onlyCustom = parseProvidersConfig(JSON.stringify([CUSTOM])).providers
     expect(resolveLlmProvider(null, onlyCustom, {}, {})).toMatchObject({
       ok: false,
       reason: 'missing-key',

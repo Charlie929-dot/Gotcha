@@ -201,7 +201,7 @@ function renderEmpty(): void {
     kind = 'no-key'
     text =
       snapshot.client.reason === 'missing-key'
-        ? `未检测到密钥（${snapshot.client.apiKeyEnv ?? '环境变量'}）；在 userData/.env 或环境变量中配置后重启`
+        ? `未检测到密钥（${snapshot.client.apiKeyEnv ?? '环境变量'}）；到设置里填写 API Key 保存后立即生效`
         : '供应商配置不可用，请到设置检查'
   } else if (snapshot && !snapshot.consent) {
     kind = 'consent'

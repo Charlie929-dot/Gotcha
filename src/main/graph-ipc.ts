@@ -9,6 +9,8 @@
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import type { BrowserWindow } from 'electron'
 import type { GraphDayData, NodeEventsResult } from '../understand/graph-query'
+import type { ApiKeySource } from '../understand/cloud/providers'
+import type { FetchModelsResult } from '../understand/cloud/models'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
 import type { InductionRunOutcome, InductionSnapshot } from './induction-runtime'
 import type { HotkeyRegisterResult } from './hotkeys'
@@ -17,6 +19,23 @@ import type { HotkeyRegisterResult } from './hotkeys'
 export type GraphInduceResult =
   | Exclude<InductionRunOutcome, { status: 'error' }>
   | { status: 'error'; message: string }
+
+export interface ProviderModelsInput {
+  providerId: string
+  baseUrl: string
+  /** 用户刚在输入框里填、尚未保存的密钥；留空则由主进程读已保存的密钥 */
+  apiKey?: string
+}
+
+export type ProviderKeySaveResult =
+  | {
+      ok: true
+      /** 已写入 .env，但同名环境变量优先（实际仍用环境变量里的密钥） */
+      warning?: string
+    }
+  | { ok: false; error: string }
+
+export type ProviderKeyStatus = Record<string, ApiKeySource>
 
 export interface GraphIpcDeps {
   getGraphWindow(): BrowserWindow | null
@@ -30,6 +49,9 @@ export interface GraphIpcDeps {
   onSettingsSaved(settings: GraphSettingsView): void
   getHotkeys(): readonly HotkeyRegisterResult[]
   openTimeline(day?: number): void
+  fetchProviderModels(input: ProviderModelsInput): Promise<FetchModelsResult>
+  saveProviderKey(providerId: string, apiKey: string): ProviderKeySaveResult
+  getProviderKeyStatus(): ProviderKeyStatus
   log(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>): void
 }
 
@@ -42,6 +64,10 @@ const EMPTY_NODE_EVENTS: NodeEventsResult = {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function serializeOutcome(outcome: InductionRunOutcome): GraphInduceResult {
@@ -146,6 +172,59 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
     [
       'graph:hotkeys',
       (event) => (ensureSender(event) ? deps.getHotkeys() : [])
+    ],
+    [
+      'graph:provider:models',
+      async (event, input) => {
+        if (!ensureSender(event)) {
+          return { ok: false, error: 'forbidden' } satisfies FetchModelsResult
+        }
+        if (
+          !isPlainObject(input) ||
+          typeof input.providerId !== 'string' ||
+          typeof input.baseUrl !== 'string' ||
+          (input.apiKey !== undefined && typeof input.apiKey !== 'string')
+        ) {
+          return { ok: false, error: '参数不合法' } satisfies FetchModelsResult
+        }
+        try {
+          return await deps.fetchProviderModels({
+            providerId: input.providerId,
+            baseUrl: input.baseUrl,
+            apiKey: input.apiKey
+          })
+        } catch (error) {
+          // 只记「失败了」，不记 URL / 密钥 / 响应正文
+          deps.log('warn', 'provider models fetch failed', { error: String(error) })
+          return {
+            ok: false,
+            error: '获取模型失败，请检查供应商配置'
+          } satisfies FetchModelsResult
+        }
+      }
+    ],
+    [
+      'graph:provider:key',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies ProviderKeySaveResult
+        if (
+          !isPlainObject(input) ||
+          typeof input.providerId !== 'string' ||
+          typeof input.apiKey !== 'string'
+        ) {
+          return { ok: false, error: '参数不合法' } satisfies ProviderKeySaveResult
+        }
+        try {
+          return deps.saveProviderKey(input.providerId, input.apiKey)
+        } catch (error) {
+          deps.log('error', 'provider key save failed', { error: String(error) })
+          return { ok: false, error: '密钥保存失败' } satisfies ProviderKeySaveResult
+        }
+      }
+    ],
+    [
+      'graph:provider:keys',
+      (event) => (ensureSender(event) ? deps.getProviderKeyStatus() : {})
     ],
     [
       'graph:open-timeline',

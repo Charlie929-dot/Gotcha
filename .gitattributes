@@ -1,0 +1,2 @@
+﻿# 本地向量模型（bge-small-zh-v1.5）随仓库分发：90MB 的 onnx 走 LFS，避免普通 git 对象膨胀
+*.onnx filter=lfs diff=lfs merge=lfs -text

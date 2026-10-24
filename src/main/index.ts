@@ -39,7 +39,7 @@ import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSet
 import { createDeterministicFakeLlm } from './fake-llm'
 import { createGraphWindow } from './graph-window'
 import { runGraphBackfill } from './graph-backfill-runtime'
-import { resolveEmbeddingModelDir } from '../understand/embedding/paths'
+import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
 import { isModelReady } from '../understand/embedding/session'
 import { registerGraphIpc, type ProviderKeySaveResult } from './graph-ipc'
 import { validateApiKey, writeEnvKey } from './provider-keys'
@@ -259,17 +259,28 @@ function resolveClient(): ClientResolution {
   }
 }
 
+/** 模型候选目录（设置覆盖 → 打包资源 → 仓库 resources → userData 历史位置） */
+function embeddingModelDirs(): string[] {
+  const db = connections.queryDb()
+  return embeddingModelCandidates({
+    setting: db ? getSetting(db, 'graph.embedding_model_dir') : '',
+    resourcesPath: process.resourcesPath,
+    appPath: app.getAppPath(),
+    userDataDir: app.getPath('userData')
+  })
+}
+
+/** 选中真正可用的模型目录（随应用分发的模型在大多数机器上直接命中，用户不用手工放置） */
+function resolveModelDir(): string {
+  return pickEmbeddingModelDir(embeddingModelDirs(), isModelReady)
+}
+
 /**
  * 本地向量模型是否就绪（`model.onnx` + `vocab.txt` 都在）。
  * 只 stat 两个文件；读设置走只读连接，模型没装时更不能因为一次状态查询去建库（A3）。
  */
 function readEmbeddingsReady(): boolean {
-  const db = connections.queryDb()
-  const modelDir = resolveEmbeddingModelDir(
-    app.getPath('userData'),
-    db ? getSetting(db, 'graph.embedding_model_dir') : ''
-  )
-  return isModelReady(modelDir)
+  return isModelReady(resolveModelDir())
 }
 
 /** 归纳运行时未创建时的只读快照（不建库；图谱窗口在采集暂停时也能显示原因） */
@@ -382,11 +393,7 @@ function runGraphBackfillInBackground(): void {
     })
     return
   }
-  const modelDir = resolveEmbeddingModelDir(
-    app.getPath('userData'),
-    getSetting(db, 'graph.embedding_model_dir')
-  )
-  void runGraphBackfill({ db, modelDir, log: captureLog })
+  void runGraphBackfill({ db, modelDir: resolveModelDir(), log: captureLog })
 }
 
 function showGraphWindow(): void {

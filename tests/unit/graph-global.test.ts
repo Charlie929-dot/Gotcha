@@ -181,4 +181,32 @@ describe('queryGlobalGraph', () => {
       db.close()
     }
   })
+
+  it('已合并节点不出现：主题/归属/边/位置都按存活节点过滤', () => {
+    const db = openDatabase(':memory:')
+    try {
+      seedTheme(db, 1)
+      seedTheme(db, 2)
+      seedTheme(db, 3)
+      db.prepare('UPDATE nodes SET merged_into = 1 WHERE id = 2').run()
+      seedMoment(db, 1, '2026-10-22', at(22, 9))
+      seedMembership(db, 1, 1)
+      seedMembership(db, 2, 1) // 源节点的残留归属（合并后应已迁走，这里验证查询过滤）
+      seedEdge(db, 100, 1, 2, 'embedding')
+      seedEdge(db, 101, 1, 3, 'embedding')
+      seedPosition(db, 2, 1, 2)
+      seedPosition(db, 3, 3, 4)
+
+      const data = queryGlobalGraph(db)
+      expect(data.themes.map((theme) => theme.id).sort()).toEqual([1, 3])
+      expect(data.memberships).toEqual([
+        { themeId: 1, momentId: 1, weight: 1, source: 'owner' }
+      ])
+      expect(data.edges.map((edge) => edge.id)).toEqual([101])
+      expect(data.positions.map((position) => position.nodeId)).toEqual([3])
+      expect(data.stats).toEqual({ themes: 2, moments: 1, memberships: 1, edges: 1, positions: 1 })
+    } finally {
+      db.close()
+    }
+  })
 })

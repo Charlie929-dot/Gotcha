@@ -32,7 +32,7 @@ describe('migrations · :memory: 库', () => {
     try {
       expect(getSchemaVersion(db)).toBe(0)
       expect(applyMigrations(db)).toBe(LATEST)
-      expect(LATEST).toBe(3)
+      expect(LATEST).toBe(4)
 
       db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
       // 第二次跑同一套迁移：不应抛错、版本不倒退、已有数据不丢
@@ -65,6 +65,18 @@ describe('migrations · :memory: 库', () => {
       expect(names).toContain('node_positions')
       expect(names).toContain('idx_moments_day')
       expect(names).toContain('idx_theme_moments_moment')
+      // v4：合并审计 + 事件向量 + 主题质心 + nodes.merged_into
+      expect(names).toContain('node_merges')
+      expect(names).toContain('event_embeddings')
+      expect(names).toContain('theme_centroids')
+      expect(names).toContain('idx_node_merges_group')
+      expect(names).toContain('idx_node_merges_from')
+      expect(names).toContain('idx_node_merges_into')
+      expect(names).toContain('idx_nodes_merged_into')
+      const nodeColumns = (
+        db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>
+      ).map((row) => row.name)
+      expect(nodeColumns).toContain('merged_into')
 
       revertMigrations(db)
       expect(getSchemaVersion(db)).toBe(0)
@@ -80,6 +92,9 @@ describe('migrations · :memory: 库', () => {
       expect(afterDown).not.toContain('theme_moments')
       expect(afterDown).not.toContain('node_embeddings')
       expect(afterDown).not.toContain('node_positions')
+      expect(afterDown).not.toContain('node_merges')
+      expect(afterDown).not.toContain('event_embeddings')
+      expect(afterDown).not.toContain('theme_centroids')
 
       expect(applyMigrations(db)).toBe(LATEST)
       expect(structureSnapshot(db)).toEqual(before)
@@ -111,6 +126,9 @@ describe('migrations · :memory: 库', () => {
       expect(names).not.toContain('theme_moments')
       expect(names).not.toContain('node_embeddings')
       expect(names).not.toContain('node_positions')
+      expect(names).not.toContain('node_merges')
+      expect(names).not.toContain('event_embeddings')
+      expect(names).not.toContain('theme_centroids')
       expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 1 })
 
       // 再迁回 v3：时刻层重建为空表，nodes/edges 数据仍在

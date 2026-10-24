@@ -19,6 +19,13 @@ import {
   type LlmProvider
 } from '../understand/cloud/providers'
 import { DEFAULT_HOTKEYS, isSupportedAccelerator, type HotkeyBindings } from './hotkeys'
+import {
+  GRAPH_THRESHOLD_DEFAULTS,
+  GRAPH_THRESHOLD_KEYS,
+  parseThresholdPatch,
+  readGraphThresholds,
+  type GraphThresholds
+} from '../understand/graph-thresholds'
 
 export const GRAPH_SETTING_KEYS = {
   auto: 'graph.auto',
@@ -50,6 +57,8 @@ export interface GraphSettingsView {
   providersInvalid: boolean
   hotkeys: HotkeyBindings
   outboundConsent: boolean
+  /** 相似度阈值（§5.2；P3 才在设置面板暴露，这里先保证可读写/可标定） */
+  thresholds: GraphThresholds
   usage: GraphUsageView
 }
 
@@ -65,6 +74,7 @@ export interface GraphSettingsPatch {
   providers?: LlmProvider[]
   hotkeys?: Partial<HotkeyBindings>
   outboundConsent?: boolean
+  thresholds?: Partial<GraphThresholds>
 }
 
 export type GraphSettingsSaveResult =
@@ -130,6 +140,7 @@ export function readGraphSettings(db: Db | null, now = Date.now()): GraphSetting
       providersInvalid: false,
       hotkeys: { ...DEFAULT_HOTKEYS },
       outboundConsent: false,
+      thresholds: { ...GRAPH_THRESHOLD_DEFAULTS },
       usage: { calls: 0, promptTokens: 0, completionTokens: 0 }
     }
   }
@@ -152,6 +163,7 @@ export function readGraphSettings(db: Db | null, now = Date.now()): GraphSetting
       openGraph: getSetting(db, 'hotkey.open_graph').trim() || DEFAULT_HOTKEYS.openGraph
     },
     outboundConsent: getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
+    thresholds: readGraphThresholds(db),
     usage: {
       calls: usage.calls,
       promptTokens: usage.promptTokens,
@@ -192,7 +204,8 @@ function validatePatch(input: unknown): { ok: true; patch: GraphSettingsPatch } 
     'activeProvider',
     'providers',
     'hotkeys',
-    'outboundConsent'
+    'outboundConsent',
+    'thresholds'
   ]
   for (const key of Object.keys(input)) {
     if (SECRET_KEYS.has(key.toLowerCase())) {
@@ -283,6 +296,11 @@ function validatePatch(input: unknown): { ok: true; patch: GraphSettingsPatch } 
     }
     patch.hotkeys = hotkeys
   }
+  if ('thresholds' in input) {
+    const checked = parseThresholdPatch(input.thresholds)
+    if (!checked.ok) return checked
+    patch.thresholds = checked.patch
+  }
 
   return { ok: true, patch }
 }
@@ -346,6 +364,17 @@ export function saveGraphSettings(db: Db, input: unknown, now = Date.now()): Gra
       }
       if (patch.maxTokens !== undefined) {
         setSetting(db, GRAPH_SETTING_KEYS.maxTokens, String(patch.maxTokens))
+      }
+      if (patch.thresholds) {
+        for (const [key, value] of Object.entries(patch.thresholds)) {
+          if (value === undefined) continue
+          const name = key as keyof GraphThresholds
+          setSetting(
+            db,
+            GRAPH_THRESHOLD_KEYS[name],
+            name === 'edgeMutual' ? (value ? '1' : '0') : String(value)
+          )
+        }
       }
     })()
   } catch (error) {

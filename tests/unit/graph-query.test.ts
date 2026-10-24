@@ -158,4 +158,17 @@ describe('queryNodeEvents', () => {
     expect(queryNodeEvents(db, Number.NaN).found).toBe(false)
     db.close()
   })
+
+  it('已合并节点跟随到存活节点（旧引用不断链）', () => {
+    const db = openDatabase(':memory:')
+    const eventId = insertEvent(db, { ts: at(9), app: 'chrome', ocrText: 'x' })
+    seedNode(db, { id: 1, tsStart: at(9), sourceEvents: JSON.stringify([eventId]) })
+    seedNode(db, { id: 2, tsStart: at(9), sourceEvents: '[]' })
+    db.prepare('UPDATE nodes SET merged_into = 1 WHERE id = 2').run()
+
+    const result = queryNodeEvents(db, 2)
+    expect(result.found).toBe(true)
+    expect(result.events.map((event) => event.id)).toEqual([eventId])
+    db.close()
+  })
 })

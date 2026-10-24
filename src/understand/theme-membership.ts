@@ -129,13 +129,40 @@ function selectNodes(db: Db, themeIds?: readonly number[]): NodeRow[] {
     const placeholders = ids.map(() => '?').join(',')
     return db
       .prepare(
-        `SELECT id, source_events FROM nodes WHERE level = 1 AND id IN (${placeholders}) ORDER BY id ASC`
+        `SELECT id, source_events FROM nodes
+         WHERE level = 1 AND merged_into IS NULL AND id IN (${placeholders})
+         ORDER BY id ASC`
       )
       .all(...ids) as NodeRow[]
   }
   return db
-    .prepare('SELECT id, source_events FROM nodes WHERE level = 1 ORDER BY id ASC')
+    .prepare(
+      'SELECT id, source_events FROM nodes WHERE level = 1 AND merged_into IS NULL ORDER BY id ASC'
+    )
     .all() as NodeRow[]
+}
+
+/** 一条 owner 归属（合并质心 / 次归属计划都按它算） */
+export interface OwnerMembershipRow {
+  themeId: number
+  momentId: number
+}
+
+/**
+ * 只读主归属（owner + manual；不含次归属）。
+ * manual 是显式用户归属，语义等同主归属：算质心、做次归属排除、清理残留时都按它对待。
+ * 已合并节点不返回。
+ */
+export function readOwnerMemberships(db: Db): OwnerMembershipRow[] {
+  return db
+    .prepare(
+      `SELECT tm.theme_id AS themeId, tm.moment_id AS momentId
+       FROM theme_moments tm
+       JOIN nodes n ON n.id = tm.theme_id
+       WHERE tm.source IN ('owner', 'manual') AND n.merged_into IS NULL
+       ORDER BY tm.theme_id ASC, tm.moment_id ASC`
+    )
+    .all() as OwnerMembershipRow[]
 }
 
 /** 归属计数（成员数 / 主归属数 / 次归属数），供图谱统计与用例断言 */

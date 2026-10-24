@@ -9,6 +9,9 @@
  * - 按本地日取批（D28）：自动只跑今天，手动只跑图谱当前查看日；节点 `source_events`
  *   已覆盖的事件跳过，重复点击幂等；旧游标只保留兼容，不再驱动归纳；
  * - 空 content / 非法 JSON 与校验失败都各走 1 次修复重试（错误摘要为固定文案）；
+ * - 覆盖缺口不判整批失败（2026-10-24）：同一时刻漏掉的 id 由 `repairCoverage` 补到兄弟节点，
+ *   整段被忽略的时刻落本地「未归纳时段」兜底节点；补齐数量写进日志 / 快照；
+ *   仍会失败的是编造 id / 重复归属 / 结构非法（temperature=0 的修复重试对这些才可能有效）；
  * - 失败 / 取消也把已消耗的 token 记账，避免失败循环绕过预算；
  * - 未配置供应商（getClient 返回 null）时跳过、不抛到采集链路。
  *
@@ -39,6 +42,7 @@ import {
 } from './cloud/llm-client'
 import { buildCloudMomentPayload } from './cloud/redact'
 import { persistInduction, readUsage, recordUsage, type InductionUsage } from './induction'
+import { repairCoverage, type CoverageRepair } from './structure/coverage'
 import { validateInduction, type InductionResult, type InductionTruncation, type InductionValidation } from './structure/schema'
 
 export type InductionStatus =
@@ -62,6 +66,8 @@ export type RunOutcome =
       usage?: InductionUsage
       /** 被截断的文本字段计数（标题 / 摘要 / evidence 超硬上限；不影响落库） */
       truncated?: InductionTruncation
+      /** 覆盖补齐统计：filled=补到兄弟节点的 id 数，uncovered=整段被忽略、落本地兜底节点的 id 数 */
+      coverage?: { filled: number; uncovered: number }
     }
   | { status: 'empty' }
   | { status: 'skipped'; reason: 'auto-off' | 'in-flight' | 'not-configured' | 'budget' | 'paused' }
@@ -295,6 +301,7 @@ export function createInductionService(options: InductionServiceOptions): Induct
       let result: InductionResult = { nodes: [], edges: [] }
       let usageTotals: InductionUsage | undefined
       let truncation: InductionTruncation | undefined
+      let coverage: CoverageRepair | undefined
 
       if (built.payload.events.length > 0) {
         const call = async (repair?: { errors: readonly string[] }): Promise<LlmJsonResult> => {
@@ -340,7 +347,9 @@ export function createInductionService(options: InductionServiceOptions): Induct
           if (!validation.ok) throw new InductionValidationError(validation.errors)
         }
         if (!validation) throw new InductionValidationError([])
-        result = validation.result
+        // 覆盖缺口确定性补齐：同一时刻的兄弟 id 补进已有节点，整段被忽略的时刻走本地兜底
+        coverage = repairCoverage(validation.result, built.payload.events)
+        result = coverage.result
         truncation = validation.truncated
         usageTotals = { calls: callsMade, promptTokens: spent.promptTokens, completionTokens: spent.completionTokens }
       }
@@ -352,6 +361,7 @@ export function createInductionService(options: InductionServiceOptions): Induct
         result,
         moments: batch.moments,
         excludedEventIds: built.excludedIds,
+        uncoveredEventIds: coverage?.uncoveredEventIds ?? [],
         usage: usageTotals,
         now: currentNow
       })
@@ -369,7 +379,8 @@ export function createInductionService(options: InductionServiceOptions): Induct
         consumed: batch.consumed.length,
         more: batch.moments.length >= maxMoments(),
         usage: usageTotals,
-        truncated: truncation
+        truncated: truncation,
+        coverage: { filled: coverage?.filled ?? 0, uncovered: stats.uncovered }
       }
     } catch (error) {
       // 失败 / 取消也已经消耗了 token：照实记账，否则失败循环永远绕得过每日预算

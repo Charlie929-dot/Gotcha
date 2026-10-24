@@ -73,8 +73,9 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
   it('首轮非法 → 用错误摘要修复重试一次后成功', async () => {
     const db = makeDb()
     try {
+      // 结构非法（编造 id）才走修复重试；覆盖缺口已改为确定性补齐（见下方用例）
       const invalid = {
-        nodes: [{ title: '只有一条', summary: '漏了事件 2', type: 'knowledge', event_ids: [1] }],
+        nodes: [{ title: '只有一条', summary: '编造了 id', type: 'knowledge', event_ids: [1, 99] }],
         edges: []
       }
       const client = new FakeLlmClient([{ json: invalid }, { json: VALID }])
@@ -82,8 +83,58 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
 
       expect(outcome).toMatchObject({ status: 'ok', nodes: 2 })
       expect(client.optionCalls).toHaveLength(2)
-      expect(client.optionCalls[1].repair?.errors.join('；')).toContain('未被任何节点覆盖')
+      expect(client.optionCalls[1].repair?.errors.join('；')).toContain('不是本批事件 id')
       expect(readUsage(db, NOW)).toMatchObject({ calls: 2 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('同一时刻只回显第一个 id：自动补齐、不失败、不重复出云', async () => {
+    const db = makeDb()
+    try {
+      // 两个事件同 app + 同标题 + 相邻 1 分钟 → 同一个时刻（event_ids = [1, 2]）
+      const client = new FakeLlmClient([
+        { json: { nodes: [{ title: '读代码', summary: 'S', type: 'activity', event_ids: [1] }], edges: [] } }
+      ])
+      const outcome = await makeService(db, client).runOnce()
+
+      expect(outcome).toMatchObject({ status: 'ok', nodes: 1, coverage: { filled: 1, uncovered: 0 } })
+      expect(db.prepare('SELECT source_events FROM nodes').get()).toEqual({ source_events: '[1,2]' })
+      // 一次性成功：没有为覆盖缺口浪费修复重试
+      expect(client.requests).toHaveLength(1)
+      expect(await makeService(db, client).runOnce()).toEqual({ status: 'empty' })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('整段时刻被模型忽略：落本地「未归纳时段」兜底节点，事件不丢', async () => {
+    const db = openDatabase(':memory:')
+    try {
+      // 两个不同的时刻（标题不同），模型只归纳了第一个
+      insertEvent(db, { ts: NOW - 10 * 60_000, app: 'code.exe', windowTitle: 'a.ts', ocrText: '读代码' })
+      insertEvent(db, { ts: NOW - 9 * 60_000, app: 'chrome.exe', windowTitle: 'B 站', ocrText: '看视频' })
+      const client = new FakeLlmClient([
+        { json: { nodes: [{ title: '读代码', summary: 'S', type: 'activity', event_ids: [1] }], edges: [] } }
+      ])
+      const outcome = await makeService(db, client).runOnce()
+
+      expect(outcome).toMatchObject({ status: 'ok', nodes: 2, coverage: { filled: 0, uncovered: 1 } })
+      const rows = db
+        .prepare('SELECT type, title, summary, source_events FROM nodes ORDER BY id')
+        .all() as Array<Record<string, unknown>>
+      expect(rows).toEqual([
+        { type: 'activity', title: '读代码', summary: 'S', source_events: '[1]' },
+        {
+          type: 'activity',
+          title: '未归纳时段',
+          summary: '该时段模型未归纳，本地兜底（未出云）',
+          source_events: '[2]'
+        }
+      ])
+      // 兜底节点也覆盖事件：不会因为缺口反复重试同批
+      expect(await makeService(db, client).runOnce()).toEqual({ status: 'empty' })
     } finally {
       db.close()
     }
@@ -141,10 +192,12 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
     }
   })
 
-  it('修复重试仍非法：整批失败、游标不动、不写节点', async () => {
+  it('修复重试仍非法（编造 id）：整批失败、游标不动、不写节点', async () => {
     const db = makeDb()
     try {
-      const invalid = { nodes: [{ title: '只有一条', summary: '漏了事件 2', type: 'knowledge', event_ids: [1] }] }
+      const invalid = {
+        nodes: [{ title: '只有一条', summary: '编造了 id', type: 'knowledge', event_ids: [1, 99] }]
+      }
       const client = new FakeLlmClient([
         { json: invalid, usage: { promptTokens: 10, completionTokens: 2 } },
         { json: invalid, usage: { promptTokens: 10, completionTokens: 2 } }
@@ -303,7 +356,8 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
     vi.useFakeTimers()
     const db = makeDb()
     try {
-      const invalid = { nodes: [{ title: '只有一条', summary: '漏了事件 2', type: 'knowledge', event_ids: [1] }] }
+      // 用结构非法（type 越界）制造失败：覆盖缺口已改为确定性补齐，不再是失败理由
+      const invalid = { nodes: [{ title: '只有一条', summary: 'S', type: 'idea', event_ids: [1] }] }
       const client = new FakeLlmClient(Array.from({ length: 6 }, () => ({ json: invalid })))
       const service = createInductionService({
         db,
@@ -416,7 +470,7 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
 
 describe('induction service · 失败分类与停自动（可观测性）', () => {
   const INVALID = {
-    nodes: [{ title: '只有一条', summary: '漏了事件 2', type: 'knowledge', event_ids: [1] }]
+    nodes: [{ title: '只有一条', summary: 'S', type: 'idea', event_ids: [1] }]
   }
 
   it('失败写 lastFailure（分类 + 连续次数），下一次运行开始时清空', async () => {
@@ -481,8 +535,8 @@ describe('induction service · 失败分类与停自动（可观测性）', () =
       const failure = service.getState().lastFailure
       expect(failure?.code).toBe('validation')
       expect(failure?.message).toContain('未通过校验')
-      expect(failure?.message).toContain('未被任何节点覆盖')
-      expect(failure?.details).toEqual(['事件 2 未被任何节点覆盖'])
+      expect(failure?.message).toContain('只能是 knowledge / activity')
+      expect(failure?.details).toEqual(['nodes[0].type 只能是 knowledge / activity'])
       // 修复重试仍然只有一次
       expect(client.requests).toHaveLength(2)
     } finally {

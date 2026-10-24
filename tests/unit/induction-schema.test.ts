@@ -35,7 +35,7 @@ describe('validateInduction · 手写校验器', () => {
     expect(errorsOf({ ...(okJson() as object), total: 2 })).toContain('根节点含契约外字段')
   })
 
-  it('拒绝未知 id / 跨节点重复归属 / 未覆盖全部输入 id', () => {
+  it('拒绝未知 id / 跨节点重复归属；覆盖缺口不判失败（交给 coverage 补齐）', () => {
     const unknown = { nodes: [{ title: 'T', summary: 'S', type: 'knowledge', event_ids: [1, 99] }] }
     expect(errorsOf(unknown)).toContain('nodes[0].event_ids[1] 不是本批事件 id')
 
@@ -47,10 +47,13 @@ describe('validateInduction · 手写校验器', () => {
     }
     expect(errorsOf(duplicate)).toContain('nodes[1].event_ids[0] 重复归属（id 1）')
 
+    // 只写 id 1、漏了 2 / 3：2026-10-24 起不再整批失败（temperature=0 时修复重试会输出同一份，
+    // 这批事件会永远卡住）；缺口由 structure/coverage.ts 补到兄弟节点或落本地兜底节点
     const missing = { nodes: [{ title: 'T', summary: 'S', type: 'knowledge', event_ids: [1] }] }
-    const errors = errorsOf(missing)
-    expect(errors).toContain('事件 2 未被任何节点覆盖')
-    expect(errors).toContain('事件 3 未被任何节点覆盖')
+    const result = validateInduction(missing, ALLOWED)
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.result.nodes[0].eventIds).toEqual([1])
   })
 
   it('超长文本确定性截断并计数（长度不再是整批失败的理由）', () => {

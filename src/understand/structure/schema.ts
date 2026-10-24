@@ -7,8 +7,9 @@
  * - 文本长度是**展示约束不是错误**：超过硬上限（标题 40 / 摘要 80 / evidence 120）确定性截断
  *   （优先在标点处切，补 `…`）并计数，不再让整批失败——模型偶尔写 26–30 字的标题是可用的
  *   语义标题，悬停与侧栏显示完整，画布只显示前 18 字；
- * - `event_ids` 必须是整数、来自本批输入，且不能跨节点重复归属；本批输入 id 必须被全部覆盖
- *   （节点可下钻；校验失败走 1 次修复重试，仍失败整批失败、游标不动）；
+ * - `event_ids` 必须是整数、来自本批输入，且不能跨节点重复归属；**覆盖缺口不再判失败**：
+ *   同一「时刻」漏掉的 id 由 `structure/coverage.ts` 确定性补到兄弟节点，整段被忽略的时刻
+ *   落本地「未归纳时段」兜底节点（2026-10-24 拍板，见该文件头）；
  * - `edges` 的 from / to 是本次 nodes 下标，不可自环，weight ∈ [0,1]。
  *
  * 错误文案只含字段名 / 下标 / id / 上限，不含事件原文（日志与修复提示都不暴露正文）。
@@ -168,9 +169,8 @@ export function validateInduction(
     nodes.push({ title: safeTitle, summary: safeSummary, type: type as NodeType, eventIds })
   })
 
-  for (const id of allowedEventIds) {
-    if (!usedIds.has(id)) errors.push(`事件 ${id} 未被任何节点覆盖`)
-  }
+  // 覆盖缺口不在这里判死：模型对同一时刻常常只回显第一条 id，整批失败会让这批事件
+  // 永远卡住（temperature=0 的修复重试输出完全一样）。补齐 / 兜底见 structure/coverage.ts。
 
   const edges: InductionEdge[] = []
   if (json.edges !== undefined) {

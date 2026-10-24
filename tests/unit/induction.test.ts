@@ -217,6 +217,59 @@ describe('persistInduction · 单事务落库', () => {
     }
   })
 
+  it('整段时刻被忽略：写本地「未归纳时段」兜底节点，同一天合并、统计 uncovered', () => {
+    const { db, close } = setup()
+    try {
+      const ts = 1_700_000_000_000
+      const stats = persistInduction(
+        db,
+        input({
+          result: { nodes: [], edges: [] },
+          moments: [moment({ startTs: ts, endTs: ts + 1_000, eventIds: [1, 2] })],
+          uncoveredEventIds: [1, 2]
+        })
+      )
+      expect(stats.uncovered).toBe(2)
+      const row = db.prepare('SELECT type, title, summary, source_events FROM nodes').get() as Record<
+        string,
+        unknown
+      >
+      expect(row).toMatchObject({
+        type: 'activity',
+        title: '未归纳时段',
+        summary: '该时段模型未归纳，本地兜底（未出云）'
+      })
+      expect(JSON.parse(String(row.source_events))).toEqual([1, 2])
+      // 兜底内容不含原文
+      expect(JSON.stringify(row)).not.toContain('src/understand')
+    } finally {
+      close()
+    }
+  })
+
+  it('「未归纳时段」与「内容已保护」是两个节点，不会互相合并', () => {
+    const { db, close } = setup()
+    try {
+      const ts = 1_700_000_000_000
+      persistInduction(
+        db,
+        input({
+          result: { nodes: [], edges: [] },
+          moments: [moment({ startTs: ts, endTs: ts + 1_000, eventIds: [1, 2] })],
+          excludedEventIds: [1],
+          uncoveredEventIds: [2]
+        })
+      )
+      const rows = db.prepare('SELECT type, title FROM nodes ORDER BY id').all()
+      expect(rows).toEqual([
+        { type: 'protected', title: '内容已保护' },
+        { type: 'activity', title: '未归纳时段' }
+      ])
+    } finally {
+      close()
+    }
+  })
+
   it('游标与节点写入同一事务；今日用量累加（calls / prompt_tokens / completion_tokens）', () => {
     const { db, close } = setup()
     try {

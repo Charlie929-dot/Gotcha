@@ -32,7 +32,7 @@ describe('migrations · :memory: 库', () => {
     try {
       expect(getSchemaVersion(db)).toBe(0)
       expect(applyMigrations(db)).toBe(LATEST)
-      expect(LATEST).toBe(4)
+      expect(LATEST).toBe(5)
 
       db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
       // 第二次跑同一套迁移：不应抛错、版本不倒退、已有数据不丢
@@ -77,6 +77,11 @@ describe('migrations · :memory: 库', () => {
         db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>
       ).map((row) => row.name)
       expect(nodeColumns).toContain('merged_into')
+      // v5：检索索引（trigram FTS + 触发器同步）
+      expect(names).toContain('events_fts')
+      expect(names).toContain('events_fts_ai')
+      expect(names).toContain('events_fts_ad')
+      expect(names).toContain('events_fts_au')
 
       revertMigrations(db)
       expect(getSchemaVersion(db)).toBe(0)
@@ -95,6 +100,10 @@ describe('migrations · :memory: 库', () => {
       expect(afterDown).not.toContain('node_merges')
       expect(afterDown).not.toContain('event_embeddings')
       expect(afterDown).not.toContain('theme_centroids')
+      expect(afterDown).not.toContain('events_fts')
+      expect(afterDown).not.toContain('events_fts_ai')
+      expect(afterDown).not.toContain('events_fts_ad')
+      expect(afterDown).not.toContain('events_fts_au')
 
       expect(applyMigrations(db)).toBe(LATEST)
       expect(structureSnapshot(db)).toEqual(before)
@@ -170,6 +179,43 @@ describe('migrations · :memory: 库', () => {
       expect(applyMigrations(db)).toBe(LATEST)
       expect(db.prepare('SELECT COUNT(*) AS n FROM nodes').get()).toEqual({ n: 0 })
       expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v5 迁移把已有事件回填进检索索引（归一化后连续中文可命中），触发器接管增量写入', () => {
+    const db = new Database(':memory:')
+    try {
+      applyMigrations(db)
+      revertMigrations(db, 4)
+      expect(getSchemaVersion(db)).toBe(4)
+      expect(structureSnapshot(db).map((row) => row.name)).not.toContain('events_fts')
+
+      // 库里已有的 L0 事件（OCR 是逐字带空格的原文）
+      db.prepare("INSERT INTO events (ts, app, ocr_text) VALUES (1, 'Code', '改 按 钮 样 式')").run()
+      db.prepare("INSERT INTO events (ts, app, ocr_text) VALUES (2, 'Chrome', '查 API 用法')").run()
+
+      expect(applyMigrations(db)).toBe(LATEST)
+      expect(db.prepare('SELECT rowid, ocr_text FROM events_fts ORDER BY rowid').all()).toEqual([
+        { rowid: 1, ocr_text: '改按钮样式' },
+        { rowid: 2, ocr_text: '查API用法' }
+      ])
+      expect(
+        db
+          .prepare("SELECT rowid FROM events_fts WHERE events_fts MATCH '\"按钮样式\"' ORDER BY rowid")
+          .all()
+      ).toEqual([{ rowid: 1 }])
+
+      // 触发器接管之后的增量写入 / 删除
+      db.prepare("INSERT INTO events (ts, app, ocr_text) VALUES (3, 'Code', '新 增 事 件')").run()
+      expect(
+        db.prepare("SELECT rowid FROM events_fts WHERE events_fts MATCH '\"新增事件\"'").all()
+      ).toEqual([{ rowid: 3 }])
+      db.prepare('DELETE FROM events WHERE id = 3').run()
+      expect(
+        db.prepare("SELECT rowid FROM events_fts WHERE events_fts MATCH '\"新增事件\"'").all()
+      ).toEqual([])
     } finally {
       db.close()
     }

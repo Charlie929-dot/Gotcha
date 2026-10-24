@@ -9,26 +9,60 @@
   </head>
   <body>
     <header class="toolbar">
-      <div class="brand">
-        <h1>记忆球 · 全局图</h1>
-        <span id="status" class="status" data-kind="idle">读取中…</span>
-        <span id="status-detail" class="status-detail" hidden></span>
+      <div class="toolbar-main">
+        <div class="brand">
+          <h1>记忆球 · 全局图</h1>
+          <span id="status" class="status" data-kind="idle">读取中…</span>
+          <span id="status-detail" class="status-detail" hidden></span>
+        </div>
+        <div class="nav">
+          <label class="chip" title="隐藏时刻点，只看主题">
+            <input id="only-themes" type="checkbox" /> 只看主题
+          </label>
+          <button id="calendar-btn" type="button" title="按时间筛选（只调暗，不删数据）">
+            日期：<span id="day-label">全部</span>
+          </button>
+          <button id="fit" type="button">适配视野</button>
+          <button id="reheat" type="button">重排</button>
+          <span class="spacer"></span>
+          <button id="induce" type="button" title="归纳所选日期（未选日期时归纳今天）">立即归纳</button>
+          <button id="refresh" type="button">刷新</button>
+          <button id="settings" type="button">设置</button>
+          <button id="timeline" type="button">打开时间线</button>
+          <button id="view-classic" type="button" title="切回旧的按日 sigma 视图">经典视图</button>
+        </div>
       </div>
-      <div class="nav">
-        <label class="chip" title="隐藏时刻点，只看主题">
-          <input id="only-themes" type="checkbox" /> 只看主题
-        </label>
-        <button id="calendar-btn" type="button" title="按时间筛选（只调暗，不删数据）">
-          日期：<span id="day-label">全部</span>
-        </button>
-        <button id="fit" type="button">适配视野</button>
-        <button id="reheat" type="button">重排</button>
-        <span class="spacer"></span>
-        <button id="induce" type="button" title="归纳所选日期（未选日期时归纳今天）">立即归纳</button>
-        <button id="refresh" type="button">刷新</button>
-        <button id="settings" type="button">设置</button>
-        <button id="timeline" type="button">打开时间线</button>
-        <button id="view-classic" type="button" title="切回旧的按日 sigma 视图">经典视图</button>
+
+      <!-- 门一「问」：L0 全文检索（Ctrl+F 聚焦；结果按时刻成卡片，点开回到那一刻） -->
+      <form id="search-form" class="searchbar" role="search" autocomplete="off">
+        <input
+          id="search-input"
+          type="search"
+          placeholder="搜一句你记得的话（OCR 全文，≥2 字）"
+          aria-label="检索 OCR 全文"
+          spellcheck="false"
+        />
+        <select id="search-range" title="时间窗">
+          <option value="all">全部时间</option>
+          <option value="today">今天</option>
+          <option value="3d">前 3 天</option>
+          <option value="7d">前 7 天</option>
+          <option value="30d">前 1 月</option>
+        </select>
+        <select id="search-app" title="只看某个应用">
+          <option value="">全部应用</option>
+        </select>
+        <input id="search-title" type="search" placeholder="窗口标题包含…" aria-label="窗口标题包含" />
+        <button id="search-submit" type="submit">检索</button>
+      </form>
+
+      <div id="search-results" class="search-results" hidden>
+        <header class="search-results-head">
+          <strong id="search-summary"></strong>
+          <span id="search-hint" class="hint"></span>
+          <button id="search-close" type="button" aria-label="关闭检索结果" title="关闭">×</button>
+        </header>
+        <ul id="search-list" class="search-list"></ul>
       </div>
     </header>
 

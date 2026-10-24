@@ -14,7 +14,7 @@
 | WinRT OCR 只能在 PowerShell 5.1 里调 | pwsh 7 加载 `[Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType=WindowsRuntime]` 失败（.NET Core 无 WinRT 投影）；PS 5.1 正常，长驻进程稳态往返 ~43ms（1080p） | 用 `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File resources/ocr/winrt-ocr.ps1`，JSON 行协议（启动先输出 `{"ready":true}`）；2026-10-21 实测 |
 | active-win 在 Electron 主进程返回物理像素 | 同一窗口 node 里 1550×830、Electron 里 1938×1038（@1.25），而 `display.bounds` 是 DIP（1536×864）→ 直接相减裁剪会错位（2026-10-21 实测） | 先把 `display.bounds × scaleFactor` 换成物理坐标再裁剪；desktopCapturer 的 thumbnailSize 也用 `DIP × scaleFactor`（screen.ts 已按此实现） |
 | Electron `NativeImage.getBitmap()` 已废弃 | Electron 45 类型里返回 `void`，`new Uint8Array(image.getBitmap())` 报 TS2769 | 用 `image.toBitmap()`（返回 Buffer，RGBA），见 screen.ts |
-| WinRT OCR 中文按字分词 | 结果 CJK 字符间插空格：「记 忆 球 测 试」；M1a 原样入库（D10 忠实还原） | 不在采集层做归一化；M2 归纳/检索时再处理分词空格 |
+| WinRT OCR 中文按字分词 | 结果 CJK 字符间插空格：「记 忆 球 测 试」；M1a 原样入库（D10 忠实还原）。本机 9 866 条非空 OCR 里 **98.9%** 是这种逐字形态（2026-10-24 实测） | 采集层不归一化（L0 不改写）；检索层统一去空白：索引与查询两侧同口径（`src/db/schema.ts` 的 `normalizeOcrSql`，触发器 / v5 重建 / 查询共用）。同一词原文 LIKE 命中 42 条、去空白后 2 503 条——不归一化的中文检索基本等于不可用 |
 | electron-vite 自定义启动参数 | `npm run dev -- --capture` 报 `CACError: Unknown option --capture`（参数被 electron-vite 当成自己的 CLI 选项） | 用仓库脚本 `npm run dev:capture`，或 `npm run dev -- -- --capture`（第二个 `--` 透传成 ELECTRON_CLI_ARGS），或 `GOTCHA_CAPTURE=1 npm run dev` |
 | 透明置顶窗口 | 挡点击 / 抢焦点 / 任务栏异常 | 收起态 `setIgnoreMouseEvents(true, { forward: true })`，只在交互区恢复；永不 `focus()` 抢焦点 |
 | 归纳任务与实时采集争用 | 卡顿、事件积压 | 归纳走 worker + 任务队列，空闲/低负载时执行；队列有上限与背压 |
@@ -81,6 +81,8 @@
 | 「缺失事件向量」不能把空文本算进去 | 4 条成员事件 title/OCR 都为空，永远算不出向量；若缺失统计把它们算进去，质心会被永久判为「不完整」，合并永远不跑（2026-10-24 真实库副本踩到） | 缺失统计与 `listEventTexts` 用同一口径：`TRIM(title || ocr) != ''` 才计入；空文本事件跳过、不算缺失 |
 | 「未覆盖全部输入 id」类校验 + `temperature=0` = 永久卡死 | 模型对同一「时刻」常常只回显 `event_ids` 第一条（2026-10-24 真机：`[8074,8075]` 只写 8074、`[8083,8084]` 只写 8083），旧校验整批失败；修复重试虽带错误摘要，但 `temperature=0` 输出与上次逐字相同，于是同一批每 10 分钟失败一次、游标不动、每轮白烧两次调用，最后把自动归纳打到 `halted`（日志 14:22 / 14:23 / 14:25 / 14:28 都是同一个事件） | 覆盖缺口不判失败，改确定性补齐：`src/understand/structure/coverage.ts` 把同一时刻漏掉的 id 补到覆盖该时刻的兄弟节点（兄弟最多、并列取输出下标最小）；整段被忽略的时刻落本地「未归纳时段」兜底节点。只有「编造 id / 重复归属 / 结构非法」才整批失败——那类错误换个输出才可能修好。排查信号：`main.log` 里同一个 id 连续出现在 `details` 就是死循环，别指望重试自愈 |
 | 日历点一下日期弹层就关、涂抹拖不动 | 日格的 `mousedown` 里 `renderCalendar()` 把 42 个格子整个重建；事件冒泡到 `document` 时，外部点击判断的 `calendarEl.contains(event.target)` 对已被摘掉的 target 返回 false → 被当成「点在外面」隐藏弹层。快捷按钮在 `click`（mousedown 之后）才重建，所以不触发，看起来像「只有点日期会退出」（2026-10-24 E2E 复现：点完 `#calendar` 立刻 `hidden`） | ① 外部点击判断放**捕获阶段**（document capture，target 还在树里）；② 交互期间**只重刷 class、不重建 DOM**：`renderCalendar()` 建格子、`paintCalendar()` 刷 `.on/.today`，涂抹靠 `mouseenter` 改选择；③ 涂抹加 `event.buttons & 1` 兜底「在窗口外松手」；④ 弹层头部给独立 `×`，只关弹层不关窗口。用例：`tests/e2e/graph-global.spec.ts` 真实鼠标点 / 拖 / × |
+| FTS5 trigram 最小 3 字符 | 两字中文词（「图谱」「按钮」）用 `MATCH` 恒不命中（`sqlite 3.53.4` 实测）；`unicode61` 更糟——整串中文算一个 token，1/2 字全不命中 | ≥3 字走 trigram `MATCH`（bm25 排序），含短词一律 LIKE 兜底（`src/understand/search.ts` 的 `classifyQuery`）；LIKE 走 FTS 表内容全表扫，9 914 事件约 120 ms、随事件量线性增长（实测查询 1–290 ms）。`LIKE` 的 `%` / `_` 必须 `ESCAPE '\'` 转义，否则用户搜「%燃」会变成通配 |
+| FTS 索引升级期一次性建库开销 | 9 914 条事件建 trigram 索引约 4.1 s、库 +47 MB（原文 12 MB + 索引 35 MB）；v5 迁移在 `openDatabase()` 里同步跑，暂停态用户首次打开图谱会等到 ~7.6 s（含迁移前整库备份） | 迁移前已有 `memory.db.bak.*`；索引是派生数据，坏了 `rebuildEventSearchIndex()` 重来。事件量再大一个量级时要把回填挪到后台（当前 10k 量级接受一次性等待，别再在 `up()` 里加同步大活） |
 
 ## 规则
 

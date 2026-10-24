@@ -106,7 +106,8 @@ test.beforeAll(async () => {
   otherKey = localDayKey(t1 - 3 * DAY_MS)
 
   const db = openDatabase(join(userDataDir, 'memory.db'))
-  const e1 = insertEvent(db, { ts: t1, app: 'Code', windowTitle: 'a.ts', ocrText: '改按钮样式' })
+  // e1 故意用 OCR 的逐字空格形态：检索必须在归一化索引上命中连续中文词
+  const e1 = insertEvent(db, { ts: t1, app: 'Code', windowTitle: 'a.ts', ocrText: '改 按 钮 样 式' })
   const e2 = insertEvent(db, {
     ts: t1 + 30_000,
     app: 'Code',
@@ -370,6 +371,57 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     } finally {
       expect(count).toBeGreaterThanOrEqual(2)
     }
+  })
+
+  test('门一检索：OCR 逐字空格也能搜到，卡片点开回到那一刻', async () => {
+    // app 过滤器候选项（全部应用 + 种子的两个 app）
+    await expect(graph.locator('#search-app option')).toHaveCount(3, { timeout: 15_000 })
+
+    // 连续 4 字 → trigram MATCH；种子事件原文是「改 按 钮 样 式」，只有归一化索引能命中
+    await graph.locator('#search-input').fill('按钮样式')
+    await graph.locator('#search-input').press('Enter')
+    await expect(graph.locator('#search-results')).toBeVisible()
+    await expect(graph.locator('#search-list li')).toHaveCount(1, { timeout: 15_000 })
+    const card = graph.locator('#search-list li').first()
+    await expect(card).toContainText('Code')
+    await expect(card).toContainText('a.ts')
+    await expect(card).toContainText('按钮样式')
+    await expect(card).toHaveAttribute('data-moment-id', '1')
+
+    // 两字词走 LIKE 兜底，同样命中
+    await graph.locator('#search-input').fill('按钮')
+    await graph.locator('#search-input').press('Enter')
+    await expect(graph.locator('#search-list li')).toHaveCount(1, { timeout: 15_000 })
+    await expect(graph.locator('#search-hint')).toContainText('两字词走模糊匹配')
+
+    // 点卡片 → 侧栏原始事件（走时刻成员事件，含同一时刻的 2 条事件）
+    await graph.locator('#search-list li').first().click()
+    await expect(graph.locator('#panel')).toBeVisible()
+    await expect(graph.locator('#panel-title')).toContainText('Code')
+    await expect(graph.locator('#panel-events li')).toHaveCount(2)
+    await expect(graph.locator('#panel-events li').first()).toContainText('改 按 钮 样 式')
+
+    // app / 标题过滤生效
+    await graph.locator('#search-input').fill('用法')
+    await graph.locator('#search-app').selectOption('Chrome')
+    await expect(graph.locator('#search-list li')).toHaveCount(1, { timeout: 15_000 })
+    await expect(graph.locator('#search-list li').first()).toContainText('文档')
+    await graph.locator('#search-app').selectOption('Code')
+    await expect(graph.locator('#search-list li')).toHaveCount(1, { timeout: 15_000 })
+    await expect(graph.locator('#search-list li').first()).toHaveClass(/empty/)
+    await graph.locator('#search-title').fill('文档')
+    await graph.locator('#search-input').press('Enter')
+    await expect(graph.locator('#search-list li.empty')).toHaveCount(1)
+
+    // 没命中给明确空态；Esc 关结果、不关窗口
+    await graph.locator('#search-app').selectOption('')
+    await graph.locator('#search-title').fill('')
+    await graph.locator('#search-input').fill('完全 不存在 的 词')
+    await graph.locator('#search-input').press('Enter')
+    await expect(graph.locator('#search-list li.empty')).toContainText('没有找到这段记忆')
+    await graph.locator('#search-input').press('Escape')
+    await expect(graph.locator('#search-results')).toBeHidden()
+    await expect(graph.locator('foam-graph')).toBeVisible()
   })
 
   test('经典视图互切：全局 Foam 页 ↔ 旧 sigma 按日页', async () => {

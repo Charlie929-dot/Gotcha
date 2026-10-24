@@ -12,6 +12,7 @@ import type { GraphDayData, GraphGlobalData, NodeEventsResult } from '../underst
 import { emptyGlobalGraph } from '../understand/graph-query'
 import type { SaveNodePositionsResult } from '../understand/node-positions'
 import { MAX_POSITIONS_PER_SAVE } from '../understand/node-positions'
+import type { SearchHitEventsInput, SearchInput, SearchResult } from '../understand/search'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
@@ -48,6 +49,12 @@ export interface GraphIpcDeps {
   queryNodeEvents(nodeId: number): NodeEventsResult
   /** 时刻下钻：`moments.event_ids` → events 行 */
   queryMomentEvents(momentId: number): NodeEventsResult
+  /** 门一检索 v1：L0 全文 + app / 标题 / 时间窗过滤，结果按时刻成卡片 */
+  search(input: SearchInput): SearchResult
+  /** 检索卡片下钻（有 momentId 走时刻成员事件，否则按窗口现取） */
+  searchHitEvents(input: SearchHitEventsInput): NodeEventsResult
+  /** 检索的 app 过滤器候选项 */
+  searchApps(): string[]
   /** Foam 沉降后回写主题坐标（下次打开作为 seed） */
   savePositions(input: unknown): SaveNodePositionsResult
   getSnapshot(): InductionSnapshot
@@ -71,6 +78,18 @@ const EMPTY_NODE_EVENTS: NodeEventsResult = {
   malformed: false
 }
 
+const EMPTY_SEARCH: SearchResult = {
+  query: '',
+  mode: 'empty',
+  hits: [],
+  matchedEvents: 0,
+  truncated: false
+}
+
+/** 检索输入上限（IPC 是信任边界，长度先卡死再进查询层） */
+const MAX_QUERY_LENGTH = 200
+const MAX_FILTER_TEXT_LENGTH = 200
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
 }
@@ -82,6 +101,56 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function serializeOutcome(outcome: InductionRunOutcome): GraphInduceResult {
   if (outcome.status === 'error') return { status: 'error', message: outcome.error.message }
   return outcome
+}
+
+/** IPC 入参校验：非法直接当空检索，不把原始输入塞进查询层 */
+function readSearchInput(input: unknown): SearchInput | null {
+  if (!isPlainObject(input)) return null
+  if (typeof input.query !== 'string' || input.query.length > MAX_QUERY_LENGTH) return null
+
+  const optionalText = (value: unknown): string | null | undefined => {
+    if (value === undefined || value === null) return null
+    if (typeof value !== 'string' || value.length > MAX_FILTER_TEXT_LENGTH) return undefined
+    return value
+  }
+  const optionalTs = (value: unknown): number | null | undefined => {
+    if (value === undefined || value === null) return null
+    return isFiniteNumber(value) ? value : undefined
+  }
+
+  const app = optionalText(input.app)
+  const titleContains = optionalText(input.titleContains)
+  const fromTs = optionalTs(input.fromTs)
+  const toTs = optionalTs(input.toTs)
+  if (app === undefined || titleContains === undefined || fromTs === undefined || toTs === undefined) {
+    return null
+  }
+  return { query: input.query, app, titleContains, fromTs, toTs }
+}
+
+function readSearchHitEventsInput(input: unknown): SearchHitEventsInput | null {
+  if (!isPlainObject(input)) return null
+  if (typeof input.app !== 'string' || input.app.length > MAX_FILTER_TEXT_LENGTH) return null
+  const windowTitle = input.windowTitle
+  if (
+    windowTitle !== undefined &&
+    windowTitle !== null &&
+    (typeof windowTitle !== 'string' || windowTitle.length > MAX_FILTER_TEXT_LENGTH)
+  ) {
+    return null
+  }
+  if (!isFiniteNumber(input.startTs) || !isFiniteNumber(input.endTs)) return null
+  const momentId = input.momentId
+  if (momentId !== undefined && momentId !== null) {
+    if (!Number.isInteger(momentId) || (momentId as number) <= 0) return null
+  }
+  return {
+    momentId: (momentId as number | null | undefined) ?? null,
+    app: input.app,
+    windowTitle: (windowTitle as string | null | undefined) ?? null,
+    startTs: input.startTs,
+    endTs: input.endTs
+  }
 }
 
 export function registerGraphIpc(deps: GraphIpcDeps): () => void {
@@ -149,6 +218,36 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
         }
       }
     ],
+    [
+      'graph:search',
+      (event, input) => {
+        if (!ensureSender(event)) return EMPTY_SEARCH
+        const parsed = readSearchInput(input)
+        if (!parsed) return EMPTY_SEARCH
+        try {
+          return deps.search(parsed)
+        } catch (error) {
+          // 只记「失败了」，不记查询串 / OCR 原文
+          deps.log('warn', 'graph search failed', { error: String(error) })
+          return EMPTY_SEARCH
+        }
+      }
+    ],
+    [
+      'graph:search-hit-events',
+      (event, input) => {
+        if (!ensureSender(event)) return EMPTY_NODE_EVENTS
+        const parsed = readSearchHitEventsInput(input)
+        if (!parsed) return EMPTY_NODE_EVENTS
+        try {
+          return deps.searchHitEvents(parsed)
+        } catch (error) {
+          deps.log('warn', 'graph search hit events failed', { error: String(error) })
+          return EMPTY_NODE_EVENTS
+        }
+      }
+    ],
+    ['graph:search-apps', (event) => (ensureSender(event) ? deps.searchApps() : [])],
     [
       'graph:positions:save',
       (event, positions) => {

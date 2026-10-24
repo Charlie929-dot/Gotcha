@@ -23,15 +23,24 @@ body {
 
 .toolbar {
   flex: 0 0 auto;
-  flex-direction: row;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 14px;
+  position: relative;
+}
+
+.toolbar-main {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 8px 14px;
+  flex-wrap: wrap;
 }
 
 .brand {
   min-width: 0;
+  flex: 0 0 auto;
 }
 
 .brand h1 {
@@ -40,6 +49,141 @@ body {
 
 .nav {
   justify-content: flex-end;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* 门一「问」：检索行（输入 + 时间窗 / 应用 / 标题过滤） */
+.searchbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.searchbar input[type='search'],
+.searchbar select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 9px;
+  font: inherit;
+}
+
+.searchbar input[type='search']:focus,
+.searchbar select:focus {
+  outline: none;
+  border-color: rgb(79 195 247 / 55%);
+}
+
+#search-input {
+  flex: 1;
+  min-width: 220px;
+}
+
+#search-title {
+  width: 180px;
+}
+
+.search-results {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 14px;
+  width: min(640px, calc(100% - 28px));
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  z-index: 20;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 14px 40px rgb(0 0 0 / 45%);
+  padding: 10px 12px;
+}
+
+.search-results-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.search-results-head strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.search-results-head .hint {
+  margin: 0;
+}
+
+.search-results-head button {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 14px;
+  line-height: 1.1;
+  color: var(--muted);
+}
+
+.search-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.search-list li {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.search-list li:hover {
+  border-color: rgb(79 195 247 / 55%);
+  background: #262634;
+}
+
+.search-list li.empty {
+  cursor: default;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.search-list li.empty:hover {
+  border-color: var(--border);
+  background: var(--panel-2);
+}
+
+.search-list .hit-head {
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.search-list .hit-title {
+  margin-top: 2px;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-list .hit-snippet {
+  margin-top: 3px;
+  color: #85858f;
+  font-size: 12px;
+}
+
+.search-list .hit-meta {
+  margin-top: 3px;
+  color: #6d6d80;
+  font-size: 11px;
 }
 
 main.stage {

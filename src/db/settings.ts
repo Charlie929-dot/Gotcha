@@ -12,6 +12,8 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'graph.interval_minutes': '10',
   'graph.budget_tokens_per_day': '1000000',
   'graph.retry_backoff_minutes': '1,5,15',
+  // 连续失败到上限就停自动归纳（手动「立即归纳」成功一次即恢复；2026-10-24 可观测性）
+  'graph.max_consecutive_failures': '5',
   'graph.batch_max_moments': '20',
   'graph.max_tokens': '2000',
   // 本地向量模型目录（留空 = `<userData>/models/bge-small-zh-v1.5`；D29 / 方案 §10）

@@ -2,7 +2,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openDatabase, insertEvent } from '../../src/db'
 import { setSetting } from '../../src/db/settings'
 import { readCursor, startOfLocalDay } from '../../src/understand/cloud/batch'
-import { FakeLlmClient, LlmAbortError, LlmParseError, type LlmClient } from '../../src/understand/cloud/llm-client'
+import {
+  FakeLlmClient,
+  LlmAbortError,
+  LlmError,
+  LlmHttpError,
+  LlmNetworkError,
+  LlmParseError,
+  LlmTimeoutError,
+  type LlmClient
+} from '../../src/understand/cloud/llm-client'
 import { createInductionService, type InductionService } from '../../src/understand/service'
 import { localDayKey, readUsage } from '../../src/understand/induction'
 
@@ -398,6 +407,127 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
       service.start()
       expect(service.isActive()).toBe(true)
       expect(service.getState().nextRunAt).toBe(NOW + 5_000)
+      service.stop()
+    } finally {
+      db.close()
+    }
+  })
+})
+
+describe('induction service · 失败分类与停自动（可观测性）', () => {
+  const INVALID = {
+    nodes: [{ title: '只有一条', summary: '漏了事件 2', type: 'knowledge', event_ids: [1] }]
+  }
+
+  it('失败写 lastFailure（分类 + 连续次数），下一次运行开始时清空', async () => {
+    const db = makeDb()
+    try {
+      const client = new FakeLlmClient([new LlmHttpError(429)])
+      const service = makeService(db, client)
+
+      const outcome = await service.runOnce()
+      expect(outcome.status).toBe('error')
+      expect(service.getState().lastFailure).toMatchObject({
+        code: 'http',
+        status: 429,
+        streak: 1
+      })
+      expect(service.getState().lastError).toContain('429')
+
+      // 下一次开始（running）立刻清掉旧失败，避免 UI 把上次原因挂在运行中
+      client.push({ json: VALID })
+      const pending = service.runOnce()
+      expect(service.getState().lastFailure).toBeUndefined()
+      expect((await pending).status).toBe('ok')
+      expect(service.getState().lastSuccessAt).toBe(NOW)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('失败分类：超时 / 网络 / 配置 / 未知各归各类', async () => {
+    const cases: Array<[Error, string]> = [
+      [new LlmTimeoutError(), 'timeout'],
+      [new LlmNetworkError(), 'network'],
+      [new LlmError('缺少 API key', 'config'), 'config'],
+      [new Error('boom'), 'unknown']
+    ]
+    for (const [error, code] of cases) {
+      const db = makeDb()
+      try {
+        const service = makeService(db, new FakeLlmClient([error]))
+        expect((await service.runOnce()).status).toBe('error')
+        expect(service.getState().lastFailure?.code).toBe(code)
+        expect(service.getState().lastFailure?.streak).toBe(1)
+      } finally {
+        db.close()
+      }
+    }
+  })
+
+  it('连续失败达上限停自动（不再排下次）；手动成功一次即恢复排程', async () => {
+    vi.useFakeTimers()
+    const db = makeDb()
+    try {
+      setSetting(db, 'graph.max_consecutive_failures', '2')
+      const client = new FakeLlmClient([
+        { json: INVALID },
+        { json: INVALID },
+        { json: INVALID },
+        { json: INVALID },
+        { json: VALID }
+      ])
+      const service = createInductionService({
+        db,
+        getClient: () => client,
+        now: () => NOW,
+        firstDelayMs: 5_000,
+        intervalMs: 600_000
+      })
+      service.start()
+
+      // 第 1 次失败 → 退避 1 分钟后重试
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(service.getState().status).toBe('backoff')
+      expect(service.getState().lastFailure).toMatchObject({ code: 'parse', streak: 1 })
+      expect(service.getState().nextRunAt).toBe(NOW + 60_000)
+
+      // 第 2 次失败 → 到上限：停自动，不再排下一次
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(service.getState().status).toBe('error')
+      expect(service.getState().halted).toBe(true)
+      expect(service.getState().lastFailure?.streak).toBe(2)
+      expect(service.getState().nextRunAt).toBeUndefined()
+
+      // 再过一小时也不会自己重试（不会无限 1/5/15 分钟循环）
+      await vi.advanceTimersByTimeAsync(3_600_000)
+      expect(client.pending).toBe(1)
+
+      // 手动「立即归纳」成功：解除停自动并恢复排程
+      expect((await service.runOnce({ manual: true })).status).toBe('ok')
+      expect(service.getState().halted).toBe(false)
+      expect(service.getState().nextRunAt).toBe(NOW + 600_000)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('start 复位停自动状态（采集重启后回到正常调度）', async () => {
+    const db = makeDb()
+    try {
+      setSetting(db, 'graph.max_consecutive_failures', '1')
+      const service = createInductionService({
+        db,
+        getClient: () => new FakeLlmClient([new Error('boom')]),
+        now: () => NOW,
+        firstDelayMs: 5_000
+      })
+      service.start()
+      await service.runOnce()
+      expect(service.getState().halted).toBe(true)
+      service.stop()
+      service.start()
+      expect(service.getState().halted).toBe(false)
       service.stop()
     } finally {
       db.close()

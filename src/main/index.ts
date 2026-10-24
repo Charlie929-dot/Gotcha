@@ -253,6 +253,7 @@ function currentInductionSnapshot(): InductionSnapshot {
   const resolved = resolveClient()
   return {
     status: 'stopped',
+    halted: false,
     consent: db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false,
     captureRunning: controller.status() === 'running',
     client: resolved.ok

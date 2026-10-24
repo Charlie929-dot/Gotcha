@@ -37,6 +37,7 @@ import {
 } from './graph-interactions'
 import { createNodePanel } from './graph-panel'
 import { createSettingsPanel } from './graph-settings-panel'
+import { statusView } from './status-view'
 
 declare global {
   interface Window {
@@ -73,6 +74,7 @@ interface SigmaModules {
 }
 
 const statusEl = document.getElementById('status')
+const statusDetailEl = document.getElementById('status-detail')
 const dateEl = document.getElementById('date')
 const emptyEl = document.getElementById('empty')
 const countEl = document.getElementById('node-count')
@@ -96,6 +98,7 @@ const filterInputs = Array.from(
 
 if (
   !statusEl ||
+  !statusDetailEl ||
   !dateEl ||
   !emptyEl ||
   !countEl ||
@@ -119,6 +122,7 @@ if (
 
 const els = {
   status: statusEl,
+  statusDetail: statusDetailEl,
   date: dateEl,
   empty: emptyEl,
   count: countEl,
@@ -177,45 +181,6 @@ document.getElementById('settings')?.addEventListener('click', () => {
   void settingsPanel.open()
 })
 
-const STATUS_LABEL: Record<string, string> = {
-  idle: '空闲',
-  running: '归纳中…',
-  backoff: '退避重试',
-  error: '上次失败',
-  'budget-exhausted': '今日预算已用尽',
-  stopped: '未运行'
-}
-
-function statusView(current: InductionSnapshot | null): { kind: string; text: string } {
-  if (!current) return { kind: 'idle', text: '读取中…' }
-  if (!current.consent) return { kind: 'consent', text: '未确认出网' }
-  if (!current.client.ok) {
-    if (current.client.reason === 'missing-key') {
-      return { kind: 'error', text: `未配置密钥（${current.client.apiKeyEnv ?? '环境变量'}）` }
-    }
-    if (current.client.reason === 'invalid-providers') {
-      return { kind: 'error', text: '供应商配置损坏' }
-    }
-    if (current.client.reason === 'unknown-provider') {
-      return { kind: 'error', text: '当前供应商不存在' }
-    }
-    return { kind: 'error', text: '供应商配置不可用' }
-  }
-  if (!current.captureRunning && current.status === 'stopped') {
-    return { kind: 'idle', text: '采集暂停，归纳已停' }
-  }
-  if (current.status === 'budget-exhausted') {
-    return { kind: 'budget', text: STATUS_LABEL[current.status] }
-  }
-  if (current.status === 'error') return { kind: 'error', text: '上次归纳失败' }
-  if (current.status === 'backoff') return { kind: 'backoff', text: STATUS_LABEL[current.status] }
-  if (current.status === 'running') return { kind: 'running', text: STATUS_LABEL[current.status] }
-  return {
-    kind: current.status === 'idle' ? 'ok' : 'idle',
-    text: STATUS_LABEL[current.status] ?? current.status
-  }
-}
-
 function applySnapshot(next: InductionSnapshot): void {
   if (statusFlashTimer !== null) {
     clearTimeout(statusFlashTimer)
@@ -225,6 +190,9 @@ function applySnapshot(next: InductionSnapshot): void {
   const view = statusView(next)
   els.status.dataset.kind = view.kind
   els.status.textContent = view.text
+  els.status.title = view.detail
+  els.statusDetail.textContent = view.detail
+  els.statusDetail.hidden = view.detail === ''
   els.consent.hidden = !(next.client.ok && !next.consent)
   const canInduce = next.client.ok && next.captureRunning
   ;(document.getElementById('induce') as HTMLButtonElement | null)?.toggleAttribute(
@@ -240,6 +208,9 @@ function flashStatus(text: string, kind: string): void {
   if (statusFlashTimer !== null) clearTimeout(statusFlashTimer)
   els.status.dataset.kind = kind
   els.status.textContent = text
+  els.status.title = ''
+  els.statusDetail.textContent = ''
+  els.statusDetail.hidden = true
   statusFlashTimer = setTimeout(() => {
     statusFlashTimer = null
     if (snapshot) applySnapshot(snapshot)

@@ -11,7 +11,13 @@
 
 import type { GraphData, GraphDataLink, NodeInfo } from '../foam/protocol'
 import type { GraphGlobalData } from '../../understand/graph-query'
-import { momentMatchesDays, themeMatchesDays } from './calendar'
+import {
+  ALL_DAY,
+  clockWindows,
+  momentInWindows,
+  windowsOverlap,
+  type ClockRange
+} from './time-of-day'
 
 export interface ThemeSeed {
   id: number
@@ -213,22 +219,25 @@ export function toGlobalGraphInput(data: GraphGlobalData): GlobalGraphInput {
   return { themes, moments, edges }
 }
 
-/** 时间筛选：返回需要调暗（而不是删除）的节点 id 集合。
+/**
+ * 时间筛选：所选日期 × 每天时段（默认全天）→ 若干时间窗，与窗外节点调暗（不删除）。
  * `days === null`（全部）时返回空集合。
  */
 export function timeDimmedIds(
   input: GlobalGraphInput,
-  days: Set<string> | null
+  days: Set<string> | null,
+  clock: ClockRange = ALL_DAY
 ): Set<string> {
   const dimmed = new Set<string>()
   if (days === null) return dimmed
+  const windows = clockWindows(days, clock)
   for (const theme of input.themes) {
-    if (!themeMatchesDays(theme.tsStart, theme.tsEnd, days)) {
+    if (!windowsOverlap(theme.tsStart, theme.tsEnd, windows)) {
       dimmed.add(themeNodeId(theme.id))
     }
   }
   for (const moment of input.moments) {
-    if (!momentMatchesDays(moment.dayKey, days)) {
+    if (!momentInWindows(moment.ts, windows)) {
       dimmed.add(momentNodeId(moment.id))
     }
   }
@@ -238,17 +247,64 @@ export function timeDimmedIds(
 /** 时间筛选后仍在范围内的节点（用于相机适配，F8）。 */
 export function focusedIdsForDays(
   input: GlobalGraphInput,
-  days: Set<string> | null
+  days: Set<string> | null,
+  clock: ClockRange = ALL_DAY
 ): { themeIds: string[]; momentIds: string[] } {
   const themeIds: string[] = []
   const momentIds: string[] = []
+  if (days === null) {
+    for (const theme of input.themes) themeIds.push(themeNodeId(theme.id))
+    for (const moment of input.moments) momentIds.push(momentNodeId(moment.id))
+    return { themeIds, momentIds }
+  }
+  const windows = clockWindows(days, clock)
   for (const theme of input.themes) {
-    if (themeMatchesDays(theme.tsStart, theme.tsEnd, days)) themeIds.push(themeNodeId(theme.id))
+    if (windowsOverlap(theme.tsStart, theme.tsEnd, windows)) themeIds.push(themeNodeId(theme.id))
   }
   for (const moment of input.moments) {
-    if (momentMatchesDays(moment.dayKey, days)) momentIds.push(momentNodeId(moment.id))
+    if (momentInWindows(moment.ts, windows)) momentIds.push(momentNodeId(moment.id))
   }
   return { themeIds, momentIds }
+}
+
+/**
+ * 文字检索当筛选用：命中事件所在的时刻 + 它们归属的主题点亮，其余调暗。
+ * 没有命中时刻（`hitMomentIds` 为空）时全部调暗——空结果本身就是一种筛选结果。
+ */
+export function searchFocusedIds(
+  input: GlobalGraphInput,
+  hitMomentIds: ReadonlySet<number>
+): { themeIds: string[]; momentIds: string[] } {
+  const hitThemeIds = new Set<number>()
+  const momentIds: string[] = []
+  for (const moment of input.moments) {
+    if (!hitMomentIds.has(moment.id)) continue
+    momentIds.push(momentNodeId(moment.id))
+    for (const themeId of moment.themeIds) hitThemeIds.add(themeId)
+  }
+  const themeIds = input.themes
+    .filter((theme) => hitThemeIds.has(theme.id))
+    .map((theme) => themeNodeId(theme.id))
+  return { themeIds, momentIds }
+}
+
+/** 文字检索筛选：返回需要调暗的节点 id 集合。 */
+export function searchDimmedIds(
+  input: GlobalGraphInput,
+  hitMomentIds: ReadonlySet<number>
+): Set<string> {
+  const { themeIds, momentIds } = searchFocusedIds(input, hitMomentIds)
+  const visible = new Set<string>([...themeIds, ...momentIds])
+  const dimmed = new Set<string>()
+  for (const theme of input.themes) {
+    const id = themeNodeId(theme.id)
+    if (!visible.has(id)) dimmed.add(id)
+  }
+  for (const moment of input.moments) {
+    const id = momentNodeId(moment.id)
+    if (!visible.has(id)) dimmed.add(id)
+  }
+  return dimmed
 }
 
 /** 侧栏「也属于」：时刻的其它主题（与主归属分开显示）。 */

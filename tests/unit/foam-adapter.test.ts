@@ -5,6 +5,8 @@ import {
   momentNodeId,
   nodeIdOf,
   otherThemesOfMoment,
+  searchDimmedIds,
+  searchFocusedIds,
   themeNodeId,
   themeSize,
   timeDimmedIds,
@@ -236,5 +238,66 @@ describe('时间筛选', () => {
 
   it('DAY_MS 常量与测试夹具一致', () => {
     expect(day(2026, 10, 23) - day(2026, 10, 22)).toBe(DAY_MS)
+  })
+})
+
+describe('时段筛选（日期 × 起止时分）', () => {
+  it('同一天内按时段调暗：时刻 11 在 11:00–13:00 内，主题 2 跨到次日仍保留', () => {
+    const clock = { fromMinute: 11 * 60, toMinute: 13 * 60 }
+    const dimmed = timeDimmedIds(fixture(), new Set(['2026-10-22']), clock)
+    expect(dimmed.has(themeNodeId(2))).toBe(false)
+    expect(dimmed.has(themeNodeId(1))).toBe(true)
+    expect(dimmed.has(themeNodeId(3))).toBe(true)
+    expect(dimmed.has(momentNodeId(11))).toBe(false)
+    expect(dimmed.has(momentNodeId(10))).toBe(true)
+    expect(dimmed.has(momentNodeId(12))).toBe(true)
+  })
+
+  it('时段把当天时刻挡在外面时，只剩跨时段主题', () => {
+    const clock = { fromMinute: 13 * 60, toMinute: 18 * 60 }
+    const dimmed = timeDimmedIds(fixture(), new Set(['2026-10-22']), clock)
+    expect(dimmed.has(themeNodeId(2))).toBe(false)
+    expect(dimmed.has(momentNodeId(11))).toBe(true)
+  })
+
+  it('默认全天等价于只看日期', () => {
+    const days = new Set(['2026-10-22'])
+    expect([...timeDimmedIds(fixture(), days)].sort()).toEqual(
+      [...timeDimmedIds(fixture(), days, { fromMinute: 0, toMinute: 1439 })].sort()
+    )
+  })
+
+  it('focused 与 dimmed 在时段下仍互补', () => {
+    const clock = { fromMinute: 11 * 60, toMinute: 13 * 60 }
+    const days = new Set(['2026-10-22'])
+    const focused = focusedIdsForDays(fixture(), days, clock)
+    const dimmed = timeDimmedIds(fixture(), days, clock)
+    expect(focused.themeIds).toEqual([themeNodeId(2)])
+    expect(focused.momentIds).toEqual([momentNodeId(11)])
+    expect(focused.momentIds.some((id) => dimmed.has(id))).toBe(false)
+  })
+})
+
+describe('文字筛选（命中时刻 → 图谱调暗）', () => {
+  it('命中时刻与它归属的主题点亮，其余调暗', () => {
+    // 时刻 11 同时属于主题 2（owner）与 1（secondary）
+    const dimmed = searchDimmedIds(fixture(), new Set([11]))
+    expect(dimmed.has(themeNodeId(1))).toBe(false)
+    expect(dimmed.has(themeNodeId(2))).toBe(false)
+    expect(dimmed.has(themeNodeId(3))).toBe(true)
+    expect(dimmed.has(momentNodeId(10))).toBe(true)
+    expect(dimmed.has(momentNodeId(11))).toBe(false)
+    expect(dimmed.has(momentNodeId(12))).toBe(true)
+  })
+
+  it('没有命中时刻时全部调暗（空结果也是一种筛选结果）', () => {
+    expect(searchDimmedIds(fixture(), new Set()).size).toBe(6)
+  })
+
+  it('主题按输入顺序返回，不随命中时刻顺序漂移', () => {
+    expect(searchFocusedIds(fixture(), new Set([12, 11]))).toEqual({
+      themeIds: [themeNodeId(1), themeNodeId(2), themeNodeId(3)],
+      momentIds: [momentNodeId(11), momentNodeId(12)]
+    })
   })
 })

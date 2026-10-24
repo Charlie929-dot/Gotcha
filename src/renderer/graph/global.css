@@ -186,6 +186,122 @@ body {
   font-size: 11px;
 }
 
+.search-status {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* 日历弹层里的「时段」：起止两组 时 : 分 滚轮 */
+.cal-time {
+  flex: 1;
+  min-width: 0;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+
+.cal-time-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cal-time-value {
+  margin-left: auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.cal-time-head button {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.time-ends {
+  display: flex;
+  gap: 10px;
+}
+
+.time-end {
+  flex: 1;
+  min-width: 0;
+}
+
+.time-end header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.time-end-name {
+  color: var(--muted);
+}
+
+.time-end-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.time-cols {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* 滚轮列：可视 5 项，首尾各留 2 项高度，让第一/最后一项也能居中吸附 */
+.time-col {
+  --time-item-h: 28px;
+  flex: 1;
+  min-width: 0;
+  height: calc(var(--time-item-h) * 5);
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  scrollbar-width: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding-block: calc(var(--time-item-h) * 2);
+}
+
+.time-col::-webkit-scrollbar {
+  display: none;
+}
+
+.time-col .time-item {
+  display: block;
+  width: 100%;
+  height: var(--time-item-h);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  scroll-snap-align: center;
+}
+
+.time-col .time-item:hover {
+  background: rgb(79 195 247 / 10%);
+}
+
+.time-col .time-item.on {
+  background: rgb(79 195 247 / 18%);
+  color: #bfeaff;
+  font-weight: 600;
+}
+
+.time-colon {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 main.stage {
   position: relative;
   flex: 1;
@@ -264,7 +380,10 @@ foam-graph {
   position: absolute;
   top: 52px;
   left: 12px;
-  width: 296px;
+  width: 540px;
+  max-width: calc(100% - 24px);
+  max-height: calc(100% - 64px);
+  overflow-y: auto;
   z-index: 6;
   background: var(--panel);
   border: 1px solid var(--border);
@@ -273,6 +392,18 @@ foam-graph {
   box-shadow: 0 14px 40px rgb(0 0 0 / 45%);
   /* 涂抹时别把日格文字选蓝 */
   user-select: none;
+}
+
+/* 左：月网格；右：时段滚轮（竖排会在矮窗口里被截掉，改成并排） */
+.cal-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.cal-days {
+  flex: 0 0 296px;
+  min-width: 0;
 }
 
 .cal-head {

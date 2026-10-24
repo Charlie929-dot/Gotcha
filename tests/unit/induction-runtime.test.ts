@@ -233,6 +233,32 @@ describe('InductionRuntime：结构化日志（可观测性）', () => {
     db.close()
   })
 
+  it('截断计数进 ok 日志（本批截断 N 个标题）', async () => {
+    const db = openDatabase(':memory:')
+    const id = seed(db)
+    const lines: LogLine[] = []
+    const longTitle = {
+      nodes: [
+        { title: '长'.repeat(45), summary: '摘要', type: 'knowledge', event_ids: [id] }
+      ],
+      edges: []
+    }
+    const client = new FakeLlmClient([
+      { json: longTitle, usage: { promptTokens: 10, completionTokens: 5 } }
+    ])
+    const runtime = runtimeFor(db, () => ({ ok: true, client }), {
+      log: collectingLog(lines)
+    })
+    runtime.grantConsent()
+    runtime.onCaptureStatus('running')
+
+    expect((await runtime.runOnce({ manual: true })).status).toBe('ok')
+    const line = lines.find((item) => item.msg === 'induction run ok')
+    expect(line?.data?.truncated).toEqual({ titles: 1, summaries: 0, evidence: 0 })
+    runtime.dispose()
+    db.close()
+  })
+
   it('失败：按分类记录；达上限再记一行 auto halted', async () => {
     const db = openDatabase(':memory:')
     seed(db)
@@ -259,9 +285,9 @@ describe('InductionRuntime：结构化日志（可观测性）', () => {
     const db = openDatabase(':memory:')
     const id = seed(db)
     const lines: LogLine[] = []
-    // 标题 30 字 > 24 字上限 → 两轮都不合法，分类为 validation
+    // type 非法 → 两轮都不合法，分类为 validation
     const invalid = {
-      nodes: [{ title: '长'.repeat(30), summary: '摘要', type: 'knowledge', event_ids: [id] }],
+      nodes: [{ title: '计划', summary: '摘要', type: 'idea', event_ids: [id] }],
       edges: []
     }
     const client = new FakeLlmClient([{ json: invalid }, { json: invalid }])
@@ -275,7 +301,7 @@ describe('InductionRuntime：结构化日志（可观测性）', () => {
     const failed = lines.find((item) => item.msg === 'induction run failed')
     expect(failed?.data).toMatchObject({ code: 'validation' })
     const details = failed?.data?.details as string[]
-    expect(details[0]).toContain('title 超过 24 字')
+    expect(details[0]).toContain('type 只能是 knowledge / activity')
     expect(JSON.stringify(lines)).not.toContain('项目计划')
     runtime.dispose()
     db.close()

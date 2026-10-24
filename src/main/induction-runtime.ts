@@ -124,7 +124,11 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
         more: outcome.more === true,
         calls: outcome.usage?.calls ?? 0,
         promptTokens: outcome.usage?.promptTokens ?? 0,
-        completionTokens: outcome.usage?.completionTokens ?? 0
+        completionTokens: outcome.usage?.completionTokens ?? 0,
+        ...(outcome.truncated &&
+        outcome.truncated.titles + outcome.truncated.summaries + outcome.truncated.evidence > 0
+          ? { truncated: outcome.truncated }
+          : {})
       })
       return
     }

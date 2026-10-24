@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { validateInduction } from '../../src/understand/structure/schema'
+import { truncateWithEllipsis, validateInduction } from '../../src/understand/structure/schema'
 
 const ALLOWED = new Set([1, 2, 3])
 
@@ -53,23 +53,74 @@ describe('validateInduction · 手写校验器', () => {
     expect(errors).toContain('事件 3 未被任何节点覆盖')
   })
 
-  it('拒绝超长标题 / 摘要、非法 type、空 event_ids', () => {
-    const errors = errorsOf(
+  it('超长文本确定性截断并计数（长度不再是整批失败的理由）', () => {
+    const result = validateInduction(
       {
         nodes: [
           {
-            title: '标'.repeat(25),
+            title: '标'.repeat(41),
             summary: '摘'.repeat(81),
-            type: 'idea',
-            event_ids: []
+            type: 'knowledge',
+            event_ids: [1, 2, 3]
           }
         ]
-      }
+      },
+      ALLOWED
     )
-    expect(errors).toContain('nodes[0].title 超过 24 字')
-    expect(errors).toContain('nodes[0].summary 超过 80 字')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const node = result.result.nodes[0]
+    // 标题硬上限 40（prompt 建议 24，宽出 16 字给真实语义标题）
+    expect(node.title).toHaveLength(40)
+    expect(node.title.endsWith('…')).toBe(true)
+    expect(node.summary).toHaveLength(80)
+    expect(result.truncated).toEqual({ titles: 1, summaries: 1, evidence: 0 })
+  })
+
+  it('标题 25–40 字原样保留（硬上限内不截断）', () => {
+    const result = validateInduction(
+      { nodes: [{ title: '标'.repeat(25), summary: 'S', type: 'knowledge', event_ids: [1, 2, 3] }] },
+      ALLOWED
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.result.nodes[0].title).toHaveLength(25)
+    expect(result.truncated.titles).toBe(0)
+  })
+
+  it('evidence 超 120 字截断并计数', () => {
+    const result = validateInduction(
+      {
+        nodes: [
+          { title: 'A', summary: 'S', type: 'knowledge', event_ids: [1, 2] },
+          { title: 'B', summary: 'S', type: 'activity', event_ids: [3] }
+        ],
+        edges: [{ from: 0, to: 1, weight: 0.5, evidence: '证'.repeat(121) }]
+      },
+      ALLOWED
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.result.edges[0].evidence).toHaveLength(120)
+    expect(result.truncated).toEqual({ titles: 0, summaries: 0, evidence: 1 })
+  })
+
+  it('非法 type / 空 event_ids 仍然整批失败', () => {
+    const errors = errorsOf({
+      nodes: [{ title: 'T', summary: 'S', type: 'idea', event_ids: [] }]
+    })
     expect(errors).toContain('nodes[0].type 只能是 knowledge / activity')
     expect(errors).toContain('nodes[0].event_ids 必须是非空数组')
+  })
+
+  it('truncateWithEllipsis：优先标点切，兜底硬切，结果不超过上限', () => {
+    expect(truncateWithEllipsis('短标题', 10)).toBe('短标题')
+    // 切点够靠后（≥60%）用标点
+    expect(truncateWithEllipsis('前面的话，后面还有很长很长的一段', 8)).toBe('前面的话…')
+    // 没有标点时硬切
+    expect(truncateWithEllipsis('abcdefghij', 5)).toBe('abcd…')
+    // 标点太靠前（<60%）时退回硬切，避免只剩一两个字
+    expect(truncateWithEllipsis('一，后面就很长了', 8)).toHaveLength(8)
   })
 
   it('拒绝非法边：下标越界 / 自环 / 权重越界 / 空 evidence / 未知字段', () => {

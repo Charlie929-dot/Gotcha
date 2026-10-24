@@ -39,7 +39,7 @@ import {
 } from './cloud/llm-client'
 import { buildCloudMomentPayload } from './cloud/redact'
 import { persistInduction, readUsage, recordUsage, type InductionUsage } from './induction'
-import { validateInduction, type InductionResult, type InductionValidation } from './structure/schema'
+import { validateInduction, type InductionResult, type InductionTruncation, type InductionValidation } from './structure/schema'
 
 export type InductionStatus =
   | 'idle'
@@ -60,6 +60,8 @@ export type RunOutcome =
       more?: boolean
       /** 本次调用消耗（含修复重试）；日志 / 快照用，不含正文 */
       usage?: InductionUsage
+      /** 被截断的文本字段计数（标题 / 摘要 / evidence 超硬上限；不影响落库） */
+      truncated?: InductionTruncation
     }
   | { status: 'empty' }
   | { status: 'skipped'; reason: 'auto-off' | 'in-flight' | 'not-configured' | 'budget' | 'paused' }
@@ -292,6 +294,7 @@ export function createInductionService(options: InductionServiceOptions): Induct
 
       let result: InductionResult = { nodes: [], edges: [] }
       let usageTotals: InductionUsage | undefined
+      let truncation: InductionTruncation | undefined
 
       if (built.payload.events.length > 0) {
         const call = async (repair?: { errors: readonly string[] }): Promise<LlmJsonResult> => {
@@ -338,6 +341,7 @@ export function createInductionService(options: InductionServiceOptions): Induct
         }
         if (!validation) throw new InductionValidationError([])
         result = validation.result
+        truncation = validation.truncated
         usageTotals = { calls: callsMade, promptTokens: spent.promptTokens, completionTokens: spent.completionTokens }
       }
 
@@ -364,7 +368,8 @@ export function createInductionService(options: InductionServiceOptions): Induct
         placeholders: stats.placeholders,
         consumed: batch.consumed.length,
         more: batch.moments.length >= maxMoments(),
-        usage: usageTotals
+        usage: usageTotals,
+        truncated: truncation
       }
     } catch (error) {
       // 失败 / 取消也已经消耗了 token：照实记账，否则失败循环永远绕得过每日预算

@@ -72,12 +72,14 @@
 | 时刻按「≤90s」分组会跨本地日 | `batch.ts` 的合并只看 app/标题/间隔，没有 day_key；直接拿来生成 `moments` 会把 23:59:50 与 00:00:10 并成一条，日历按 `day_key` 筛选时两边都错位（v0.3 §4.1） | 持久化时刻的分组条件必须带 `localDayKey(ts)`（`src/understand/moments.ts#groupMoments`），用例覆盖跨午夜；归纳取批仍用 batch 口径，两者用「同日等价」用例钉住 |
 | npm 的 allowScripts 会跳过 onnxruntime 安装脚本 | `npm install onnxruntime-node` 只提示 `install-scripts not yet covered by allowScripts`，不报错；若二进制没下成，`InferenceSession.create` 会在运行时才炸（2026-10-24 本机） | 装完检查 `node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime.dll` 存在；缺就跑 `npm install-scripts approve onnxruntime-node` 后重装 |
 | bge 分词不能照抄英文 BERT | bge-small-zh 的 `tokenizer_config.json` 是 `do_lower_case=false`；自己 lowercase 会把 `GUI`/`DeepSeek` 变成另一串 token，向量分布漂移 | 分词按 vocab.txt + WordPiece，保留大小写；中文按 `_is_chinese_char` 码点拆字；用例钉住 `Hello` ≠ `hello`、`##` 续词、512 截断 |
+
 | 模型目录布局不是 `onnx/model.onnx` | 从 HF 下 fp32 模型常在 `onnx/model.onnx`；代码约定是 `<modelDir>/model.onnx` + `vocab.txt` + `config.json`，放错目录会一直 `model-missing`（2026-10-24 踩过） | 下载后把 `model.onnx` 移到模型目录根；`isModelReady()` 只认根目录；HF 源 `Xenova/bge-small-zh-v1.5` 才有 ONNX 导出 |
 | 事件级 embedding 比主题慢一个量级 | 主题 title+summary 约 16 ms/条；成员事件带 OCR 文本约 61 ms/条（3,141 条约 192 s，单线程）。按「主题数 × 20ms」估时间会差 4 倍（2026-10-24 实测） | 事件级（P0.5 质心）要截断 256 token、加大 `intraOpNumThreads`、后台跑；主题向量回填用 `onlyMissing`，重跑几乎零成本 |
 | 后台回填别直接 `ensureWritable()` | 打开图谱时顺手回填 v3 数据，第一版直接 `connections.ensureWritable()`；「默认暂停」E2E 立刻红：点球开图谱凭空建出 `memory.db`，踩 A3「无显式交互零磁盘写入」（2026-10-24 实测） | 后台任务先 `existsSync(dbPath)`，没有库就直接跳过；要读设置也用只读连接，别为了读一个 key 触发建库 |
 | onnxruntime 线程数不是越多越快 | 事件向量（256 token）本机 8 逻辑核：1 线程 93.4 ms/条、4 线程 44.5 ms/条、**8 线程 65.7 ms/条**（线程争用更慢）；batch 32 略优于 16（42.3 ms）（2026-10-24 实测） | 主进程后台推理用 `intraOpNumThreads: 4` + `batchSize: 32`；128 token 虽然快一倍（20.4 ms/条），但 OCR 正文被截太多，P0.5 质心不用 |
 | 主题合并一轮不收敛 | 合并把成员并集写进存活主题，质心会变，可能又贴近别的主题；只跑一轮会留下「下次打开又合并」的漂移（2026-10-24 真实库副本：第 1 轮 34 组 / 65 节点，第 2 轮又 3 组 / 6 节点） | 回填内循环到固定点（`MAX_MERGE_ROUNDS=8`，实测 2 轮），每轮重算质心再判定；第二次运行应 0 合并 |
 | 「缺失事件向量」不能把空文本算进去 | 4 条成员事件 title/OCR 都为空，永远算不出向量；若缺失统计把它们算进去，质心会被永久判为「不完整」，合并永远不跑（2026-10-24 真实库副本踩到） | 缺失统计与 `listEventTexts` 用同一口径：`TRIM(title || ocr) != ''` 才计入；空文本事件跳过、不算缺失 |
+| 「未覆盖全部输入 id」类校验 + `temperature=0` = 永久卡死 | 模型对同一「时刻」常常只回显 `event_ids` 第一条（2026-10-24 真机：`[8074,8075]` 只写 8074、`[8083,8084]` 只写 8083），旧校验整批失败；修复重试虽带错误摘要，但 `temperature=0` 输出与上次逐字相同，于是同一批每 10 分钟失败一次、游标不动、每轮白烧两次调用，最后把自动归纳打到 `halted`（日志 14:22 / 14:23 / 14:25 / 14:28 都是同一个事件） | 覆盖缺口不判失败，改确定性补齐：`src/understand/structure/coverage.ts` 把同一时刻漏掉的 id 补到覆盖该时刻的兄弟节点（兄弟最多、并列取输出下标最小）；整段被忽略的时刻落本地「未归纳时段」兜底节点。只有「编造 id / 重复归属 / 结构非法」才整批失败——那类错误换个输出才可能修好。排查信号：`main.log` 里同一个 id 连续出现在 `details` 就是死循环，别指望重试自愈 |
 
 ## 规则
 

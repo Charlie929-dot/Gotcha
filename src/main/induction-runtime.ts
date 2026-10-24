@@ -128,6 +128,10 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
         ...(outcome.truncated &&
         outcome.truncated.titles + outcome.truncated.summaries + outcome.truncated.evidence > 0
           ? { truncated: outcome.truncated }
+          : {}),
+        // 覆盖缺口补齐（>0 才记）：filled=补到兄弟节点，uncovered=落「未归纳时段」兜底节点
+        ...(outcome.coverage && outcome.coverage.filled + outcome.coverage.uncovered > 0
+          ? { coverage: outcome.coverage }
           : {})
       })
       return

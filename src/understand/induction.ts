@@ -6,6 +6,8 @@
  * - 边：按 (src, dst, kind='ai') 去重，weight 取最大、evidence 保留非空；
  * - 敏感占位：无法安全剥离的「时刻」只记本地节点（type='protected'，标题「内容已保护」），
  *   日志与出云都不含原文；同一天多个占位合并成一个节点；
+ * - 未归纳兜底：整段时刻被模型忽略时记本地节点（type='activity'，标题「未归纳时段」），
+ *   保证事件不丢、出云不猜内容；同一天同样合并成一个节点；
  * - 游标与节点/边写入同一事务：任何一步失败整体回滚，游标不动（下次重试同批）。
  */
 
@@ -27,6 +29,11 @@ export interface InductionPersistInput {
   /** 无法安全剥离、整条不出云的事件 id（来自 buildCloudMomentPayload） */
   excludedEventIds?: readonly number[]
   /**
+   * 整段「时刻」被模型忽略、未被任何节点覆盖的事件 id（来自 `structure/coverage.ts`）。
+   * 本地生成「未归纳时段」兜底节点，保证事件不丢但不猜内容。
+   */
+  uncoveredEventIds?: readonly number[]
+  /**
    * 旧游标：只有历史回填路径才传；按天归纳（D28）不传，避免把游标推到高层级日。
    */
   cursor?: BatchCursor
@@ -40,12 +47,21 @@ export interface InductionPersistStats {
   placeholders: number
   edgesInserted: number
   edgesUpdated: number
+  /** 「未归纳时段」兜底节点覆盖的事件数（整段被模型忽略的时刻） */
+  uncovered: number
 }
 
 export const PLACEHOLDER_NODE = {
   type: 'protected',
   title: '内容已保护',
   summary: '该时刻含敏感内容，未出云（本地占位）'
+} as const
+
+/** 整段时刻被模型忽略时的本地兜底节点（不出云、不含原文，只保证事件不丢） */
+export const UNINDUCED_NODE = {
+  type: 'activity',
+  title: '未归纳时段',
+  summary: '该时段模型未归纳，本地兜底（未出云）'
 } as const
 
 export const USAGE_KEY_PREFIX = 'graph.usage.'
@@ -231,6 +247,46 @@ function nodeAggregateFromEventIds(
   return { tsStart, tsEnd, ids }
 }
 
+/**
+ * 本地兜底节点（敏感占位 / 未归纳时段）：按本地日聚合后 upsert，同一天只留一个。
+ * 返回新建 / 合并的节点数与真正覆盖到的事件数（找不到时刻的 id 只跳过）。
+ */
+function upsertLocalFallbacks(
+  db: Db,
+  eventIds: readonly number[],
+  ranges: Map<number, { startTs: number; endTs: number }>,
+  template: { type: string; title: string; summary: string }
+): { created: number; merged: number; covered: number } {
+  const byDay = new Map<string, NodeAggregate>()
+  let covered = 0
+  for (const id of eventIds) {
+    const range = ranges.get(id)
+    if (!range) continue
+    covered += 1
+    const day = localDayKey(range.startTs)
+    const aggregate = byDay.get(day) ?? {
+      type: template.type,
+      title: template.title,
+      summary: template.summary,
+      tsStart: range.startTs,
+      tsEnd: range.endTs,
+      eventIds: new Set<number>()
+    }
+    aggregate.tsStart = Math.min(aggregate.tsStart, range.startTs)
+    aggregate.tsEnd = Math.max(aggregate.tsEnd, range.endTs)
+    aggregate.eventIds.add(id)
+    byDay.set(day, aggregate)
+  }
+  let created = 0
+  let merged = 0
+  for (const aggregate of byDay.values()) {
+    const result = upsertNode(db, aggregate)
+    if (result.merged) merged += 1
+    else created += 1
+  }
+  return { created, merged, covered }
+}
+
 /** 落库（单事务）。返回写入统计；事务内抛错整体回滚。 */
 export function persistInduction(db: Db, input: InductionPersistInput): InductionPersistStats {
   const stats: InductionPersistStats = {
@@ -238,7 +294,8 @@ export function persistInduction(db: Db, input: InductionPersistInput): Inductio
     nodesMerged: 0,
     placeholders: 0,
     edgesInserted: 0,
-    edgesUpdated: 0
+    edgesUpdated: 0,
+    uncovered: 0
   }
   const ranges = momentRanges(input.moments)
 
@@ -271,33 +328,16 @@ export function persistInduction(db: Db, input: InductionPersistInput): Inductio
     }
 
     // 敏感时刻 → 本地占位节点（按本地日合并；payload 里没有原文）
-    const excluded = input.excludedEventIds ?? []
-    const placeholderByDay = new Map<string, NodeAggregate>()
-    for (const id of excluded) {
-      const range = ranges.get(id)
-      if (!range) continue
-      const day = localDayKey(range.startTs)
-      const aggregate = placeholderByDay.get(day) ?? {
-        type: PLACEHOLDER_NODE.type,
-        title: PLACEHOLDER_NODE.title,
-        summary: PLACEHOLDER_NODE.summary,
-        tsStart: range.startTs,
-        tsEnd: range.endTs,
-        eventIds: new Set<number>()
-      }
-      aggregate.tsStart = Math.min(aggregate.tsStart, range.startTs)
-      aggregate.tsEnd = Math.max(aggregate.tsEnd, range.endTs)
-      aggregate.eventIds.add(id)
-      placeholderByDay.set(day, aggregate)
-    }
-    for (const aggregate of placeholderByDay.values()) {
-      const result = upsertNode(db, aggregate)
-      if (result.merged) stats.nodesMerged += 1
-      else {
-        stats.nodesCreated += 1
-        stats.placeholders += 1
-      }
-    }
+    const placeholder = upsertLocalFallbacks(db, input.excludedEventIds ?? [], ranges, PLACEHOLDER_NODE)
+    stats.nodesCreated += placeholder.created
+    stats.nodesMerged += placeholder.merged
+    stats.placeholders += placeholder.created
+
+    // 整段时刻被模型忽略 → 本地「未归纳时段」兜底（事件不丢，内容不猜、不出云）
+    const uncovered = upsertLocalFallbacks(db, input.uncoveredEventIds ?? [], ranges, UNINDUCED_NODE)
+    stats.nodesCreated += uncovered.created
+    stats.nodesMerged += uncovered.merged
+    stats.uncovered = uncovered.covered
 
     if (input.cursor) writeCursor(db, input.cursor)
     addUsage(db, input.now, input.usage)

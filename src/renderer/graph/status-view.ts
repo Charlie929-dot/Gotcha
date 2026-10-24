@@ -49,7 +49,8 @@ export function failureReasonText(failure: InductionFailure | undefined): string
     case 'config':
       return `配置错误：${failure.message}`
     case 'parse':
-      // 客户端已给出可定位的固定文案（截断 / 非法 JSON / 未通过校验）
+    case 'validation':
+      // 客户端 / 校验器已给出可定位的固定文案（截断 / 非法 JSON / 具体规则）
       return failure.message
     default:
       return failure.message === '' ? '未知错误' : failure.message

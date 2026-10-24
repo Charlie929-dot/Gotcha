@@ -255,6 +255,32 @@ describe('InductionRuntime：结构化日志（可观测性）', () => {
     db.close()
   })
 
+  it('校验失败：日志带 details（具体规则，不含事件正文）', async () => {
+    const db = openDatabase(':memory:')
+    const id = seed(db)
+    const lines: LogLine[] = []
+    // 标题 30 字 > 24 字上限 → 两轮都不合法，分类为 validation
+    const invalid = {
+      nodes: [{ title: '长'.repeat(30), summary: '摘要', type: 'knowledge', event_ids: [id] }],
+      edges: []
+    }
+    const client = new FakeLlmClient([{ json: invalid }, { json: invalid }])
+    const runtime = runtimeFor(db, () => ({ ok: true, client }), {
+      log: collectingLog(lines)
+    })
+    runtime.grantConsent()
+    runtime.onCaptureStatus('running')
+
+    expect((await runtime.runOnce({ manual: true })).status).toBe('error')
+    const failed = lines.find((item) => item.msg === 'induction run failed')
+    expect(failed?.data).toMatchObject({ code: 'validation' })
+    const details = failed?.data?.details as string[]
+    expect(details[0]).toContain('title 超过 24 字')
+    expect(JSON.stringify(lines)).not.toContain('项目计划')
+    runtime.dispose()
+    db.close()
+  })
+
   it('跳过：记 reason（自动关 / 预算 / 未配置），便于排查「为什么没动」', async () => {
     const db = openDatabase(':memory:')
     seed(db)

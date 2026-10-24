@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+﻿import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openDatabase, insertEvent } from '../../src/db'
 import { setSetting } from '../../src/db/settings'
 import { readCursor, startOfLocalDay } from '../../src/understand/cloud/batch'
@@ -445,6 +445,26 @@ describe('induction service · 失败分类与停自动（可观测性）', () =
     }
   })
 
+  it('校验失败单独分类（validation），消息与 details 带具体规则', async () => {
+    const db = makeDb()
+    try {
+      const client = new FakeLlmClient([{ json: INVALID }, { json: INVALID }])
+      const service = makeService(db, client)
+
+      const outcome = await service.runOnce()
+      expect(outcome.status).toBe('error')
+      const failure = service.getState().lastFailure
+      expect(failure?.code).toBe('validation')
+      expect(failure?.message).toContain('未通过校验')
+      expect(failure?.message).toContain('未被任何节点覆盖')
+      expect(failure?.details).toEqual(['事件 2 未被任何节点覆盖'])
+      // 修复重试仍然只有一次
+      expect(client.requests).toHaveLength(2)
+    } finally {
+      db.close()
+    }
+  })
+
   it('失败分类：超时 / 网络 / 配置 / 未知各归各类', async () => {
     const cases: Array<[Error, string]> = [
       [new LlmTimeoutError(), 'timeout'],
@@ -489,7 +509,7 @@ describe('induction service · 失败分类与停自动（可观测性）', () =
       // 第 1 次失败 → 退避 1 分钟后重试
       await vi.advanceTimersByTimeAsync(5_000)
       expect(service.getState().status).toBe('backoff')
-      expect(service.getState().lastFailure).toMatchObject({ code: 'parse', streak: 1 })
+      expect(service.getState().lastFailure).toMatchObject({ code: 'validation', streak: 1 })
       expect(service.getState().nextRunAt).toBe(NOW + 60_000)
 
       // 第 2 次失败 → 到上限：停自动，不再排下一次
@@ -534,3 +554,4 @@ describe('induction service · 失败分类与停自动（可观测性）', () =
     }
   })
 })
+

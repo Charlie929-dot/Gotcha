@@ -38,7 +38,7 @@ export function createGraphWindow(options: GraphWindowOptions): BrowserWindow {
 
   const devServerUrl = options.devServerUrl?.replace(/\/+$/, '')
   if (devServerUrl) {
-    void window.loadURL(`${devServerUrl}/graph/graph.html`)
+    void window.loadURL(`${devServerUrl}/graph/global.html`)
   } else {
     void window.loadFile(options.htmlPath)
   }

@@ -9,6 +9,7 @@ import {
   themeSize,
   timeDimmedIds,
   toFoamGraph,
+  toGlobalGraphInput,
   type GlobalGraphInput
 } from '../../src/renderer/graph/foam-adapter'
 
@@ -88,6 +89,113 @@ describe('toFoamGraph', () => {
     expect(momentNodeId(7)).toBe('m:7')
     expect(nodeIdOf('t:42')).toBe(42)
     expect(Number.isNaN(nodeIdOf('good morning'))).toBe(true)
+  })
+})
+
+describe('toGlobalGraphInput（graph:global DTO → Foam 输入）', () => {
+  it('主题/时刻/边映射，主归属排第一、次归属随后', () => {
+    const input = toGlobalGraphInput({
+      themes: [
+        {
+          id: 1,
+          type: 'knowledge',
+          title: 'GUI 修复',
+          summary: '修按钮',
+          tsStart: day(2026, 10, 21),
+          tsEnd: day(2026, 10, 21, 18),
+          sourceCount: 12,
+          memberCount: 3,
+          degree: 1
+        },
+        {
+          id: 2,
+          type: 'activity',
+          title: '时间线',
+          summary: '',
+          tsStart: day(2026, 10, 22),
+          tsEnd: day(2026, 10, 22, 20),
+          sourceCount: 4,
+          memberCount: 1,
+          degree: 1
+        }
+      ],
+      moments: [
+        {
+          id: 10,
+          startTs: day(2026, 10, 21),
+          endTs: day(2026, 10, 21),
+          dayKey: '2026-10-21',
+          app: 'Code',
+          windowTitle: '改 CSS',
+          ocrSummary: null,
+          eventIds: [1, 2],
+          assigned: true
+        },
+        {
+          id: 11,
+          startTs: day(2026, 10, 22),
+          endTs: day(2026, 10, 22),
+          dayKey: '2026-10-22',
+          app: null,
+          windowTitle: null,
+          ocrSummary: '查文档',
+          eventIds: [3],
+          assigned: true
+        }
+      ],
+      // 故意把次归属排在主归属前面，验证映射会重排
+      memberships: [
+        { themeId: 2, momentId: 11, weight: 0.93, source: 'secondary' },
+        { themeId: 1, momentId: 11, weight: 0.97, source: 'owner' },
+        { themeId: 1, momentId: 10, weight: 1, source: 'owner' }
+      ],
+      edges: [{ id: 100, source: 1, target: 2, weight: 0.82, kind: 'embedding', evidence: '' }],
+      positions: [],
+      stats: { themes: 2, moments: 2, memberships: 3, edges: 1, positions: 0 }
+    })
+
+    expect(input.themes.map((theme) => theme.id)).toEqual([1, 2])
+    expect(input.themes[0].sourceCount).toBe(12)
+    expect(input.moments.map((moment) => moment.id)).toEqual([10, 11])
+    expect(input.moments[1]).toEqual({
+      id: 11,
+      ts: day(2026, 10, 22),
+      dayKey: '2026-10-22',
+      app: '',
+      title: '查文档',
+      themeIds: [1, 2]
+    })
+    expect(input.edges).toEqual([{ source: 1, target: 2, weight: 0.82 }])
+
+    // 映射后的数据能直接进 Foam：成员边按主归属优先，共享时刻有两条成员边
+    const view = toFoamGraph(input)
+    expect(view.data.nodeInfo['t:1'].title).toBe('GUI 修复')
+    expect(view.data.nodeInfo['m:11'].type).toBe('moment')
+    expect(countMembership(input)).toBe(3)
+  })
+
+  it('没有归属的时刻 themeIds 为空，不抛错', () => {
+    const input = toGlobalGraphInput({
+      themes: [],
+      moments: [
+        {
+          id: 1,
+          startTs: 1,
+          endTs: 2,
+          dayKey: '2026-10-21',
+          app: 'Code',
+          windowTitle: null,
+          ocrSummary: null,
+          eventIds: [],
+          assigned: false
+        }
+      ],
+      memberships: [],
+      edges: [],
+      positions: [],
+      stats: { themes: 0, moments: 1, memberships: 0, edges: 0, positions: 0 }
+    })
+    expect(input.moments[0].themeIds).toEqual([])
   })
 })
 

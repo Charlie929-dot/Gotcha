@@ -132,6 +132,13 @@ test.beforeAll(async () => {
   graph = await graphPromise
   await graph.waitForLoadState('domcontentloaded')
   await graph.waitForSelector('#status')
+
+  // 默认打开的是 v0.3 全局 Foam 页；本 spec 验证保留的旧 sigma 按日页，
+  // 先点工具栏「经典视图」切过去（同一窗口，同一 preload）。
+  await graph.waitForSelector('#view-classic')
+  await graph.locator('#view-classic').click()
+  await graph.waitForSelector('#sigma-container')
+  await graph.waitForSelector('#status')
 })
 
 test.afterAll(async () => {

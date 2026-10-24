@@ -10,6 +10,7 @@
  */
 
 import type { GraphData, GraphDataLink, NodeInfo } from '../foam/protocol'
+import type { GraphGlobalData } from '../../understand/graph-query'
 import { momentMatchesDays, themeMatchesDays } from './calendar'
 
 export interface ThemeSeed {
@@ -161,8 +162,58 @@ export function toFoamGraph(input: GlobalGraphInput): GlobalGraphView {
   return { data: { nodeInfo, links }, themeIds, momentIds }
 }
 
-/**
- * 时间筛选：返回需要调暗（而不是删除）的节点 id 集合。
+/** 把全局图 DTO 映射成 Foam 页使用的输入（纯函数，可单测）。 */
+export function toGlobalGraphInput(data: GraphGlobalData): GlobalGraphInput {
+  const themes: ThemeSeed[] = data.themes.map((theme) => ({
+    id: theme.id,
+    type: theme.type,
+    title: theme.title,
+    summary: theme.summary,
+    tsStart: theme.tsStart,
+    tsEnd: theme.tsEnd,
+    sourceCount: theme.sourceCount
+  }))
+
+  // 主归属排第一（侧栏「也属于」= 其余主题）；同源按权重降序，保证顺序稳定。
+  const memberships = new Map<number, Array<{ themeId: number; source: string; weight: number }>>()
+  for (const row of data.memberships) {
+    const list = memberships.get(row.momentId) ?? []
+    list.push({ themeId: row.themeId, source: row.source, weight: row.weight })
+    memberships.set(row.momentId, list)
+  }
+  const sourceRank: Record<string, number> = { owner: 0, manual: 1, secondary: 2 }
+  const themeIdsByMoment = new Map<number, number[]>()
+  for (const [momentId, rows] of memberships) {
+    const ordered = [...rows].sort((a, b) => {
+      const rank = (sourceRank[a.source] ?? 3) - (sourceRank[b.source] ?? 3)
+      return rank !== 0 ? rank : b.weight - a.weight
+    })
+    const ids: number[] = []
+    for (const row of ordered) {
+      if (!ids.includes(row.themeId)) ids.push(row.themeId)
+    }
+    themeIdsByMoment.set(momentId, ids)
+  }
+
+  const moments: MomentSeed[] = data.moments.map((moment) => ({
+    id: moment.id,
+    ts: moment.startTs,
+    dayKey: moment.dayKey,
+    app: moment.app ?? '',
+    title: moment.windowTitle || moment.ocrSummary || '',
+    themeIds: themeIdsByMoment.get(moment.id) ?? []
+  }))
+
+  const edges: ThemeEdgeSeed[] = data.edges.map((edge) => ({
+    source: edge.source,
+    target: edge.target,
+    weight: edge.weight
+  }))
+
+  return { themes, moments, edges }
+}
+
+/** 时间筛选：返回需要调暗（而不是删除）的节点 id 集合。
  * `days === null`（全部）时返回空集合。
  */
 export function timeDimmedIds(

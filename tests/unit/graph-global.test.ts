@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { openDatabase } from '../../src/db'
-import { queryGlobalGraph } from '../../src/understand/graph-query'
+import { insertEvent, openDatabase } from '../../src/db'
+import { queryGlobalGraph, queryMomentEvents } from '../../src/understand/graph-query'
 
 function at(day: number, hour: number): number {
   return new Date(2026, 9, day, hour, 0, 0, 0).getTime()
@@ -205,6 +205,53 @@ describe('queryGlobalGraph', () => {
       expect(data.edges.map((edge) => edge.id)).toEqual([101])
       expect(data.positions.map((position) => position.nodeId)).toEqual([3])
       expect(data.stats).toEqual({ themes: 2, moments: 1, memberships: 1, edges: 1, positions: 1 })
+    } finally {
+      db.close()
+    }
+  })
+})
+
+describe('queryMomentEvents', () => {
+  it('返回时刻成员事件（按时间排序）并保留缺失 id', () => {
+    const db = openDatabase(':memory:')
+    try {
+      const first = insertEvent(db, { ts: at(22, 9), app: 'Code', windowTitle: 'a.ts', ocrText: 'x' })
+      const second = insertEvent(db, { ts: at(22, 10), app: 'Chrome', windowTitle: '文档', ocrText: 'y' })
+      seedMoment(db, 7, '2026-10-22', at(22, 9))
+      // 故意乱序 + 一个不存在的 id
+      db.prepare('UPDATE moments SET event_ids = ? WHERE id = 7').run(
+        JSON.stringify([second, 999_999, first])
+      )
+
+      const result = queryMomentEvents(db, 7)
+      expect(result.found).toBe(true)
+      expect(result.malformed).toBe(false)
+      expect(result.events.map((event) => event.id)).toEqual([first, second])
+      expect(result.events[0].windowTitle).toBe('a.ts')
+      expect(result.missingIds).toEqual([999_999])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('时刻不存在 / 非法 id / 坏 JSON 都不抛错', () => {
+    const db = openDatabase(':memory:')
+    try {
+      expect(queryMomentEvents(db, 42)).toEqual({
+        found: false,
+        events: [],
+        missingIds: [],
+        malformed: false
+      })
+      expect(queryMomentEvents(db, 0).found).toBe(false)
+      expect(queryMomentEvents(db, 1.5).found).toBe(false)
+
+      seedMoment(db, 8, '2026-10-22', at(22, 9))
+      db.prepare('UPDATE moments SET event_ids = ? WHERE id = 8').run('{oops')
+      const malformed = queryMomentEvents(db, 8)
+      expect(malformed.found).toBe(true)
+      expect(malformed.malformed).toBe(true)
+      expect(malformed.events).toEqual([])
     } finally {
       db.close()
     }

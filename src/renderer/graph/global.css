@@ -1,139 +1,74 @@
+/**
+ * 全局图谱页样式（在 graph.css 之上叠加；v0.3 §7.4 / §8）
+ *
+ * graph.css 提供工具栏 / 侧栏 / 设置抽屉的通用样式，这里只补 Foam 画布、
+ * 日历弹层、图例与浮层计数。两者有重叠时以下面的规则为准（后加载）。
+ */
+
 :root {
-  color-scheme: dark;
-  --bg: #121218;
-  --panel: #1b1b23;
-  --panel-2: #22222c;
-  --border: #2e2e3a;
-  --text: #e8e8ef;
-  --muted: #9a9aab;
-  --knowledge: #4fc3f7;
-  --activity: #81c784;
-  --protected: #9e9e9e;
   --moment: #58677c;
   --accent: #ffd166;
 }
 
-* {
-  box-sizing: border-box;
-}
-
 html,
 body {
-  margin: 0;
   height: 100%;
+  overflow: hidden;
 }
 
 body {
   display: flex;
   flex-direction: column;
-  background: var(--bg);
-  color: var(--text);
-  font: 13px/1.45 system-ui, "Segoe UI", "Microsoft YaHei UI", sans-serif;
-  overflow: hidden;
 }
 
 .toolbar {
-  display: flex;
+  flex: 0 0 auto;
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   padding: 8px 14px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  flex: 0 0 auto;
 }
 
 .brand {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
   min-width: 0;
 }
 
 .brand h1 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
   white-space: nowrap;
 }
 
-.status {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.status[data-kind="error"] {
-  color: #ef5350;
-}
-
-.status[data-kind="ready"] {
-  color: var(--activity);
-}
-
 .nav {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
   justify-content: flex-end;
 }
 
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 12px;
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--panel-2);
-}
-
-.chip select {
-  background: transparent;
-  color: var(--text);
-  border: 0;
-  font: inherit;
-  outline: none;
-}
-
-button {
-  font: inherit;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 10px;
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #46505f;
-}
-
-button:active {
-  transform: translateY(1px);
-}
-
-button.primary {
-  background: var(--knowledge);
-  border-color: var(--knowledge);
-  color: #0b1016;
-  font-weight: 600;
-}
-
-.stage {
+main.stage {
   position: relative;
-  display: flex;
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: row;
+  padding: 0;
+  gap: 0;
 }
 
-.canvas-wrap {
+/* 侧栏贴在画布区右侧（不盖住工具栏 / 合同意条） */
+.stage .panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+}
+
+.stage .canvas-wrap {
   position: relative;
   flex: 1;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  display: block;
+  overflow: hidden;
 }
 
 foam-graph {
@@ -165,17 +100,20 @@ foam-graph {
   font-variant-numeric: tabular-nums;
 }
 
-.state {
+.stage .state {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
+  padding: 0 24px;
+  text-align: center;
   color: var(--muted);
   z-index: 4;
+  pointer-events: none;
 }
 
-.state[hidden] {
-  display: none;
+.stage .state[data-kind='error'] {
+  color: var(--error);
 }
 
 .calendar {
@@ -189,10 +127,6 @@ foam-graph {
   border-radius: 12px;
   padding: 10px 12px 12px;
   box-shadow: 0 14px 40px rgb(0 0 0 / 45%);
-}
-
-.calendar[hidden] {
-  display: none;
 }
 
 .cal-head {
@@ -251,7 +185,7 @@ foam-graph {
 }
 
 .cal-grid button.today::after {
-  content: "";
+  content: '';
   position: absolute;
   left: 50%;
   bottom: 3px;
@@ -284,20 +218,11 @@ foam-graph {
   position: absolute;
   left: 50%;
   bottom: 14px;
+  top: auto;
   transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px 6px 14px;
-  background: rgb(27 27 35 / 92%);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 12px;
   z-index: 5;
-}
-
-.focus-bar[hidden] {
-  display: none;
+  max-width: calc(100% - 24px);
+  font-size: 12px;
 }
 
 .legend {
@@ -343,74 +268,17 @@ foam-graph {
   background: var(--moment);
 }
 
-.panel {
-  flex: 0 0 320px;
-  background: var(--panel);
-  border-left: 1px solid var(--border);
-  padding: 12px 14px 18px;
-  overflow-y: auto;
-}
-
-.panel[hidden] {
-  display: none;
-}
-
-.panel-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.panel-head h2 {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.35;
-}
-
-.panel-meta {
-  margin: 8px 0 10px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.panel-body h3 {
-  margin: 14px 0 6px;
-  font-size: 12px;
-  color: var(--muted);
-  font-weight: 600;
-}
-
-.panel-body ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.panel-body li {
-  padding: 5px 7px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  font-size: 12px;
-  color: #cfd8dc;
+/* 侧栏「也属于」列表：可点击跳主题 */
+#panel-related li {
   cursor: pointer;
 }
 
-.panel-body li:hover {
-  background: var(--panel-2);
-  border-color: var(--border);
+#panel-related li:hover {
+  border-color: rgb(79 195 247 / 55%);
+  background: #262634;
 }
 
-.panel-body .hint {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.footer {
-  flex: 0 0 auto;
-  padding: 6px 14px;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: 11px;
-  background: var(--panel);
+#panel-related-title[hidden],
+#panel-related[hidden] {
+  display: none !important;
 }

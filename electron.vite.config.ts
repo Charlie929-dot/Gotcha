@@ -29,9 +29,10 @@ export default defineConfig({
           index: resolve(__dirname, 'src/renderer/index.html'),
           capture: resolve(__dirname, 'src/renderer/capture.html'),
           ball: resolve(__dirname, 'src/renderer/ball/ball.html'),
-          graph: resolve(__dirname, 'src/renderer/graph/graph.html'),
-          // P0 harness：合成数据的全局图验证页（P3 收口时移除或转正式页）
-          harness: resolve(__dirname, 'src/renderer/graph/harness.html')
+          // 默认全局图谱（v0.3：主题 + 时刻 + 日历调暗）
+          graph: resolve(__dirname, 'src/renderer/graph/global.html'),
+          // 旧 sigma 按日视图保留开关（工具栏「全局视图 / 经典视图」互切）
+          graphClassic: resolve(__dirname, 'src/renderer/graph/graph.html')
         }
       }
     }

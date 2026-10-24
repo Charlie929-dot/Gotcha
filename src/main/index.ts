@@ -40,6 +40,7 @@ import { createDeterministicFakeLlm } from './fake-llm'
 import { createGraphWindow } from './graph-window'
 import { runGraphBackfill } from './graph-backfill-runtime'
 import { resolveEmbeddingModelDir } from '../understand/embedding/paths'
+import { isModelReady } from '../understand/embedding/session'
 import { registerGraphIpc, type ProviderKeySaveResult } from './graph-ipc'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
@@ -258,6 +259,19 @@ function resolveClient(): ClientResolution {
   }
 }
 
+/**
+ * 本地向量模型是否就绪（`model.onnx` + `vocab.txt` 都在）。
+ * 只 stat 两个文件；读设置走只读连接，模型没装时更不能因为一次状态查询去建库（A3）。
+ */
+function readEmbeddingsReady(): boolean {
+  const db = connections.queryDb()
+  const modelDir = resolveEmbeddingModelDir(
+    app.getPath('userData'),
+    db ? getSetting(db, 'graph.embedding_model_dir') : ''
+  )
+  return isModelReady(modelDir)
+}
+
 /** 归纳运行时未创建时的只读快照（不建库；图谱窗口在采集暂停时也能显示原因） */
 function currentInductionSnapshot(): InductionSnapshot {
   if (inductionRuntime) return inductionRuntime.getSnapshot()
@@ -270,7 +284,8 @@ function currentInductionSnapshot(): InductionSnapshot {
     captureRunning: controller.status() === 'running',
     client: resolved.ok
       ? { ok: true }
-      : { ok: false, reason: resolved.reason, apiKeyEnv: resolved.apiKeyEnv }
+      : { ok: false, reason: resolved.reason, apiKeyEnv: resolved.apiKeyEnv },
+    embeddingsReady: readEmbeddingsReady()
   }
 }
 
@@ -290,6 +305,11 @@ function ensureInductionRuntime(): InductionRuntime {
       return db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
     },
     onSnapshot: (snapshot) => pushGraphSnapshot(snapshot),
+    /**
+     * 本地向量模型是否就绪：顶部黄条「新主题暂无法计算」用。
+     * 每次取快照现读，用户装好模型后下一次刷新就会消失。
+     */
+    readEmbeddingsReady,
     log: captureLog
   })
   return inductionRuntime

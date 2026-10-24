@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import type { InductionSnapshot } from '../../src/main/induction-runtime'
 import {
   failureReasonText,
+  modelWarningText,
   retryEtaText,
   statusView
 } from '../../src/renderer/graph/status-view'
@@ -19,9 +20,28 @@ function snapshot(patch: Partial<InductionSnapshot> = {}): InductionSnapshot {
     consent: true,
     captureRunning: true,
     client: { ok: true },
+    embeddingsReady: true,
     ...patch
   }
 }
+
+describe('status-view · 模型缺失黄条', () => {
+  it('模型就绪 / 还没读到快照时不显示', () => {
+    expect(modelWarningText(null)).toBeNull()
+    expect(modelWarningText(snapshot())).toBeNull()
+    expect(modelWarningText(snapshot({ embeddingsReady: true }))).toBeNull()
+  })
+
+  it('模型缺失时给一句可执行的话：只说新主题算不出来 + 放哪', () => {
+    const text = modelWarningText(snapshot({ embeddingsReady: false }))
+    expect(text).not.toBeNull()
+    expect(text).toContain('新主题')
+    expect(text).toContain('照常浏览')
+    expect(text).toContain('bge-small-zh-v1.5')
+    // 不谎称图不可用，也不泄露任何路径以外的信息
+    expect(text).not.toContain('清空')
+  })
+})
 
 describe('status-view · 徽标文案', () => {
   it('读取中 / 未确认出网 / 缺密钥 / 采集暂停', () => {

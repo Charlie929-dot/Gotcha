@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 
 - 窗口默认加载 `graph/global.html`（Foam）；`graph:global` 一次取 `queryGlobalGraph` DTO，`toGlobalGraphInput` 映射成 `t:<id>` 主题 / `m:<id>` 时刻，主题相似边 + 默认隐藏的成员边。主题半径按 `sourceCount` 6–22、时刻 2.4（多归属 3）。
 - 时间：日历 popover 实现 §8 的单击 / 涂抹 / Ctrl 加减 / Shift 扩展 / 快捷范围；只改 `dimmedNodeIds` 并按 focused 子集 `zoomToFitNodes`，**节点数不变**；空范围给提示、不移动相机。
+- 弹层自身：交互期间只重刷日格 class、不重建 DOM（`renderCalendar` 建格子 / `paintCalendar` 刷 `.on`），否则冒泡到 `document` 时 target 已游离、外部点击判断误判成「点在外面」→ 一碰日期就关；外部点击判断改捕获阶段；头部新增 `×` 只关弹层、不关图谱窗口。
 - 侧栏：主题 → `graph:node-events`；时刻 → 新增 `graph:moment-events`（`moments.event_ids` → events 行）+「也属于」其它主题（主归属排第一）。时刻单击直接开侧栏，主题单击聚焦 / 双击开侧栏。
 - 位置：Foam 沉降后只回写主题坐标（`graph:positions:save` → `node_positions`，时刻不存）；下次打开作 seed。无库时跳过写，守 A3。
 - 旧 sigma 按日页保留为 `graph.html`，工具栏「经典视图 / 全局视图」互切；P0 harness 页移除（`harness*.ts/html/css`）。
@@ -333,6 +334,7 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 
 - **形态**：图谱窗口工具栏的日历 **popover**（不是独立 OS 窗口）。
 - **交互**：点=单日；拖=涂抹连续范围；`Ctrl/Cmd+点`=加/减某天（支持不连续）；`Shift+点`=扩到该天；快捷「今天 / 前 3 天 / 前 7 天 / 前 1 月 / 全部」。
+- **开合**：弹层内的一切操作（点 / 拖 / 加减 / 快捷范围）都不关闭弹层；关闭走头部 `×`、工具栏「日期」按钮、`Esc`、或点弹层外。`×` 只关弹层，不动图谱窗口。
 - **日格**：显示当天主题/时刻/事件量（热力点）；归纳未跑完的天用空心点；tooltip 给计数。
 - **语义**：
   - 主题：`[ts_start, ts_end]` 与所选日期相交即 focused；
@@ -425,9 +427,9 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 
 ### 13.2 E2E（假采集 + 假 LLM + 假 embedding）
 
-- 全局页（`tests/e2e/graph-global.spec.ts`，2026-10-24）：主题/时刻/相似连线计数；主题下钻成员事件；多归属时刻「也属于」+ 原始事件；日历 `setDays` 调暗后节点数不变、空范围提示；「只看主题」；沉降后主题坐标回写 `node_positions`；全局页 ↔ 经典页互切。
+- 全局页（`tests/e2e/graph-global.spec.ts`，2026-10-24）：主题/时刻/相似连线计数；主题下钻成员事件；多归属时刻「也属于」+ 原始事件；日历 `setDays` 调暗后节点数不变、空范围提示；日历真实鼠标（点日期不关弹层 / 拖拽涂抹连续范围 / 快捷范围不关弹层 / `×` 只关弹层）；「只看主题」；沉降后主题坐标回写 `node_positions`；全局页 ↔ 经典页互切。
 - 经典页（`tests/e2e/graph.spec.ts`）：确认门、立即归纳落库、下钻 + 时间线定位、设置抽屉、类型显隐、单击/双击语义、暂停零请求。
-- 日历真实鼠标涂抹 / Ctrl 加减：语义由 `calendar.ts` 纯函数用例覆盖，E2E 走 `setDays` 同一应用路径；真机手感留 P3-b。
+- 日历 `Ctrl/Cmd+点` 加减、`Shift+点` 扩展：语义由 `calendar.ts` 纯函数用例覆盖；真实鼠标只测了单点与涂抹，这两个组合键的真机手感留 P3-b。
 - 模型缺失黄条 / 新主题待算：P3-b。
 - 原有 26 条 E2E 回归全绿（2026-10-24：33 条）。
 
@@ -578,3 +580,4 @@ UIA 本机探针：焦点 Document，TextPattern=True；全文 37,349 字符 vs 
 | 3 | 2026-10-24 | v0.3：全局图 + 主题节点/时刻点 + 多归属 + 时间 popover；撤销 3D/主题圈/批量 LLM 边；保留 Foam 活布局；新增 D29 | 2026-10-24 对话 |
 | 4 | 2026-10-24 | v0.4：P0.5 主题合并固定点 + 次归属回填 + schema v4（事件向量/质心/合并审计）；阈值重标定 | §5.1 标定 / 真实库副本 |
 | 5 | 2026-10-24 | P3-a：默认全局 Foam 页（`graph:global`）、时刻下钻 / 「也属于」（`graph:moment-events`）、沉降坐标回写（`graph:positions:save`）、日历调暗、旧 sigma 页保留互切；移除 P0 harness | §7.4 / §8 / §13.2 实施 |
+| 6 | 2026-10-24 | 日历 popover 交互修复：点日期不再关弹层（外部点击判断改捕获阶段）、拖拽涂抹稳定（构建/重绘分离）、头部新增 `×` 只关弹层；补真实鼠标 E2E | §8 / §13.2 |

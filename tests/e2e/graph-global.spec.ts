@@ -252,6 +252,75 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     expect(await focusDays()).toBeNull()
   })
 
+  test('日历真实鼠标：点日期不关弹层 / 拖拽涂抹 / × 只关弹层', async () => {
+    const resetDays = (): Promise<void> =>
+      graph.evaluate(() => {
+        ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays(null)
+      })
+    await resetDays()
+
+    await graph.locator('#calendar-btn').click()
+    await expect(graph.locator('#calendar')).toBeVisible()
+
+    const cells = graph.locator('#cal-grid button:not(.dim)')
+    const firstKey = await cells.first().getAttribute('data-key')
+    expect(firstKey).toBeTruthy()
+
+    // 单击一天：弹层必须留着（回归：mousedown 里重建 DOM → 外部点击判断误判成「点在外面」）
+    const firstBox = (await cells.first().boundingBox())!
+    await graph.mouse.click(firstBox.x + firstBox.width / 2, firstBox.y + firstBox.height / 2)
+    await expect(graph.locator('#calendar')).toBeVisible()
+    expect(await focusDays()).toEqual([firstKey!])
+    await expect(graph.locator(`#cal-grid button[data-key="${firstKey}"]`)).toHaveClass(/\bon\b/)
+
+    // 涂抹：从某天按住拖到相邻的另一天，两次落在同一选择范围里
+    const boxes = await cells.evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const rect = node.getBoundingClientRect()
+        const element = node as HTMLElement
+        return { key: element.dataset.key ?? '', x: rect.x, y: rect.y, w: rect.width, h: rect.height }
+      })
+    )
+    const pair = boxes
+      .flatMap((from, i) => boxes.slice(i + 1).map((to) => ({ from, to })))
+      .find(
+        ({ from, to }) =>
+          Math.abs(from.y - to.y) < 1.5 && to.x - from.x > from.w * 0.9 && to.x - from.x < from.w * 1.6
+      )
+    expect(pair, '日历里应能找到同一行的相邻两格').toBeTruthy()
+    const { from, to } = pair!
+
+    await graph.mouse.move(from.x + from.w / 2, from.y + from.h / 2)
+    await graph.mouse.down()
+    await graph.mouse.move(to.x + to.w / 2, to.y + to.h / 2, { steps: 8 })
+    await graph.mouse.up()
+
+    await expect(graph.locator('#calendar')).toBeVisible()
+    const smeared = await focusDays()
+    expect(smeared).toEqual([from.key, to.key].sort())
+    await expect(graph.locator(`#cal-grid button[data-key="${from.key}"]`)).toHaveClass(/\bon\b/)
+    await expect(graph.locator(`#cal-grid button[data-key="${to.key}"]`)).toHaveClass(/\bon\b/)
+    await expect(graph.locator('#day-label')).toHaveText(`${from.key} ~ ${to.key}`)
+
+    // 快捷范围不改弹层开合，× 只关弹层、不关图谱窗口
+    await graph.locator('#calendar [data-preset="7d"]').click()
+    await expect(graph.locator('#calendar')).toBeVisible()
+    expect((await focusDays())?.length).toBe(7)
+
+    await graph.locator('#cal-close').click()
+    await expect(graph.locator('#calendar')).toBeHidden()
+    await expect(graph.locator('#calendar-btn')).toBeVisible()
+
+    // 重新打开后仍是原选择；点工具栏按钮可再次收起
+    await graph.locator('#calendar-btn').click()
+    await expect(graph.locator('#calendar')).toBeVisible()
+    await graph.locator('#calendar-btn').click()
+    await expect(graph.locator('#calendar')).toBeHidden()
+
+    await resetDays()
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
+  })
+
   test('「只看主题」：隐藏时刻层，连线只留主题相似边', async () => {
     await graph.locator('#only-themes').check()
     await expect.poll(async () => (await visibleCounts()).nodes).toBe(2)

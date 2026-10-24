@@ -77,6 +77,7 @@ const calTitleEl = byId<HTMLElement>('cal-title')
 const calGridEl = byId<HTMLDivElement>('cal-grid')
 const calPrevEl = byId<HTMLButtonElement>('cal-prev')
 const calNextEl = byId<HTMLButtonElement>('cal-next')
+const calCloseEl = byId<HTMLButtonElement>('cal-close')
 const focusBarEl = byId<HTMLDivElement>('focus-bar')
 const focusLabelEl = byId<HTMLElement>('focus-label')
 const focusExitEl = byId<HTMLButtonElement>('focus-exit')
@@ -299,14 +300,20 @@ async function openNodeKey(key: string): Promise<void> {
 /* -------------------------------- 日历弹层 -------------------------------- */
 
 calendarBtn.addEventListener('click', () => {
-  calendarEl.hidden = !calendarEl.hidden
   if (!calendarEl.hidden) {
-    const anchor = days && days.size > 0 ? [...days].sort()[0] : dayKey(Date.now())
-    const [y, m] = anchor.split('-').map(Number)
-    calYear = y
-    calMonth = m - 1
-    renderCalendar()
+    calendarEl.hidden = true
+    return
   }
+  const anchor = days && days.size > 0 ? [...days].sort()[0] : dayKey(Date.now())
+  const [y, m] = anchor.split('-').map(Number)
+  calYear = y
+  calMonth = m - 1
+  calendarEl.hidden = false
+  renderCalendar()
+})
+
+calCloseEl.addEventListener('click', () => {
+  calendarEl.hidden = true
 })
 
 calPrevEl.addEventListener('click', () => {
@@ -331,12 +338,19 @@ for (const button of Array.from(calendarEl.querySelectorAll<HTMLButtonElement>('
   })
 }
 
-document.addEventListener('mousedown', (event) => {
-  if (calendarEl.hidden) return
-  const target = event.target as Node
-  if (calendarEl.contains(target) || calendarBtn.contains(target)) return
-  calendarEl.hidden = true
-})
+// 捕获阶段判断「点在外面」：此时 target 还在 DOM 里。
+// 之前放在冒泡阶段，而日格的 mousedown 会重建网格，target 已被摘掉，
+// `contains()` 于是误判成「点在外面」→ 一碰日期弹层就关（涂抹更无从谈起）。
+document.addEventListener(
+  'mousedown',
+  (event) => {
+    if (calendarEl.hidden) return
+    const target = event.target as Node
+    if (calendarEl.contains(target) || calendarBtn.contains(target)) return
+    calendarEl.hidden = true
+  },
+  true
+)
 
 document.addEventListener('mouseup', () => {
   if (!dragging) return
@@ -355,25 +369,43 @@ document.addEventListener('keydown', (event) => {
 function renderCalendar(): void {
   calTitleEl.textContent = monthTitle(calYear, calMonth)
   calGridEl.textContent = ''
-  const today = dayKey(Date.now())
   for (const day of monthGrid(calYear, calMonth)) {
     const button = document.createElement('button')
     button.type = 'button'
     button.textContent = String(Number(day.key.slice(8)))
     button.dataset.key = day.key
+    button.draggable = false
     if (!day.inMonth) button.classList.add('dim')
-    if (days !== null && days.has(day.key)) button.classList.add('on')
-    if (day.key === today) button.classList.add('today')
     button.addEventListener('mousedown', (event) => onDayMouseDown(event, day.key))
-    button.addEventListener('mouseenter', () => onDayMouseEnter(day.key))
+    button.addEventListener('mouseenter', (event) => onDayMouseEnter(event, day.key))
     calGridEl.appendChild(button)
+  }
+  paintCalendar()
+}
+
+/**
+ * 只重刷选中 / 今天的样式，不重建 DOM。
+ * 涂抹时鼠标下的格子每次都重建的话，浏览器拿不到稳定的 hover 目标，
+ * 既会掉 mouseenter，也会让 mousedown 的 target 变成游离节点。
+ */
+function paintCalendar(): void {
+  const today = dayKey(Date.now())
+  for (const button of Array.from(calGridEl.querySelectorAll<HTMLButtonElement>('button'))) {
+    const key = button.dataset.key ?? ''
+    button.classList.toggle('on', days !== null && days.has(key))
+    button.classList.toggle('today', key === today)
   }
 }
 
 function onDayMouseDown(event: MouseEvent, key: string): void {
+  if (event.button !== 0) return
+  // 不让浏览器去选区 / 拖图，省得涂抹时整片文字被选蓝。
+  event.preventDefault()
   if (event.ctrlKey || event.metaKey) {
+    dragging = null
     days = editDaySelection(days, key, 'toggle')
   } else if (event.shiftKey) {
+    dragging = null
     const anchor = days && days.size > 0 ? [...days].sort()[0] : key
     days = dayRange(anchor, key)
   } else {
@@ -381,14 +413,20 @@ function onDayMouseDown(event: MouseEvent, key: string): void {
     days = new Set([key])
   }
   applyTimeFocus(false)
-  renderCalendar()
+  paintCalendar()
 }
 
-function onDayMouseEnter(key: string): void {
+function onDayMouseEnter(event: MouseEvent, key: string): void {
   if (!dragging) return
+  // 在窗口外松开就收不到 mouseup：用按键状态兜底，免得「松手了还在涂」。
+  if ((event.buttons & 1) === 0) {
+    dragging = null
+    applyTimeFocus(true)
+    return
+  }
   days = dayRange(dragging.anchor, key)
   applyTimeFocus(false)
-  renderCalendar()
+  paintCalendar()
 }
 
 /* ------------------------------ 时间筛选应用 ------------------------------ */

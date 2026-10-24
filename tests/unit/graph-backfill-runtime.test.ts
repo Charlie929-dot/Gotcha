@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { insertEvent, openDatabase, type Db } from '../../src/db'
 import {
+  BACKFILL_EMBEDDER_OPTIONS,
   resetGraphBackfillRuntimeState,
   runGraphBackfill,
   type GraphBackfillRuntimeDeps
@@ -68,6 +69,20 @@ beforeEach(() => {
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
   resetGraphBackfillRuntimeState()
+})
+
+describe('BACKFILL_EMBEDDER_OPTIONS', () => {
+  /**
+   * 回归护栏（2026-10-25 实测）：`onnxruntime-node` 推理期间独占主进程 JS 线程，
+   * 批 32 单次卡 1.2–2.5s → 打开图谱连着几十秒没响应；批 1 单次 ~60ms 且吞吐不降
+   * （批 1 = 38.8ms/条、批 8 = 41.1ms/条）。批大小一旦被「提速」改回去，
+   * 主进程卡顿会立刻复现，所以这里钉死。
+   */
+  it('批大小保持 1（批内补齐会白算，且大批判会让主进程僵住）', () => {
+    expect(BACKFILL_EMBEDDER_OPTIONS.batchSize).toBe(1)
+    expect(BACKFILL_EMBEDDER_OPTIONS.intraOpNumThreads).toBeGreaterThanOrEqual(2)
+    expect(BACKFILL_EMBEDDER_OPTIONS.maxLength).toBeLessThanOrEqual(512)
+  })
 })
 
 describe('runGraphBackfill', () => {

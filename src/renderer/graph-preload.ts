@@ -7,6 +7,7 @@
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type { GraphDayData, GraphGlobalData, NodeEventsResult } from '../understand/graph-query'
+import type { SearchHitEventsInput, SearchInput, SearchResult } from '../understand/search'
 import type { SaveNodePositionsResult } from '../understand/node-positions'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
@@ -20,6 +21,12 @@ export interface GraphApi {
   global(): Promise<GraphGlobalData>
   nodeEvents(nodeId: number): Promise<NodeEventsResult>
   momentEvents(momentId: number): Promise<NodeEventsResult>
+  /** 门一检索 v1：L0 全文检索（OCR 归一化索引 + app / 标题 / 时间窗过滤） */
+  search(input: SearchInput): Promise<SearchResult>
+  /** 检索卡片下钻：命中时刻的原始事件 */
+  searchHitEvents(input: SearchHitEventsInput): Promise<NodeEventsResult>
+  /** app 过滤器候选项（按事件量倒序） */
+  searchApps(): Promise<string[]>
   savePositions(
     positions: Array<{ nodeId: number; x: number; y: number }>
   ): Promise<SaveNodePositionsResult>
@@ -43,6 +50,10 @@ const api: GraphApi = {
     ipcRenderer.invoke('graph:node-events', nodeId) as Promise<NodeEventsResult>,
   momentEvents: (momentId) =>
     ipcRenderer.invoke('graph:moment-events', momentId) as Promise<NodeEventsResult>,
+  search: (input) => ipcRenderer.invoke('graph:search', input) as Promise<SearchResult>,
+  searchHitEvents: (input) =>
+    ipcRenderer.invoke('graph:search-hit-events', input) as Promise<NodeEventsResult>,
+  searchApps: () => ipcRenderer.invoke('graph:search-apps') as Promise<string[]>,
   savePositions: (positions) =>
     ipcRenderer.invoke('graph:positions:save', positions) as Promise<SaveNodePositionsResult>,
   status: () => ipcRenderer.invoke('graph:status') as Promise<InductionSnapshot>,

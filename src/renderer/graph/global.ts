@@ -22,6 +22,8 @@ import type {
 import type { GraphSettingsView } from '../../main/graph-settings'
 import type { InductionSnapshot } from '../../main/induction-runtime'
 import type { GraphInduceResult } from '../../main/graph-ipc'
+import type { SearchHitDto, SearchResult } from '../../understand/search'
+import { formatTime } from '../timeline'
 import {
   focusedIdsForDays,
   nodeIdOf,
@@ -83,6 +85,15 @@ const focusLabelEl = byId<HTMLElement>('focus-label')
 const focusExitEl = byId<HTMLButtonElement>('focus-exit')
 const panelEl = byId<HTMLElement>('panel')
 const induceEl = byId<HTMLButtonElement>('induce')
+const searchForm = byId<HTMLFormElement>('search-form')
+const searchInput = byId<HTMLInputElement>('search-input')
+const searchRangeEl = byId<HTMLSelectElement>('search-range')
+const searchAppEl = byId<HTMLSelectElement>('search-app')
+const searchTitleEl = byId<HTMLInputElement>('search-title')
+const searchResultsEl = byId<HTMLDivElement>('search-results')
+const searchListEl = byId<HTMLUListElement>('search-list')
+const searchSummaryEl = byId<HTMLElement>('search-summary')
+const searchHintEl = byId<HTMLElement>('search-hint')
 
 const panel = createGlobalPanel(
   {
@@ -361,6 +372,7 @@ document.addEventListener('mouseup', () => {
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return
   calendarEl.hidden = true
+  closeSearch()
   panel.hide()
   graphEl.clearSelection()
   hideFocus()
@@ -453,6 +465,243 @@ onlyThemesEl.addEventListener('change', () => {
   onlyThemes = onlyThemesEl.checked
   graphEl.setNodeTypeVisible('moment', !onlyThemes)
   applyTimeFocus(true)
+})
+
+/* ---------------------------------- 检索 ---------------------------------- */
+
+/** 时间窗下拉 → fromTs（null = 全部） */
+const SEARCH_RANGE_DAYS: Record<string, number | null> = {
+  all: null,
+  today: 1,
+  '3d': 3,
+  '7d': 7,
+  '30d': 30
+}
+
+let searchSeq = 0
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+let searchAppsLoaded = false
+
+function searchFromTs(): number | null {
+  const days = SEARCH_RANGE_DAYS[searchRangeEl.value]
+  if (days === null || days === undefined) return null
+  const today = new Date(dayStart(Date.now()))
+  today.setDate(today.getDate() - (days - 1))
+  return today.getTime()
+}
+
+function scheduleSearch(delay = 300): void {
+  if (searchTimer !== null) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    void runSearch()
+  }, delay)
+}
+
+function closeSearch(): void {
+  searchSeq += 1
+  if (searchResultsEl.hidden) return
+  searchResultsEl.hidden = true
+  searchListEl.replaceChildren()
+}
+
+/** 只按 code point 数（与主进程 search 模块的「≥2 字」口径一致） */
+function queryCharCount(value: string): number {
+  return [...value.replace(/\s+/g, '')].length
+}
+
+async function runSearch(): Promise<void> {
+  const query = searchInput.value
+  if (queryCharCount(query) < 2) {
+    closeSearch()
+    return
+  }
+  const seq = ++searchSeq
+  searchResultsEl.hidden = false
+  searchSummaryEl.textContent = '检索中…'
+  searchHintEl.textContent = ''
+  searchListEl.replaceChildren()
+  try {
+    const result = await window.gotchaGraph.search({
+      query,
+      app: searchAppEl.value || null,
+      titleContains: searchTitleEl.value.trim() || null,
+      fromTs: searchFromTs(),
+      toTs: null
+    })
+    if (seq !== searchSeq) return
+    renderSearchResult(result)
+  } catch (error) {
+    if (seq !== searchSeq) return
+    searchSummaryEl.textContent = `检索失败：${String(error)}`
+    searchListEl.replaceChildren()
+  }
+}
+
+function renderSearchResult(result: SearchResult): void {
+  if (result.mode === 'empty') {
+    closeSearch()
+    return
+  }
+  searchResultsEl.hidden = false
+  searchSummaryEl.textContent =
+    result.matchedEvents === 0
+      ? '没有命中'
+      : `${result.matchedEvents} 条命中 · ${result.hits.length} 个时刻`
+  searchHintEl.textContent = result.truncated
+    ? '结果已截断，缩小时间范围更准'
+    : result.mode === 'like'
+      ? '两字词走模糊匹配'
+      : ''
+  searchListEl.replaceChildren()
+  if (result.hits.length === 0) {
+    const li = document.createElement('li')
+    li.className = 'empty'
+    li.textContent = '没有找到这段记忆（数据仍在，只是没命中）'
+    searchListEl.append(li)
+    return
+  }
+  for (const hit of result.hits) searchListEl.append(searchCard(hit))
+}
+
+function searchCard(hit: SearchHitDto): HTMLLIElement {
+  const li = document.createElement('li')
+  li.dataset.momentId = hit.momentId === null ? '' : String(hit.momentId)
+  li.dataset.startTs = String(hit.startTs)
+
+  const head = document.createElement('div')
+  head.className = 'hit-head'
+  const time = document.createElement('span')
+  const startLabel = formatTime(hit.startTs)
+  const endLabel = formatTime(hit.endTs)
+  time.textContent = `${hit.dayKey.slice(5)} ${
+    endLabel !== startLabel ? `${startLabel}–${endLabel}` : startLabel
+  }`
+  const app = document.createElement('span')
+  app.textContent = hit.app || '未知应用'
+  head.append(time, app)
+
+  const title = document.createElement('div')
+  title.className = 'hit-title'
+  title.textContent = hit.windowTitle || '（无窗口标题）'
+
+  const snippet = document.createElement('div')
+  snippet.className = 'hit-snippet'
+  snippet.textContent = hit.snippet
+
+  const meta = document.createElement('div')
+  meta.className = 'hit-meta'
+  meta.textContent = `${hit.matchedEvents} 条命中${
+    hit.momentId === null ? ' · 未成时刻（仍可下钻原文）' : ''
+  }`
+
+  li.append(head, title, snippet, meta)
+  li.addEventListener('click', () => void openSearchHit(hit))
+  return li
+}
+
+/** 点结果卡片 = 回到那一刻：有时刻走时刻面板（含「也属于」），否则按窗口现取原文 */
+async function openSearchHit(hit: SearchHitDto): Promise<void> {
+  const seq = ++panelSeq
+  try {
+    const result = await window.gotchaGraph.searchHitEvents({
+      momentId: hit.momentId,
+      app: hit.app,
+      windowTitle: hit.windowTitle,
+      startTs: hit.startTs,
+      endTs: hit.endTs
+    })
+    if (seq !== panelSeq) return
+    const themeIds =
+      hit.momentId === null
+        ? []
+        : input?.moments.find((moment) => moment.id === hit.momentId)?.themeIds ?? []
+    const themes = themeIds
+      .map((themeId) => themeById.get(themeId))
+      .filter((theme): theme is GlobalThemeDto => theme !== undefined)
+    panel.showMoment(
+      {
+        id: hit.momentId ?? 0,
+        startTs: hit.startTs,
+        endTs: hit.endTs,
+        dayKey: hit.dayKey,
+        app: hit.app,
+        windowTitle: hit.windowTitle,
+        ocrSummary: hit.ocrSummary ?? hit.snippet,
+        eventIds: hit.eventIds,
+        assigned: themes.length > 0
+      },
+      result,
+      themes
+    )
+    if (hit.momentId !== null && momentById.has(hit.momentId)) {
+      const key = `m:${hit.momentId}`
+      graphEl.selectNode(key)
+      showFocus(key)
+    }
+  } catch (error) {
+    showEmpty('error', `打开时刻失败：${String(error)}`)
+  }
+}
+
+/** app 过滤器候选项（一次加载；刷新时重取） */
+async function loadSearchApps(): Promise<void> {
+  try {
+    const apps = await window.gotchaGraph.searchApps()
+    const current = searchAppEl.value
+    const options: HTMLOptionElement[] = []
+    const all = document.createElement('option')
+    all.value = ''
+    all.textContent = '全部应用'
+    options.push(all)
+    for (const app of apps) {
+      const option = document.createElement('option')
+      option.value = app
+      option.textContent = app
+      options.push(option)
+    }
+    searchAppEl.replaceChildren(...options)
+    searchAppEl.value = apps.includes(current) ? current : ''
+    searchAppsLoaded = true
+  } catch {
+    searchAppsLoaded = false
+  }
+}
+
+searchForm.addEventListener('submit', (event) => {
+  event.preventDefault()
+  scheduleSearch(0)
+})
+
+searchInput.addEventListener('input', () => scheduleSearch())
+searchTitleEl.addEventListener('input', () => scheduleSearch())
+searchRangeEl.addEventListener('change', () => {
+  if (queryCharCount(searchInput.value) >= 2) scheduleSearch(0)
+})
+searchAppEl.addEventListener('change', () => {
+  if (queryCharCount(searchInput.value) >= 2) scheduleSearch(0)
+})
+byId('search-close').addEventListener('click', () => closeSearch())
+
+// 检索结果与日历一样：捕获阶段判断「点在外面」，此时被点的节点还在 DOM 里
+document.addEventListener(
+  'mousedown',
+  (event) => {
+    if (searchResultsEl.hidden) return
+    const target = event.target as Node
+    if (searchResultsEl.contains(target) || searchForm.contains(target)) return
+    closeSearch()
+  },
+  true
+)
+
+// Ctrl+F：聚焦检索框（Electron 窗口没有浏览器自带查找）
+document.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+    event.preventDefault()
+    searchInput.focus()
+    searchInput.select()
+  }
 })
 
 /* ---------------------------------- 计数 ---------------------------------- */
@@ -586,6 +835,7 @@ async function refreshStatus(): Promise<void> {
 async function refresh(): Promise<void> {
   await refreshStatus()
   await load()
+  if (!searchAppsLoaded) void loadSearchApps()
 }
 
 async function applySavedSettings(settings: GraphSettingsView): Promise<void> {
@@ -694,3 +944,4 @@ window.__gotchaGraphView = {
 }
 
 void refresh()
+void loadSearchApps()

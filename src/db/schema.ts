@@ -213,6 +213,62 @@ export const EDGES_SRC_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 `
 
+/* ------------------------------------------------------------------ *
+ * v5：检索索引（门一 v1，D31 / docs/memory-orb-design-proposal.md §3）
+ * ------------------------------------------------------------------ */
+
+/**
+ * OCR 文本归一化（SQL 侧唯一定义：触发器与重建共用）。
+ *
+ * 实测修正（2026-10-24，本机 9 866 条非空 OCR）：98.9% 的中文被 WinRT OCR 切成
+ * 「图 谱 设 计」这种空格逐字形态，原文上 trigram MATCH（需 ≥3 连续字符）与
+ * LIKE '%图谱%' 都搜不到连续中文词（同一词原文 LIKE 命中 42 条、去空白后 2 503 条）。
+ * 中文词内空格在视觉上无意义，因此索引侧一律去空白；查询侧同样去空白，两边口径一致，
+ * 英文相邻词（"quick brown" → "quickbrown"）也仍然可查。
+ */
+export function normalizeOcrSql(expr: string): string {
+  return `replace(replace(replace(replace(replace(replace(${expr}, ' ', ''), char(9), ''), char(10), ''), char(13), ''), char(12288), ''), char(160), '')`
+}
+
+/**
+ * 检索索引：rowid = `events.id`，列存**归一化后的 OCR 文本**（不是原文）。
+ *
+ * 为什么不是 external-content（提案 §3.2 原始写法）：归一化文本必须落库才撑得起
+ * 「两字词 LIKE 兜底」与 snippet，而 SQL 触发器没法调用 TS 归一化函数；用内容自持的
+ * FTS 表 = 索引 + 归一化文本同表，省掉第二张原文副本，且仍可从 L0 整体重建。
+ * 代价（本机实测）：9 914 条事件建索引 ~4.1 s、库 44.6 → 91.7 MB（+47 MB：归一化原文 ~12 MB + trigram 索引 ~35 MB）。
+ */
+export const EVENTS_FTS_DDL = `
+CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+  ocr_text,
+  tokenize = 'trigram'
+);
+`
+
+/** 新事件入索引（与 `events` 同事务，触发器保证任何写入路径都覆盖） */
+export const EVENTS_FTS_INSERT_TRIGGER_DDL = `
+CREATE TRIGGER IF NOT EXISTS events_fts_ai AFTER INSERT ON events BEGIN
+  INSERT INTO events_fts(rowid, ocr_text)
+  VALUES (new.id, ${normalizeOcrSql("coalesce(new.ocr_text, '')")});
+END;
+`
+
+/** 事件删除 → 索引同步删（L0 行没了，索引不能留下幽灵命中） */
+export const EVENTS_FTS_DELETE_TRIGGER_DDL = `
+CREATE TRIGGER IF NOT EXISTS events_fts_ad AFTER DELETE ON events BEGIN
+  DELETE FROM events_fts WHERE rowid = old.id;
+END;
+`
+
+/** 事件改写 → 索引跟随（现有写入路径不改写 L0；留触发器兜住未来迁移/修正脚本） */
+export const EVENTS_FTS_UPDATE_TRIGGER_DDL = `
+CREATE TRIGGER IF NOT EXISTS events_fts_au AFTER UPDATE ON events BEGIN
+  DELETE FROM events_fts WHERE rowid = old.id;
+  INSERT INTO events_fts(rowid, ocr_text)
+  VALUES (new.id, ${normalizeOcrSql("coalesce(new.ocr_text, '')")});
+END;
+`
+
 export const EDGES_DST_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 `

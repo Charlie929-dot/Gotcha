@@ -64,7 +64,7 @@ Foam <foam-graph>：活布局、时间 dimmed、主题/时刻两层
 - 主进程只多一个**本地** embedding 服务；LLM 只做语义命名/确认，出网仍走唯一出口（`redact.ts`）与 D24 确认门。
 - SQLite 仍是唯一事实源；模型文件不进库、不进 git。
 
-## 4. 数据模型（schema v4）
+## 4. 数据模型（schema v4；v5 另有检索索引 `events_fts`，见 `docs/memory-orb-design-proposal.md` §3）
 
 ### 4.1 时刻
 

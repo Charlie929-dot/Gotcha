@@ -17,6 +17,11 @@ import {
   queryNodeEvents
 } from '../understand/graph-query'
 import { saveNodePositions } from '../understand/node-positions'
+import {
+  listSearchApps,
+  querySearchHitEvents,
+  searchEvents
+} from '../understand/search'
 import { loadEnvFile } from '../understand/cloud/env-file'
 import { createDeepSeekClient } from '../understand/cloud/deepseek'
 import {
@@ -810,6 +815,23 @@ if (primaryInstance) {
         return db
           ? queryMomentEvents(db, momentId)
           : { found: false, events: [], missingIds: [], malformed: false }
+      },
+      search: (input) => {
+        const db = connections.queryDb()
+        // A3 红线：没有库（从未采集）时不因为搜索建库，返回空结果
+        return db
+          ? searchEvents(db, input)
+          : { query: '', mode: 'empty', hits: [], matchedEvents: 0, truncated: false }
+      },
+      searchHitEvents: (input) => {
+        const db = connections.queryDb()
+        return db
+          ? querySearchHitEvents(db, input)
+          : { found: false, events: [], missingIds: [], malformed: false }
+      },
+      searchApps: () => {
+        const db = connections.queryDb()
+        return db ? listSearchApps(db) : []
       },
       savePositions: (input) => {
         // A3 红线：从未建库时不能因为画布沉降而建库 / 写盘

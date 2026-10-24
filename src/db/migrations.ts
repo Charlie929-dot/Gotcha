@@ -14,6 +14,10 @@ import {
   EDGES_SRC_INDEX_DDL,
   EVENT_EMBEDDINGS_DDL,
   EVENTS_DDL,
+  EVENTS_FTS_DDL,
+  EVENTS_FTS_DELETE_TRIGGER_DDL,
+  EVENTS_FTS_INSERT_TRIGGER_DDL,
+  EVENTS_FTS_UPDATE_TRIGGER_DDL,
   EVENTS_TS_INDEX_DDL,
   MOMENTS_DDL,
   MOMENTS_DAY_INDEX_DDL,
@@ -30,7 +34,8 @@ import {
   SETTINGS_DDL,
   THEME_CENTROIDS_DDL,
   THEME_MOMENTS_DDL,
-  THEME_MOMENTS_MOMENT_INDEX_DDL
+  THEME_MOMENTS_MOMENT_INDEX_DDL,
+  normalizeOcrSql
 } from './schema'
 
 export interface Migration {
@@ -125,6 +130,33 @@ export const migrations: Migration[] = [
       db.exec('DROP INDEX IF EXISTS idx_node_merges_from')
       db.exec('DROP INDEX IF EXISTS idx_node_merges_group')
       db.exec('DROP TABLE IF EXISTS node_merges')
+    }
+  },
+  {
+    /**
+     * v5：检索索引（门一 v1 / D31）。
+     * - trigram FTS5 + 归一化 OCR 文本（中文词内空格见 `schema.ts` 的实测说明）；
+     * - 触发器保证任何写入路径（采集管线、测试直插）都同步索引；
+     * - up 末尾整表重建，让已采下的全部 L0 事件 retroactively 可查（幂等：先清后灌）；
+     * - 索引是派生数据：down 直接丢表，L0 不受影响。
+     */
+    version: 5,
+    up(db) {
+      db.exec(EVENTS_FTS_DDL)
+      db.exec(EVENTS_FTS_INSERT_TRIGGER_DDL)
+      db.exec(EVENTS_FTS_DELETE_TRIGGER_DDL)
+      db.exec(EVENTS_FTS_UPDATE_TRIGGER_DDL)
+      db.exec('DELETE FROM events_fts')
+      db.exec(
+        `INSERT INTO events_fts(rowid, ocr_text)
+         SELECT id, ${normalizeOcrSql('ocr_text')} FROM events`
+      )
+    },
+    down(db) {
+      db.exec('DROP TRIGGER IF EXISTS events_fts_au')
+      db.exec('DROP TRIGGER IF EXISTS events_fts_ad')
+      db.exec('DROP TRIGGER IF EXISTS events_fts_ai')
+      db.exec('DROP TABLE IF EXISTS events_fts')
     }
   }
 ]

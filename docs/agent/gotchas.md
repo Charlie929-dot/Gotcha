@@ -91,6 +91,8 @@
 | 状态快照里顺手读模型 / 设置会踩 A3 | 归纳快照每次刷新都要知道「本地向量模型是否就绪」；如果为了读 `graph.embedding_model_dir` 顺手 `connections.ensureWritable()` 或 `openDatabase()`，默认暂停下「打开图谱 / 读一次状态」就会建库，违反 A3「无显式交互零磁盘写入」（2026-10-25 做模型缺失黄条时规避） | 状态类读取一律走只读连接 `connections.queryDb()`，没库就按空设置处理（回退默认模型目录）；就绪判定只 `existsSync(model.onnx)` + `existsSync(vocab.txt)`，不做任何写盘 |
 | 新增的快照字段缺省被当成「坏消息」 | 模型缺失黄条上线后，真机（2026-10-25 02:0x）挂着一条「新主题暂无法计算」，但模型其实装好了、日志一路 `embeddingsOk:true`（`node_embeddings` 354 / `event_embeddings` 6954）。原因：跑着的 electron 是 00:23 启动的**旧主进程**（没有 `embeddingsReady`），而图谱窗口的渲染层已经被 `npm run dev` 热更新成新代码 → `!undefined === true` → 误报 | 渲染层判断「否定状态」时必须**只认明确的 `false`**（`embeddingsReady !== false` 才静默），缺省＝不知道；主进程侧同理，新字段的默认值要选「不报警」方向。改完要让用户**重启应用**（HMR 只换渲染层，主进程要重启），否则新旧混跑仍会看到旧行为 |
 | 保存设置后才读「旧值」比较 = 永远相等 | `applyGraphSettings` 用 `inductionRuntime.getSnapshot().consent` 判断确认门是否变化；但 IPC 是**先写库、再回调**，快照读的就是新值，比较恒等 → 在设置里取消「已确认出网」既不停调度、也 abort 不了在途请求（D24 隐私承诺失效，2026-10-25 发现，同日修） | 旧值必须在**写库前**取：`graph:settings:save` 先 `deps.readSettings().outboundConsent` 再 `saveSettings`，把 `previousConsent` 一起交给 `onSettingsSaved`；`tests/unit/graph-ipc.test.ts` 钉住顺序（`[true, false]`，顺序反了会变成 `[false, false]`） |
+| git-lfs 指针文件冒充模型 | 模型入库后（D37），没装 git-lfs 的机器克隆下来 `resources/models/.../model.onnx` 只有 130 B 的文本指针；只看 `existsSync` 会判「就绪」，黄条不出现，直到 `InferenceSession.create` 才炸，报错跟真正原因对不上（2026-10-25） | `isModelReady` 加下界 `MIN_MODEL_ONNX_BYTES = 1 MB`；`git lfs install` 后 `git lfs pull` 才能拿到真文件，`node_modules` 之外的二进制一律走 `.gitattributes` 的 `filter=lfs` |
+| 显式设置被「兜底」悄悄顶掉 | 模型查找先试 `graph.embedding_model_dir`，若「设了但目录不存在」还继续回退到自带模型，用户会以为设置没生效（E2E 也因此在真模型回填下把种好的假边覆盖掉，断言飘） | `embeddingModelCandidates`：设置非空就**只**返回它，不回退；要么命中、要么黄条提示，不做静默兜底 |
 
 ## 规则
 

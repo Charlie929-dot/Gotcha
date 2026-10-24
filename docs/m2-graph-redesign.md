@@ -378,14 +378,14 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 - 模型：`bge-small-zh-v1.5`，512 维，CLS pooling + L2；`model.onnx` 94.8 MB；vocab 无英文子词（DeepSeek/API/GUI 等会 `[UNK]`），中文摘要仍提供信号。
 - 运行时：`onnxruntime-node`（N-API 预编译）在 Electron 45 主进程实测 3 条短文本 7.2 ms；首次加载约 0.47 s；打包 `asarUnpack`、只留 win32-x64；失败回退 WASM。
 - 进程：优先主线程懒加载 + 分块（121 主题/天约 0.3–0.9 s，带进度）；worker_threads 作为可选优化，不作为 P1 前置。
-- 模型路径：`graph.embedding_model_dir` → `%APPDATA%/Gotcha/models/...`；不自动下载；缺失时明确提示。
+- 模型路径（**2026-10-25 改，D37**）：模型随应用分发，不再是「用户本地资产 + 手工放置」。查找顺序：设置 `graph.embedding_model_dir` → 打包资源 `<resourcesPath>/models/bge-small-zh-v1.5` → 仓库 `<appPath>/resources/models/bge-small-zh-v1.5`（dev）→ `%APPDATA%/Gotcha/models/`（历史位置，兼容）；第一个「就绪」的胜出（`src/understand/embedding/paths.ts`）。仍不自动下载；缺失时顶部黄条明确提示。
 - 日志：只记模型名/维度/批大小/耗时/失败码；不记节点文本、向量、路径。
 - 详见 `docs/archive/m2-graph-redesign-v0.2.md` §5、§10。
 
 **实施（2026-10-24，PR #38；真机实测）**
 
 - 依赖：`onnxruntime-node@1.30.0`（MIT，N-API 预编译，unpacked ~301 MB 含各平台二进制）；主进程 `await import()` 懒加载，打包时 `asarUnpack`、只留 win32-x64（打包步骤 P3 补）。
-- 模型：`Xenova/bge-small-zh-v1.5` 的 `onnx/model.onnx`（fp32，94,851,877 B）+ `vocab.txt`/`config.json`；放在 `%APPDATA%/Gotcha/models/bge-small-zh-v1.5/`（`model.onnx` 在目录根，**不是** `onnx/` 子目录）。不进 git、不自动下载；BAAI BGE 为 MIT，第三方声明补在打包阶段。
+- 模型：`Xenova/bge-small-zh-v1.5` 的 `onnx/model.onnx`（fp32，94,851,877 B）+ `vocab.txt`/`config.json`；**2026-10-25 起随仓库分发**：`resources/models/bge-small-zh-v1.5/`（`model.onnx` 走 git-lfs，`vocab.txt` / `config.json` 普通提交；`model.onnx` 仍在目录根，**不是** `onnx/` 子目录）。打包用 electron-builder `extraResources` 带进安装包（M5 落地）；仍不自动下载；BAAI BGE 为 MIT，第三方声明补在打包阶段。
 - 分词：自写 `BertTokenizer`（vocab.txt + WordPiece），按 `tokenizer_config.json` 的 `do_lower_case=false`、`tokenize_chinese_chars=true`；不引第三方 tokenizer，用例覆盖中文按字、`##` 续词、截断 512、`[UNK]`。
 - 池化：`last_hidden_state` 第 0 位（CLS）+ L2；向量以 Float32 小端 BLOB 存 `node_embeddings`。
 - 实测（本机 Windows / Node 24 / 单线程 ORT）：会话加载 357 ms；229 个主题（title+summary）3.6 s（约 16 ms/条，batch 16）；3,141 个成员事件 192 s（约 61 ms/条，OCR 文本长）。

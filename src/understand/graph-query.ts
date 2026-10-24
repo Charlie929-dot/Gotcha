@@ -276,6 +276,46 @@ export function queryNodeEvents(db: Db, nodeId: number): NodeEventsResult {
   return { found: true, events, missingIds, malformed: parsed.malformed }
 }
 
+/** 时刻成员事件（侧栏下钻；`event_ids` 与节点 `source_events` 同口径解析） */
+export function queryMomentEvents(db: Db, momentId: number): NodeEventsResult {
+  if (!Number.isInteger(momentId) || momentId <= 0) {
+    return { found: false, events: [], missingIds: [], malformed: false }
+  }
+  const moment = db
+    .prepare('SELECT event_ids FROM moments WHERE id = ?')
+    .get(momentId) as { event_ids: string | null } | undefined
+  if (!moment) return { found: false, events: [], missingIds: [], malformed: false }
+
+  const parsed = parseEventIds(moment.event_ids)
+  if (parsed.ids.length === 0) {
+    return { found: true, events: [], missingIds: [], malformed: parsed.malformed }
+  }
+
+  const rows = selectEventsByIds(db, parsed.ids)
+  const byId = new Map<number, EventRow>()
+  for (const row of rows) byId.set(row.id, row)
+
+  const events: NodeEventDto[] = []
+  const missingIds: number[] = []
+  for (const id of parsed.ids) {
+    const row = byId.get(id)
+    if (!row) {
+      missingIds.push(id)
+      continue
+    }
+    events.push({
+      id: row.id,
+      ts: row.ts,
+      app: row.app,
+      windowTitle: row.window_title,
+      ocrText: row.ocr_text,
+      sensitive: row.sensitive === 1 ? 1 : 0
+    })
+  }
+  events.sort((a, b) => (a.ts === b.ts ? a.id - b.id : a.ts - b.ts))
+  return { found: true, events, missingIds, malformed: parsed.malformed }
+}
+
 /* ------------------------------------------------------------------ *
  * v0.3 全局图（docs/m2-graph-redesign.md §4 / §8）
  * ------------------------------------------------------------------ */

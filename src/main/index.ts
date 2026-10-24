@@ -9,7 +9,14 @@ import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
 import { cleanStaleFrames } from '../capture/temp-store'
-import { queryGraphDay, queryNodeEvents } from '../understand/graph-query'
+import {
+  emptyGlobalGraph,
+  queryGlobalGraph,
+  queryGraphDay,
+  queryMomentEvents,
+  queryNodeEvents
+} from '../understand/graph-query'
+import { saveNodePositions } from '../understand/node-positions'
 import { loadEnvFile } from '../understand/cloud/env-file'
 import { createDeepSeekClient } from '../understand/cloud/deepseek'
 import {
@@ -363,7 +370,7 @@ function showGraphWindow(): void {
   }
   graphWindow = createGraphWindow({
     devServerUrl: process.env['ELECTRON_RENDERER_URL'],
-    htmlPath: join(__dirname, '../renderer/graph/graph.html'),
+    htmlPath: join(__dirname, '../renderer/graph/global.html'),
     preloadPath: join(__dirname, '../preload/graph.js'),
     onClosed: () => {
       graphWindow = null
@@ -788,11 +795,28 @@ if (primaryInstance) {
         const db = connections.queryDb()
         return db ? queryGraphDay(db, from, to, { includeEvents: true }) : { nodes: [], edges: [] }
       },
+      queryGlobal: () => {
+        const db = connections.queryDb()
+        return db ? queryGlobalGraph(db) : emptyGlobalGraph()
+      },
       queryNodeEvents: (nodeId) => {
         const db = connections.queryDb()
         return db
           ? queryNodeEvents(db, nodeId)
           : { found: false, events: [], missingIds: [], malformed: false }
+      },
+      queryMomentEvents: (momentId) => {
+        const db = connections.queryDb()
+        return db
+          ? queryMomentEvents(db, momentId)
+          : { found: false, events: [], missingIds: [], malformed: false }
+      },
+      savePositions: (input) => {
+        // A3 红线：从未建库时不能因为画布沉降而建库 / 写盘
+        if (!existsSync(dbPath)) return { ok: true, saved: 0, rejected: 0 }
+        // 显式 UI 动作（Foam 沉降后回写 seed）：允许打开写连接
+        const db = connections.ensureWritable().db
+        return saveNodePositions(db, input)
       },
       getSnapshot: currentInductionSnapshot,
       runInductionNow: (dayStart?: number) =>

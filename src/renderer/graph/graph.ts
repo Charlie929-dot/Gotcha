@@ -38,22 +38,11 @@ import {
 import { createNodePanel } from './graph-panel'
 import { createSettingsPanel } from './graph-settings-panel'
 import { statusView } from './status-view'
+import './view-hook'
 
 declare global {
   interface Window {
     gotchaGraph: GraphApi
-    /** E2E 只读钩子：sigma 画布不便于按像素点击，测试通过它走同一 openNode 路径 */
-    __gotchaGraphView?: {
-      count(): number
-      select(nodeId: number): Promise<void>
-      hover(nodeId: number | null): void
-      focus(nodeId: number | string): void
-      clearFocus(): void
-      /** 节点在页面坐标系中的位置（E2E 用真实鼠标事件验证单击 / 双击语义） */
-      position(nodeId: number): { x: number; y: number } | null
-      filters(): Record<string, boolean>
-      visibleCounts(): { nodes: number; edges: number }
-    }
   }
 }
 
@@ -632,6 +621,9 @@ document.getElementById('today')?.addEventListener('click', () => {
   void load()
 })
 document.getElementById('refresh')?.addEventListener('click', () => void refresh())
+document.getElementById('view-global')?.addEventListener('click', () => {
+  window.location.href = './global.html'
+})
 document.getElementById('timeline')?.addEventListener('click', () => {
   void window.gotchaGraph.openTimeline(day)
 })

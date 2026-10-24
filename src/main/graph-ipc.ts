@@ -8,7 +8,10 @@
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import type { BrowserWindow } from 'electron'
-import type { GraphDayData, NodeEventsResult } from '../understand/graph-query'
+import type { GraphDayData, GraphGlobalData, NodeEventsResult } from '../understand/graph-query'
+import { emptyGlobalGraph } from '../understand/graph-query'
+import type { SaveNodePositionsResult } from '../understand/node-positions'
+import { MAX_POSITIONS_PER_SAVE } from '../understand/node-positions'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
@@ -40,7 +43,13 @@ export type ProviderKeyStatus = Record<string, ApiKeySource>
 export interface GraphIpcDeps {
   getGraphWindow(): BrowserWindow | null
   queryGraph(from: number, to: number): GraphDayData
+  /** v0.3 全局图：一次取主题 / 时刻 / 归属 / embedding 边 / 位置 */
+  queryGlobal(): GraphGlobalData
   queryNodeEvents(nodeId: number): NodeEventsResult
+  /** 时刻下钻：`moments.event_ids` → events 行 */
+  queryMomentEvents(momentId: number): NodeEventsResult
+  /** Foam 沉降后回写主题坐标（下次打开作为 seed） */
+  savePositions(input: unknown): SaveNodePositionsResult
   getSnapshot(): InductionSnapshot
   runInductionNow(dayStart?: number): Promise<InductionRunOutcome>
   setConsent(consented: boolean): void
@@ -101,6 +110,18 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
       }
     ],
     [
+      'graph:global',
+      (event) => {
+        if (!ensureSender(event)) return emptyGlobalGraph()
+        try {
+          return deps.queryGlobal()
+        } catch (error) {
+          deps.log('warn', 'graph global query failed', { error: String(error) })
+          return emptyGlobalGraph()
+        }
+      }
+    ],
+    [
       'graph:node-events',
       (event, nodeId) => {
         if (!ensureSender(event) || !Number.isInteger(nodeId) || (nodeId as number) <= 0) {
@@ -111,6 +132,38 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
         } catch (error) {
           deps.log('warn', 'graph node events failed', { error: String(error) })
           return EMPTY_NODE_EVENTS
+        }
+      }
+    ],
+    [
+      'graph:moment-events',
+      (event, momentId) => {
+        if (!ensureSender(event) || !Number.isInteger(momentId) || (momentId as number) <= 0) {
+          return EMPTY_NODE_EVENTS
+        }
+        try {
+          return deps.queryMomentEvents(momentId as number)
+        } catch (error) {
+          deps.log('warn', 'graph moment events failed', { error: String(error) })
+          return EMPTY_NODE_EVENTS
+        }
+      }
+    ],
+    [
+      'graph:positions:save',
+      (event, positions) => {
+        if (
+          !ensureSender(event) ||
+          !Array.isArray(positions) ||
+          positions.length > MAX_POSITIONS_PER_SAVE
+        ) {
+          return { ok: false, error: '参数不合法' } satisfies SaveNodePositionsResult
+        }
+        try {
+          return deps.savePositions(positions)
+        } catch (error) {
+          deps.log('warn', 'graph positions save failed', { error: String(error) })
+          return { ok: false, error: '保存布局坐标失败' } satisfies SaveNodePositionsResult
         }
       }
     ],

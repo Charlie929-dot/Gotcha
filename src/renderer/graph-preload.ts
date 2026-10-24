@@ -6,7 +6,8 @@
  */
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import type { GraphDayData, NodeEventsResult } from '../understand/graph-query'
+import type { GraphDayData, GraphGlobalData, NodeEventsResult } from '../understand/graph-query'
+import type { SaveNodePositionsResult } from '../understand/node-positions'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
@@ -16,7 +17,12 @@ import type { HotkeyRegisterResult } from '../main/hotkeys'
 
 export interface GraphApi {
   query(from: number, to: number): Promise<GraphDayData>
+  global(): Promise<GraphGlobalData>
   nodeEvents(nodeId: number): Promise<NodeEventsResult>
+  momentEvents(momentId: number): Promise<NodeEventsResult>
+  savePositions(
+    positions: Array<{ nodeId: number; x: number; y: number }>
+  ): Promise<SaveNodePositionsResult>
   status(): Promise<InductionSnapshot>
   onStatus(callback: (snapshot: InductionSnapshot) => void): () => void
   induceNow(dayStart?: number): Promise<GraphInduceResult>
@@ -32,8 +38,13 @@ export interface GraphApi {
 
 const api: GraphApi = {
   query: (from, to) => ipcRenderer.invoke('graph:query', from, to) as Promise<GraphDayData>,
+  global: () => ipcRenderer.invoke('graph:global') as Promise<GraphGlobalData>,
   nodeEvents: (nodeId) =>
     ipcRenderer.invoke('graph:node-events', nodeId) as Promise<NodeEventsResult>,
+  momentEvents: (momentId) =>
+    ipcRenderer.invoke('graph:moment-events', momentId) as Promise<NodeEventsResult>,
+  savePositions: (positions) =>
+    ipcRenderer.invoke('graph:positions:save', positions) as Promise<SaveNodePositionsResult>,
   status: () => ipcRenderer.invoke('graph:status') as Promise<InductionSnapshot>,
   onStatus(callback) {
     const listener = (_event: IpcRendererEvent, snapshot: InductionSnapshot): void => {

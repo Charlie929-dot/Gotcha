@@ -455,6 +455,20 @@ foam-graph {
   color: #5c5c6b;
 }
 
+/* 日格热力：按当天事件量分三档（day-stats.ts 的 HEAT_STEPS）。
+   顺序要求：热力 < hover < 选中 `.on`，否则有记录的日子悬停 / 选中都看不出变化。 */
+.cal-grid button.heat-1 {
+  background: rgb(79 195 247 / 8%);
+}
+
+.cal-grid button.heat-2 {
+  background: rgb(79 195 247 / 15%);
+}
+
+.cal-grid button.heat-3 {
+  background: rgb(79 195 247 / 23%);
+}
+
 .cal-grid button:hover {
   background: var(--panel-2);
 }

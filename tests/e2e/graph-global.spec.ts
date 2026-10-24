@@ -10,8 +10,9 @@
  * 2. 主题下钻（成员事件）；
  * 3. 多归属时刻侧栏「也属于」+ 原始事件；
  * 4. 日历调暗不删节点；
- * 5. 「只看主题」；
- * 6. 经典 sigma 页互切。
+ * 5. 日历日格计数（热力档位 + tooltip）；
+ * 6. 「只看主题」；
+ * 7. 经典 sigma 页互切。
  */
 
 import { expect, test } from '@playwright/test'
@@ -335,6 +336,32 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
 
     await resetDays()
     await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
+  })
+
+  test('日历日格：按事件量分档热力，tooltip 给时刻 / 事件 / 主题三项计数', async () => {
+    await graph.evaluate(() => {
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays(null)
+    })
+    await graph.locator('#calendar-btn').click()
+    await expect(graph.locator('#calendar')).toBeVisible()
+
+    // 种子：今天 2 个时刻 / 3 条事件 / 2 个主题 → 最低档热力 + 完整 tooltip
+    const todayCell = graph.locator(`#cal-grid button[data-key="${todayKey}"]`)
+    await expect(todayCell).toHaveClass(/\bheat-1\b/)
+    await expect(todayCell).toHaveAttribute('title', `${todayKey} · 2 个时刻 · 3 条事件 · 2 个主题`)
+
+    // 没有记录的日子不画热力，tooltip 明说「无记录」
+    const empty = graph.locator('#cal-grid button:not(.heat-1):not(.heat-2):not(.heat-3)').first()
+    await expect(empty).toHaveAttribute('title', /· 无记录$/)
+
+    // 翻月不重建失败：仍按同一份计数渲染（这里只验证切月后没有抛错、格子还在）
+    await graph.locator('#cal-next').click()
+    await expect(graph.locator('#cal-grid button')).toHaveCount(42)
+    await graph.locator('#cal-prev').click()
+    await expect(graph.locator(`#cal-grid button[data-key="${todayKey}"]`)).toHaveClass(/\bheat-1\b/)
+
+    await graph.locator('#cal-close').click()
+    await expect(graph.locator('#calendar')).toBeHidden()
   })
 
   test('日历时段滚轮：选起时立即调暗，全天一键复位', async () => {

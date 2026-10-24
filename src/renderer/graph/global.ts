@@ -62,6 +62,7 @@ import {
   windowSpan,
   type ClockRange
 } from './time-of-day'
+import { computeDayStats, dayTooltip, heatLevel, type DayStat } from './day-stats'
 import { createGlobalPanel } from './global-panel'
 import { createSettingsPanel } from './graph-settings-panel'
 import { statusView } from './status-view'
@@ -140,6 +141,8 @@ byId('panel-close').addEventListener('click', () => panel.hide())
 
 let data: GraphGlobalData | null = null
 let input: GlobalGraphInput | null = null
+/** 日历日格计数（主题 / 时刻 / 事件量），打开时随数据一起算一次 */
+let dayStats = new Map<string, DayStat>()
 let themeById = new Map<number, GlobalThemeDto>()
 let momentById = new Map<number, GlobalMomentDto>()
 let days: Set<string> | null = null
@@ -177,6 +180,7 @@ async function load(): Promise<void> {
     if (seq !== loadSeq) return
     data = next
     input = toGlobalGraphInput(next)
+    dayStats = computeDayStats(next.themes, next.moments)
     themeById = new Map(next.themes.map((theme) => [theme.id, theme]))
     momentById = new Map(next.moments.map((moment) => [moment.id, moment]))
     const view = toFoamGraph(input)
@@ -200,6 +204,7 @@ async function load(): Promise<void> {
     if (seq !== loadSeq) return
     data = null
     input = null
+    dayStats = new Map()
     graphEl.graphData = null
     updateCount()
     showEmpty('error', `读取全局图失败：${String(error)}`)
@@ -427,6 +432,11 @@ function renderCalendar(): void {
     button.dataset.key = day.key
     button.draggable = false
     if (!day.inMonth) button.classList.add('dim')
+    // 日格热力：按当天事件量分三档，只画背景不写数字；计数放 tooltip（方案 §8 日格）
+    const stat = dayStats.get(day.key)
+    const heat = heatLevel(stat)
+    if (heat > 0) button.classList.add(`heat-${heat}`)
+    button.title = dayTooltip(day.key, stat)
     button.addEventListener('mousedown', (event) => onDayMouseDown(event, day.key))
     button.addEventListener('mouseenter', (event) => onDayMouseEnter(event, day.key))
     calGridEl.appendChild(button)

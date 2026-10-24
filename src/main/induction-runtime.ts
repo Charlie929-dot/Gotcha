@@ -8,6 +8,9 @@
  *    未置 1 时自动归纳不启动、`runOnce` 返回 `consent`，用户在图谱窗口显式确认后才出网；
  * 3. **状态快照**：把 service 状态 + 确认门 + 供应商配置状态合成给图谱窗口，未配置 / 缺 key
  *    只显示原因，不抛到采集链路。
+ * 4. **可观测性**：每次跑完（自动 / 手动 / 跳过）打一行结构化日志——状态、失败分类（HTTP 状态码 /
+ *    超时 / 网络 / 解析 / 配置）、连续失败次数、是否停自动、token 与耗时；不记提示词、
+ *    响应正文、密钥。没有这行日志，「为什么在退避」只能靠猜。
  *
  * 本文件保持 Electron-free（Db / LlmClient 注入），调度与落库仍在 service / induction。
  */
@@ -17,6 +20,7 @@ import { getSetting, setSetting } from '../db/settings'
 import type { LlmClient } from '../understand/cloud/llm-client'
 import {
   createInductionService,
+  type InductionRunMeta,
   type InductionService,
   type InductionState,
   type InductionStatus,
@@ -86,7 +90,8 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
     ((): boolean => getSetting(options.getDb(), GRAPH_SETTING_KEYS.outboundConsent) === '1')
 
   const snapshot = (): InductionSnapshot => {
-    const state: InductionState = service?.getState() ?? { status: 'stopped' as InductionStatus }
+    const state: InductionState =
+      service?.getState() ?? { status: 'stopped' as InductionStatus, halted: false }
     const resolved = options.resolveClient()
     return {
       ...state,
@@ -102,6 +107,46 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
     if (!disposed) options.onSnapshot?.(snapshot())
   }
 
+  /**
+   * 一次跑批一行日志（F09/可观测性）：只记类型化字段，不记提示词 / 响应正文 / 密钥。
+   * 自动跑批由 service 内部的 tick 触发，也必须经过这里，否则「为什么在退避」永远查不到。
+   */
+  const logRun = (outcome: RunOutcome, state: InductionState, meta: InductionRunMeta): void => {
+    const log = options.log
+    if (!log) return
+    if (outcome.status === 'ok') {
+      log('info', 'induction run ok', {
+        manual: meta.manual,
+        nodes: outcome.nodes,
+        edges: outcome.edges,
+        placeholders: outcome.placeholders,
+        consumed: outcome.consumed,
+        more: outcome.more === true,
+        calls: outcome.usage?.calls ?? 0,
+        promptTokens: outcome.usage?.promptTokens ?? 0,
+        completionTokens: outcome.usage?.completionTokens ?? 0
+      })
+      return
+    }
+    if (outcome.status === 'error') {
+      const failure = state.lastFailure
+      log('warn', 'induction run failed', {
+        manual: meta.manual,
+        code: failure?.code ?? 'unknown',
+        ...(failure?.status !== undefined ? { httpStatus: failure.status } : {}),
+        streak: failure?.streak ?? 1,
+        halted: state.halted
+      })
+      if (state.halted) log('warn', 'induction auto halted', { streak: failure?.streak ?? 1 })
+      return
+    }
+    if (outcome.status === 'skipped') {
+      log('info', 'induction run skipped', { manual: meta.manual, reason: outcome.reason })
+      return
+    }
+    log('info', 'induction run aborted', { manual: meta.manual })
+  }
+
   const ensureService = (): InductionService => {
     if (service) return service
     service = createInductionService({
@@ -113,7 +158,8 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
       now: options.now,
       firstDelayMs: options.firstDelayMs,
       intervalMs: options.intervalMs,
-      onStateChange: () => emit()
+      onStateChange: () => emit(),
+      onRunFinished: logRun
     })
     return service
   }

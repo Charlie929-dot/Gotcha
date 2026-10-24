@@ -83,6 +83,16 @@ body {
   border-color: rgb(239 83 80 / 45%);
 }
 
+.status-detail {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+  max-width: 46vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .nav {
   display: flex;
   align-items: center;

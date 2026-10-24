@@ -88,7 +88,7 @@ tests/
 
 - **schema v2**（按技术方案 §4 原文，不改字段名）：`nodes(id, level, type, title, summary, ts_start, ts_end, source_events, meta_json)`、`edges(id, src, dst, weight, kind, evidence)`；索引 `idx_nodes_ts_start`、`idx_nodes_level`、`idx_edges_src`、`idx_edges_dst`。不新增表（`node_events` 之类不建，`source_events` 用 `json_each` 解析）。
 - **settings 键**（不建新表，全部有默认值、可在图谱窗口设置抽屉里调整，D22）：
-  - 归纳：`graph.cursor_ts` / `graph.cursor_id`（游标，内部维护）、`graph.auto`（`1` 默认 = 采集运行中自动归纳）、`graph.interval_minutes`（默认 `10`）、`graph.budget_tokens_per_day`（默认 `1000000`）、`graph.retry_backoff_minutes`（默认 `1,5,15`）、`graph.usage.<yyyy-mm-dd>`（JSON：calls / prompt_tokens / completion_tokens）。
+  - 归纳：`graph.cursor_ts` / `graph.cursor_id`（游标，内部维护）、`graph.auto`（`1` 默认 = 采集运行中自动归纳）、`graph.interval_minutes`（默认 `10`）、`graph.budget_tokens_per_day`（默认 `1000000`）、`graph.retry_backoff_minutes`（默认 `1,5,15`）、`graph.max_consecutive_failures`（默认 `5`：连续失败到上限停自动归纳，手动「立即归纳」成功一次即恢复）、`graph.usage.<yyyy-mm-dd>`（JSON：calls / prompt_tokens / completion_tokens）。
   - 供应商：`llm.active_provider`（默认 `deepseek`）、`llm.providers`（JSON 数组：`{id, label, baseUrl, model, apiKeyEnv}`，默认含 DeepSeek 预设；可加自定义 OpenAI 兼容供应商；设置界面可直接填 API Key 并拉取模型清单，见 D26）。
   - 快捷键：`hotkey.toggle_capture`（默认 `Alt+P`）、`hotkey.open_graph`（默认 `Alt+Space`）；注册失败时提示冲突并引导改键。
 - **API key**：只从 `process.env` 或 `userData/.env` 读取（`KEY=VALUE`，手写解析 30 行内，不引 dotenv）；供应商配置里只存环境变量名（`apiKeyEnv`），**密钥不写 settings、不落库、不落日志**；设置界面填写的密钥由主进程写入 `userData/.env`（D26，写后不回显，同名环境变量优先），仓库只提交 `.env.example`（`.env` 已在 `.gitignore`）。模型默认 `deepseek-flash`，base URL 默认 `https://api.deepseek.com`，均可在设置中改（供换供应商/换模型）；「获取模型」按需 `GET {baseUrl}/models` 填充下拉，失败可手填。

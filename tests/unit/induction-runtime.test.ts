@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { insertEvent, openDatabase, type Db } from '../../src/db'
-import { getSetting } from '../../src/db/settings'
-import { FakeLlmClient, LlmAbortError, type LlmClient } from '../../src/understand/cloud/llm-client'
+import { getSetting, setSetting } from '../../src/db/settings'
+import {
+  FakeLlmClient,
+  LlmAbortError,
+  LlmHttpError,
+  type LlmClient
+} from '../../src/understand/cloud/llm-client'
 import { createInductionRuntime, type ClientResolution } from '../../src/main/induction-runtime'
 import { GRAPH_SETTING_KEYS } from '../../src/main/graph-settings'
 
@@ -182,6 +187,88 @@ describe('InductionRuntime：供应商状态与暂停取消', () => {
     expect(outcome).toEqual({ status: 'aborted' })
     expect(requests).toBe(1)
     expect(countNodes(db)).toBe(0)
+    runtime.dispose()
+    db.close()
+  })
+})
+
+describe('InductionRuntime：结构化日志（可观测性）', () => {
+  interface LogLine {
+    level: string
+    msg: string
+    data?: Record<string, unknown>
+  }
+
+  function collectingLog(lines: LogLine[]) {
+    return (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>): void => {
+      lines.push({ level, msg, data })
+    }
+  }
+
+  it('成功：记节点 / 边 / token / manual，不含正文', async () => {
+    const db = openDatabase(':memory:')
+    const id = seed(db)
+    const lines: LogLine[] = []
+    const runtime = runtimeFor(db, () => ({ ok: true, client: clientOk([id]) }), {
+      log: collectingLog(lines)
+    })
+    runtime.grantConsent()
+    runtime.onCaptureStatus('running')
+
+    expect((await runtime.runOnce({ manual: true })).status).toBe('ok')
+    const line = lines.find((item) => item.msg === 'induction run ok')
+    expect(line?.level).toBe('info')
+    expect(line?.data).toMatchObject({
+      manual: true,
+      nodes: 1,
+      edges: 0,
+      consumed: 1,
+      calls: 1,
+      promptTokens: 10,
+      completionTokens: 5
+    })
+    // 日志里不出现用户正文
+    expect(JSON.stringify(lines)).not.toContain('项目计划')
+    runtime.dispose()
+    db.close()
+  })
+
+  it('失败：按分类记录；达上限再记一行 auto halted', async () => {
+    const db = openDatabase(':memory:')
+    seed(db)
+    setSetting(db, 'graph.max_consecutive_failures', '1')
+    const lines: LogLine[] = []
+    const client = new FakeLlmClient([new LlmHttpError(503)])
+    const runtime = runtimeFor(db, () => ({ ok: true, client }), {
+      log: collectingLog(lines)
+    })
+    runtime.grantConsent()
+    runtime.onCaptureStatus('running')
+
+    expect((await runtime.runOnce({ manual: true })).status).toBe('error')
+    const failed = lines.find((item) => item.msg === 'induction run failed')
+    expect(failed?.level).toBe('warn')
+    expect(failed?.data).toMatchObject({ code: 'http', httpStatus: 503, streak: 1, halted: true })
+    expect(lines.some((item) => item.msg === 'induction auto halted')).toBe(true)
+    expect(runtime.getSnapshot().halted).toBe(true)
+    runtime.dispose()
+    db.close()
+  })
+
+  it('跳过：记 reason（自动关 / 预算 / 未配置），便于排查「为什么没动」', async () => {
+    const db = openDatabase(':memory:')
+    seed(db)
+    setSetting(db, 'graph.auto', '0')
+    const lines: LogLine[] = []
+    const runtime = runtimeFor(db, () => ({ ok: true, client: new FakeLlmClient([]) }), {
+      log: collectingLog(lines)
+    })
+    runtime.grantConsent()
+    runtime.onCaptureStatus('running')
+
+    expect(await runtime.runOnce()).toEqual({ status: 'skipped', reason: 'auto-off' })
+    const skipped = lines.find((item) => item.msg === 'induction run skipped')
+    expect(skipped?.data).toMatchObject({ reason: 'auto-off', manual: false })
     runtime.dispose()
     db.close()
   })

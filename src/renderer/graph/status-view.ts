@@ -60,9 +60,12 @@ export function failureReasonText(failure: InductionFailure | undefined): string
 /**
  * 本地向量模型缺失时的顶部黄条文案（`null` = 不显示）。
  * 只影响「新主题 / 新连线能不能算」，已有向量与边照常画——不清图、也不改任何验收口径。
+ *
+ * **只有明确 `false` 才报警**：字段缺省（例如渲染层已经更新、主进程还是旧版没这个字段）
+ * 属于「不知道」，不能当成「没有模型」——否则模型明明装好了也会挂一条黄条（2026-10-25 真机踩到）。
  */
 export function modelWarningText(current: InductionSnapshot | null): string | null {
-  if (!current || current.embeddingsReady) return null
+  if (!current || current.embeddingsReady !== false) return null
   return '本地向量模型未就绪：新主题与相似连线暂无法计算，已有主题与连线照常浏览。把模型放到 userData/models/bge-small-zh-v1.5/ 后重新打开图谱即可。'
 }
 

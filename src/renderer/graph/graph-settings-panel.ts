@@ -93,6 +93,12 @@ export function createSettingsPanel(
   const backoffInput = byId<HTMLInputElement>(root, 'set-backoff')
   const batchInput = byId<HTMLInputElement>(root, 'set-batch')
   const maxTokensInput = byId<HTMLInputElement>(root, 'set-max-tokens')
+  /**
+   * 日格热力满量只在全局图页有输入框（经典按日页共用这个面板，没有「视图」段）。
+   * 这里必须容错：缺元素时既不报错，也不在保存里带这个字段——
+   * 否则从经典页保存会把它写成空值 / 覆盖掉全局页的设置。
+   */
+  const dayHeatInput = root.querySelector<HTMLInputElement>('#set-day-heat')
   const consentInput = byId<HTMLInputElement>(root, 'set-consent')
   const usageEl = byId(root, 'usage')
   const activeSelect = byId<HTMLSelectElement>(root, 'set-active')
@@ -436,6 +442,7 @@ export function createSettingsPanel(
       backoffInput.value = settings.retryBackoffMinutes
       batchInput.value = String(settings.batchMaxMoments)
       maxTokensInput.value = String(settings.maxTokens)
+      if (dayHeatInput) dayHeatInput.value = String(settings.dayHeatMax)
       consentInput.checked = settings.outboundConsent
       hotkeyToggleInput.value = settings.hotkeys.toggleCapture
       hotkeyGraphInput.value = settings.hotkeys.openGraph
@@ -478,7 +485,7 @@ export function createSettingsPanel(
         model: row.modelInput.value.trim(),
         apiKeyEnv: row.apiKeyEnvInput.value.trim() || deriveEnvName(row.idInput.value)
       }))
-      const payload = {
+      const payload: Record<string, unknown> = {
         auto: autoInput.checked,
         intervalMinutes: Number(intervalInput.value),
         budgetTokensPerDay: Number(budgetInput.value),
@@ -497,6 +504,8 @@ export function createSettingsPanel(
         },
         outboundConsent: consentInput.checked
       }
+      // 只有全局图页有这个输入框；缺省时不要带字段（免得清掉已有设置）
+      if (dayHeatInput) payload.dayHeatMax = Number(dayHeatInput.value)
       const result = await api.saveSettings(payload)
       if (!result.ok) {
         setMessage(result.error, 'error')
@@ -534,6 +543,7 @@ export function createSettingsPanel(
       hotkeyToggleInput.value = result.settings.hotkeys.toggleCapture
       hotkeyGraphInput.value = result.settings.hotkeys.openGraph
       consentInput.checked = result.settings.outboundConsent
+      if (dayHeatInput) dayHeatInput.value = String(result.settings.dayHeatMax)
       void refreshKeyStatus()
       void refreshHotkeyStatus()
       onSaved(result.settings)

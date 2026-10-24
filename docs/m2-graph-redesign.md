@@ -328,7 +328,7 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 - 位置：Foam 沉降后只回写主题坐标（`graph:positions:save` → `node_positions`，时刻不存）；下次打开作 seed。无库时跳过写，守 A3。
 - 旧 sigma 按日页保留为 `graph.html`，工具栏「经典视图 / 全局视图」互切；P0 harness 页移除（`harness*.ts/html/css`）。
 - 真机副本冒烟（`better-sqlite3 backup()` 复制用户库）：230 主题 / 1,047 个有归属时刻（总 2,113）/ 1,151 条归属 / 171 条相似边；画布 1,277 节点 + 1,322 连线，沉降 3.1–4.9 s；230 条主题坐标回写到副本。
-- 日格计数（P3-b 第一项，2026-10-24，`src/renderer/graph/day-stats.ts`）：热力按**当天事件量**三档（≤80 / ≤400 / 更多），tooltip「时刻 / 事件 / 主题」。口径只用 `graph:global` 这份 DTO：时刻按 `day_key` 落桶、主题按 `[tsStart, tsEnd]` 铺天、事件＝当天各时刻 `eventIds` 之和——**未归纳积压的事件看不到**，所以「归纳未跑完＝空心点」需要按天事件计数（不在当前 DTO 里，未做）。
+- 日格热力（P3-b 第一项，2026-10-24/25，`src/renderer/graph/day-stats.ts`）：**连续变化**——当天事件数 ÷ 满量（默认 4000 条/天，设置抽屉「视图」可调）＝百分比，映射成 `rgba(79,195,247,α)`，α ∈ 0.06–0.45、中间走 `ratio^0.6`；tooltip「N 条事件（P%）· M 个时刻 · K 个主题」。事件量来自主进程 `graph:global.dayActivity`（按本地日统计 `events` 全量，**含未成时刻的积压**），时刻按 `day_key`、主题按 `[tsStart, tsEnd]` 铺天。「归纳未跑完＝空心点」仍需「当天有多少事件还没成时刻」的口径（未做）。
 - 未做（P3-b 余下）：设置抽屉阈值控件（合并阈值 / 连线 k）、撤销合并入口、模型缺失黄条、未归纳空心点、>2k 时刻 LOD / 收窄提示。
 
 ## 8. 时间筛选

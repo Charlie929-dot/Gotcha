@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+﻿import { describe, expect, it } from 'vitest'
 import {
   countMembership,
   focusedIdsForDays,
@@ -153,6 +153,7 @@ describe('toGlobalGraphInput（graph:global DTO → Foam 输入）', () => {
       ],
       edges: [{ id: 100, source: 1, target: 2, weight: 0.82, kind: 'embedding', evidence: '' }],
       positions: [],
+      dayActivity: [],
       stats: { themes: 2, moments: 2, memberships: 3, edges: 1, positions: 0 }
     })
 
@@ -195,6 +196,7 @@ describe('toGlobalGraphInput（graph:global DTO → Foam 输入）', () => {
       memberships: [],
       edges: [],
       positions: [],
+      dayActivity: [],
       stats: { themes: 0, moments: 1, memberships: 0, edges: 0, positions: 0 }
     })
     expect(input.moments[0].themeIds).toEqual([])

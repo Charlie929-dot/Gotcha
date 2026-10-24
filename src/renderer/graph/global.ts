@@ -62,7 +62,7 @@ import {
   windowSpan,
   type ClockRange
 } from './time-of-day'
-import { computeDayStats, dayTooltip, heatLevel, type DayStat } from './day-stats'
+import { computeDayStats, dayTooltip, heatAlpha, DEFAULT_HEAT_FULL_SCALE, type DayStat } from './day-stats'
 import { createGlobalPanel } from './global-panel'
 import { createSettingsPanel } from './graph-settings-panel'
 import { statusView } from './status-view'
@@ -141,8 +141,10 @@ byId('panel-close').addEventListener('click', () => panel.hide())
 
 let data: GraphGlobalData | null = null
 let input: GlobalGraphInput | null = null
-/** 日历日格计数（主题 / 时刻 / 事件量），打开时随数据一起算一次 */
+/** 日历日格计数（事件 / 时刻 / 主题），打开时随数据一起算一次 */
 let dayStats = new Map<string, DayStat>()
+/** 日格热力满量（事件/天，设置抽屉可调）；当天事件占它的比例决定颜色深浅 */
+let dayHeatMax = DEFAULT_HEAT_FULL_SCALE
 let themeById = new Map<number, GlobalThemeDto>()
 let momentById = new Map<number, GlobalMomentDto>()
 let days: Set<string> | null = null
@@ -180,7 +182,7 @@ async function load(): Promise<void> {
     if (seq !== loadSeq) return
     data = next
     input = toGlobalGraphInput(next)
-    dayStats = computeDayStats(next.themes, next.moments)
+    dayStats = computeDayStats(next.themes, next.dayActivity)
     themeById = new Map(next.themes.map((theme) => [theme.id, theme]))
     momentById = new Map(next.moments.map((moment) => [moment.id, moment]))
     const view = toFoamGraph(input)
@@ -432,11 +434,11 @@ function renderCalendar(): void {
     button.dataset.key = day.key
     button.draggable = false
     if (!day.inMonth) button.classList.add('dim')
-    // 日格热力：按当天事件量分三档，只画背景不写数字；计数放 tooltip（方案 §8 日格）
+    // 日格热力：当天事件 ÷ 满量 → 连续不透明度（方案 §8 日格；满量在设置抽屉可调）
     const stat = dayStats.get(day.key)
-    const heat = heatLevel(stat)
-    if (heat > 0) button.classList.add(`heat-${heat}`)
-    button.title = dayTooltip(day.key, stat)
+    const alpha = heatAlpha(stat?.events ?? 0, dayHeatMax)
+    if (alpha > 0) button.style.setProperty('--heat-alpha', String(alpha))
+    button.title = dayTooltip(day.key, stat, dayHeatMax)
     button.addEventListener('mousedown', (event) => onDayMouseDown(event, day.key))
     button.addEventListener('mouseenter', (event) => onDayMouseEnter(event, day.key))
     calGridEl.appendChild(button)
@@ -1093,7 +1095,26 @@ async function refresh(): Promise<void> {
   if (!searchAppsLoaded) void loadSearchApps()
 }
 
+/** 应用设置里的日格满量；非法值保持当前值（主进程已校验，这里只防意外） */
+function applyDayHeatMax(value: unknown): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return
+  if (value === dayHeatMax) return
+  dayHeatMax = value
+  // 颜色是逐格算的，满量变了要重建格子（日历没开就不用动）
+  if (!calendarEl.hidden) renderCalendar()
+}
+
+/** 启动时读一次满量：读不到就用默认 4000，不因为没有设置而卡住图谱 */
+async function loadDayHeatMax(): Promise<void> {
+  try {
+    applyDayHeatMax((await window.gotchaGraph.settings()).dayHeatMax)
+  } catch {
+    // 设置读取失败不影响图谱浏览
+  }
+}
+
 async function applySavedSettings(settings: GraphSettingsView): Promise<void> {
+  applyDayHeatMax(settings.dayHeatMax)
   await refreshStatus()
   if (settings.outboundConsent) await load()
 }
@@ -1208,3 +1229,4 @@ window.__gotchaGraphView = {
 
 void refresh()
 void loadSearchApps()
+void loadDayHeatMax()

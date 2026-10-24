@@ -338,27 +338,57 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
   })
 
-  test('日历日格：按事件量分档热力，tooltip 给时刻 / 事件 / 主题三项计数', async () => {
+  test('日历日格：事件百分比 → 连续热力，满量可在设置抽屉调', async () => {
     await graph.evaluate(() => {
       ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays(null)
     })
     await graph.locator('#calendar-btn').click()
     await expect(graph.locator('#calendar')).toBeVisible()
 
-    // 种子：今天 2 个时刻 / 3 条事件 / 2 个主题 → 最低档热力 + 完整 tooltip
-    const todayCell = graph.locator(`#cal-grid button[data-key="${todayKey}"]`)
-    await expect(todayCell).toHaveClass(/\bheat-1\b/)
-    await expect(todayCell).toHaveAttribute('title', `${todayKey} · 2 个时刻 · 3 条事件 · 2 个主题`)
+    const todayCell = (): ReturnType<typeof graph.locator> =>
+      graph.locator(`#cal-grid button[data-key="${todayKey}"]`)
+    const heatAlphaOf = async (): Promise<number> =>
+      Number(
+        await todayCell().evaluate((node) => (node as HTMLElement).style.getPropertyValue('--heat-alpha'))
+      )
 
-    // 没有记录的日子不画热力，tooltip 明说「无记录」
-    const empty = graph.locator('#cal-grid button:not(.heat-1):not(.heat-2):not(.heat-3)').first()
+    // 种子：今天 3 条事件 / 2 个时刻 / 2 个主题；默认满量 4000 → 0%，但颜色仍要有一点点
+    await expect(todayCell()).toHaveAttribute(
+      'title',
+      `${todayKey} · 3 条事件（0%）· 2 个时刻 · 2 个主题`
+    )
+    const before = await heatAlphaOf()
+    expect(before).toBeGreaterThan(0)
+
+    // 没有记录的日子不着色，tooltip 明说「无记录」
+    const empty = graph.locator('#cal-grid button').first()
     await expect(empty).toHaveAttribute('title', /· 无记录$/)
+    expect(
+      await empty.evaluate((node) => (node as HTMLElement).style.getPropertyValue('--heat-alpha'))
+    ).toBe('')
 
-    // 翻月不重建失败：仍按同一份计数渲染（这里只验证切月后没有抛错、格子还在）
+    // 满量调到 100 → 同一天变 3%，颜色更深（设置抽屉 → 保存 → 重开日历生效）
+    await graph.locator('#cal-close').click()
+    await graph.locator('#settings').click()
+    await expect(graph.locator('#set-day-heat')).toHaveValue('4000')
+    await graph.locator('#set-day-heat').fill('100')
+    await graph.locator('#settings-save').click()
+    await expect(graph.locator('#settings-msg')).toHaveText('已保存', { timeout: 15_000 })
+    await graph.locator('#settings-close').click()
+
+    await graph.locator('#calendar-btn').click()
+    await expect(graph.locator('#calendar')).toBeVisible()
+    await expect(todayCell()).toHaveAttribute(
+      'title',
+      `${todayKey} · 3 条事件（3%）· 2 个时刻 · 2 个主题`
+    )
+    expect(await heatAlphaOf()).toBeGreaterThan(before)
+
+    // 翻月不重建失败：仍按同一份计数渲染（切月后格子还在、今天的颜色还在）
     await graph.locator('#cal-next').click()
     await expect(graph.locator('#cal-grid button')).toHaveCount(42)
     await graph.locator('#cal-prev').click()
-    await expect(graph.locator(`#cal-grid button[data-key="${todayKey}"]`)).toHaveClass(/\bheat-1\b/)
+    expect(await heatAlphaOf()).toBeGreaterThan(before)
 
     await graph.locator('#cal-close').click()
     await expect(graph.locator('#calendar')).toBeHidden()
@@ -548,11 +578,27 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
       timeout: 15_000
     })
 
+    // 回归：两页共用同一个设置面板，经典页没有「视图」段；保存必须成功，
+    // 且不能把全局页的日格满量（上一条用例改成 100）用空值覆盖回 4000
+    await graph.locator('#settings').click()
+    await expect(graph.locator('#set-day-heat')).toHaveCount(0)
+    await graph.locator('#settings-save').click()
+    await expect(graph.locator('#settings-msg')).toHaveText('已保存', { timeout: 15_000 })
+    await graph.locator('#settings-close').click()
+
     await graph.locator('#view-global').click()
     await graph.waitForSelector('foam-graph')
     await expect(graph.locator('#node-count')).toContainText('2 个主题 · 2 个时刻', {
       timeout: 15_000
     })
     await expect.poll(async () => (await nodeIds()).length, { timeout: 15_000 }).toBe(4)
+
+    // 满量仍是 100（没被经典页的保存清掉）
+    await graph.locator('#calendar-btn').click()
+    await expect(graph.locator(`#cal-grid button[data-key="${todayKey}"]`)).toHaveAttribute(
+      'title',
+      `${todayKey} · 3 条事件（3%）· 2 个时刻 · 2 个主题`
+    )
+    await graph.locator('#cal-close').click()
   })
 })

@@ -462,7 +462,8 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 | P3 | 主题/时刻 UI、日历、设置、E2E、验收、文档 | 3–4 天 |
 
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
-- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）。
+- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）。
+- 检索（提案门一）✅ v1（#48）：`events_fts`（trigram，归一化文本）+ 三触发器同步 + v5 迁移回填，双路查询（MATCH ≥3 字 / LIKE 兜底），结果按时刻卡片呈现；未归纳事件同等可查。
 - 仍需补：P2 在线 assigner/labeler（新主题增量向量、模糊带确认、暂停/队列）、打包 `asarUnpack` 与第三方声明、撤销合并的 UI 入口（`revertThemeMerge` 已有接口）、P3-b（日历日格计数 / 设置抽屉阈值控件 / 模型缺失黄条 / 自动归纳完成后的画布自动刷新）。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 

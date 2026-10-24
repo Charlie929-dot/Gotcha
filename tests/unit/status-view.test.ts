@@ -84,6 +84,23 @@ describe('status-view · 徽标文案', () => {
     expect(truncated.detail).toContain('max_tokens（2000）')
   })
 
+  it('校验类失败显示具体规则（字段 / 下标 / id）', () => {
+    const view = statusView(
+      snapshot({
+        status: 'error',
+        lastFailure: {
+          code: 'validation',
+          message: 'LLM 输出未通过校验（1 条问题）：nodes[0].title 超过 24 字',
+          details: ['nodes[0].title 超过 24 字'],
+          at: NOW,
+          streak: 1
+        }
+      }),
+      NOW
+    )
+    expect(view.detail).toContain('nodes[0].title 超过 24 字')
+  })
+
   it('连续失败停自动：给出次数与恢复方式', () => {
     const view = statusView(
       snapshot({

@@ -134,6 +134,7 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
         manual: meta.manual,
         code: failure?.code ?? 'unknown',
         ...(failure?.status !== undefined ? { httpStatus: failure.status } : {}),
+        ...(failure?.details !== undefined ? { details: failure.details } : {}),
         streak: failure?.streak ?? 1,
         halted: state.halted
       })

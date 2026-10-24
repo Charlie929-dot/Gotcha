@@ -67,7 +67,14 @@ export type RunOutcome =
   | { status: 'error'; error: Error }
 
 /** 失败分类：UI 只需知道「哪一类」，不需要原始错误栈 */
-export type InductionFailureCode = 'http' | 'timeout' | 'network' | 'parse' | 'config' | 'unknown'
+export type InductionFailureCode =
+  | 'http'
+  | 'timeout'
+  | 'network'
+  | 'parse'
+  | 'validation'
+  | 'config'
+  | 'unknown'
 
 export interface InductionFailure {
   code: InductionFailureCode
@@ -75,6 +82,8 @@ export interface InductionFailure {
   status?: number
   /** 固定文案：来自客户端的类型化错误信息，不含 prompt / 响应正文 */
   message: string
+  /** 校验类失败的逐条问题（字段名 / 下标 / id / 上限；最多 5 条，每条 ≤120 字） */
+  details?: readonly string[]
   /** 失败发生时间 */
   at: number
   /** 连续失败次数（本次为第几次） */
@@ -137,6 +146,23 @@ function parseBackoffMinutes(raw: string): number[] {
 }
 
 /**
+ * 校验失败（修复重试后仍不合法）。
+ * 带上校验器给的固定文案（字段名 / 下标 / id / 上限），不含事件原文——否则「未通过校验」
+ * 只是一句没有信息量的话，定位不了是哪个字段越界还是哪个 id 没覆盖。
+ */
+export class InductionValidationError extends Error {
+  constructor(readonly errors: readonly string[]) {
+    const head = errors.slice(0, 3).join('；')
+    super(
+      errors.length > 0
+        ? `LLM 输出未通过校验（${errors.length} 条问题）：${head}`.slice(0, 200)
+        : 'LLM 输出未通过校验'
+    )
+    this.name = 'InductionValidationError'
+  }
+}
+
+/**
  * 错误 → 失败分类（UI 显示「为什么在退避」用）。
  * 只取类型化信息：消息全部来自客户端的固定文案，不含 prompt / 响应正文 / 密钥。
  */
@@ -146,6 +172,15 @@ export function classifyFailure(error: Error, at: number, streak: number): Induc
   }
   if (error instanceof LlmTimeoutError) return { code: 'timeout', message: error.message, at, streak }
   if (error instanceof LlmNetworkError) return { code: 'network', message: error.message, at, streak }
+  if (error instanceof InductionValidationError) {
+    return {
+      code: 'validation',
+      message: error.message,
+      details: error.errors.slice(0, 5).map((item) => item.slice(0, 120)),
+      at,
+      streak
+    }
+  }
   if (error instanceof LlmParseError) return { code: 'parse', message: error.message, at, streak }
   if (error instanceof LlmError && error.code === 'config') {
     return { code: 'config', message: error.message, at, streak }
@@ -294,14 +329,14 @@ export function createInductionService(options: InductionServiceOptions): Induct
           // 空 content / 非法 JSON：同样给 1 次修复重试（m2-plan §4.2 / §6）
           const repaired = await call({ errors: [PARSE_REPAIR_ERROR] })
           validation = validateInduction(repaired.json, allowedEventIds)
-          if (!validation.ok) throw new LlmParseError('LLM 输出未通过校验')
+          if (!validation.ok) throw new InductionValidationError(validation.errors)
         } else if (validation && !validation.ok) {
           // 首轮结构非法 → 用错误摘要做 1 次修复重试（错误文案不含事件原文）
           const repaired = await call({ errors: validation.errors })
           validation = validateInduction(repaired.json, allowedEventIds)
-          if (!validation.ok) throw new LlmParseError('LLM 输出未通过校验')
+          if (!validation.ok) throw new InductionValidationError(validation.errors)
         }
-        if (!validation) throw new LlmParseError('LLM 输出未通过校验')
+        if (!validation) throw new InductionValidationError([])
         result = validation.result
         usageTotals = { calls: callsMade, promptTokens: spent.promptTokens, completionTokens: spent.completionTokens }
       }

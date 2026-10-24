@@ -156,9 +156,12 @@ tests/
 | `sigma` | 4.0.3 | MIT | 2D 力导向图谱渲染（技术方案 §3 已选型） | ~3.4 MB | 仅图谱窗口懒加载 |
 | `graphology` | 0.26.0 | MIT | 图数据结构（节点/边/属性） | ~2.7 MB | sigma 的配套数据结构 |
 | `graphology-layout-forceatlas2` | 0.10.1 | MIT | 力导向布局 | ~79 KB | 权重作吸引强度 |
+| `onnxruntime-node` | 1.30.0 | MIT | v0.3 本地向量推理（bge-small-zh-v1.5） | ~301 MB（含全平台二进制；打包只留 win32-x64） | 原生 N-API；主进程 `await import()` 懒加载；模型文件不进包、不进 git |
 
 - 不新增 HTTP 依赖（Node 内置 fetch）；不引 dotenv（手写 `.env` 解析）；不引图标/图表库。
-- 新增依赖仅 3 个、均 MIT、浏览器侧打包，不进主进程运行时依赖。
+- M2 前置的 3 个图谱依赖均 MIT、浏览器侧打包，不进主进程运行时依赖。
+- v0.3 新增 `onnxruntime-node`（主进程原生依赖，D30）：替代方案 `@xenova/transformers`（同样落到 onnxruntime，多一层封装）、WASM 版（慢 3–5 倍且要自己管内存）；模型 `bge-small-zh-v1.5`（BAAI，MIT）由用户放在 `userData/models/`，应用不自动下载；打包时 `asarUnpack` 并裁掉非 win32-x64 二进制（P3）。
+
 
 ## 6. 风险与对策
 

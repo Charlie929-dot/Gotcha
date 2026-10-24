@@ -13,7 +13,9 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'graph.budget_tokens_per_day': '1000000',
   'graph.retry_backoff_minutes': '1,5,15',
   'graph.batch_max_moments': '20',
-  'graph.max_tokens': '2000'
+  'graph.max_tokens': '2000',
+  // 本地向量模型目录（留空 = `<userData>/models/bge-small-zh-v1.5`；D29 / 方案 §10）
+  'graph.embedding_model_dir': ''
 }
 
 export function getSetting(db: Db, key: string): string {

@@ -125,6 +125,9 @@ CREATE TABLE IF NOT EXISTS node_positions (
 - 时刻向量不落库：分配时临时计算；若后续要做事件级回忆，再单独评估存储（int8/窗口）。
 - `node_positions` 只存坐标，用于下次 seed；活布局会继续移动，不冻结。
 
+**实施（2026-10-24，PR #38）**：主题向量 = `title + "。" + summary`，写 `node_embeddings`（model=`bge-small-zh-v1.5`、dim=512、已 L2 归一化）；`embedThemeVectors` 只补缺失、失败返回错误码不抛；真实库 229 个主题 3.6 s 跑完，重跑 0 次推理。
+
+
 ### 4.4 边
 
 - `edges(kind='embedding')`：主题↔主题相似边，`weight=sim`，`evidence` 存 `{model, threshold, topK, mutual}`。
@@ -168,6 +171,18 @@ CREATE TABLE IF NOT EXISTS node_positions (
 - 合并 = 并集 `theme_moments`、扩展 `ts_start/ts_end`、摘要取更长/LLM 合并一次、重算向量、重连边；
 - 留 `node_merges(from_node, into_node, at, reason)` 审计/回滚；合并后源节点标记 `merged_into`，不物理删除，避免旧引用断链；
 - 合并后重新跑一次多归属统计，阈值再标定。
+
+**标定（2026-10-24，真实库 229 主题 / 3,141 成员事件，`bge-small-zh-v1.5`；PR #38）**
+
+| 向量来源 | ≥0.99 | ≥0.95 | 0.90–0.95 | ≥0.95 连通分量 | 涉及主题 |
+| - | - | - | - | - | - |
+| 主题 `title+summary`（存 `node_embeddings`） | 1 | 13 | 29 | 6 个（4/4/2/2/2/2） | 16 |
+| 成员事件质心（成员向量均值再 L2） | 41 | **174** | 429 | 22 个（12/11/11/9/8/8/7/7/5…） | **108** |
+
+- **合并候选必须用成员事件质心，不能只看 `title+summary` 向量**：文本向量只认出 16 个主题，质心能认出 108 个（「审查草案」家族一串 0.998+）；v0.2 的 127 对也是质心口径。
+- 质心口径下 ≥0.95 的分量有大有小（最大 12），合并要按分量处理、能撤销；0.90–0.95 只提示。
+- 代价：质心要把成员事件都过一遍模型（3,141 条 / 单线程 192 s）；P0.5 应截断到 256 token + 多线程 + 后台跑，并考虑把质心另存（`node_embeddings` 只放 title+summary 向量，二者用途不同：连线 vs 合并判定）。
+
 
 ### 5.2 主归属 + 次归属
 
@@ -324,6 +339,16 @@ CREATE TABLE IF NOT EXISTS node_positions (
 - 日志：只记模型名/维度/批大小/耗时/失败码；不记节点文本、向量、路径。
 - 详见 `docs/archive/m2-graph-redesign-v0.2.md` §5、§10。
 
+**实施（2026-10-24，PR #38；真机实测）**
+
+- 依赖：`onnxruntime-node@1.30.0`（MIT，N-API 预编译，unpacked ~301 MB 含各平台二进制）；主进程 `await import()` 懒加载，打包时 `asarUnpack`、只留 win32-x64（打包步骤 P3 补）。
+- 模型：`Xenova/bge-small-zh-v1.5` 的 `onnx/model.onnx`（fp32，94,851,877 B）+ `vocab.txt`/`config.json`；放在 `%APPDATA%/Gotcha/models/bge-small-zh-v1.5/`（`model.onnx` 在目录根，**不是** `onnx/` 子目录）。不进 git、不自动下载；BAAI BGE 为 MIT，第三方声明补在打包阶段。
+- 分词：自写 `BertTokenizer`（vocab.txt + WordPiece），按 `tokenizer_config.json` 的 `do_lower_case=false`、`tokenize_chinese_chars=true`；不引第三方 tokenizer，用例覆盖中文按字、`##` 续词、截断 512、`[UNK]`。
+- 池化：`last_hidden_state` 第 0 位（CLS）+ L2；向量以 Float32 小端 BLOB 存 `node_embeddings`。
+- 实测（本机 Windows / Node 24 / 单线程 ORT）：会话加载 357 ms；229 个主题（title+summary）3.6 s（约 16 ms/条，batch 16）；3,141 个成员事件 192 s（约 61 ms/条，OCR 文本长）。
+- 触发：打开图谱窗口时后台跑一次（结构回填永远跑，向量只补缺失），同进程 60s 节流；模型缺失只回填结构、不报错。
+
+
 ## 11. 隐私与安全
 
 - 向量计算全本地，零新增出网；主题命名/模糊确认仍走 `redact.ts` 唯一出口 + D24 确认门 + D18 暂停；
@@ -396,7 +421,8 @@ CREATE TABLE IF NOT EXISTS node_positions (
 | P3 | 主题/时刻 UI、日历、设置、E2E、验收、文档 | 3–4 天 |
 
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
-- 进度：P0 ✅（#36）；P1 数据层 ✅（v3 schema + 回填编排 + 全局查询 DTO，#37）；P1 剩余 = 向量回填 + 启动接线；P0.5 依赖向量运行时。
+- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 可开工（合并判定用成员事件质心，见 §5.1）。
+- 仍需补：新主题的增量向量（随 P2 在线 assigner）、打包 `asarUnpack` 与第三方声明、打开图谱后自动刷新画布（P3 切全局图时一起做）。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 
 ## 15. 风险与回退
@@ -474,6 +500,16 @@ events 7,423；level=1 主题 229；旧 ai 边 201
 
 # 模型（沿用 v0.2）
 bge-small-zh-v1.5 512d；model.onnx 94,851,877 B；Electron 45 主进程 3 条 7.2 ms；首次加载约 0.47 s
+
+# 向量回填 + 边实测（2026-10-24，真实用户库就地回填，备份 .tmp/userdb-backup-*；PR #38）
+模型：Xenova/bge-small-zh-v1.5 的 fp32 ONNX（94,851,877 B）+ vocab.txt；onnxruntime-node 1.30.0
+会话加载 357 ms；229 个主题（title+summary）3.6 s（约 16 ms/条，batch 16，单线程）
+首跑总耗时 4.4 s（含结构回填 1,949 时刻 + 828 归属）；重跑 661 ms、0 新增、边替换 247→247
+embedding 边（0.64/k4/互选）：247 条；跨天 87；孤立 40
+k3/k4/k8：178 / 247 / 500；阈值 0.60/0.62/0.66/0.68/0.70（k4）：248/247/244/234/221
+相似度：中位 0.5024；top 0.9966（「GUI按钮悬停与卡顿修复草案」vs「…讨论」）
+近重复（≥0.95）：title+summary 13 对 / 16 主题；成员事件质心 174 对 / 22 个分量 / 108 主题（合并用质心，见 §5.1）
+事件级 embedding：3,141 条 192 s（约 61 ms/条，OCR 文本长，单线程）
 
 # 采集层（另立方案，仅记录）
 UIA 本机探针：焦点 Document，TextPattern=True；全文 37,349 字符 vs 可见 4,401 字符（83 段）

@@ -9,6 +9,7 @@
  */
 
 import type { Db } from '../db'
+import { localDayKey } from './moments'
 import { parseEventIdsDetailed } from './source-events'
 
 export interface GraphNodeDto {
@@ -362,6 +363,15 @@ export interface NodePositionDto {
   y: number
 }
 
+export interface DayActivityDto {
+  /** 本地日 `yyyy-mm-dd` */
+  dayKey: string
+  /** 当天采集到的全部事件数（含还没成时刻的积压） */
+  events: number
+  /** 当天时刻数（`moments` 表，含未归属主题的） */
+  moments: number
+}
+
 export interface GraphGlobalStats {
   themes: number
   moments: number
@@ -376,6 +386,8 @@ export interface GraphGlobalData {
   memberships: MembershipDto[]
   edges: GraphEdgeDto[]
   positions: NodePositionDto[]
+  /** 按本地日的活动量（日历日格热力用；含未归纳积压的事件） */
+  dayActivity: DayActivityDto[]
   stats: GraphGlobalStats
 }
 
@@ -416,8 +428,40 @@ export function emptyGlobalGraph(): GraphGlobalData {
     memberships: [],
     edges: [],
     positions: [],
+    dayActivity: [],
     stats: { themes: 0, moments: 0, memberships: 0, edges: 0, positions: 0 }
   }
+}
+
+/**
+ * 按本地日汇总活动量（日历日格热力）。
+ * - 事件：`events.ts` 逐条落本地日（含未进时刻的积压——日格计数要的是「这天有多忙」）；
+ * - 时刻：`moments` 表按 `day_key` 计数（含未归属主题的，与事件数同口径）。
+ */
+function queryDayActivity(db: Db): DayActivityDto[] {
+  const byDay = new Map<string, DayActivityDto>()
+  const bucket = (key: string): DayActivityDto => {
+    const existing = byDay.get(key)
+    if (existing) return existing
+    const created: DayActivityDto = { dayKey: key, events: 0, moments: 0 }
+    byDay.set(key, created)
+    return created
+  }
+
+  const eventRows = db.prepare('SELECT ts FROM events').all() as Array<{ ts: number }>
+  for (const row of eventRows) {
+    if (!isFiniteNumber(row.ts)) continue
+    bucket(localDayKey(row.ts)).events += 1
+  }
+  const momentRows = db
+    .prepare('SELECT day_key, COUNT(*) AS moments FROM moments GROUP BY day_key')
+    .all() as Array<{ day_key: string | null; moments: number }>
+  for (const row of momentRows) {
+    if (!row.day_key) continue
+    bucket(row.day_key).moments += isFiniteNumber(row.moments) ? row.moments : 0
+  }
+
+  return [...byDay.values()].sort((a, b) => a.dayKey.localeCompare(b.dayKey))
 }
 
 /**
@@ -540,6 +584,7 @@ export function queryGlobalGraph(db: Db, options: GlobalQueryOptions = {}): Grap
     memberships,
     edges,
     positions,
+    dayActivity: queryDayActivity(db),
     stats: {
       themes: themes.length,
       moments: moments.length,

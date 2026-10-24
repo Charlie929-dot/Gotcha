@@ -446,7 +446,9 @@ foam-graph {
   padding: 0;
   font-size: 12px;
   border-radius: 7px;
-  background: transparent;
+  /* 日格热力：当天事件 ÷ 满量 → 连续不透明度（--heat-alpha 由 global.ts 逐格写入）。
+     顺序要求：热力 < hover < 选中 `.on`，否则有记录的日子悬停 / 选中都看不出变化。 */
+  background: rgb(79 195 247 / var(--heat-alpha, 0));
   border-color: transparent;
   color: var(--text);
 }

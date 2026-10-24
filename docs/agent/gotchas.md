@@ -85,6 +85,9 @@
 | FTS5 trigram 最小 3 字符 | 两字中文词（「图谱」「按钮」）用 `MATCH` 恒不命中（`sqlite 3.53.4` 实测）；`unicode61` 更糟——整串中文算一个 token，1/2 字全不命中 | ≥3 字走 trigram `MATCH`（bm25 排序），含短词一律 LIKE 兜底（`src/understand/search.ts` 的 `classifyQuery`）；LIKE 走 FTS 表内容全表扫，9 914 事件约 120 ms、随事件量线性增长（实测查询 1–290 ms）。`LIKE` 的 `%` / `_` 必须 `ESCAPE '\'` 转义，否则用户搜「%燃」会变成通配 |
 | FTS 索引升级期一次性建库开销 | 9 914 条事件建 trigram 索引约 4.1 s、库 +47 MB（原文 12 MB + 索引 35 MB）；v5 迁移在 `openDatabase()` 里同步跑，暂停态用户首次打开图谱会等到 ~7.6 s（含迁移前整库备份） | 迁移前已有 `memory.db.bak.*`；索引是派生数据，坏了 `rebuildEventSearchIndex()` 重来。事件量再大一个量级时要把回填挪到后台（当前 10k 量级接受一次性等待，别再在 `up()` 里加同步大活） |
 | 截图混入窗口外的文字 | OCR 结果里夹着邻窗 / 桌面的片段，非文字图标被读成怪字（2026-10-24 拍板人真机反馈） | 根因之一与 UIA 无关：`active-win` 用 `GetWindowRect` 取窗口矩形，比 DWM 可见边界 `DWMWA_EXTENDED_FRAME_BOUNDS` 左 / 右 / 下各多 8px（本机 per-monitor DPI 探针实测：125% 下 8/0/8/8，96dpi 窗口 9/0/9/9，最大化窗口 -9 起算），按 GetWindowRect 裁剪会把这圈「窗口背后」的像素送进 OCR。对策：`computeCaptureGeometry` 先 `insetWindowBounds(bounds, WINDOW_FRAME_INSET=8)`（顶边不缩、小窗口按尺寸自适应），再与视频帧求交；窗口几乎整块在屏外时抛错跳过本帧，**不回退整帧**（旧逻辑回退会把整屏送去 OCR）。半透明窗口下叠在窗口内部的字、图标怪字仍需 UIA（门二） |
+| 日格热力盖住「悬停 / 选中」 | 日历格子加了热力背景后，若规则排在 `:hover` / `.on` 之后，同特异性下热力底色胜出——有记录的日子悬停没反馈、选中也看不出高亮（2026-10-24 写日格计数时踩到） | 热力写在 `.cal-grid button` 的基础规则里（`background: rgb(79 195 247 / var(--heat-alpha, 0))`），`hover` / `.on` 靠更高特异性盖住它；新加背景一律别插在 `:hover` 后面 |
+| 日格计数 ≠ 当天采集量 | tooltip 写「N 条事件」容易被当成「这天采了多少」。v1 只算**已落进时刻**的事件，归纳积压多时明显偏小（2026-10-24）；v2（2026-10-25）改为主进程 `dayActivity` 统计 `events` 全量，才等于「这天有多忙」 | 口径固定在 `day-stats.ts` 注释与 `docs/m2-graph-redesign.md` §7.4；「归纳未跑完空心点」要的是「当天有多少事件还没成时刻」，仍未做 |
+| 两个图谱页共用设置面板，加必填元素会静默打死另一个页 | 给 `graph-settings-panel.ts` 的 `ELEMENT_IDS` 加 `set-day-heat` 后，经典页（`graph.html` 没有这一项）初始化 `createSettingsPanel` 直接抛「设置抽屉缺少 #…」，整个 renderer 挂在「读取中…」，E2E 只在最后一条「经典视图互切」红（2026-10-25 实测） | 两页共用的面板里，**只在全局图页出现的控件**用 `root.querySelector` 取、判空后再读写，并**只在存在时才放进保存 payload**（缺省时带字段会清掉既有设置）；改完必须跑整份 `npx playwright test`，两个页面都要覆盖 |
 
 ## 规则
 

@@ -161,8 +161,32 @@ describe('queryGlobalGraph', () => {
         memberships: [],
         edges: [],
         positions: [],
+        dayActivity: [],
         stats: { themes: 0, moments: 0, memberships: 0, edges: 0, positions: 0 }
       })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('dayActivity 按本地日汇总：事件含未成时刻的积压，时刻按 day_key 计数', () => {
+    const db = openDatabase(':memory:')
+    try {
+      // 10-22 两条事件，其中一条没进任何时刻（积压）
+      insertEvent(db, { ts: at(22, 9), app: 'Code', ocrText: 'a' })
+      insertEvent(db, { ts: at(22, 10), app: 'Code', ocrText: 'b' })
+      insertEvent(db, { ts: at(21, 9), app: 'Chrome', ocrText: 'c' })
+      seedMoment(db, 1, '2026-10-22', at(22, 9))
+      seedMoment(db, 2, '2026-10-22', at(22, 10))
+      seedMoment(db, 3, '2026-10-21', at(21, 9))
+
+      const data = queryGlobalGraph(db)
+      // 没有归属主题 → moments 列表为空，但 dayActivity 仍按「这天有多忙」统计
+      expect(data.moments).toEqual([])
+      expect(data.dayActivity).toEqual([
+        { dayKey: '2026-10-21', events: 1, moments: 1 },
+        { dayKey: '2026-10-22', events: 2, moments: 2 }
+      ])
     } finally {
       db.close()
     }

@@ -27,9 +27,22 @@ describe('readGraphSettings', () => {
     expect(defaults.hotkeys).toEqual({ toggleCapture: 'Alt+P', openGraph: 'Alt+Space' })
     expect(defaults.providers).toEqual([DEFAULT_PROVIDER])
     expect(defaults.thresholds).toEqual(GRAPH_THRESHOLD_DEFAULTS)
+    // 日格热力满量默认 4000（一天全在使用约 3–4k 事件）
+    expect(defaults.dayHeatMax).toBe(4_000)
 
     const db = openDatabase(':memory:')
     expect(readGraphSettings(db)).toEqual(defaults)
+    db.close()
+  })
+
+  it('日格满量：库里的脏值（0 / 负数 / 越界 / 小数 / 非数字）一律回退默认', () => {
+    const db = openDatabase(':memory:')
+    for (const raw of ['0', '-100', '999999999', '3000.5', 'abc']) {
+      setSetting(db, GRAPH_SETTING_KEYS.dayHeatMax, raw)
+      expect(readGraphSettings(db).dayHeatMax).toBe(4_000)
+    }
+    setSetting(db, GRAPH_SETTING_KEYS.dayHeatMax, '1200')
+    expect(readGraphSettings(db).dayHeatMax).toBe(1_200)
     db.close()
   })
 
@@ -115,6 +128,8 @@ describe('saveGraphSettings', () => {
     expect(saveGraphSettings(db, { budgetTokensPerDay: 10 })).toMatchObject({ ok: false })
     expect(saveGraphSettings(db, { retryBackoffMinutes: [] })).toMatchObject({ ok: false })
     expect(saveGraphSettings(db, { maxTokens: 100 })).toMatchObject({ ok: false })
+    expect(saveGraphSettings(db, { dayHeatMax: 50 })).toMatchObject({ ok: false })
+    expect(saveGraphSettings(db, { dayHeatMax: '4000' })).toMatchObject({ ok: false })
     expect(
       saveGraphSettings(db, { hotkeys: { toggleCapture: 'Alt+', openGraph: 'Alt+Space' } })
     ).toMatchObject({ ok: false })
@@ -124,6 +139,21 @@ describe('saveGraphSettings', () => {
     // 任一失败都不落任何键
     expect(getSetting(db, GRAPH_SETTING_KEYS.intervalMinutes)).toBe('10')
     db.close()
+  })
+
+  it('日格满量可保存并读回；整数与区间校验', () => {
+    const db = openDatabase(':memory:')
+    try {
+      const saved = saveGraphSettings(db, { dayHeatMax: 6_500 })
+      expect(saved.ok).toBe(true)
+      if (!saved.ok) return
+      expect(saved.settings.dayHeatMax).toBe(6_500)
+      expect(getSetting(db, GRAPH_SETTING_KEYS.dayHeatMax)).toBe('6500')
+      expect(saveGraphSettings(db, { dayHeatMax: 4_000.5 })).toMatchObject({ ok: false })
+      expect(saveGraphSettings(db, { dayHeatMax: 200_001 })).toMatchObject({ ok: false })
+    } finally {
+      db.close()
+    }
   })
 
   it('阈值可作为设置项读写（含 edgeMutual 布尔）；非法阈值整单拒绝', () => {

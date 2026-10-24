@@ -53,6 +53,11 @@ export interface InductionSnapshot extends InductionState {
   consent: boolean
   captureRunning: boolean
   client: ClientStatusView
+  /**
+   * 本地向量模型是否就绪（`model.onnx` + `vocab.txt` 都在）。
+   * false 时新主题 / embedding 连线算不出来，但已有向量与边照常画（顶部黄条提示，不清图）。
+   */
+  embeddingsReady: boolean
 }
 
 export interface InductionRuntimeOptions {
@@ -65,6 +70,11 @@ export interface InductionRuntimeOptions {
   firstDelayMs?: number
   intervalMs?: number
   onSnapshot?: (snapshot: InductionSnapshot) => void
+  /**
+   * 本地向量模型是否就绪（缺省视为就绪：没接线的地方不该凭空报黄条）。
+   * 每次取快照现读，用户装好模型后下一次刷新就能消失。
+   */
+  readEmbeddingsReady?: () => boolean
   log?: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => void
 }
 
@@ -89,6 +99,8 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
     options.readConsent ??
     ((): boolean => getSetting(options.getDb(), GRAPH_SETTING_KEYS.outboundConsent) === '1')
 
+  const readEmbeddingsReady = options.readEmbeddingsReady ?? ((): boolean => true)
+
   const snapshot = (): InductionSnapshot => {
     const state: InductionState =
       service?.getState() ?? { status: 'stopped' as InductionStatus, halted: false }
@@ -99,7 +111,8 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
       captureRunning,
       client: resolved.ok
         ? { ok: true }
-        : { ok: false, reason: resolved.reason, apiKeyEnv: resolved.apiKeyEnv }
+        : { ok: false, reason: resolved.reason, apiKeyEnv: resolved.apiKeyEnv },
+      embeddingsReady: readEmbeddingsReady()
     }
   }
 

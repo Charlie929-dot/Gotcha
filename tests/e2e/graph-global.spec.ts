@@ -211,6 +211,17 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     expect(stats.stats).toEqual({ themes: 2, moments: 2, memberships: 3, edges: 1, positions: 0 })
   })
 
+  test('模型缺失：顶部黄条提示「新主题暂无法计算」，已有图照画', async () => {
+    // E2E 的 userData 里没有 bge 模型 → isModelReady=false
+    await expect(graph.locator('#model-warning')).toBeVisible({ timeout: 15_000 })
+    await expect(graph.locator('#model-warning')).toContainText('新主题暂无法计算')
+    await expect(graph.locator('#model-warning-text')).toContainText('bge-small-zh-v1.5')
+
+    // 不清图、不改计数：黄条只说明「新的算不出来」
+    await expect(graph.locator('#node-count')).toContainText('2 个主题 · 2 个时刻')
+    expect((await nodeIds()).length).toBe(4)
+  })
+
   test('点击主题下钻：侧栏成员事件，来源 100% 可溯', async () => {
     await graph.evaluate(async () => {
       await (window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.select(1)

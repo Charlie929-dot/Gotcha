@@ -155,6 +155,26 @@ describe('InductionRuntime：供应商状态与暂停取消', () => {
     db.close()
   })
 
+  it('快照带 embeddingsReady：缺省视为就绪，注入后每次现读（装好模型不用重启）', () => {
+    const db = openDatabase(':memory:')
+    try {
+      const defaultRuntime = runtimeFor(db, () => ({ ok: true, client: new FakeLlmClient([]) }))
+      expect(defaultRuntime.getSnapshot().embeddingsReady).toBe(true)
+      defaultRuntime.dispose()
+
+      let ready = false
+      const runtime = runtimeFor(db, () => ({ ok: true, client: new FakeLlmClient([]) }), {
+        readEmbeddingsReady: () => ready
+      })
+      expect(runtime.getSnapshot().embeddingsReady).toBe(false)
+      ready = true
+      expect(runtime.getSnapshot().embeddingsReady).toBe(true)
+      runtime.dispose()
+    } finally {
+      db.close()
+    }
+  })
+
   it('暂停中止在途请求：结果丢弃、不落库（D18）', async () => {
     const db = openDatabase(':memory:')
     seed(db)

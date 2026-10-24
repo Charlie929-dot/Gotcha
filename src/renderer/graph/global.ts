@@ -65,7 +65,7 @@ import {
 import { computeDayStats, dayTooltip, heatAlpha, DEFAULT_HEAT_FULL_SCALE, type DayStat } from './day-stats'
 import { createGlobalPanel } from './global-panel'
 import { createSettingsPanel } from './graph-settings-panel'
-import { statusView } from './status-view'
+import { modelWarningText, statusView } from './status-view'
 import './view-hook'
 
 declare global {
@@ -87,6 +87,8 @@ const emptyEl = byId<HTMLDivElement>('empty')
 const countEl = byId<HTMLDivElement>('node-count')
 const consentEl = byId<HTMLElement>('consent')
 const consentButton = byId<HTMLButtonElement>('consent-btn')
+const modelWarningEl = byId<HTMLElement>('model-warning')
+const modelWarningTextEl = byId<HTMLElement>('model-warning-text')
 const metaEl = byId<HTMLElement>('meta')
 const onlyThemesEl = byId<HTMLInputElement>('only-themes')
 const calendarBtn = byId<HTMLButtonElement>('calendar-btn')
@@ -1061,6 +1063,10 @@ function applySnapshot(next: InductionSnapshot): void {
   statusDetailEl.textContent = view.detail
   statusDetailEl.hidden = view.detail === ''
   consentEl.hidden = !(next.client.ok && !next.consent)
+  // 模型缺失只是「新主题算不出来」，图照画：顶部黄条提示，不清空画布
+  const modelWarning = modelWarningText(next)
+  modelWarningEl.hidden = modelWarning === null
+  modelWarningTextEl.textContent = modelWarning ?? ''
   induceEl.disabled = !(next.client.ok && next.captureRunning)
   metaEl.textContent = next.consent
     ? '数据只存本地；出网内容经统一脱敏'

@@ -127,17 +127,28 @@ foam-graph {
   border-radius: 12px;
   padding: 10px 12px 12px;
   box-shadow: 0 14px 40px rgb(0 0 0 / 45%);
+  /* 涂抹时别把日格文字选蓝 */
+  user-select: none;
 }
 
 .cal-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 4px;
   margin-bottom: 8px;
 }
 
 .cal-head strong {
+  flex: 1;
+  text-align: center;
   font-size: 13px;
+}
+
+.cal-head .cal-close {
+  padding: 2px 8px;
+  font-size: 14px;
+  line-height: 1.1;
+  color: var(--muted);
 }
 
 .cal-weekdays,

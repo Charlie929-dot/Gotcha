@@ -26,6 +26,8 @@ import { createInductionRuntime, type ClientResolution, type InductionRuntime, t
 import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSettingsView } from './graph-settings'
 import { createDeterministicFakeLlm } from './fake-llm'
 import { createGraphWindow } from './graph-window'
+import { runGraphBackfill } from './graph-backfill-runtime'
+import { resolveEmbeddingModelDir } from '../understand/embedding/paths'
 import { registerGraphIpc, type ProviderKeySaveResult } from './graph-ipc'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
@@ -329,6 +331,27 @@ function applyGraphSettings(settings: GraphSettingsView): void {
   }
 }
 
+/** 打开图谱时后台回填 v3 结构（时刻/归属）与主题向量；模型缺失时只回填结构 */
+function runGraphBackfillInBackground(): void {
+  if (shuttingDown) return
+  // A3 红线：默认暂停 / 从未建库时不允许因为「打开图谱」而建库或写盘
+  if (!existsSync(dbPath)) return
+  let db: Db
+  try {
+    db = connections.ensureWritable().db
+  } catch (error) {
+    captureLog('warn', 'graph backfill: database unavailable', {
+      error: error instanceof Error ? error.name : 'unknown'
+    })
+    return
+  }
+  const modelDir = resolveEmbeddingModelDir(
+    app.getPath('userData'),
+    getSetting(db, 'graph.embedding_model_dir')
+  )
+  void runGraphBackfill({ db, modelDir, log: captureLog })
+}
+
 function showGraphWindow(): void {
   if (!app.isReady()) return
   if (graphWindow && !graphWindow.isDestroyed()) {
@@ -345,6 +368,7 @@ function showGraphWindow(): void {
       graphWindow = null
     }
   })
+  runGraphBackfillInBackground()
 }
 
 /** D20：球点击 / Alt+Space 默认打开图谱；打开即视为一次交互（取消启动自动恢复倒计时） */

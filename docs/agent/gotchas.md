@@ -65,9 +65,13 @@
 | 已保存密钥回显给渲染进程 | 一旦回显，密钥会进 DOM / 截图 / 调试日志，违反 D21；把密钥塞进 settings 也会随数据库备份扩散 | 设置读取只回「env / file / none」来源；写入走独立 IPC `graph:provider:key`（providerId + 一次性输入，主进程反查 apiKeyEnv）；settings 通道继续整单拒绝 apiKey 字段 |
 | DeepSeek V4 默认 thinking 吃满 `max_tokens` | 归纳一直报「LLM 返回空 content」；响应 `finish_reason=length`，`completion_tokens` 全是 `reasoning_tokens`。2026-10-23 合成批次实测：400 个 event_id + `max_tokens=2000` → reasoning 2000/2000、content 0；小批次/短输入不会复现，容易被误判成 JSON 模式的偶发空响应 | 结构化 JSON 归纳显式关闭 thinking：请求体加 `thinking:{type:'disabled'}`（只对 `*.deepseek.com` 发送，避免严格网关因未知参数 400）。关闭后同批 content_len=3282、completion_tokens=1512、`finish_reason=stop`。`finish_reason=length` 时把空 content / 残 JSON 报成「被 max_tokens（N）截断」，不要只报「空 content」 |
 | 归纳按旧游标补历史，今天的图长期为空 | 自动归纳从 `graph.cursor_*` 一路从 10-21 补到 10-22，今天 2,000+ 条排在后面；按 10 分钟一批要十几小时才轮到今天，用户看到的是「昨天突然多出节点、今天不动」 | 改为按本地日取批（D28）：自动只归纳今天，手动「立即归纳」只归纳图谱当前查看日；用节点 `source_events` 去重，重复点击幂等；旧游标仅保留兼容，不再驱动自动归纳（`src/understand/cloud/batch.ts` 的 `readDayBatch` / `service.ts`） |
-
 | 只拷 `memory.db` 做真实库预演会缺数据 | WAL 模式下已提交但未 checkpoint 的帧在 `memory.db-wal` 里；只复制主库，副本可能少最后一批事件/主题（2026-10-24 复制 19.8MB 库时 `-wal` 还有 57KB 未落主库） | 预演副本必须连 `memory.db-wal` / `memory.db-shm` 一起复制（或先关应用让它 checkpoint）；在副本上跑 `openDatabase()` 还会生成 `.bak.*`，别在用户库目录里做实验 |
 | 时刻按「≤90s」分组会跨本地日 | `batch.ts` 的合并只看 app/标题/间隔，没有 day_key；直接拿来生成 `moments` 会把 23:59:50 与 00:00:10 并成一条，日历按 `day_key` 筛选时两边都错位（v0.3 §4.1） | 持久化时刻的分组条件必须带 `localDayKey(ts)`（`src/understand/moments.ts#groupMoments`），用例覆盖跨午夜；归纳取批仍用 batch 口径，两者用「同日等价」用例钉住 |
+| npm 的 allowScripts 会跳过 onnxruntime 安装脚本 | `npm install onnxruntime-node` 只提示 `install-scripts not yet covered by allowScripts`，不报错；若二进制没下成，`InferenceSession.create` 会在运行时才炸（2026-10-24 本机） | 装完检查 `node_modules/onnxruntime-node/bin/napi-v6/win32/x64/onnxruntime.dll` 存在；缺就跑 `npm install-scripts approve onnxruntime-node` 后重装 |
+| bge 分词不能照抄英文 BERT | bge-small-zh 的 `tokenizer_config.json` 是 `do_lower_case=false`；自己 lowercase 会把 `GUI`/`DeepSeek` 变成另一串 token，向量分布漂移 | 分词按 vocab.txt + WordPiece，保留大小写；中文按 `_is_chinese_char` 码点拆字；用例钉住 `Hello` ≠ `hello`、`##` 续词、512 截断 |
+| 模型目录布局不是 `onnx/model.onnx` | 从 HF 下 fp32 模型常在 `onnx/model.onnx`；代码约定是 `<modelDir>/model.onnx` + `vocab.txt` + `config.json`，放错目录会一直 `model-missing`（2026-10-24 踩过） | 下载后把 `model.onnx` 移到模型目录根；`isModelReady()` 只认根目录；HF 源 `Xenova/bge-small-zh-v1.5` 才有 ONNX 导出 |
+| 事件级 embedding 比主题慢一个量级 | 主题 title+summary 约 16 ms/条；成员事件带 OCR 文本约 61 ms/条（3,141 条约 192 s，单线程）。按「主题数 × 20ms」估时间会差 4 倍（2026-10-24 实测） | 事件级（P0.5 质心）要截断 256 token、加大 `intraOpNumThreads`、后台跑；主题向量回填用 `onlyMissing`，重跑几乎零成本 |
+| 后台回填别直接 `ensureWritable()` | 打开图谱时顺手回填 v3 数据，第一版直接 `connections.ensureWritable()`；「默认暂停」E2E 立刻红：点球开图谱凭空建出 `memory.db`，踩 A3「无显式交互零磁盘写入」（2026-10-24 实测） | 后台任务先 `existsSync(dbPath)`，没有库就直接跳过；要读设置也用只读连接，别为了读一个 key 触发建库 |
 
 ## 规则
 

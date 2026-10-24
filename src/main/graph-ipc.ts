@@ -62,7 +62,12 @@ export interface GraphIpcDeps {
   setConsent(consented: boolean): void
   readSettings(): GraphSettingsView
   saveSettings(patch: unknown): GraphSettingsSaveResult
-  onSettingsSaved(settings: GraphSettingsView): void
+  /**
+   * 保存成功后由主进程接手副作用（重绑热键 / 按确认门启停归纳）。
+   * `previousConsent` 是**保存前**读到的确认门——保存后库里的值已经是新的，
+   * 拿它和 `settings.outboundConsent` 比会永远相等，撤销 D24 就停不掉调度（也 abort 不了在途请求）。
+   */
+  onSettingsSaved(settings: GraphSettingsView, previousConsent: boolean): void
   getHotkeys(): readonly HotkeyRegisterResult[]
   openTimeline(day?: number): void
   fetchProviderModels(input: ProviderModelsInput): Promise<FetchModelsResult>
@@ -153,7 +158,13 @@ function readSearchHitEventsInput(input: unknown): SearchHitEventsInput | null {
   }
 }
 
-export function registerGraphIpc(deps: GraphIpcDeps): () => void {
+/**
+ * 组装 `graph:*` 的 handler 表（不碰 ipcMain，便于单测直接调用某个通道）。
+ * 权限面在 `ensureSender` 里：只认图谱窗口主 frame。
+ */
+export function createGraphIpcHandlers(
+  deps: GraphIpcDeps
+): Array<[string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown]> {
   const ensureSender = (event: IpcMainInvokeEvent): boolean => {
     const window = deps.getGraphWindow()
     if (!window || window.isDestroyed()) return false
@@ -163,7 +174,7 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
     )
   }
 
-  const handlers: Array<[string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown]> = [
+  return [
     [
       'graph:query',
       (event, from, to) => {
@@ -310,8 +321,10 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
       (event, patch) => {
         if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies GraphSettingsSaveResult
         try {
+          // 必须在写库**之前**读旧确认门：保存后库里的值已经是新的
+          const previousConsent = deps.readSettings().outboundConsent
           const result = deps.saveSettings(patch)
-          if (result.ok) deps.onSettingsSaved(result.settings)
+          if (result.ok) deps.onSettingsSaved(result.settings, previousConsent)
           return result
         } catch (error) {
           deps.log('error', 'graph settings save failed', { error: String(error) })
@@ -390,6 +403,11 @@ export function registerGraphIpc(deps: GraphIpcDeps): () => void {
       }
     ]
   ]
+}
+
+/** 注册到 ipcMain；卸载函数用于窗口关闭 / 测试清理 */
+export function registerGraphIpc(deps: GraphIpcDeps): () => void {
+  const handlers = createGraphIpcHandlers(deps)
 
   for (const [channel, handler] of handlers) ipcMain.handle(channel, handler)
 

@@ -89,6 +89,7 @@
 | 日格计数 ≠ 当天采集量 | tooltip 写「N 条事件」容易被当成「这天采了多少」。v1 只算**已落进时刻**的事件，归纳积压多时明显偏小（2026-10-24）；v2（2026-10-25）改为主进程 `dayActivity` 统计 `events` 全量，才等于「这天有多忙」 | 口径固定在 `day-stats.ts` 注释与 `docs/m2-graph-redesign.md` §7.4；「归纳未跑完空心点」要的是「当天有多少事件还没成时刻」，仍未做 |
 | 两个图谱页共用设置面板，加必填元素会静默打死另一个页 | 给 `graph-settings-panel.ts` 的 `ELEMENT_IDS` 加 `set-day-heat` 后，经典页（`graph.html` 没有这一项）初始化 `createSettingsPanel` 直接抛「设置抽屉缺少 #…」，整个 renderer 挂在「读取中…」，E2E 只在最后一条「经典视图互切」红（2026-10-25 实测） | 两页共用的面板里，**只在全局图页出现的控件**用 `root.querySelector` 取、判空后再读写，并**只在存在时才放进保存 payload**（缺省时带字段会清掉既有设置）；改完必须跑整份 `npx playwright test`，两个页面都要覆盖 |
 | 状态快照里顺手读模型 / 设置会踩 A3 | 归纳快照每次刷新都要知道「本地向量模型是否就绪」；如果为了读 `graph.embedding_model_dir` 顺手 `connections.ensureWritable()` 或 `openDatabase()`，默认暂停下「打开图谱 / 读一次状态」就会建库，违反 A3「无显式交互零磁盘写入」（2026-10-25 做模型缺失黄条时规避） | 状态类读取一律走只读连接 `connections.queryDb()`，没库就按空设置处理（回退默认模型目录）；就绪判定只 `existsSync(model.onnx)` + `existsSync(vocab.txt)`，不做任何写盘 |
+| 保存设置后才读「旧值」比较 = 永远相等 | `applyGraphSettings` 用 `inductionRuntime.getSnapshot().consent` 判断确认门是否变化；但 IPC 是**先写库、再回调**，快照读的就是新值，比较恒等 → 在设置里取消「已确认出网」既不停调度、也 abort 不了在途请求（D24 隐私承诺失效，2026-10-25 发现，同日修） | 旧值必须在**写库前**取：`graph:settings:save` 先 `deps.readSettings().outboundConsent` 再 `saveSettings`，把 `previousConsent` 一起交给 `onSettingsSaved`；`tests/unit/graph-ipc.test.ts` 钉住顺序（`[true, false]`，顺序反了会变成 `[false, false]`） |
 
 ## 规则
 

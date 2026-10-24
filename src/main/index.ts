@@ -354,11 +354,15 @@ function registerGlobalHotkeys(): void {
   }
 }
 
-/** 设置保存后：重绑热键；确认门变化时启停归纳（授权 / 撤销） */
-function applyGraphSettings(settings: GraphSettingsView): void {
+/**
+ * 设置保存后：重绑热键；确认门变化时启停归纳（授权 / 撤销）。
+ * `previousConsent` 必须是**保存前**读到的值（由 IPC 层在写库前取）。
+ * 旧实现拿 `inductionRuntime.getSnapshot().consent` 来比——那已经是写库后的新值，
+ * 比较永远相等，于是「撤销出网授权」停不掉调度、也 abort 不了在途请求（D24 漏洞，2026-10-25 修）。
+ */
+function applyGraphSettings(settings: GraphSettingsView, previousConsent: boolean): void {
   registerGlobalHotkeys()
   if (!inductionRuntime) return
-  const previousConsent = inductionRuntime.getSnapshot().consent
   if (previousConsent !== settings.outboundConsent) {
     inductionRuntime.setConsent(settings.outboundConsent)
   }

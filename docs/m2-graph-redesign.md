@@ -346,6 +346,7 @@ CREATE TABLE IF NOT EXISTS node_positions (
 - 分词：自写 `BertTokenizer`（vocab.txt + WordPiece），按 `tokenizer_config.json` 的 `do_lower_case=false`、`tokenize_chinese_chars=true`；不引第三方 tokenizer，用例覆盖中文按字、`##` 续词、截断 512、`[UNK]`。
 - 池化：`last_hidden_state` 第 0 位（CLS）+ L2；向量以 Float32 小端 BLOB 存 `node_embeddings`。
 - 实测（本机 Windows / Node 24 / 单线程 ORT）：会话加载 357 ms；229 个主题（title+summary）3.6 s（约 16 ms/条，batch 16）；3,141 个成员事件 192 s（约 61 ms/条，OCR 文本长）。
+- Electron 45 主进程实测（2026-10-24，临时 E2E）：打开图谱后后台完成 2 个合成主题的 512 维向量 + 1 条 embedding 边——`onnxruntime-node` 在 Electron 里可用，不只是 plain Node。
 - 触发：打开图谱窗口时后台跑一次（结构回填永远跑，向量只补缺失），同进程 60s 节流；模型缺失只回填结构、不报错。
 
 

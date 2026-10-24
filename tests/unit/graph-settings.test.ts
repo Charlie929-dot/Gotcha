@@ -7,6 +7,7 @@ import {
   saveGraphSettings
 } from '../../src/main/graph-settings'
 import { DEFAULT_PROVIDER } from '../../src/understand/cloud/providers'
+import { GRAPH_THRESHOLD_DEFAULTS } from '../../src/understand/graph-thresholds'
 
 describe('readGraphSettings', () => {
   it('无库 / 空库返回默认值且不建库', () => {
@@ -25,6 +26,7 @@ describe('readGraphSettings', () => {
     })
     expect(defaults.hotkeys).toEqual({ toggleCapture: 'Alt+P', openGraph: 'Alt+Space' })
     expect(defaults.providers).toEqual([DEFAULT_PROVIDER])
+    expect(defaults.thresholds).toEqual(GRAPH_THRESHOLD_DEFAULTS)
 
     const db = openDatabase(':memory:')
     expect(readGraphSettings(db)).toEqual(defaults)
@@ -122,6 +124,33 @@ describe('saveGraphSettings', () => {
     // 任一失败都不落任何键
     expect(getSetting(db, GRAPH_SETTING_KEYS.intervalMinutes)).toBe('10')
     db.close()
+  })
+
+  it('阈值可作为设置项读写（含 edgeMutual 布尔）；非法阈值整单拒绝', () => {
+    const db = openDatabase(':memory:')
+    try {
+      const saved = saveGraphSettings(db, {
+        thresholds: { themeMergeSim: 0.97, themeSecondaryMax: 3, edgeTopK: 6, edgeMutual: false }
+      })
+      expect(saved.ok).toBe(true)
+      if (!saved.ok) return
+      expect(saved.settings.thresholds).toMatchObject({
+        themeMergeSim: 0.97,
+        themeSecondaryMax: 3,
+        edgeTopK: 6,
+        edgeMutual: false
+      })
+      expect(getSetting(db, 'graph.edge_mutual')).toBe('0')
+
+      expect(saveGraphSettings(db, { thresholds: { themeMergeSim: 2 } })).toMatchObject({
+        ok: false
+      })
+      expect(saveGraphSettings(db, { thresholds: { nope: 1 } })).toMatchObject({ ok: false })
+      // 失败不落库
+      expect(getSetting(db, 'graph.theme_merge_sim')).toBe('0.97')
+    } finally {
+      db.close()
+    }
   })
 
   it('供应商校验：非法 baseUrl / 未知字段 / apiKey 值 / id 重复都整单拒绝', () => {

@@ -15,7 +15,16 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'graph.batch_max_moments': '20',
   'graph.max_tokens': '2000',
   // 本地向量模型目录（留空 = `<userData>/models/bge-small-zh-v1.5`；D29 / 方案 §10）
-  'graph.embedding_model_dir': ''
+  'graph.embedding_model_dir': '',
+  // 图谱相似度阈值（docs/m2-graph-redesign.md §5.2；在合并后的真实主题集上标定）
+  'graph.theme_new_min_sim': '0.78',
+  'graph.theme_member_min_sim': '0.92',
+  'graph.theme_duplicate_sim': '0.92',
+  'graph.theme_merge_sim': '0.95',
+  'graph.theme_secondary_max': '2',
+  'graph.edge_min_sim': '0.64',
+  'graph.edge_top_k': '4',
+  'graph.edge_mutual': '1'
 }
 
 export function getSetting(db: Db, key: string): string {

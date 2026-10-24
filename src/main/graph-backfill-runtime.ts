@@ -9,7 +9,12 @@
  */
 
 import type { Db } from '../db'
-import { backfillGraphStructures, type GraphBackfillReport } from '../understand/graph-backfill'
+import {
+  backfillGraphStructures,
+  backfillThemeGraph,
+  type GraphBackfillReport,
+  type ThemeGraphReport
+} from '../understand/graph-backfill'
 import { createLocalEmbedder, isModelReady } from '../understand/embedding/session'
 import type { Embedder } from '../understand/embedding/types'
 import type { ThemeEmbeddingResult } from '../understand/theme-embeddings'
@@ -32,7 +37,10 @@ export interface GraphBackfillRunResult {
   status: 'done' | 'skipped'
   /** 模型缺失 / 加载失败时为 null */
   embeddings: ThemeEmbeddingResult | null
+  /** 结构回填结果（兼容旧字段；完整报告见 `theme`） */
   report: GraphBackfillReport | null
+  /** P0.5 全流程报告（事件向量 / 质心 / 合并 / 次归属） */
+  theme: ThemeGraphReport | null
   /** 跳过的原因（status='skipped'） */
   reason?: 'throttled' | 'busy'
 }
@@ -65,9 +73,9 @@ function getEmbedder(modelDir: string, factory: (dir: string) => Promise<Embedde
 export async function runGraphBackfill(deps: GraphBackfillRuntimeDeps): Promise<GraphBackfillRunResult> {
   const now = deps.now?.() ?? Date.now()
   const minInterval = deps.minIntervalMs ?? 60_000
-  if (running) return { status: 'skipped', embeddings: null, report: null, reason: 'busy' }
+  if (running) return { status: 'skipped', embeddings: null, report: null, theme: null, reason: 'busy' }
   if (minInterval > 0 && now - lastRunAt < minInterval) {
-    return { status: 'skipped', embeddings: null, report: null, reason: 'throttled' }
+    return { status: 'skipped', embeddings: null, report: null, theme: null, reason: 'throttled' }
   }
   running = true
   lastRunAt = now
@@ -80,12 +88,22 @@ export async function runGraphBackfill(deps: GraphBackfillRuntimeDeps): Promise<
         existingMoments: report.moments.existing,
         memberships: report.memberships.inserted
       })
-      return { status: 'done', embeddings: null, report }
+      return { status: 'done', embeddings: null, report, theme: null }
     }
 
     let embedder: Embedder | null = null
     try {
-      const factory = deps.createEmbedder ?? ((dir: string) => createLocalEmbedder({ modelDir: dir }))
+      const factory =
+        deps.createEmbedder ??
+        ((dir: string) =>
+          createLocalEmbedder({
+            modelDir: dir,
+            // 事件文本长（OCR）：截 256 token + 4 线程 + batch 32；实测约 42 ms/条
+            // （3.1k 条 ≈ 2 分钟一次性后台跑；8 线程反而更慢，见 §5.1 实测）
+            maxLength: 256,
+            batchSize: 32,
+            intraOpNumThreads: 4
+          }))
       embedder = await getEmbedder(deps.modelDir, factory)
     } catch (error) {
       deps.log('warn', 'graph backfill: embedder unavailable, structure only', {
@@ -93,20 +111,34 @@ export async function runGraphBackfill(deps: GraphBackfillRuntimeDeps): Promise<
       })
     }
 
-    const report = await backfillGraphStructures(deps.db, embedder ? { now, embedder } : { now })
+    if (!embedder) {
+      const report = await backfillGraphStructures(deps.db, { now })
+      return { status: 'done', embeddings: null, report, theme: null }
+    }
+
+    const theme = await backfillThemeGraph(deps.db, { now, embedder })
     deps.log('info', 'graph backfill done', {
-      moments: report.moments.created,
-      memberships: report.memberships.inserted,
-      embeddings: report.embeddings?.embedded ?? 0,
-      edges: report.edges?.inserted ?? 0,
-      embeddingsOk: report.embeddings?.ok ?? null
+      moments: theme.structure.moments.created,
+      memberships: theme.structure.memberships.inserted,
+      embeddings: theme.structure.embeddings?.embedded ?? 0,
+      eventVectors: theme.events?.embedded ?? 0,
+      merges: theme.merges?.applied ?? 0,
+      secondary: theme.secondary?.inserted ?? 0,
+      edges: theme.structure.edges?.inserted ?? 0,
+      embeddingsOk: theme.structure.embeddings?.ok ?? null,
+      deferred: theme.deferred
     })
-    return { status: 'done', embeddings: report.embeddings, report }
+    return {
+      status: 'done',
+      embeddings: theme.structure.embeddings ?? null,
+      report: theme.structure,
+      theme
+    }
   } catch (error) {
     deps.log('warn', 'graph backfill failed', {
       error: error instanceof Error ? error.name : 'unknown'
     })
-    return { status: 'done', embeddings: null, report: null }
+    return { status: 'done', embeddings: null, report: null, theme: null }
   } finally {
     running = false
   }

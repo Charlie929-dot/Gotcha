@@ -63,7 +63,7 @@ export function listThemeTexts(db: Db, options: ListThemeTextsOptions = {}): The
       ? db
           .prepare(
             `SELECT n.id, n.title, n.summary FROM nodes n
-             WHERE n.level = 1
+             WHERE n.level = 1 AND n.merged_into IS NULL
                AND NOT EXISTS (
                  SELECT 1 FROM node_embeddings e WHERE e.node_id = n.id AND e.model = ?
                )
@@ -71,7 +71,9 @@ export function listThemeTexts(db: Db, options: ListThemeTextsOptions = {}): The
           )
           .all(model)
       : db
-          .prepare('SELECT id, title, summary FROM nodes WHERE level = 1 ORDER BY id ASC')
+          .prepare(
+            'SELECT id, title, summary FROM nodes WHERE level = 1 AND merged_into IS NULL ORDER BY id ASC'
+          )
           .all()
   ) as ThemeTextRow[]
 

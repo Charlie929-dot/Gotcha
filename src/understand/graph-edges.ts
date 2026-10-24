@@ -163,6 +163,8 @@ function decodeVector(blob: Buffer): Float32Array {
   return out
 }
 
+export { encodeVector, decodeVector }
+
 export interface WriteVectorsResult {
   written: number
   /** 维度与声明不一致而跳过的条数（不抛错，交由调用方判断） */

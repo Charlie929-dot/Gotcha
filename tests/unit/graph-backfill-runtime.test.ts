@@ -34,7 +34,10 @@ function fakeEmbedder(): Embedder & { calls: number } {
     calls: 0,
     async embed(texts) {
       this.calls += 1
-      return texts.map(() => Float32Array.from([1, 0]))
+      // 两个主题给不同方向（相似度 0.9：够连边、不触发 0.95 合并）
+      return texts.map((text) =>
+        text.includes('主题 1') ? Float32Array.from([1, 0]) : Float32Array.from([0.9, 0.4359])
+      )
     }
   }
 }

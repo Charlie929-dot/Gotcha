@@ -12,16 +12,23 @@ import {
   EDGES_DDL,
   EDGES_DST_INDEX_DDL,
   EDGES_SRC_INDEX_DDL,
+  EVENT_EMBEDDINGS_DDL,
   EVENTS_DDL,
   EVENTS_TS_INDEX_DDL,
   MOMENTS_DDL,
   MOMENTS_DAY_INDEX_DDL,
   NODES_DDL,
   NODES_LEVEL_INDEX_DDL,
+  NODES_MERGED_INTO_INDEX_DDL,
   NODES_TS_START_INDEX_DDL,
   NODE_EMBEDDINGS_DDL,
+  NODE_MERGES_DDL,
+  NODE_MERGES_FROM_INDEX_DDL,
+  NODE_MERGES_GROUP_INDEX_DDL,
+  NODE_MERGES_INTO_INDEX_DDL,
   NODE_POSITIONS_DDL,
   SETTINGS_DDL,
+  THEME_CENTROIDS_DDL,
   THEME_MOMENTS_DDL,
   THEME_MOMENTS_MOMENT_INDEX_DDL
 } from './schema'
@@ -87,8 +94,46 @@ export const migrations: Migration[] = [
       db.exec('DROP INDEX IF EXISTS idx_moments_day')
       db.exec('DROP TABLE IF EXISTS moments')
     }
+  },
+  {
+    /**
+     * v4：主题合并审计 + 事件向量 + 主题质心（docs/m2-graph-redesign.md §5.1）。
+     * - `nodes.merged_into` 用 ALTER 加列（带存在性检查，保证 up 可重复执行）；
+     * - down 时 DROP COLUMN（SQLite ≥3.35，本项目 3.53）；down→up 后 DDL 文本与首次一致（已实测）。
+     */
+    version: 4,
+    up(db) {
+      db.exec(NODE_MERGES_DDL)
+      db.exec(NODE_MERGES_GROUP_INDEX_DDL)
+      db.exec(NODE_MERGES_FROM_INDEX_DDL)
+      db.exec(NODE_MERGES_INTO_INDEX_DDL)
+      db.exec(EVENT_EMBEDDINGS_DDL)
+      db.exec(THEME_CENTROIDS_DDL)
+      if (!hasColumn(db, 'nodes', 'merged_into')) {
+        db.exec('ALTER TABLE nodes ADD COLUMN merged_into INTEGER')
+      }
+      db.exec(NODES_MERGED_INTO_INDEX_DDL)
+    },
+    down(db) {
+      db.exec('DROP INDEX IF EXISTS idx_nodes_merged_into')
+      if (hasColumn(db, 'nodes', 'merged_into')) {
+        db.exec('ALTER TABLE nodes DROP COLUMN merged_into')
+      }
+      db.exec('DROP TABLE IF EXISTS theme_centroids')
+      db.exec('DROP TABLE IF EXISTS event_embeddings')
+      db.exec('DROP INDEX IF EXISTS idx_node_merges_into')
+      db.exec('DROP INDEX IF EXISTS idx_node_merges_from')
+      db.exec('DROP INDEX IF EXISTS idx_node_merges_group')
+      db.exec('DROP TABLE IF EXISTS node_merges')
+    }
   }
 ]
+
+/** 列是否存在（ALTER 加列 / 删列前检查，保证迁移 up/down 可重复执行） */
+function hasColumn(db: Database.Database, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info('${table}')`).all() as Array<{ name: string }>
+  return rows.some((row) => row.name === column)
+}
 
 const SCHEMA_VERSION_DDL = `
 CREATE TABLE IF NOT EXISTS schema_version (

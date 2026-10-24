@@ -64,7 +64,7 @@ Foam <foam-graph>：活布局、时间 dimmed、主题/时刻两层
 - 主进程只多一个**本地** embedding 服务；LLM 只做语义命名/确认，出网仍走唯一出口（`redact.ts`）与 D24 确认门。
 - SQLite 仍是唯一事实源；模型文件不进库、不进 git。
 
-## 4. 数据模型（schema v3）
+## 4. 数据模型（schema v4）
 
 ### 4.1 时刻
 
@@ -127,6 +127,23 @@ CREATE TABLE IF NOT EXISTS node_positions (
 
 **实施（2026-10-24，PR #38）**：主题向量 = `title + "。" + summary`，写 `node_embeddings`（model=`bge-small-zh-v1.5`、dim=512、已 L2 归一化）；`embedThemeVectors` 只补缺失、失败返回错误码不抛；真实库 229 个主题 3.6 s 跑完，重跑 0 次推理。
 
+**v4 追加（P0.5 / §5.1）**：
+
+```sql
+CREATE TABLE IF NOT EXISTS event_embeddings (   -- 成员事件向量缓存（合并/次归属用）
+  event_id INTEGER PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL,
+  vec BLOB NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
+  node_id INTEGER PRIMARY KEY, model TEXT NOT NULL, dim INTEGER NOT NULL,
+  vec BLOB NOT NULL, member_events INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+```
+
+- 事件向量逐条缓存、只补缺失（中断可续）；质心每次回填按 owner 归属重算（229 主题 × ~14 事件，毫秒级）。
+- `node_embeddings` 只放 `title+summary`（连线），`theme_centroids` 只放成员事件均值（合并判定），口径不同不混存。
+
+
 
 ### 4.4 边
 
@@ -134,9 +151,10 @@ CREATE TABLE IF NOT EXISTS node_positions (
 - 主题↔时刻的成员边**不进 edges 表**，由 `theme_moments` 现算；只在力布局/高亮时用，默认画得很淡或不可见。
 - 旧 `kind='ai'` 边保留不删，查询默认 `kind='embedding'`；显式清理另开操作。
 
-### 4.5 迁移 v3
+### 4.5 迁移 v3 / v4
 
-- 建表 + 索引；up/down/幂等；文件库迁移前自动备份（沿用 Phase 0 流程）。
+- v3：时刻层 / 多归属 / 主题向量与位置；建表 + 索引；up/down/幂等；文件库迁移前自动备份（沿用 Phase 0 流程）。
+- v4：`node_merges`（合并审计，每源节点一行、共享 `group_id`）+ `nodes.merged_into` + `event_embeddings` + `theme_centroids`；`ALTER TABLE` 前后做列存在性检查，down 用 `DROP COLUMN`（SQLite ≥3.35，本项目 3.53）；down→up 后结构快照与首次一致（已测）。
 - 回填（一次性/可重入）：
   1. 从 events 生成 moments（按本地日 + 合并口径）；
   2. 由 `nodes.source_events` 生成 `theme_moments`（source='owner'）；
@@ -183,6 +201,18 @@ CREATE TABLE IF NOT EXISTS node_positions (
 - 质心口径下 ≥0.95 的分量有大有小（最大 12），合并要按分量处理、能撤销；0.90–0.95 只提示。
 - 代价：质心要把成员事件都过一遍模型（3,141 条 / 单线程 192 s）；P0.5 应截断到 256 token + 多线程 + 后台跑，并考虑把质心另存（`node_embeddings` 只放 title+summary 向量，二者用途不同：连线 vs 合并判定）。
 
+**P0.5 实施与复测（2026-10-24，schema v4）**
+
+- 表：`event_embeddings`（事件向量缓存，只算 owner/manual 时刻引用且有文本的事件；本库 3,137 条，另有 4 条空文本永远不算、不计入缺失）+ `theme_centroids`（主题质心 + 参与均值的事件数）。标题向量与事件/质心向量分表存，用途不混。
+- 合并固定点：合并会改变存活主题质心（成员并集），可能贴近新的主题，所以一轮回填内循环到收敛（上限 8 轮；实测 2 轮）。实测第 1 轮 34 组 / 65 个源节点，第 2 轮 3 组 / 6 个，**229 → 158 个主题**；成员事件并集不变（3,141），5 个时刻与目标已有归属冲突（保留目标那条，不重复写）。
+- 摘要先按「取更长」确定性合并（标题保留存活节点）；LLM 合并摘要留到 P2（要过 D24 确认门），不在后台自动调。
+- 撤销：`node_merges` 每个源节点一行、同一次计划共享 `group_id`；`revertThemeMerge` 按组恢复字段与归属。副本上把 37 组全部回滚后回到 229 个主题、owner 828 条、成员事件 3,141 条。
+- 复测相似度（256 token 事件向量）：质心 @0.90/0.95/0.99 = **378/100/21 对**；`title+summary` = **40/13/1 对**。结论不变：合并用质心。
+- 事件向量耗时：256 token / 4 线程 / batch 32 ≈ **42–45 ms/条**；本库一次约 **2 分 10 秒**（后台、一次性）。8 线程 65.7 ms/条反而更慢；128 token 20.4 ms/条但会丢正文信息，未采用。
+- 次归属标定：质心口径 0.80 时 **787/822** 个时刻都有非主归属候选（95%+ 命中，与 v0.2「均值抹平」同病）；0.92 且近重复 ≥0.92 排除后 **78/823 个时刻、103 行**；0.93 为 45/57。默认取 0.92 / 0.92，上限 2。
+- 合并后 embedding 边（158 主题，0.64/k4/互选）**171 条**。第二次运行：0 合并、0 新向量、次归属 0 增 0 删、边 171→171（幂等）。
+- 只在质心完整（所有有文本的 owner 事件都有向量）时进入合并；事件向量没算完（模型缺失/中断/首次后台未跑完）时只重建边并标 `deferred`，下次打开继续。
+
 
 ### 5.2 主归属 + 次归属
 
@@ -196,20 +226,20 @@ CREATE TABLE IF NOT EXISTS node_positions (
 
 > 存量时刻（已有 `source_events` 归属）以现有 owner 为主归属，不重跑向量；新时刻才用向量 argmax。实测事件文本的 top1 与既有 owner 只有 20.6% 一致，**不能盲信 argmax**；top1/top2 差距小或跨类型时交给 LLM。
 
-阈值全部进 settings，初始值：
+阈值全部进 settings（默认值已在 2026-10-24 合并后的真实主题集上重新标定）：
 
 | 键 | 默认 | 说明 |
 | - | - | - |
-| `graph.theme_new_min_sim` | `0.78` | 低于它新建主题 |
-| `graph.theme_member_min_sim` | `0.80` | 次归属最低相似度 |
+| `graph.theme_new_min_sim` | `0.78` | 低于它新建主题（P2 在线 assigner 用，待重标） |
+| `graph.theme_member_min_sim` | `0.92` | 次归属最低相似度（质心口径；0.80 会 95% 命中） |
 | `graph.theme_duplicate_sim` | `0.92` | 与主主题达到它视为近重复，不做次归属 |
-| `graph.theme_merge_sim` | `0.95` | 自动合并阈值 |
+| `graph.theme_merge_sim` | `0.95` | 自动合并阈值（质心、同 type） |
 | `graph.theme_secondary_max` | `2` | 次归属上限 |
 | `graph.edge_min_sim` | `0.64` | 主题间连线阈值 |
 | `graph.edge_top_k` | `4` | 每主题最多邻居数 |
 | `graph.edge_mutual` | `1` | 互选 |
 
-> 这些是初值，必须在合并后的真实主题集上重新标定；不要直接套 v0.2 的 node→node 数字。
+> 已按 §5.1 的标定更新 `theme_member_min_sim`（0.80→0.92）；其余沿用，但换模型/大规模增量后要重新标定，不要直接套 v0.2 的 node→node 数字。
 
 ### 5.3 存量数据
 
@@ -422,8 +452,8 @@ CREATE TABLE IF NOT EXISTS node_positions (
 | P3 | 主题/时刻 UI、日历、设置、E2E、验收、文档 | 3–4 天 |
 
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
-- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 可开工（合并判定用成员事件质心，见 §5.1）。
-- 仍需补：新主题的增量向量（随 P2 在线 assigner）、打包 `asarUnpack` 与第三方声明、打开图谱后自动刷新画布（P3 切全局图时一起做）。
+- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）。
+- 仍需补：新主题的增量向量（随 P2 在线 assigner）、打包 `asarUnpack` 与第三方声明、打开图谱后自动刷新画布（P3 切全局图时一起做）、撤销合并的 UI 入口（`revertThemeMerge` 已有接口）、次归属「也属于」侧栏（P3）。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 
 ## 15. 风险与回退
@@ -512,6 +542,16 @@ k3/k4/k8：178 / 247 / 500；阈值 0.60/0.62/0.66/0.68/0.70（k4）：248/247/2
 近重复（≥0.95）：title+summary 13 对 / 16 主题；成员事件质心 174 对 / 22 个分量 / 108 主题（合并用质心，见 §5.1）
 事件级 embedding：3,141 条 192 s（约 61 ms/条，OCR 文本长，单线程）
 
+# P0.5 合并/次归属（2026-10-24，真实库副本 `.tmp/realdb-merge`，schema v4）
+副本：229 主题 / 3,141 成员事件 / 823 个有归属时刻；事件向量 3,137 条（4 条空文本不算）
+事件向量：256 token / 4 线程 / batch 32 ≈ 42–45 ms/条，约 2 分 10 秒一次性后台（8 线程更慢 65.7 ms）
+合并相似度（256 token 质心）：@0.90 378 对 / @0.95 100 对 / @0.99 21 对；title+summary 为 40 / 13 / 1
+合并固定点：2 轮，37 组 / 71 个源节点，229 → 158 主题；成员事件并集仍 3,141；owner 828 → 823（5 个冲突时刻保留目标那条）
+撤销：37 组全部回滚后回到 229 主题 / owner 828 / 成员事件 3,141
+次归属：0.80 时 787/822 个时刻有非主归属候选；0.92+0.92 排除后 78/823 个时刻、103 行（0.93 为 45/57）
+合并后 embedding 边（158 主题，0.64/k4/互选）171 条；第二次运行 0 合并、0 新向量、次归属 0 增 0 删、边 171→171
+全流程（不含首次事件向量）约 3.8 s；第二次约 5.4 s（含边全量替换）
+
 # 采集层（另立方案，仅记录）
 UIA 本机探针：焦点 Document，TextPattern=True；全文 37,349 字符 vs 可见 4,401 字符（83 段）
 ```
@@ -523,3 +563,4 @@ UIA 本机探针：焦点 Document，TextPattern=True；全文 37,349 字符 vs 
 | 1 | 2026-10-23 | v0.1：Foam 兼容 Sigma 草案 | 拍板人 |
 | 2 | 2026-10-23 | v0.2：Foam 内核 + 本地向量连线 + 距离编码 + 事件默认不上画布 | 对话 / D27 |
 | 3 | 2026-10-24 | v0.3：全局图 + 主题节点/时刻点 + 多归属 + 时间 popover；撤销 3D/主题圈/批量 LLM 边；保留 Foam 活布局；新增 D29 | 2026-10-24 对话 |
+| 4 | 2026-10-24 | v0.4：P0.5 主题合并固定点 + 次归属回填 + schema v4（事件向量/质心/合并审计）；阈值重标定 | §5.1 标定 / 真实库副本 |

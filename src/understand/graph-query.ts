@@ -117,7 +117,8 @@ export function queryGraphDay(
     .prepare(
       `SELECT id, type, title, summary, ts_start, ts_end, source_events
        FROM nodes
-       WHERE level = ? AND ts_start IS NOT NULL AND ts_start <= ? AND COALESCE(ts_end, ts_start) >= ?
+       WHERE level = ? AND merged_into IS NULL
+         AND ts_start IS NOT NULL AND ts_start <= ? AND COALESCE(ts_end, ts_start) >= ?
        ORDER BY ts_start ASC, id ASC`
     )
     .all(level, to, from) as NodeRow[]
@@ -235,9 +236,14 @@ export function queryNodeEvents(db: Db, nodeId: number): NodeEventsResult {
     return { found: false, events: [], missingIds: [], malformed: false }
   }
   const node = db
-    .prepare('SELECT source_events FROM nodes WHERE id = ?')
-    .get(nodeId) as { source_events: string | null } | undefined
+    .prepare('SELECT source_events, merged_into FROM nodes WHERE id = ?')
+    .get(nodeId) as { source_events: string | null; merged_into: number | null } | undefined
   if (!node) return { found: false, events: [], missingIds: [], malformed: false }
+
+  // 已合并节点：跟随到存活节点（旧缓存里可能还拿着被合并的 id）
+  if (node.merged_into !== null) {
+    return queryNodeEvents(db, node.merged_into)
+  }
 
   const parsed = parseEventIds(node.source_events)
   if (parsed.ids.length === 0) {
@@ -384,7 +390,7 @@ export function queryGlobalGraph(db: Db, options: GlobalQueryOptions = {}): Grap
   const themeRows = db
     .prepare(
       `SELECT id, type, title, summary, ts_start, ts_end, source_events
-       FROM nodes WHERE level = 1 ORDER BY id ASC`
+       FROM nodes WHERE level = 1 AND merged_into IS NULL ORDER BY id ASC`
     )
     .all() as GlobalThemeRow[]
 

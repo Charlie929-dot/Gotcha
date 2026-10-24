@@ -10,6 +10,7 @@
 
 import type { Db } from '../db'
 import { nextLocalDayStart, startOfLocalDay } from './cloud/batch'
+import { parseSourceEventIds } from './source-events'
 
 /** 同一时刻允许的事件间隔（与 batch.ts 的 mergeGapMs 对齐） */
 export const MOMENT_MERGE_GAP_MS = 90_000
@@ -234,9 +235,19 @@ export function backfillMomentsForDay(
   return { dayKey, events: events.length, created, existing }
 }
 
+/** 时刻 → 成员事件 id（坏 JSON 视为空数组；供质心/次归属计算用） */
+export function readMomentEventIds(db: Db): Map<number, number[]> {
+  const rows = db.prepare('SELECT id, event_ids FROM moments ORDER BY id ASC').all() as Array<{
+    id: number
+    event_ids: string | null
+  }>
+  const map = new Map<number, number[]>()
+  for (const row of rows) map.set(row.id, parseSourceEventIds(row.event_ids))
+  return map
+}
+
 /** 取事件时间范围（没有事件返回 null） */
-export function eventTimeRange(db: Db): { min: number; max: number } | null {
-  const row = db
+export function eventTimeRange(db: Db): { min: number; max: number } | null {  const row = db
     .prepare('SELECT MIN(ts) AS minTs, MAX(ts) AS maxTs FROM events')
     .get() as { minTs: number | null; maxTs: number | null }
   if (typeof row.minTs !== 'number' || typeof row.maxTs !== 'number') return null

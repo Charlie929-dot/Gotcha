@@ -72,6 +72,9 @@
 | 模型目录布局不是 `onnx/model.onnx` | 从 HF 下 fp32 模型常在 `onnx/model.onnx`；代码约定是 `<modelDir>/model.onnx` + `vocab.txt` + `config.json`，放错目录会一直 `model-missing`（2026-10-24 踩过） | 下载后把 `model.onnx` 移到模型目录根；`isModelReady()` 只认根目录；HF 源 `Xenova/bge-small-zh-v1.5` 才有 ONNX 导出 |
 | 事件级 embedding 比主题慢一个量级 | 主题 title+summary 约 16 ms/条；成员事件带 OCR 文本约 61 ms/条（3,141 条约 192 s，单线程）。按「主题数 × 20ms」估时间会差 4 倍（2026-10-24 实测） | 事件级（P0.5 质心）要截断 256 token、加大 `intraOpNumThreads`、后台跑；主题向量回填用 `onlyMissing`，重跑几乎零成本 |
 | 后台回填别直接 `ensureWritable()` | 打开图谱时顺手回填 v3 数据，第一版直接 `connections.ensureWritable()`；「默认暂停」E2E 立刻红：点球开图谱凭空建出 `memory.db`，踩 A3「无显式交互零磁盘写入」（2026-10-24 实测） | 后台任务先 `existsSync(dbPath)`，没有库就直接跳过；要读设置也用只读连接，别为了读一个 key 触发建库 |
+| onnxruntime 线程数不是越多越快 | 事件向量（256 token）本机 8 逻辑核：1 线程 93.4 ms/条、4 线程 44.5 ms/条、**8 线程 65.7 ms/条**（线程争用更慢）；batch 32 略优于 16（42.3 ms）（2026-10-24 实测） | 主进程后台推理用 `intraOpNumThreads: 4` + `batchSize: 32`；128 token 虽然快一倍（20.4 ms/条），但 OCR 正文被截太多，P0.5 质心不用 |
+| 主题合并一轮不收敛 | 合并把成员并集写进存活主题，质心会变，可能又贴近别的主题；只跑一轮会留下「下次打开又合并」的漂移（2026-10-24 真实库副本：第 1 轮 34 组 / 65 节点，第 2 轮又 3 组 / 6 节点） | 回填内循环到固定点（`MAX_MERGE_ROUNDS=8`，实测 2 轮），每轮重算质心再判定；第二次运行应 0 合并 |
+| 「缺失事件向量」不能把空文本算进去 | 4 条成员事件 title/OCR 都为空，永远算不出向量；若缺失统计把它们算进去，质心会被永久判为「不完整」，合并永远不跑（2026-10-24 真实库副本踩到） | 缺失统计与 `listEventTexts` 用同一口径：`TRIM(title || ocr) != ''` 才计入；空文本事件跳过、不算缺失 |
 
 ## 规则
 

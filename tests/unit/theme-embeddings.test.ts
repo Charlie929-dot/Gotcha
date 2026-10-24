@@ -67,6 +67,11 @@ describe('listThemeTexts', () => {
         { id: 2, text: '主题二' }
       ])
 
+      // 已合并节点不再算标题向量
+      db.prepare('UPDATE nodes SET merged_into = 1 WHERE id = 2').run()
+      expect(listThemeTexts(db).map((item) => item.id)).toEqual([1])
+      db.prepare('UPDATE nodes SET merged_into = NULL WHERE id = 2').run()
+
       await embedThemeVectors(db, fakeEmbedder({ dim: 3 }), { now: 1 })
       expect(listThemeTexts(db, { onlyMissing: true })).toEqual([])
       expect(listThemeTexts(db).map((item) => item.id)).toEqual([1, 2])

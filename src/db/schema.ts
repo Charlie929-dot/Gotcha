@@ -138,6 +138,76 @@ CREATE TABLE IF NOT EXISTS node_positions (
 );
 `
 
+/* ------------------------------------------------------------------ *
+ * v4：主题合并审计 + 事件向量 + 主题质心（docs/m2-graph-redesign.md §5.1）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 合并审计与回滚：源节点并入目标节点。
+ * - 不物理删除源节点，`nodes.merged_into` 指向目标（旧引用不断链）；
+ * - `before_json` 存合并前两个节点的字段与归属快照，供 `revertThemeMerge` 精确回滚；
+ * - `reverted_at` 非空 = 已撤销，重复撤销直接跳过。
+ */
+export const NODE_MERGES_DDL = `
+CREATE TABLE IF NOT EXISTS node_merges (
+  id          INTEGER PRIMARY KEY,
+  group_id    INTEGER NOT NULL,
+  from_node   INTEGER NOT NULL,
+  into_node   INTEGER NOT NULL,
+  merged_at   INTEGER NOT NULL,
+  reason      TEXT,
+  before_json TEXT,
+  reverted_at INTEGER
+);
+`
+
+export const NODE_MERGES_GROUP_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_node_merges_group ON node_merges(group_id);
+`
+
+export const NODE_MERGES_FROM_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_node_merges_from ON node_merges(from_node);
+`
+
+export const NODE_MERGES_INTO_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_node_merges_into ON node_merges(into_node);
+`
+
+/** 查询层过滤已合并节点（`merged_into IS NULL`） */
+export const NODES_MERGED_INTO_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_nodes_merged_into ON nodes(merged_into);
+`
+
+/**
+ * 事件向量缓存（合并质心 / 次归属用）。
+ * 与 `node_embeddings` 分开：那边只放主题 `title+summary` 向量（用途是连线），
+ * 这边放成员事件向量（用途是合并判定与时刻向量），口径不同不能混存。
+ */
+export const EVENT_EMBEDDINGS_DDL = `
+CREATE TABLE IF NOT EXISTS event_embeddings (
+  event_id   INTEGER PRIMARY KEY,
+  model      TEXT NOT NULL,
+  dim        INTEGER NOT NULL,
+  vec        BLOB NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`
+
+/**
+ * 主题成员事件质心（成员事件向量均值再 L2 归一化）。
+ * `member_events` 是参与求均值的去重事件数；合并/次归属都读它，不读 title+summary 向量。
+ */
+export const THEME_CENTROIDS_DDL = `
+CREATE TABLE IF NOT EXISTS theme_centroids (
+  node_id       INTEGER PRIMARY KEY,
+  model         TEXT NOT NULL,
+  dim           INTEGER NOT NULL,
+  vec           BLOB NOT NULL,
+  member_events INTEGER NOT NULL,
+  updated_at    INTEGER NOT NULL
+);
+`
+
 /** 邻域查询 / 边去重按端点查 */
 export const EDGES_SRC_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);

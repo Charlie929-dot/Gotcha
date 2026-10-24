@@ -31,9 +31,17 @@ export const LLM_DEFAULTS = {
   batchMaxEventIds: 400,
   /** 单次查询事件上限（防止长期停机后一次拉爆内存；游标仍逐批推进） */
   batchEventLimit: 5_000,
-  /** 归纳节点标题 / 摘要上限（prompt 与校验器共用） */
+  /** 归纳节点标题 / 摘要上限（prompt 里的建议值） */
   nodeTitleMaxChars: 24,
   nodeSummaryMaxChars: 80,
   /** 边 evidence 上限 */
-  edgeEvidenceMaxChars: 120
+  edgeEvidenceMaxChars: 120,
+  /**
+   * 存库硬上限：超过才确定性截断（长度是展示约束，不该让整批归纳失败）。
+   * 标题硬上限比 prompt 建议宽——模型偶尔写 26–30 字是可用的语义标题，
+   * 悬停与侧栏显示完整，画布只显示前 18 字（`nodeLabel`）。
+   */
+  nodeTitleHardMaxChars: 40,
+  nodeSummaryHardMaxChars: 80,
+  edgeEvidenceHardMaxChars: 120
 } as const

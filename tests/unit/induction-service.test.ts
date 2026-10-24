@@ -1,4 +1,4 @@
-﻿import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { openDatabase, insertEvent } from '../../src/db'
 import { setSetting } from '../../src/db/settings'
 import { readCursor, startOfLocalDay } from '../../src/understand/cloud/batch'
@@ -440,6 +440,31 @@ describe('induction service · 失败分类与停自动（可观测性）', () =
       expect(service.getState().lastFailure).toBeUndefined()
       expect((await pending).status).toBe('ok')
       expect(service.getState().lastSuccessAt).toBe(NOW)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('超长标题截断后照常落库（不再整批失败）', async () => {
+    const db = makeDb()
+    try {
+      const longTitle = {
+        nodes: [
+          { title: '标'.repeat(50), summary: '摘要', type: 'knowledge', event_ids: [1, 2] }
+        ],
+        edges: []
+      }
+      const client = new FakeLlmClient([{ json: longTitle }])
+      const outcome = await makeService(db, client).runOnce()
+
+      expect(outcome).toMatchObject({ status: 'ok', nodes: 1 })
+      if (outcome.status === 'ok') {
+        expect(outcome.truncated).toEqual({ titles: 1, summaries: 0, evidence: 0 })
+      }
+      const row = db.prepare('SELECT title FROM nodes').get() as { title: string }
+      expect(row.title).toHaveLength(40)
+      // 一次调用就够：长度不再是校验错误，不需要修复重试
+      expect(client.requests).toHaveLength(1)
     } finally {
       db.close()
     }

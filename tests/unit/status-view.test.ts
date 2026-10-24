@@ -32,6 +32,13 @@ describe('status-view · 模型缺失黄条', () => {
     expect(modelWarningText(snapshot({ embeddingsReady: true }))).toBeNull()
   })
 
+  it('字段缺省（旧版主进程 / 渲染层先更新）不能当成「没有模型」', () => {
+    // 真机踩过：模型装好、日志 embeddingsOk:true，但主进程还是旧版没这个字段 → 误报黄条
+    const legacy = snapshot()
+    delete (legacy as { embeddingsReady?: boolean }).embeddingsReady
+    expect(modelWarningText(legacy)).toBeNull()
+  })
+
   it('模型缺失时给一句可执行的话：只说新主题算不出来 + 放哪', () => {
     const text = modelWarningText(snapshot({ embeddingsReady: false }))
     expect(text).not.toBeNull()

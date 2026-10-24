@@ -21,6 +21,24 @@ import type { ThemeEmbeddingResult } from '../understand/theme-embeddings'
 
 export type BackfillLogLevel = 'info' | 'warn' | 'error'
 
+/**
+ * 本地向量模型的推理参数。
+ *
+ * **`batchSize` 必须保持 1**（2026-10-25 实测，本机 4 线程 / 256 token）：
+ * `onnxruntime-node` 的 `session.run()` 在推理期间**独占主进程 JS 线程**（50ms 心跳在 1.2s 推理里
+ * 0 次触发）。批 32 时单次调用卡 1.2–2.5s，1126 条待算事件 = 连续几十秒「打开图谱就卡死」；
+ * 批 1 单次只卡 ~60ms，而吞吐不变（批 1 = 38.8ms/条，批 8 = 41.1ms/条，批 32 = 37ms/条——
+ * 批内长度不同要补齐到最长，批大反而做了无用计算）。
+ * 线程数保持 4：1 线程实测 80–125ms/条，明显更慢。
+ */
+export const BACKFILL_EMBEDDER_OPTIONS = {
+  /** 事件文本长（OCR）：截 256 token */
+  maxLength: 256,
+  /** 一次推理几条：见上，1 = 最不卡 */
+  batchSize: 1,
+  intraOpNumThreads: 4
+} as const
+
 export interface GraphBackfillRuntimeDeps {
   db: Db
   /** 模型目录（已按设置解析过） */
@@ -98,11 +116,7 @@ export async function runGraphBackfill(deps: GraphBackfillRuntimeDeps): Promise<
         ((dir: string) =>
           createLocalEmbedder({
             modelDir: dir,
-            // 事件文本长（OCR）：截 256 token + 4 线程 + batch 32；实测约 42 ms/条
-            // （3.1k 条 ≈ 2 分钟一次性后台跑；8 线程反而更慢，见 §5.1 实测）
-            maxLength: 256,
-            batchSize: 32,
-            intraOpNumThreads: 4
+            ...BACKFILL_EMBEDDER_OPTIONS
           }))
       embedder = await getEmbedder(deps.modelDir, factory)
     } catch (error) {

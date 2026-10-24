@@ -19,7 +19,7 @@
           <label class="chip" title="隐藏时刻点，只看主题">
             <input id="only-themes" type="checkbox" /> 只看主题
           </label>
-          <button id="calendar-btn" type="button" title="按时间筛选（只调暗，不删数据）">
+          <button id="calendar-btn" type="button" title="按时间筛选（日期 + 时段；只调暗，不删数据）">
             日期：<span id="day-label">全部</span>
           </button>
           <button id="fit" type="button">适配视野</button>
@@ -33,27 +33,21 @@
         </div>
       </div>
 
-      <!-- 门一「问」：L0 全文检索（Ctrl+F 聚焦；结果按时刻成卡片，点开回到那一刻） -->
+      <!-- 门一「问」：L0 全文检索（Ctrl+F 聚焦）；输入只筛图谱，点「检索」/回车才出文字卡片 -->
       <form id="search-form" class="searchbar" role="search" autocomplete="off">
         <input
           id="search-input"
           type="search"
-          placeholder="搜一句你记得的话（OCR 全文，≥2 字）"
+          placeholder="输入文字筛选图谱（OCR 全文，≥2 字）"
           aria-label="检索 OCR 全文"
           spellcheck="false"
         />
-        <select id="search-range" title="时间窗">
-          <option value="all">全部时间</option>
-          <option value="today">今天</option>
-          <option value="3d">前 3 天</option>
-          <option value="7d">前 7 天</option>
-          <option value="30d">前 1 月</option>
-        </select>
         <select id="search-app" title="只看某个应用">
           <option value="">全部应用</option>
         </select>
         <input id="search-title" type="search" placeholder="窗口标题包含…" aria-label="窗口标题包含" />
         <button id="search-submit" type="submit">检索</button>
+        <span id="search-status" class="search-status" aria-live="polite"></span>
       </form>
 
       <div id="search-results" class="search-results" hidden>
@@ -88,10 +82,49 @@
             <button id="cal-next" type="button" aria-label="下个月">›</button>
             <button id="cal-close" class="cal-close" type="button" aria-label="关闭日历" title="关闭日历">×</button>
           </header>
-          <div class="cal-weekdays">
-            <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+
+          <div class="cal-body">
+            <div class="cal-days">
+              <div class="cal-weekdays">
+                <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span>
+              </div>
+              <div id="cal-grid" class="cal-grid"></div>
+            </div>
+
+            <!-- 时段：所选日期内每天的时间窗（起时:分 → 止时:分）；滚轮或点击选择 -->
+            <section class="cal-time">
+              <header class="cal-time-head">
+                <span>时段</span>
+                <span id="clock-label" class="cal-time-value">全天</span>
+                <button id="clock-all" type="button" title="恢复全天（00:00–23:59）">全天</button>
+              </header>
+              <div class="time-ends">
+                <div class="time-end">
+                  <header>
+                    <span class="time-end-name">起</span>
+                    <span id="clock-from" class="time-end-value">00:00</span>
+                  </header>
+                  <div class="time-cols">
+                    <div id="from-hour" class="time-col" data-kind="hour"></div>
+                    <span class="time-colon">:</span>
+                    <div id="from-minute" class="time-col" data-kind="minute"></div>
+                  </div>
+                </div>
+                <div class="time-end">
+                  <header>
+                    <span class="time-end-name">止</span>
+                    <span id="clock-to" class="time-end-value">23:59</span>
+                  </header>
+                  <div class="time-cols">
+                    <div id="to-hour" class="time-col" data-kind="hour"></div>
+                    <span class="time-colon">:</span>
+                    <div id="to-minute" class="time-col" data-kind="minute"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
-          <div id="cal-grid" class="cal-grid"></div>
+
           <div class="cal-presets">
             <button type="button" data-preset="today">今天</button>
             <button type="button" data-preset="3d">前 3 天</button>
@@ -99,7 +132,7 @@
             <button type="button" data-preset="30d">前 1 月</button>
             <button type="button" data-preset="all">全部</button>
           </div>
-          <p class="cal-hint">点=单日 · 拖=涂抹范围 · Ctrl+点=加减 · Shift+点=从上次扩到这天</p>
+          <p class="cal-hint">点=单日 · 拖=涂抹范围 · Ctrl+点=加减 · Shift+点=从上次扩到这天 · 未选日期时滚时段=今天</p>
         </div>
 
         <div id="focus-bar" class="focus-bar" hidden>

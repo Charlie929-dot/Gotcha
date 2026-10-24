@@ -42,6 +42,9 @@ interface GlobalDebug {
   dimmedCount(): number
   focusDays(): string[] | null
   setDays(list: string[] | null): void
+  clock(): { fromMinute: number; toMinute: number }
+  setClock(fromMinute: number, toMinute: number): void
+  searchHits(): number[] | null
   onlyThemes(): boolean
   setOnlyThemes(value: boolean): void
   nodeIds(): string[]
@@ -78,6 +81,18 @@ function dimmedCount(): Promise<number> {
 function focusDays(): Promise<string[] | null> {
   return graph.evaluate(() =>
     (window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.focusDays()
+  )
+}
+
+function searchHits(): Promise<number[] | null> {
+  return graph.evaluate(() =>
+    (window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.searchHits()
+  )
+}
+
+function clock(): Promise<{ fromMinute: number; toMinute: number }> {
+  return graph.evaluate(() =>
+    (window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.clock()
   )
 }
 
@@ -244,7 +259,7 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     expect(await nodeIds()).toEqual(before)
     expect(await visibleCounts()).toEqual({ nodes: 4, edges: 4, themes: 2, moments: 2 })
     await expect(graph.locator('#empty')).toBeVisible()
-    await expect(graph.locator('#empty')).toContainText('所选日期没有主题或时刻')
+    await expect(graph.locator('#empty')).toContainText('所选时间范围没有主题或时刻')
 
     await graph.evaluate(() => {
       ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays(null)
@@ -322,6 +337,45 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
   })
 
+  test('日历时段滚轮：选起时立即调暗，全天一键复位', async () => {
+    await graph.evaluate((day) => {
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays([day])
+    }, todayKey)
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
+
+    await graph.locator('#calendar-btn').click()
+    await expect(graph.locator('#calendar')).toBeVisible()
+    await expect(graph.locator('#clock-label')).toHaveText('全天')
+
+    // 点「10」时：起 10:00 → 09:00 的时刻与主题调暗（种子：09:00 Code / 10:00 Chrome）
+    await graph.locator('#from-hour .time-item[data-value="10"]').click()
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(2)
+    await expect(graph.locator('#clock-label')).toHaveText('10:00–23:59')
+    await expect(graph.locator('#day-label')).toHaveText(`${todayKey} · 10:00–23:59`)
+    expect(await clock()).toEqual({ fromMinute: 600, toMinute: 1439 })
+
+    // 滚回 00 时 → 恢复全天（不用点按钮）
+    await graph.locator('#from-hour .time-item[data-value="00"]').click()
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
+    await expect(graph.locator('#clock-label')).toHaveText('全天')
+
+    // 09:00–18:00（E2E 钩子设置）→ 一键全天
+    await graph.evaluate(() => {
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setClock(540, 1080)
+    })
+    await expect(graph.locator('#clock-label')).toHaveText('09:00–18:00')
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
+    await graph.locator('#clock-all').click()
+    await expect(graph.locator('#clock-label')).toHaveText('全天')
+    expect(await clock()).toEqual({ fromMinute: 0, toMinute: 1439 })
+
+    await graph.locator('#cal-close').click()
+    await graph.evaluate(() => {
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays(null)
+    })
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
+  })
+
   test('「只看主题」：隐藏时刻层，连线只留主题相似边', async () => {
     await graph.locator('#only-themes').check()
     await expect.poll(async () => (await visibleCounts()).nodes).toBe(2)
@@ -373,13 +427,20 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     }
   })
 
-  test('门一检索：OCR 逐字空格也能搜到，卡片点开回到那一刻', async () => {
+  test('门一检索：输入只筛图谱，点「检索」/回车才出文字卡片', async () => {
     // app 过滤器候选项（全部应用 + 种子的两个 app）
     await expect(graph.locator('#search-app option')).toHaveCount(3, { timeout: 15_000 })
 
-    // 连续 4 字 → trigram MATCH；种子事件原文是「改 按 钮 样 式」，只有归一化索引能命中
+    // 输入即筛（不按回车）：连续 4 字 → trigram MATCH；原文是「改 按 钮 样 式」
     await graph.locator('#search-input').fill('按钮样式')
-    await graph.locator('#search-input').press('Enter')
+    await expect.poll(searchHits, { timeout: 15_000 }).toEqual([1])
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(2)
+    await expect(graph.locator('#search-status')).toContainText('1 条命中')
+    // 没点检索：结果卡片不出现
+    await expect(graph.locator('#search-results')).toBeHidden()
+
+    // 点「检索」：同一查询列出时刻卡片
+    await graph.locator('#search-submit').click()
     await expect(graph.locator('#search-results')).toBeVisible()
     await expect(graph.locator('#search-list li')).toHaveCount(1, { timeout: 15_000 })
     const card = graph.locator('#search-list li').first()
@@ -388,39 +449,67 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     await expect(card).toContainText('按钮样式')
     await expect(card).toHaveAttribute('data-moment-id', '1')
 
-    // 两字词走 LIKE 兜底，同样命中
-    await graph.locator('#search-input').fill('按钮')
-    await graph.locator('#search-input').press('Enter')
-    await expect(graph.locator('#search-list li')).toHaveCount(1, { timeout: 15_000 })
-    await expect(graph.locator('#search-hint')).toContainText('两字词走模糊匹配')
-
-    // 点卡片 → 侧栏原始事件（走时刻成员事件，含同一时刻的 2 条事件）
-    await graph.locator('#search-list li').first().click()
+    // 卡片点开 → 侧栏原始事件（时刻 1 含同窗口 2 条事件）
+    await card.click()
     await expect(graph.locator('#panel')).toBeVisible()
     await expect(graph.locator('#panel-title')).toContainText('Code')
     await expect(graph.locator('#panel-events li')).toHaveCount(2)
     await expect(graph.locator('#panel-events li').first()).toContainText('改 按 钮 样 式')
 
-    // app / 标题过滤生效
+    // 改输入 → 旧卡片立即收起，图谱继续即时筛选（两字词走 LIKE 兜底）
+    await graph.locator('#search-input').fill('按钮')
+    await expect(graph.locator('#search-results')).toBeHidden()
+    await expect.poll(searchHits, { timeout: 15_000 }).toEqual([1])
+
+    // app 过滤：Chrome 下「用法」命中时刻 2（同时属于两个主题）→ 只调暗时刻 1
     await graph.locator('#search-input').fill('用法')
     await graph.locator('#search-app').selectOption('Chrome')
-    await expect(graph.locator('#search-list li')).toHaveCount(1, { timeout: 15_000 })
+    await expect.poll(searchHits, { timeout: 15_000 }).toEqual([2])
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(1)
+    await graph.locator('#search-submit').click()
     await expect(graph.locator('#search-list li').first()).toContainText('文档')
-    await graph.locator('#search-app').selectOption('Code')
-    await expect(graph.locator('#search-list li')).toHaveCount(1, { timeout: 15_000 })
-    await expect(graph.locator('#search-list li').first()).toHaveClass(/empty/)
-    await graph.locator('#search-title').fill('文档')
-    await graph.locator('#search-input').press('Enter')
-    await expect(graph.locator('#search-list li.empty')).toHaveCount(1)
 
-    // 没命中给明确空态；Esc 关结果、不关窗口
-    await graph.locator('#search-app').selectOption('')
-    await graph.locator('#search-title').fill('')
-    await graph.locator('#search-input').fill('完全 不存在 的 词')
-    await graph.locator('#search-input').press('Enter')
+    // app 换成 Code → 没命中：图谱全暗 + 空态；点检索给空卡片
+    await graph.locator('#search-app').selectOption('Code')
+    await expect(graph.locator('#search-results')).toBeHidden()
+    await expect.poll(searchHits, { timeout: 15_000 }).toEqual([])
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(4)
+    await expect(graph.locator('#empty')).toContainText('没有找到这段记忆')
+    await graph.locator('#search-submit').click()
     await expect(graph.locator('#search-list li.empty')).toContainText('没有找到这段记忆')
+
+    // 标题过滤 + 时间窗：检索结果同样受时间筛选约束
+    await graph.locator('#search-app').selectOption('')
+    await graph.locator('#search-title').fill('文档')
+    await expect.poll(searchHits, { timeout: 15_000 }).toEqual([2])
+    await graph.evaluate((day) => {
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays([day])
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setClock(540, 570)
+    }, todayKey)
+    // 09:00–09:30 内没有「用法」（e3 在 10:00）→ 卡片为空
+    await expect(graph.locator('#search-results')).toBeHidden()
+    await expect.poll(searchHits, { timeout: 15_000 }).toEqual([])
+    await graph.locator('#search-submit').click()
+    await expect(graph.locator('#search-list li.empty')).toBeVisible()
+
+    // 清掉时间筛选：文字筛选与卡片恢复
+    await graph.evaluate(() => {
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays(null)
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setClock(0, 1439)
+    })
+    await expect.poll(searchHits, { timeout: 15_000 }).toEqual([2])
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(1)
+    await graph.locator('#search-submit').click()
+    await expect(graph.locator('#search-list li')).toHaveCount(1)
+
+    // Esc：先关卡片（筛选保留），再按一次清筛选；都不关窗口
     await graph.locator('#search-input').press('Escape')
     await expect(graph.locator('#search-results')).toBeHidden()
+    expect(await searchHits()).toEqual([2])
+    await graph.locator('#search-input').press('Escape')
+    await expect.poll(searchHits, { timeout: 5_000 }).toBeNull()
+    await expect.poll(dimmedCount, { timeout: 5_000 }).toBe(0)
+    await expect(graph.locator('#search-status')).toHaveText('')
     await expect(graph.locator('foam-graph')).toBeVisible()
   })
 

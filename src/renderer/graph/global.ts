@@ -4,7 +4,10 @@
  * - 数据：`graph:global` 一次取全量（主题 + 时刻 + 归属 + embedding 边 + 位置），
  *   客户端只按日历调暗，不重新查库；
  * - 渲染：Foam 活布局（`foam-adapter` 映射），主题大点 + 时刻小点，成员边默认不画；
- * - 时间：日历 popover（单日 / 涂抹 / Ctrl 加减 / Shift 扩展 / 快捷范围），只调暗不删数据；
+ * - 时间：日历 popover（单日 / 涂抹 / Ctrl 加减 / Shift 扩展 / 快捷范围）选「哪天」，
+ *   内嵌时段滚轮选「每天内的哪一段」（起止时:分，默认全天）；只调暗不删数据；
+ * - 检索：输入 / app / 标题 / 时间变化只更新图谱筛选（命中时刻及其主题点亮）；
+ *   点「检索」/回车才列出文字结果卡片，并把相机适配到命中节点。
  * - 侧栏：主题 → 成员事件；时刻 → 原始事件 +「也属于」其它主题；
  * - 旧 sigma 按日页保留为 `graph.html`，工具栏「经典视图」互切；
  * - 沉降后把主题坐标回写 `node_positions`，下次打开作为 seed。
@@ -27,6 +30,8 @@ import { formatTime } from '../timeline'
 import {
   focusedIdsForDays,
   nodeIdOf,
+  searchDimmedIds,
+  searchFocusedIds,
   themeNodeId,
   timeDimmedIds,
   toFoamGraph,
@@ -46,6 +51,17 @@ import {
   shiftMonth,
   type FocusPreset
 } from './calendar'
+import {
+  ALL_DAY,
+  columnIndex,
+  columnScrollTop,
+  formatClock,
+  formatClockRange,
+  isAllDay,
+  normalizeClock,
+  windowSpan,
+  type ClockRange
+} from './time-of-day'
 import { createGlobalPanel } from './global-panel'
 import { createSettingsPanel } from './graph-settings-panel'
 import { statusView } from './status-view'
@@ -80,6 +96,10 @@ const calGridEl = byId<HTMLDivElement>('cal-grid')
 const calPrevEl = byId<HTMLButtonElement>('cal-prev')
 const calNextEl = byId<HTMLButtonElement>('cal-next')
 const calCloseEl = byId<HTMLButtonElement>('cal-close')
+const clockLabelEl = byId<HTMLElement>('clock-label')
+const clockFromLabelEl = byId<HTMLElement>('clock-from')
+const clockToLabelEl = byId<HTMLElement>('clock-to')
+const clockAllEl = byId<HTMLButtonElement>('clock-all')
 const focusBarEl = byId<HTMLDivElement>('focus-bar')
 const focusLabelEl = byId<HTMLElement>('focus-label')
 const focusExitEl = byId<HTMLButtonElement>('focus-exit')
@@ -87,9 +107,9 @@ const panelEl = byId<HTMLElement>('panel')
 const induceEl = byId<HTMLButtonElement>('induce')
 const searchForm = byId<HTMLFormElement>('search-form')
 const searchInput = byId<HTMLInputElement>('search-input')
-const searchRangeEl = byId<HTMLSelectElement>('search-range')
 const searchAppEl = byId<HTMLSelectElement>('search-app')
 const searchTitleEl = byId<HTMLInputElement>('search-title')
+const searchStatusEl = byId<HTMLElement>('search-status')
 const searchResultsEl = byId<HTMLDivElement>('search-results')
 const searchListEl = byId<HTMLUListElement>('search-list')
 const searchSummaryEl = byId<HTMLElement>('search-summary')
@@ -123,6 +143,10 @@ let input: GlobalGraphInput | null = null
 let themeById = new Map<number, GlobalThemeDto>()
 let momentById = new Map<number, GlobalMomentDto>()
 let days: Set<string> | null = null
+/** 每天内的时间窗；默认全天 */
+let clock: ClockRange = { ...ALL_DAY }
+/** 文字检索命中的时刻 id；`null`＝没按文字筛 */
+let searchHits: Set<number> | null = null
 let snapshot: InductionSnapshot | null = null
 let statusFlashTimer: ReturnType<typeof setTimeout> | null = null
 let loading = false
@@ -321,6 +345,7 @@ calendarBtn.addEventListener('click', () => {
   calMonth = m - 1
   calendarEl.hidden = false
   renderCalendar()
+  syncClockPickers()
 })
 
 calCloseEl.addEventListener('click', () => {
@@ -343,8 +368,14 @@ calNextEl.addEventListener('click', () => {
 
 for (const button of Array.from(calendarEl.querySelectorAll<HTMLButtonElement>('[data-preset]'))) {
   button.addEventListener('click', () => {
-    days = presetDays(Date.now(), button.dataset.preset as FocusPreset)
-    applyTimeFocus(true)
+    const preset = button.dataset.preset as FocusPreset
+    days = presetDays(Date.now(), preset)
+    // 「全部」＝不筛时间：把时段也复位，免得标签写着全部却还卡着 09:00–18:00
+    if (preset === 'all') {
+      clock = { ...ALL_DAY }
+      syncClockPickers()
+    }
+    onFilterChanged(true)
     renderCalendar()
   })
 }
@@ -366,13 +397,21 @@ document.addEventListener(
 document.addEventListener('mouseup', () => {
   if (!dragging) return
   dragging = null
-  applyTimeFocus(true)
+  onFilterChanged(true)
 })
 
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return
   calendarEl.hidden = true
-  closeSearch()
+  if (!searchResultsEl.hidden) {
+    // 第一下 Esc 只收卡片，保留当前筛选；拦住 type=search 的原生「清空输入」
+    event.preventDefault()
+    closeCards()
+  } else if (document.activeElement === searchInput) {
+    event.preventDefault()
+    if (searchInput.value !== '') searchInput.value = ''
+    clearSearchFilter()
+  }
   panel.hide()
   graphEl.clearSelection()
   hideFocus()
@@ -424,7 +463,7 @@ function onDayMouseDown(event: MouseEvent, key: string): void {
     dragging = { anchor: key }
     days = new Set([key])
   }
-  applyTimeFocus(false)
+  onFilterChanged(false)
   paintCalendar()
 }
 
@@ -433,7 +472,7 @@ function onDayMouseEnter(event: MouseEvent, key: string): void {
   // 在窗口外松开就收不到 mouseup：用按键状态兜底，免得「松手了还在涂」。
   if ((event.buttons & 1) === 0) {
     dragging = null
-    applyTimeFocus(true)
+    onFilterChanged(true)
     return
   }
   days = dayRange(dragging.anchor, key)
@@ -441,24 +480,192 @@ function onDayMouseEnter(event: MouseEvent, key: string): void {
   paintCalendar()
 }
 
+/* -------------------------------- 时段滚轮 -------------------------------- */
+
+/** 滚轮列每项高度（px），与 global.css 的 `--time-item-h` 必须一致 */
+const CLOCK_ITEM_H = 28
+
+interface ClockColumn {
+  kind: 'hour' | 'minute'
+  el: HTMLDivElement
+  count: number
+  /** 当前选中序号（滚轮停下后由 scrollTop 反推） */
+  index: number
+}
+
+interface ClockPicker {
+  hour: number
+  minute: number
+  columns: ClockColumn[]
+}
+
+const HOUR_VALUES = Array.from({ length: 24 }, (_, i) => String(i).padStart(2, '0'))
+const MINUTE_VALUES = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'))
+
+function buildClockPicker(end: 'from' | 'to'): ClockPicker {
+  const picker: ClockPicker = {
+    hour: end === 'from' ? 0 : 23,
+    minute: end === 'from' ? 0 : 59,
+    columns: []
+  }
+  for (const kind of ['hour', 'minute'] as const) {
+    const el = byId<HTMLDivElement>(`${end}-${kind}`)
+    const values = kind === 'hour' ? HOUR_VALUES : MINUTE_VALUES
+    const column: ClockColumn = { kind, el, count: values.length, index: 0 }
+    el.replaceChildren(
+      ...values.map((value, index) => {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'time-item'
+        button.dataset.value = value
+        button.textContent = value
+        button.addEventListener('click', () => selectClockColumn(picker, column, index))
+        return button
+      })
+    )
+    // 滚轮交给原生滚动（scroll-snap 负责吸附），选中项由滚动位置反推
+    el.addEventListener('scroll', () => onClockScroll(picker, column), { passive: true })
+    picker.columns.push(column)
+  }
+  return picker
+}
+
+const fromClockPicker = buildClockPicker('from')
+const toClockPicker = buildClockPicker('to')
+
+function paintClockColumn(column: ClockColumn): void {
+  const buttons = column.el.children
+  for (let i = 0; i < buttons.length; i += 1) buttons[i].classList.toggle('on', i === column.index)
+}
+
+/** 程序化滚动：先写 index 再改 scrollTop，随后的 scroll 事件会被当成「没变化」跳过 */
+function scrollClockColumnTo(column: ClockColumn, index: number): void {
+  const clamped = Math.min(column.count - 1, Math.max(0, index))
+  column.index = clamped
+  column.el.scrollTop = columnScrollTop(clamped, CLOCK_ITEM_H, column.count)
+  paintClockColumn(column)
+}
+
+function applyClockColumn(picker: ClockPicker, column: ClockColumn, index: number): void {
+  if (column.kind === 'hour') picker.hour = index
+  else picker.minute = index
+}
+
+function selectClockColumn(picker: ClockPicker, column: ClockColumn, index: number): void {
+  scrollClockColumnTo(column, index)
+  applyClockColumn(picker, column, index)
+  commitClock(false)
+}
+
+function onClockScroll(picker: ClockPicker, column: ClockColumn): void {
+  const index = columnIndex(column.el.scrollTop, CLOCK_ITEM_H, column.count)
+  if (index === column.index) return
+  column.index = index
+  paintClockColumn(column)
+  applyClockColumn(picker, column, index)
+  commitClock(false)
+}
+
+function paintClockUi(): void {
+  clockFromLabelEl.textContent = formatClock(clock.fromMinute)
+  clockToLabelEl.textContent = formatClock(clock.toMinute)
+  clockLabelEl.textContent = formatClockRange(clock)
+}
+
+/** 时段状态 → 列位置（打开弹层 / 点「全天」时用） */
+function syncClockPickers(): void {
+  fromClockPicker.hour = Math.floor(clock.fromMinute / 60)
+  fromClockPicker.minute = clock.fromMinute % 60
+  toClockPicker.hour = Math.floor(clock.toMinute / 60)
+  toClockPicker.minute = clock.toMinute % 60
+  for (const picker of [fromClockPicker, toClockPicker]) {
+    scrollClockColumnTo(picker.columns[0], picker.hour)
+    scrollClockColumnTo(picker.columns[1], picker.minute)
+  }
+  paintClockUi()
+}
+
+/** 选择态 → 时段（起 > 止 自动交换），并同步调暗 / 计数 / 检索 */
+function commitClock(fitCamera: boolean): void {
+  clock = normalizeClock(
+    fromClockPicker.hour * 60 + fromClockPicker.minute,
+    toClockPicker.hour * 60 + toClockPicker.minute
+  )
+  paintClockUi()
+  // 没选日期时滚时段＝从今天开始筛，避免「滚了半天图谱没反应」
+  if (days === null) {
+    days = new Set([dayKey(Date.now())])
+    renderCalendar()
+  }
+  onFilterChanged(fitCamera)
+}
+
+clockAllEl.addEventListener('click', () => {
+  clock = { ...ALL_DAY }
+  syncClockPickers()
+  onFilterChanged(false)
+})
+
 /* ------------------------------ 时间筛选应用 ------------------------------ */
+
+/** 时间筛选 / 文字筛选 / 日历交互的统一出口：先调暗，再按需刷新检索 */
+function onFilterChanged(fitCamera: boolean): void {
+  // 筛选条件变了，旧的文字卡片已过期，先收起；需要时再点「检索」重列
+  closeCards()
+  applyTimeFocus(fitCamera)
+  if (queryCharCount(searchInput.value) >= 2) scheduleSearch(0)
+}
 
 function applyTimeFocus(fitCamera: boolean): void {
   if (!input) return
-  graphEl.dimmedNodeIds = timeDimmedIds(input, days)
-  dayLabelEl.textContent = formatDayLabel(days)
+  const dimmed =
+    days === null ? new Set<string>() : timeDimmedIds(input, days, clock)
+  if (searchHits !== null) {
+    for (const id of searchDimmedIds(input, searchHits)) dimmed.add(id)
+  }
+  graphEl.dimmedNodeIds = dimmed
+  dayLabelEl.textContent =
+    days === null ? '全部' : `${formatDayLabel(days)}${isAllDay(clock) ? '' : ` · ${formatClockRange(clock)}`}`
   renderEmpty()
   updateCount()
 
   if (!fitCamera) return
-  if (days === null) {
+  if (days === null && searchHits === null) {
     graphEl.zoomToFit(500)
     return
   }
-  const focused = focusedIdsForDays(input, days)
+  const focused = filteredNodeIds()
   const ids = onlyThemes ? focused.themeIds : [...focused.themeIds, ...focused.momentIds]
   if (ids.length === 0) return
   graphEl.zoomToFitNodes(ids)
+}
+
+/** 时间 + 文字筛选的交集（未启用的那层视为全集） */
+function filteredNodeIds(): { themeIds: string[]; momentIds: string[] } {
+  if (!input) return { themeIds: [], momentIds: [] }
+  let themes: Set<string> | null = null
+  let moments: Set<string> | null = null
+  if (days !== null) {
+    const focused = focusedIdsForDays(input, days, clock)
+    themes = new Set(focused.themeIds)
+    moments = new Set(focused.momentIds)
+  }
+  if (searchHits !== null) {
+    const focused = searchFocusedIds(input, searchHits)
+    themes = themes === null ? new Set(focused.themeIds) : intersect(themes, focused.themeIds)
+    moments = moments === null ? new Set(focused.momentIds) : intersect(moments, focused.momentIds)
+  }
+  return {
+    themeIds: themes === null ? input.themes.map((theme) => themeNodeId(theme.id)) : [...themes],
+    momentIds: moments === null ? input.moments.map((moment) => `m:${moment.id}`) : [...moments]
+  }
+}
+
+function intersect(base: Set<string>, next: readonly string[]): Set<string> {
+  const keep = new Set(next)
+  const result = new Set<string>()
+  for (const id of base) if (keep.has(id)) result.add(id)
+  return result
 }
 
 onlyThemesEl.addEventListener('change', () => {
@@ -469,40 +676,16 @@ onlyThemesEl.addEventListener('change', () => {
 
 /* ---------------------------------- 检索 ---------------------------------- */
 
-/** 时间窗下拉 → fromTs（null = 全部） */
-const SEARCH_RANGE_DAYS: Record<string, number | null> = {
-  all: null,
-  today: 1,
-  '3d': 3,
-  '7d': 7,
-  '30d': 30
-}
-
 let searchSeq = 0
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 let searchAppsLoaded = false
-
-function searchFromTs(): number | null {
-  const days = SEARCH_RANGE_DAYS[searchRangeEl.value]
-  if (days === null || days === undefined) return null
-  const today = new Date(dayStart(Date.now()))
-  today.setDate(today.getDate() - (days - 1))
-  return today.getTime()
-}
 
 function scheduleSearch(delay = 300): void {
   if (searchTimer !== null) clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
     searchTimer = null
-    void runSearch()
+    void runSearch(false)
   }, delay)
-}
-
-function closeSearch(): void {
-  searchSeq += 1
-  if (searchResultsEl.hidden) return
-  searchResultsEl.hidden = true
-  searchListEl.replaceChildren()
 }
 
 /** 只按 code point 数（与主进程 search 模块的「≥2 字」口径一致） */
@@ -510,39 +693,85 @@ function queryCharCount(value: string): number {
   return [...value.replace(/\s+/g, '')].length
 }
 
-async function runSearch(): Promise<void> {
+/** 收起文字结果卡片（不影响图谱上的筛选） */
+function closeCards(): void {
+  if (searchResultsEl.hidden) return
+  searchResultsEl.hidden = true
+  searchListEl.replaceChildren()
+  searchSummaryEl.textContent = ''
+  searchHintEl.textContent = ''
+}
+
+/** 清掉文字筛选（保留时间筛选）；用于清空输入 / 空查询 */
+function clearSearchFilter(): void {
+  searchSeq += 1
+  searchHits = null
+  searchStatusEl.textContent = ''
+  closeCards()
+  applyTimeFocus(false)
+}
+
+/**
+ * 输入变化 → 只更新图谱（`showCards = false`）；
+ * 点「检索」/回车 → 顺带把文字结果卡片列出来（`showCards = true`）。
+ */
+async function runSearch(showCards: boolean, fitCamera = false): Promise<void> {
   const query = searchInput.value
   if (queryCharCount(query) < 2) {
-    closeSearch()
+    clearSearchFilter()
     return
   }
   const seq = ++searchSeq
-  searchResultsEl.hidden = false
-  searchSummaryEl.textContent = '检索中…'
-  searchHintEl.textContent = ''
-  searchListEl.replaceChildren()
+  searchStatusEl.textContent = '筛选中…'
+  if (showCards) {
+    searchResultsEl.hidden = false
+    searchSummaryEl.textContent = '检索中…'
+    searchHintEl.textContent = ''
+    searchListEl.replaceChildren()
+  }
+  // 时间筛选是文字筛选的前置条件：日历选了哪天/哪个时段，就只在这段里搜
+  const span = windowSpan(days, clock)
   try {
-    const result = await window.gotchaGraph.search({
+    const result: SearchResult = await window.gotchaGraph.search({
       query,
       app: searchAppEl.value || null,
       titleContains: searchTitleEl.value.trim() || null,
-      fromTs: searchFromTs(),
-      toTs: null
+      fromTs: span?.fromTs ?? null,
+      toTs: span?.toTs ?? null
     })
     if (seq !== searchSeq) return
-    renderSearchResult(result)
+    if (result.mode === 'empty') {
+      clearSearchFilter()
+      return
+    }
+    const hits = new Set<number>()
+    for (const hit of result.hits) {
+      if (hit.momentId !== null) hits.add(hit.momentId)
+    }
+    searchHits = hits
+    const unassigned = result.hits.filter((hit) => hit.momentId === null).length
+    searchStatusEl.textContent =
+      result.matchedEvents === 0
+        ? '没有命中（图谱全部调暗）'
+        : `${result.matchedEvents} 条命中 · ${hits.size} 个时刻在图上${
+            unassigned > 0 ? ` · ${unassigned} 段未成时刻` : ''
+          }${result.truncated ? '（已截断，缩小时间范围更准）' : ''}`
+    if (showCards) renderSearchResult(result)
+    applyTimeFocus(fitCamera)
   } catch (error) {
     if (seq !== searchSeq) return
-    searchSummaryEl.textContent = `检索失败：${String(error)}`
-    searchListEl.replaceChildren()
+    searchStatusEl.textContent = `筛选失败：${String(error)}`
+    searchHits = null
+    if (showCards) {
+      searchSummaryEl.textContent = '检索失败'
+      searchHintEl.textContent = ''
+      searchListEl.replaceChildren()
+    }
+    applyTimeFocus(false)
   }
 }
 
 function renderSearchResult(result: SearchResult): void {
-  if (result.mode === 'empty') {
-    closeSearch()
-    return
-  }
   searchResultsEl.hidden = false
   searchSummaryEl.textContent =
     result.matchedEvents === 0
@@ -668,29 +897,38 @@ async function loadSearchApps(): Promise<void> {
   }
 }
 
+// 输入即筛（300ms 防抖，只改图谱、不弹卡片）；点「检索」/回车才列出文字卡片
 searchForm.addEventListener('submit', (event) => {
   event.preventDefault()
-  scheduleSearch(0)
+  if (searchTimer !== null) {
+    clearTimeout(searchTimer)
+    searchTimer = null
+  }
+  void runSearch(true, true)
 })
 
-searchInput.addEventListener('input', () => scheduleSearch())
-searchTitleEl.addEventListener('input', () => scheduleSearch())
-searchRangeEl.addEventListener('change', () => {
-  if (queryCharCount(searchInput.value) >= 2) scheduleSearch(0)
+searchInput.addEventListener('input', () => {
+  closeCards()
+  scheduleSearch()
+})
+searchTitleEl.addEventListener('input', () => {
+  closeCards()
+  scheduleSearch()
 })
 searchAppEl.addEventListener('change', () => {
+  closeCards()
   if (queryCharCount(searchInput.value) >= 2) scheduleSearch(0)
 })
-byId('search-close').addEventListener('click', () => closeSearch())
+byId('search-close').addEventListener('click', () => closeCards())
 
-// 检索结果与日历一样：捕获阶段判断「点在外面」，此时被点的节点还在 DOM 里
+// 结果卡片：捕获阶段判断「点在外面」，此时被点的节点还在 DOM 里
 document.addEventListener(
   'mousedown',
   (event) => {
     if (searchResultsEl.hidden) return
     const target = event.target as Node
     if (searchResultsEl.contains(target) || searchForm.contains(target)) return
-    closeSearch()
+    closeCards()
   },
   true
 )
@@ -712,11 +950,18 @@ function renderEmpty(): void {
   const hasData = data !== null && (data.themes.length > 0 || data.moments.length > 0)
   if (hasData) {
     // 有图可看时状态徽标 / 同意条已足够，不再用空态盖住画布（G5 §7.4）。
-    if (days !== null && input) {
-      const focused = focusedIdsForDays(input, days)
+    if ((days !== null || searchHits !== null) && input) {
+      const focused = filteredNodeIds()
       if (focused.themeIds.length === 0 && focused.momentIds.length === 0) {
         kind = 'no-range'
-        text = '所选日期没有主题或时刻（数据仍在，只是被调暗）'
+        text =
+          searchHits !== null
+            ? days !== null
+              ? '当前时间范围内没有命中文字的时刻（数据仍在，只是被调暗）'
+              : searchHits.size === 0
+                ? '没有找到这段记忆（数据仍在，只是没命中）'
+                : '命中事件还没有对应时刻，图谱里暂无可点亮节点'
+            : '所选时间范围没有主题或时刻（数据仍在，只是被调暗）'
       }
     }
   } else if (snapshot && !snapshot.client.ok) {
@@ -773,13 +1018,13 @@ function updateCount(): void {
     return
   }
   const total = `${input.themes.length} 个主题 · ${onlyThemes ? '只看主题' : `${input.moments.length} 个时刻`} · ${input.edges.length} 条相似连线`
-  if (days === null) {
+  if (days === null && searchHits === null) {
     countEl.textContent = total
     return
   }
-  const focused = focusedIdsForDays(input, days)
+  const focused = filteredNodeIds()
   const momentPart = onlyThemes ? '只看主题' : `${focused.momentIds.length}/${input.moments.length} 个时刻`
-  countEl.textContent = `${focused.themeIds.length}/${input.themes.length} 个主题 · ${momentPart} · ${input.edges.length} 条相似连线（范围内）`
+  countEl.textContent = `${focused.themeIds.length}/${input.themes.length} 个主题 · ${momentPart} · ${input.edges.length} 条相似连线（筛选后）`
 }
 
 function updateHud(): void {
@@ -930,9 +1175,17 @@ window.__gotchaGraphView = {
   focusDays: () => (days === null ? null : [...days].sort()),
   setDays: (list) => {
     days = list === null ? null : new Set(list)
-    applyTimeFocus(true)
+    onFilterChanged(true)
     renderCalendar()
   },
+  clock: () => ({ ...clock }),
+  setClock: (fromMinute, toMinute) => {
+    clock = normalizeClock(fromMinute, toMinute)
+    syncClockPickers()
+    onFilterChanged(true)
+  },
+  /** 文字筛选命中的时刻 id；null＝没按文字筛 */
+  searchHits: () => (searchHits === null ? null : [...searchHits].sort((a, b) => a - b)),
   onlyThemes: () => onlyThemes,
   setOnlyThemes: (value) => {
     onlyThemesEl.checked = value

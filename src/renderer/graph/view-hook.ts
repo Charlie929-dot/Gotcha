@@ -18,6 +18,11 @@ export interface GraphViewHook {
   dimmedCount?(): number
   focusDays?(): string[] | null
   setDays?(list: string[] | null): void
+  /** 时段（一天内的起止分钟）；E2E 用来跳过滚轮像素操作 */
+  clock?(): { fromMinute: number; toMinute: number }
+  setClock?(fromMinute: number, toMinute: number): void
+  /** 文字筛选命中的时刻 id；null＝没按文字筛 */
+  searchHits?(): number[] | null
   onlyThemes?(): boolean
   setOnlyThemes?(value: boolean): void
   nodeIds?(): string[]

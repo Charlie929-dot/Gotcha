@@ -75,6 +75,14 @@
       </div>
     </section>
 
+    <section id="scale-hint" class="banner scale" hidden>
+      <div>
+        <strong>时刻有点多</strong>
+        <p id="scale-hint-text"></p>
+      </div>
+      <button id="scale-hint-only-themes" type="button">只看主题</button>
+    </section>
+
     <main class="stage">
       <section class="canvas-wrap">
         <div id="node-count" class="count"></div>
@@ -192,6 +200,8 @@
           <h3>视图</h3>
           <label>日历热力满量（事件/天）<input id="set-day-heat" type="number" min="100" max="200000" step="100" /></label>
           <p class="hint">当天事件数占这个值的比例决定日格颜色深浅；一天全在使用约 3000–4000。</p>
+          <label>收窄提示阈值（时刻数）<input id="set-scale-hint" type="number" min="1" max="20000" step="1" /></label>
+          <p class="hint">可见时刻数超过它时，顶部提示可以先切「只看主题」；默认 2000。</p>
           <label>自动合并阈值（相似度）<input id="set-merge-sim" type="number" min="0" max="1" step="0.01" /></label>
           <label>主题连线阈值（相似度）<input id="set-edge-sim" type="number" min="0" max="1" step="0.01" /></label>
           <label>每主题连线数<input id="set-edge-k" type="number" min="0" max="32" step="1" /></label>

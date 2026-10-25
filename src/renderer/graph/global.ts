@@ -74,6 +74,7 @@ import { createGlobalPanel } from './global-panel'
 import { createSettingsPanel, type SettingsChange } from './graph-settings-panel'
 import type { ThemeMergeGroupView } from '../../understand/theme-merge'
 import { modelWarningText, statusView } from './status-view'
+import { DEFAULT_SCALE_HINT_MOMENTS, scaleHintText } from './scale-hint'
 import './view-hook'
 
 declare global {
@@ -97,6 +98,9 @@ const consentEl = byId<HTMLElement>('consent')
 const consentButton = byId<HTMLButtonElement>('consent-btn')
 const modelWarningEl = byId<HTMLElement>('model-warning')
 const modelWarningTextEl = byId<HTMLElement>('model-warning-text')
+const scaleHintEl = byId<HTMLElement>('scale-hint')
+const scaleHintTextEl = byId<HTMLElement>('scale-hint-text')
+const scaleHintOnlyEl = byId<HTMLButtonElement>('scale-hint-only-themes')
 const metaEl = byId<HTMLElement>('meta')
 const onlyThemesEl = byId<HTMLInputElement>('only-themes')
 const calendarBtn = byId<HTMLButtonElement>('calendar-btn')
@@ -155,6 +159,8 @@ let input: GlobalGraphInput | null = null
 let dayStats = new Map<string, DayStat>()
 /** 日格热力满量（事件/天，设置抽屉可调）；当天事件占它的比例决定颜色深浅 */
 let dayHeatMax = DEFAULT_HEAT_FULL_SCALE
+/** 「时刻过多」提示阈值（设置抽屉可调）：可见时刻数超过它就提示先切「只看主题」 */
+let scaleHintMoments = DEFAULT_SCALE_HINT_MOMENTS
 let themeById = new Map<number, GlobalThemeDto>()
 let momentById = new Map<number, GlobalMomentDto>()
 let days: Set<string> | null = null
@@ -300,6 +306,7 @@ async function load(): Promise<void> {
       applyTimeFocus(false)
       updateCount()
       updateHud()
+      applyScaleHint()
     })
   } catch (error) {
     if (seq !== loadSeq) return
@@ -362,6 +369,7 @@ async function refreshGraphInPlace(): Promise<void> {
     applyTimeFocus(false)
     updateCount()
     updateHud()
+    applyScaleHint()
     // 待归纳空心点 / 日格热力也变了：日历开着就重画，关着等下次打开现算
     if (!calendarEl.hidden) renderCalendar()
     lastLoadedAt = Date.now()
@@ -857,6 +865,7 @@ onlyThemesEl.addEventListener('change', () => {
   onlyThemes = onlyThemesEl.checked
   graphEl.setNodeTypeVisible('moment', !onlyThemes)
   applyTimeFocus(true)
+  applyScaleHint()
 })
 
 /* ---------------------------------- 检索 ---------------------------------- */
@@ -1290,11 +1299,51 @@ async function loadDayHeatMax(): Promise<void> {
   }
 }
 
+/** 启动时读一次「收窄提示阈值」：读不到用默认 2k，不因为没有设置而卡住图谱 */
+async function loadScaleHintMoments(): Promise<void> {
+  try {
+    applyScaleHintMoments((await window.gotchaGraph.settings()).scaleHintMoments)
+  } catch {
+    // 设置读取失败不影响图谱浏览
+  }
+}
+
+/**
+ * 「时刻过多」提示：只在时刻层可见且总数超过阈值时出现。
+ * 时间筛选只调暗不删节点（§8），所以提示的是「切只看主题」而不是「收窄日期」。
+ */
+function applyScaleHint(): void {
+  if (!input) {
+    scaleHintEl.hidden = true
+    return
+  }
+  const text = scaleHintText(input.moments.length, scaleHintMoments, onlyThemes)
+  scaleHintEl.hidden = text === null
+  scaleHintTextEl.textContent = text ?? ''
+}
+
+/** 应用设置里的阈值；坏值保持当前值（主进程已校验，这里只防意外） */
+function applyScaleHintMoments(value: unknown): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return
+  if (value === scaleHintMoments) return
+  scaleHintMoments = value
+  applyScaleHint()
+}
+
+scaleHintOnlyEl.addEventListener('click', () => {
+  onlyThemesEl.checked = true
+  onlyThemes = true
+  graphEl.setNodeTypeVisible('moment', false)
+  applyTimeFocus(true)
+  applyScaleHint()
+})
+
 async function applySavedSettings(
   settings: GraphSettingsView,
   changed: SettingsChange
 ): Promise<void> {
   applyDayHeatMax(settings.dayHeatMax)
+  applyScaleHintMoments(settings.scaleHintMoments)
   await refreshStatus()
   // 阈值变了：主进程已按新阈值重算过连线，重新拉一次图（否则连线还是旧的）
   if (changed.thresholds) await load()
@@ -1408,6 +1457,7 @@ window.__gotchaGraphView = {
     onlyThemes = value
     graphEl.setNodeTypeVisible('moment', !value)
     applyTimeFocus(true)
+    applyScaleHint()
   },
   nodeIds: () => Object.keys(graphEl.graphData?.nodeInfo ?? {})
 }
@@ -1415,3 +1465,4 @@ window.__gotchaGraphView = {
 void refresh()
 void loadSearchApps()
 void loadDayHeatMax()
+void loadScaleHintMoments()

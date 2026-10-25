@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { openDatabase } from '../../src/db'
 import { getSetting, setSetting } from '../../src/db/settings'
 import {
+  DEFAULT_SCALE_HINT_MOMENTS,
   GRAPH_SETTING_KEYS,
   readGraphSettings,
   saveGraphSettings
@@ -151,6 +152,28 @@ describe('saveGraphSettings', () => {
       expect(getSetting(db, GRAPH_SETTING_KEYS.dayHeatMax)).toBe('6500')
       expect(saveGraphSettings(db, { dayHeatMax: 4_000.5 })).toMatchObject({ ok: false })
       expect(saveGraphSettings(db, { dayHeatMax: 200_001 })).toMatchObject({ ok: false })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('时刻收窄提示阈值可保存并读回；缺省 2k，越界整单拒绝', () => {
+    const db = openDatabase(':memory:')
+    try {
+      // 缺省值 = §12 的 2k（拿不到库时也是 2000，不因为缺设置就不提示）
+      expect(readGraphSettings(db).scaleHintMoments).toBe(DEFAULT_SCALE_HINT_MOMENTS)
+      const saved = saveGraphSettings(db, { scaleHintMoments: 3_000 })
+      expect(saved.ok).toBe(true)
+      if (!saved.ok) return
+      expect(saved.settings.scaleHintMoments).toBe(3_000)
+      expect(getSetting(db, GRAPH_SETTING_KEYS.scaleHintMoments)).toBe('3000')
+      expect(readGraphSettings(db).scaleHintMoments).toBe(3_000)
+      expect(saveGraphSettings(db, { scaleHintMoments: 0 })).toMatchObject({ ok: false })
+      expect(saveGraphSettings(db, { scaleHintMoments: 20_001 })).toMatchObject({ ok: false })
+      expect(saveGraphSettings(db, { scaleHintMoments: '2000' })).toMatchObject({ ok: false })
+      // 坏值不静默夹取：库里写成 0 时读回默认 2k
+      setSetting(db, GRAPH_SETTING_KEYS.scaleHintMoments, '0')
+      expect(readGraphSettings(db).scaleHintMoments).toBe(DEFAULT_SCALE_HINT_MOMENTS)
     } finally {
       db.close()
     }

@@ -625,3 +625,13 @@ foam-graph {
   font-size: 12px;
 }
 
+/* 「时刻有点多」提示：性能建议，不是错误——用主色与模型缺失的黄条区分开 */
+.banner.scale {
+  border-color: rgb(79 195 247 / 45%);
+  background: rgb(79 195 247 / 8%);
+}
+
+.banner.scale strong {
+  color: var(--accent);
+}
+

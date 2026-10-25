@@ -27,6 +27,7 @@ function settingsView(overrides: Partial<GraphSettingsView> = {}): GraphSettings
     batchMaxMoments: 20,
     maxTokens: 2_000,
     dayHeatMax: 4_000,
+    scaleHintMoments: 2_000,
     activeProvider: 'deepseek',
     providers: [
       {

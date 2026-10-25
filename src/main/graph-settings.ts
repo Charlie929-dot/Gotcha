@@ -36,6 +36,8 @@ export const GRAPH_SETTING_KEYS = {
   maxTokens: 'graph.max_tokens',
   /** 日历日格热力的「满量」：当天事件数占它的比例决定颜色深浅（P3-b） */
   dayHeatMax: 'graph.day_heat_max',
+  /** 图谱「时刻过多」提示的阈值：可见时刻数超过它就在顶部提示收窄（P3-b） */
+  scaleHintMoments: 'graph.scale_hint_moments',
   activeProvider: 'llm.active_provider',
   providers: 'llm.providers',
   outboundConsent: 'graph.outbound_consent'
@@ -46,6 +48,13 @@ export const GRAPH_SETTING_KEYS = {
  * 先按 4000 当「满格」，之后在设置抽屉里可调。
  */
 export const DEFAULT_DAY_HEAT_MAX = 4_000
+
+/**
+ * 「时刻过多」提示的默认阈值：§12 首屏口径是「超过约 2k 个时刻提示收窄」。
+ * 2k / 3k 在 §16 里还挂着待拍板，所以做成设置（默认 2k，抽屉里可调），
+ * 不把拍板结果硬编码进渲染层。
+ */
+export const DEFAULT_SCALE_HINT_MOMENTS = 2_000
 
 export interface GraphUsageView {
   calls: number
@@ -62,6 +71,8 @@ export interface GraphSettingsView {
   maxTokens: number
   /** 日历日格热力满量（事件/天）；当天事件占它的比例决定颜色深浅 */
   dayHeatMax: number
+  /** 可见时刻数超过它就提示先切「只看主题」；默认 2k */
+  scaleHintMoments: number
   activeProvider: string
   providers: LlmProvider[]
   providersInvalid: boolean
@@ -81,6 +92,7 @@ export interface GraphSettingsPatch {
   batchMaxMoments?: number
   maxTokens?: number
   dayHeatMax?: number
+  scaleHintMoments?: number
   activeProvider?: string
   providers?: LlmProvider[]
   hotkeys?: Partial<HotkeyBindings>
@@ -98,6 +110,8 @@ const LIMITS = {
   batchMaxMoments: { min: 1, max: 100 },
   maxTokens: { min: 256, max: 8_192 },
   dayHeatMax: { min: 100, max: 200_000 },
+  // 下限给到 1：阈值只是「什么时候提示」，设 1 等于常驻提示（排查 / 演示用），不做额外限制
+  scaleHintMoments: { min: 1, max: 20_000 },
   retryBackoff: { min: 1, max: 1_440, maxItems: 5 },
   providers: { min: 1, max: 20 }
 } as const
@@ -146,6 +160,14 @@ function clampDayHeatMax(value: number): number {
   return value
 }
 
+/** 同 dayHeatMax：坏值回退默认，不猜用户意图 */
+function clampScaleHintMoments(value: number): number {
+  const limits = LIMITS.scaleHintMoments
+  if (!Number.isFinite(value) || !Number.isInteger(value)) return DEFAULT_SCALE_HINT_MOMENTS
+  if (value < limits.min || value > limits.max) return DEFAULT_SCALE_HINT_MOMENTS
+  return value
+}
+
 export function readGraphSettings(db: Db | null, now = Date.now()): GraphSettingsView {
   if (!db) {
     return {
@@ -156,6 +178,7 @@ export function readGraphSettings(db: Db | null, now = Date.now()): GraphSetting
       batchMaxMoments: 20,
       maxTokens: 2_000,
       dayHeatMax: DEFAULT_DAY_HEAT_MAX,
+      scaleHintMoments: DEFAULT_SCALE_HINT_MOMENTS,
       activeProvider: DEFAULT_ACTIVE_PROVIDER,
       providers: [{ ...DEFAULT_PROVIDER }],
       providersInvalid: false,
@@ -177,6 +200,9 @@ export function readGraphSettings(db: Db | null, now = Date.now()): GraphSetting
     maxTokens: getNumberSetting(db, GRAPH_SETTING_KEYS.maxTokens, 2_000),
     dayHeatMax: clampDayHeatMax(
       getNumberSetting(db, GRAPH_SETTING_KEYS.dayHeatMax, DEFAULT_DAY_HEAT_MAX)
+    ),
+    scaleHintMoments: clampScaleHintMoments(
+      getNumberSetting(db, GRAPH_SETTING_KEYS.scaleHintMoments, DEFAULT_SCALE_HINT_MOMENTS)
     ),
     activeProvider: getSetting(db, GRAPH_SETTING_KEYS.activeProvider) || DEFAULT_ACTIVE_PROVIDER,
     providers: parsed.providers,
@@ -226,6 +252,7 @@ function validatePatch(input: unknown): { ok: true; patch: GraphSettingsPatch } 
     'batchMaxMoments',
     'maxTokens',
     'dayHeatMax',
+    'scaleHintMoments',
     'activeProvider',
     'providers',
     'hotkeys',
@@ -251,7 +278,7 @@ function validatePatch(input: unknown): { ok: true; patch: GraphSettingsPatch } 
     }
     patch.outboundConsent = input.outboundConsent
   }
-  for (const field of ['intervalMinutes', 'budgetTokensPerDay', 'batchMaxMoments', 'maxTokens', 'dayHeatMax'] as const) {
+  for (const field of ['intervalMinutes', 'budgetTokensPerDay', 'batchMaxMoments', 'maxTokens', 'dayHeatMax', 'scaleHintMoments'] as const) {
     if (!(field in input)) continue
     const limits = LIMITS[field]
     if (!isIntInRange(input[field], limits.min, limits.max)) {
@@ -392,6 +419,9 @@ export function saveGraphSettings(db: Db, input: unknown, now = Date.now()): Gra
       }
       if (patch.dayHeatMax !== undefined) {
         setSetting(db, GRAPH_SETTING_KEYS.dayHeatMax, String(patch.dayHeatMax))
+      }
+      if (patch.scaleHintMoments !== undefined) {
+        setSetting(db, GRAPH_SETTING_KEYS.scaleHintMoments, String(patch.scaleHintMoments))
       }
       if (patch.thresholds) {
         for (const [key, value] of Object.entries(patch.thresholds)) {

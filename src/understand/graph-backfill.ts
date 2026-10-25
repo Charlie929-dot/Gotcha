@@ -30,13 +30,15 @@ import {
 } from './event-embeddings'
 import {
   computeMomentVectors,
-  computeThemeCentroids,
   findMergeCandidates,
   planThemeMerges,
-  writeThemeCentroids,
   type ThemeCentroid,
   type ThemeIdentity
 } from './theme-centroids'
+import {
+  syncThemeCentroids,
+  type ThemeCentroidSyncReport
+} from './vector-maintenance'
 import { applyThemeMerges, type ThemeMergeReport } from './theme-merge'
 import {
   applySecondaryMemberships,
@@ -130,8 +132,14 @@ export interface ThemeGraphReport {
   /** 结构回填结果（`embeddings` / `edges` 由本函数补上） */
   structure: GraphBackfillReport
   events: EventEmbeddingResult | null
-  /** 主题质心统计（合并前后各写一次库；这里报最终值） */
-  centroids: { themes: number; themeMemberEvents: number } | null
+  /**
+   * 主题质心统计（合并前后各同步一次；计数是**本次累计**的操作次数）。
+   * `recomputed` = 真正重算的行，`reused` = 指纹一致直接复用的行（P2 · S3）。
+   */
+  centroids: (Pick<ThemeCentroidSyncReport, 'stale' | 'recomputed' | 'reused' | 'deleted' | 'pending'> & {
+    themes: number
+    themeMemberEvents: number
+  }) | null
   merges: ThemeMergeReport | null
   secondary: SecondaryBackfillResult | null
   /** 本次没做合并/次归属的原因（`null` = 全跑完） */
@@ -169,16 +177,7 @@ function rebuildEmbeddingEdges(
   })
 }
 
-/** 主题 id → 质心向量（写库/计划共用） */
-function writeAllCentroids(
-  db: Db,
-  centroids: ReadonlyMap<number, ThemeCentroid>,
-  model: string,
-  now: number
-): void {
-  writeThemeCentroids(db, [...centroids.values()], { model, now })
-}
-
+/** 主题 id → 质心向量（合并计划共用） */
 function groupOwners(
   rows: readonly { themeId: number; momentId: number }[]
 ): Map<number, number[]> {
@@ -259,8 +258,28 @@ export async function backfillThemeGraph(
   const eventVectors = readEventVectors(db, { model: embedder.model }).vectors
   const momentEventIds = readMomentEventIds(db)
   let owners = readOwnerMemberships(db)
-  let centroids = computeThemeCentroids(owners, momentEventIds, eventVectors)
-  writeAllCentroids(db, centroids, embedder.model, now)
+  // 增量：只有成员指纹变了的主题才重算（`vector-maintenance.ts`），其余整行复用
+  const centroidTally = { stale: 0, recomputed: 0, reused: 0, deleted: 0, pending: 0 }
+  const applyCentroidSync = (
+    sync: ReturnType<typeof syncThemeCentroids>
+  ): Map<number, ThemeCentroid> => {
+    centroidTally.stale += sync.report.stale
+    centroidTally.recomputed += sync.report.recomputed
+    centroidTally.reused += sync.report.reused
+    centroidTally.deleted += sync.report.deleted
+    centroidTally.pending += sync.report.pending
+    return sync.centroids
+  }
+  let centroids = applyCentroidSync(
+    syncThemeCentroids(db, {
+      model: embedder.model,
+      dim: embedder.dim,
+      now,
+      memberships: owners,
+      momentEventIds,
+      eventVectors
+    })
+  )
 
   let mergeReport: ThemeMergeReport | null = null
   if (options.merge !== false) {
@@ -305,8 +324,17 @@ export async function backfillThemeGraph(
       // 一个都没合上（候选全被人工撤销过的对挡掉）：已经是固定点，别再空转 8 轮
       if (applied.applied === 0) break
       owners = readOwnerMemberships(db)
-      centroids = computeThemeCentroids(owners, momentEventIds, eventVectors)
-      writeAllCentroids(db, centroids, embedder.model, now)
+      // 合并把源主题的成员并进存活主题：只有被碰过的那些主题指纹变了，只重算它们
+      centroids = applyCentroidSync(
+        syncThemeCentroids(db, {
+          model: embedder.model,
+          dim: embedder.dim,
+          now,
+          memberships: owners,
+          momentEventIds,
+          eventVectors
+        })
+      )
       rounds += 1
     }
     aggregate.touched = [...touched].sort((a, b) => a - b)
@@ -324,6 +352,8 @@ export async function backfillThemeGraph(
         themes: title.themes + reEmbed.themes,
         embedded: title.embedded + reEmbed.embedded,
         skipped: title.skipped + reEmbed.skipped,
+        reused: title.reused + reEmbed.reused,
+        skippedEmpty: title.skippedEmpty + reEmbed.skippedEmpty,
         ms: title.ms + reEmbed.ms
       }
     }
@@ -336,12 +366,19 @@ export async function backfillThemeGraph(
   structure.edges = rebuildEmbeddingEdges(db, embedder.model, thresholds)
   report.centroids = {
     themes: centroids.size,
-    themeMemberEvents: [...centroids.values()].reduce((sum, item) => sum + item.memberEvents, 0)
+    themeMemberEvents: [...centroids.values()].reduce((sum, item) => sum + item.memberEvents, 0),
+    ...centroidTally
   }
 
   if (options.secondary !== false) {
-    const momentVectors = computeMomentVectors(momentEventIds, eventVectors)
     const ownedMomentIds = [...new Set(owners.map((row) => row.momentId))]
+    // 只算「有归属的时刻」的向量：次归属只需要这些，别把全部时刻都过一遍
+    const ownedMomentEventIds = new Map<number, readonly number[]>()
+    for (const id of ownedMomentIds) {
+      const ids = momentEventIds.get(id)
+      if (ids) ownedMomentEventIds.set(id, ids)
+    }
+    const momentVectors = computeMomentVectors(ownedMomentEventIds, eventVectors)
     const active = readActiveThemes(db)
     const themeInput = active
       .filter((theme) => centroids.has(theme.id) && theme.type !== 'protected')

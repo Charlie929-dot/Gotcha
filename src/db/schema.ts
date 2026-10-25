@@ -117,7 +117,11 @@ export const THEME_MOMENTS_MOMENT_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_theme_moments_moment ON theme_moments(moment_id);
 `
 
-/** 主题向量：Float32Array（已 L2 归一化），模型名 + 维度用于换模型时识别 */
+/**
+ * 主题向量：Float32Array（已 L2 归一化），模型名 + 维度用于换模型时识别。
+ * v6 追加 `text_hash`（`title + summary` 的指纹，见 `understand/vector-fingerprint.ts`）：
+ * 文本变了才重新推理，别的主题直接复用（P2 · S3 增量维护）。
+ */
 export const NODE_EMBEDDINGS_DDL = `
 CREATE TABLE IF NOT EXISTS node_embeddings (
   node_id    INTEGER PRIMARY KEY,
@@ -196,6 +200,7 @@ CREATE TABLE IF NOT EXISTS event_embeddings (
 /**
  * 主题成员事件质心（成员事件向量均值再 L2 归一化）。
  * `member_events` 是参与求均值的去重事件数；合并/次归属都读它，不读 title+summary 向量。
+ * v6 追加 `members_hash`（参与求均值的去重事件 id 集合指纹）：成员变了才重算（P2 · S3）。
  */
 export const THEME_CENTROIDS_DDL = `
 CREATE TABLE IF NOT EXISTS theme_centroids (

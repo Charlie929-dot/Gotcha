@@ -26,13 +26,20 @@ function structureSnapshot(db: Database.Database): MasterRow[] {
     .all() as MasterRow[]
 }
 
+/** 表的列名（v6 这类 ALTER 加列的迁移用） */
+function columnNames(db: Database.Database, table: string): string[] {
+  return (db.prepare(`PRAGMA table_info('${table}')`).all() as Array<{ name: string }>).map(
+    (row) => row.name
+  )
+}
+
 describe('migrations · :memory: 库', () => {
   it('全新库从 0 迁到最新版本，重复执行幂等且数据保留', () => {
     const db = new Database(':memory:')
     try {
       expect(getSchemaVersion(db)).toBe(0)
       expect(applyMigrations(db)).toBe(LATEST)
-      expect(LATEST).toBe(5)
+      expect(LATEST).toBe(6)
 
       db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
       // 第二次跑同一套迁移：不应抛错、版本不倒退、已有数据不丢
@@ -77,6 +84,9 @@ describe('migrations · :memory: 库', () => {
         db.prepare("PRAGMA table_info('nodes')").all() as Array<{ name: string }>
       ).map((row) => row.name)
       expect(nodeColumns).toContain('merged_into')
+      // v6：派生向量的重算指纹（只加列，老行 NULL → 下次维护自愈）
+      expect(columnNames(db, 'node_embeddings')).toContain('text_hash')
+      expect(columnNames(db, 'theme_centroids')).toContain('members_hash')
       // v5：检索索引（trigram FTS + 触发器同步）
       expect(names).toContain('events_fts')
       expect(names).toContain('events_fts_ai')
@@ -216,6 +226,44 @@ describe('migrations · :memory: 库', () => {
       expect(
         db.prepare("SELECT rowid FROM events_fts WHERE events_fts MATCH '\"新增事件\"'").all()
       ).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v6 只回滚指纹列：检索索引与已有行都保留，重 up 后列回来（老行 NULL）', () => {
+    const db = new Database(':memory:')
+    try {
+      applyMigrations(db)
+      db.prepare("INSERT INTO nodes (id, level, title, summary) VALUES (1, 1, '主题', '摘要')").run()
+      db.prepare(
+        `INSERT INTO node_embeddings (node_id, model, dim, vec, updated_at, text_hash)
+         VALUES (1, 'fake', 2, x'0000803f0000803f', 7, 'abc')`
+      ).run()
+      db.prepare(
+        `INSERT INTO theme_centroids (node_id, model, dim, vec, member_events, updated_at, members_hash)
+         VALUES (1, 'fake', 2, x'0000803f0000803f', 3, 7, 'def')`
+      ).run()
+
+      revertMigrations(db, 5)
+      expect(getSchemaVersion(db)).toBe(5)
+      expect(columnNames(db, 'node_embeddings')).not.toContain('text_hash')
+      expect(columnNames(db, 'theme_centroids')).not.toContain('members_hash')
+      // 只丢列，行与数据都还在；v5 的检索索引不受影响
+      expect(db.prepare('SELECT COUNT(*) AS n FROM node_embeddings').get()).toEqual({ n: 1 })
+      expect(db.prepare('SELECT COUNT(*) AS n FROM theme_centroids').get()).toEqual({ n: 1 })
+      expect(structureSnapshot(db).map((row) => row.name)).toContain('events_fts')
+
+      expect(applyMigrations(db)).toBe(LATEST)
+      expect(columnNames(db, 'node_embeddings')).toContain('text_hash')
+      expect(columnNames(db, 'theme_centroids')).toContain('members_hash')
+      // 老行的指纹是 NULL（下一次增量维护会重算一次补上）
+      expect(db.prepare('SELECT text_hash FROM node_embeddings WHERE node_id = 1').get()).toEqual({
+        text_hash: null
+      })
+      expect(db.prepare('SELECT members_hash FROM theme_centroids WHERE node_id = 1').get()).toEqual({
+        members_hash: null
+      })
     } finally {
       db.close()
     }

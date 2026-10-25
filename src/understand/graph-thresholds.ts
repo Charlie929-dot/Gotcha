@@ -12,6 +12,12 @@ import { getSetting } from '../db/settings'
 export interface GraphThresholds {
   /** 新时刻低于它则新建主题（P2 在线 assigner 用） */
   themeNewMinSim: number
+  /**
+   * 模糊带：top1 − top2 小于它、且两个主题不是近重复时，交给 LLM 确认（§5.2 + 2026-10-25 标定）。
+   * 标定结论：绝对相似度分不开对错，gap 才是分水岭；`gap < 0.02` 约占 41% 的时刻，
+   * 而「top1/top2 近重复」占 66%（那批选谁都一样，直接取 argmax）。
+   */
+  themeGapConfirm: number
   /** 次归属最低相似度（时刻质心 vs 主题质心） */
   themeMemberMinSim: number
   /** 与主主题达到它视为近重复，不做次归属 */
@@ -30,6 +36,7 @@ export interface GraphThresholds {
 
 export const GRAPH_THRESHOLD_KEYS = {
   themeNewMinSim: 'graph.theme_new_min_sim',
+  themeGapConfirm: 'graph.theme_gap_confirm',
   themeMemberMinSim: 'graph.theme_member_min_sim',
   themeDuplicateSim: 'graph.theme_duplicate_sim',
   themeMergeSim: 'graph.theme_merge_sim',
@@ -47,6 +54,7 @@ export const GRAPH_THRESHOLD_KEYS = {
  */
 export const GRAPH_THRESHOLD_DEFAULTS: GraphThresholds = {
   themeNewMinSim: 0.78,
+  themeGapConfirm: 0.02,
   themeMemberMinSim: 0.92,
   themeDuplicateSim: 0.92,
   themeMergeSim: 0.95,
@@ -59,6 +67,7 @@ export const GRAPH_THRESHOLD_DEFAULTS: GraphThresholds = {
 /** 各阈值的合法区间（越界按默认值处理，不写回设置） */
 const SIM_RANGE: Readonly<Record<keyof GraphThresholds, { min: number; max: number }>> = {
   themeNewMinSim: { min: 0, max: 1 },
+  themeGapConfirm: { min: 0, max: 1 },
   themeMemberMinSim: { min: 0, max: 1 },
   themeDuplicateSim: { min: 0, max: 1 },
   themeMergeSim: { min: 0, max: 1 },
@@ -73,6 +82,7 @@ export const GRAPH_THRESHOLD_LIMITS: Readonly<
   Record<keyof GraphThresholds, { min: number; max: number; integer: boolean }>
 > = {
   themeNewMinSim: { ...SIM_RANGE.themeNewMinSim, integer: false },
+  themeGapConfirm: { ...SIM_RANGE.themeGapConfirm, integer: false },
   themeMemberMinSim: { ...SIM_RANGE.themeMemberMinSim, integer: false },
   themeDuplicateSim: { ...SIM_RANGE.themeDuplicateSim, integer: false },
   themeMergeSim: { ...SIM_RANGE.themeMergeSim, integer: false },
@@ -158,6 +168,7 @@ export function readGraphThresholds(db: Db | null): GraphThresholds {
 
   return {
     themeNewMinSim: read('themeNewMinSim', defaults.themeNewMinSim),
+    themeGapConfirm: read('themeGapConfirm', defaults.themeGapConfirm),
     themeMemberMinSim: read('themeMemberMinSim', defaults.themeMemberMinSim),
     themeDuplicateSim: read('themeDuplicateSim', defaults.themeDuplicateSim),
     themeMergeSim: read('themeMergeSim', defaults.themeMergeSim),

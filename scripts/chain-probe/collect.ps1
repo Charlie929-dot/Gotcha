@@ -409,6 +409,9 @@ try {
     }
 }
 finally {
+    # 停止时刻也落一行：否则最后一段的结束时间只能取「最后一条事件」，
+    # 采样在空闲中结束时那段空闲会被算成 0 长度
+    try { Write-Line ("{""type"":""stop"",""ts"":" + [ChainProbe]::NowMs() + "}") } catch { }
     [ChainProbe]::Stop()
     $writer.Flush()
     $writer.Dispose()

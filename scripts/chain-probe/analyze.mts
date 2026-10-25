@@ -183,6 +183,8 @@ export interface ProbeReport {
   ruleStats: SegmentStats[]
   trigger: TriggerReport
   uia: UiaSummary | null
+  /** 采样结束时仍在空闲：起点 ts，时长未知 */
+  trailingIdleStart: number | null
 }
 
 /* ------------------------------------------------------------------ *
@@ -270,6 +272,21 @@ export function buildIdles(records: ProbeRecord[]): IdleRange[] {
     ranges.push({ start: open, end: last })
   }
   return ranges
+}
+
+/**
+ * 采样结束时是否仍处于空闲（最后一条记录就是 idle）。
+ * 这种情况空闲时长**未知**——记录停了，不能用「最后一条记录」当结束时间。
+ * 若采集器写了 `stop` 记录，说明结束时刻已知，不算未知。
+ */
+export function trailingIdleStart(records: ProbeRecord[]): number | null {
+  let latest: ProbeRecord | null = null
+  for (const record of records) {
+    if (typeof record.ts !== 'number') continue
+    if (!latest || record.ts > latest.ts) latest = record
+  }
+  if (!latest || latest.type !== 'idle') return null
+  return latest.ts
 }
 
 /* ------------------------------------------------------------------ *
@@ -590,7 +607,8 @@ export function buildReport(
     idleShare: sessionMs > 0 ? idleMs / sessionMs : 0,
     ruleStats,
     trigger,
-    uia: summarizeUia(uiaRecords)
+    uia: summarizeUia(uiaRecords),
+    trailingIdleStart: trailingIdleStart(collectRecords)
   }
 }
 
@@ -615,13 +633,17 @@ export function formatReport(report: ProbeReport): string {
 
   lines.push('# 信息链探针报告')
   lines.push('')
-  if (sessionMs < 5 * 60_000) {
-    lines.push('> ⚠ 样本不足 5 分钟：比率类指标（段/小时、触发/小时）只能看趋势，不能当结论。至少跑 20 分钟再判读。')
+  if (sessionMs < 10 * 60_000) {
+    lines.push('> ⚠ 样本不足 10 分钟：比率类指标（段/小时、触发/小时）会被放大，只能看趋势，不能当结论。至少跑 20 分钟再判读。')
     lines.push('')
   }
   lines.push(`- 采样时长：${seconds(sessionMs)}；记录 ${report.records} 条（坏行 ${report.badLines}）`)
   lines.push(`- 前台切换 ${report.fgChanges} 次（${report.fgPerHour.toFixed(1)}/小时）；标题变化 ${report.titleChanges} 次`)
   lines.push(`- 空闲占比：${percent(report.idleShare)}（${seconds(report.idleMs)}）`)
+  if (report.trailingIdleStart !== null) {
+    const offset = seconds(Math.max(0, report.trailingIdleStart - session.start))
+    lines.push(`- 采样结束时仍在空闲（开始于 +${offset}）：这段时长未知，未计入空闲占比`)
+  }
   lines.push('')
 
   lines.push('## 1. 窗口占用段：四种切法的对比')

@@ -15,6 +15,7 @@ import {
   SEGMENT_RULES,
   summarizeUia,
   toUiaRecords,
+  trailingIdleStart,
   type ProbeRecord,
   type UiaRecord
 } from '../../scripts/chain-probe/analyze.mts'
@@ -426,7 +427,8 @@ describe('formatReport / advise', () => {
         medianChars: 300,
         medianMs: 100,
         perApp: []
-      }
+      },
+      trailingIdleStart: null
     })
     expect(advice.some((line) => line.includes('一瞥'))).toBe(true)
     expect(advice.some((line) => line.includes('偏密'))).toBe(true)
@@ -452,7 +454,8 @@ describe('formatReport / advise', () => {
         segmentsWithoutTrigger: 0,
         medianPerSegment: 0
       },
-      uia: null
+      uia: null,
+      trailingIdleStart: null
     })
     expect(advice.some((line) => line.includes('按空闲断段'))).toBe(true)
   })
@@ -476,8 +479,39 @@ describe('formatReport / advise', () => {
         segmentsWithoutTrigger: 0,
         medianPerSegment: 0
       },
-      uia: null
+      uia: null,
+      trailingIdleStart: null
     })
     expect(advice[0]).toContain('下一步可以拿这份数据去定')
+  })
+
+  it('有 stop 记录时空闲时长已知，不再标「未知」', () => {
+    const records: ProbeRecord[] = [fg(0, 1, 'a'), { type: 'idle', ts: at(60) }, { type: 'stop', ts: at(180) }]
+    const report = buildReport(records, [])
+    expect(report.trailingIdleStart).toBeNull()
+    expect(report.idleShare).toBeCloseTo(120 / 180, 5)
+    expect(formatReport(report)).not.toContain('采样结束时仍在空闲')
+  })
+
+  it('没有 stop 记录且最后一条是 idle 时，报告说明时长未知', () => {
+    const records: ProbeRecord[] = [fg(0, 1, 'a'), { type: 'idle', ts: at(60) }]
+    const report = buildReport(records, [])
+    expect(report.trailingIdleStart).toBe(at(60))
+    expect(formatReport(report)).toContain('采样结束时仍在空闲')
+  })
+
+  it('空闲结束（有 active）后不再算 trailing', () => {
+    const records: ProbeRecord[] = [
+      fg(0, 1, 'a'),
+      { type: 'idle', ts: at(10) },
+      { type: 'active', ts: at(70) },
+      fg(71, 1, 'a')
+    ]
+    expect(trailingIdleStart(records)).toBeNull()
+  })
+
+  it('短样本会打上「不能当结论」的提示', () => {
+    const text = formatReport(buildReport([fg(0, 1, 'a'), fg(60, 2, 'b')], []))
+    expect(text).toContain('样本不足 10 分钟')
   })
 })

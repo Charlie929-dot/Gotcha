@@ -71,6 +71,12 @@ export interface InductionRuntimeOptions {
   intervalMs?: number
   onSnapshot?: (snapshot: InductionSnapshot) => void
   /**
+   * 归纳成功落库后回调（只有节点 / 边 / 占位真的有变化才触发）。
+   * 主进程用它推 `graph:changed`：开着的图谱窗口就地刷新，自动归纳跑完不用用户再点刷新。
+   * 失败 / 跳过 / 取消不触发（画布没有任何变化）。
+   */
+  onGraphChanged?: (outcome: Extract<RunOutcome, { status: 'ok' }>) => void
+  /**
    * 本地向量模型是否就绪（缺省视为就绪：没接线的地方不该凭空报黄条）。
    * 每次取快照现读，用户装好模型后下一次刷新就能消失。
    */
@@ -169,6 +175,21 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
     log('info', 'induction run aborted', { manual: meta.manual })
   }
 
+  /**
+   * service 每次跑完（自动 / 手动 / 跳过）都走这里：先记日志，再按需通知画布刷新。
+   * 通知只看「落库结果有没有变化」，与 manual / 自动无关——自动跑批也得让开着的图谱动起来。
+   */
+  const handleRunFinished = (
+    outcome: RunOutcome,
+    state: InductionState,
+    meta: InductionRunMeta
+  ): void => {
+    logRun(outcome, state, meta)
+    if (outcome.status !== 'ok') return
+    if (outcome.nodes + outcome.edges + outcome.placeholders <= 0) return
+    options.onGraphChanged?.(outcome)
+  }
+
   const ensureService = (): InductionService => {
     if (service) return service
     service = createInductionService({
@@ -181,7 +202,7 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
       firstDelayMs: options.firstDelayMs,
       intervalMs: options.intervalMs,
       onStateChange: () => emit(),
-      onRunFinished: logRun
+      onRunFinished: handleRunFinished
     })
     return service
   }

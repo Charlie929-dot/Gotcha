@@ -51,6 +51,18 @@ export type GraphRecomputeResult =
   | { ok: true; edges: number; merges: number; embeddings: boolean }
   | { ok: false; reason: 'busy' | 'unavailable' }
 
+/**
+ * `graph:changed`：归纳跑完并落库后由主进程推给图谱窗口（自动 / 手动都推）。
+ * 渲染层据此就地刷新——开机后的自动归纳不再需要用户手动点刷新才看得到新节点。
+ * 计数与 `at` 随事件一起带上，渲染层目前只用它去抖，将来要做「刚更新了 N 个主题」的提示可直接用。
+ */
+export interface GraphChangedEvent {
+  nodes: number
+  edges: number
+  placeholders: number
+  at: number
+}
+
 export interface GraphIpcDeps {
   getGraphWindow(): BrowserWindow | null
   queryGraph(from: number, to: number): GraphDayData

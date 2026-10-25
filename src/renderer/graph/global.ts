@@ -174,6 +174,13 @@ let calMonth = new Date().getMonth()
 let settleMs: number | null = null
 let loadStartedAt = 0
 let savingPositions = false
+/** 手动「立即归纳」在跑：它的按钮流程自己会 load()，期间推送来的刷新先让路 */
+let inducing = false
+/** 归纳落库后的就地刷新：防抖计时器 + 上次全量拉图时间（避免手动归纳被刷两遍） */
+let autoRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let lastLoadedAt = 0
+/** 窗口不可见时收到推送：先记下，等重新可见再拉（不白算也不丢） */
+let refreshWhenVisible = false
 
 const settingsPanel = createSettingsPanel(document.body, window.gotchaGraph, (settings, changed) => {
   void applySavedSettings(settings, changed)
@@ -303,9 +310,81 @@ async function load(): Promise<void> {
     updateCount()
     showEmpty('error', `读取全局图失败：${String(error)}`)
   } finally {
-    if (seq === loadSeq) loading = false
+    if (seq === loadSeq) {
+      loading = false
+      lastLoadedAt = Date.now()
+    }
   }
 }
+
+/* ------------------------------ 归纳后就地刷新 ------------------------------ */
+
+/** 归纳跑完的推送合并成一次刷新：批与批之间很近，没必要每批都重拉 */
+const AUTO_REFRESH_DELAY_MS = 700
+/** 手动归纳 / 设置保存刚全量拉过图的窗口期：这期间的推送不再重复拉 */
+const AUTO_REFRESH_DEDUPE_MS = 1_500
+
+function scheduleGraphRefresh(delayMs = AUTO_REFRESH_DELAY_MS): void {
+  if (autoRefreshTimer !== null) clearTimeout(autoRefreshTimer)
+  autoRefreshTimer = setTimeout(() => {
+    autoRefreshTimer = null
+    void refreshGraphInPlace()
+  }, delayMs)
+}
+
+/**
+ * 归纳落库后**就地**刷新（自动归纳跑完由主进程 `graph:changed` 触发）。
+ * 与 load() 的区别：不把 graphData 置空——同 id 节点沿用画布上的当前坐标，新节点才用库里 seed，
+ * 相机与时间 / 文字筛选都不重置，用户正看着哪块不会被打断。
+ */
+async function refreshGraphInPlace(): Promise<void> {
+  // 首次加载还没成功：等它自己拉（它拿到的就是最新数据），不要叠请求
+  if (data === null) return
+  if (loading || inducing) {
+    scheduleGraphRefresh(400)
+    return
+  }
+  // 手动归纳 / 保存设置刚拉过全量图，这次推送的内容已经在画面里了
+  if (Date.now() - lastLoadedAt < AUTO_REFRESH_DEDUPE_MS) return
+  const seq = ++loadSeq
+  try {
+    const next = await window.gotchaGraph.global()
+    if (seq !== loadSeq) return
+    data = next
+    input = toGlobalGraphInput(next)
+    dayStats = computeDayStats(next.themes, next.dayActivity)
+    themeById = new Map(next.themes.map((theme) => [theme.id, theme]))
+    momentById = new Map(next.moments.map((moment) => [moment.id, moment]))
+    graphEl.seedPositions = new Map(
+      next.positions.map((position) => [themeNodeId(position.nodeId), { x: position.x, y: position.y }])
+    )
+    graphEl.graphData = toFoamGraph(input).data
+    applyTimeFocus(false)
+    updateCount()
+    updateHud()
+    // 待归纳空心点 / 日格热力也变了：日历开着就重画，关着等下次打开现算
+    if (!calendarEl.hidden) renderCalendar()
+    lastLoadedAt = Date.now()
+  } catch {
+    // 拉不到就保留旧图，下一次归纳或手动刷新再试
+  }
+}
+
+/** 主进程推来的「归纳落库了」：合并成一次刷新（窗口不可见就先记下，等可见再拉） */
+function onGraphChanged(): void {
+  if (document.hidden) {
+    refreshWhenVisible = true
+    return
+  }
+  refreshWhenVisible = false
+  scheduleGraphRefresh()
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !refreshWhenVisible) return
+  refreshWhenVisible = false
+  scheduleGraphRefresh()
+})
 
 /* ---------------------------------- 图配置 --------------------------------- */
 
@@ -1223,6 +1302,7 @@ async function applySavedSettings(
 }
 
 window.gotchaGraph.onStatus(applySnapshot)
+window.gotchaGraph.onGraphChanged(onGraphChanged)
 
 /* --------------------------------- 归纳 ---------------------------------- */
 
@@ -1232,6 +1312,7 @@ induceEl.addEventListener('click', async () => {
       ? parseDayKey([...days][0])
       : dayStart(Date.now())
   induceEl.disabled = true
+  inducing = true
   try {
     let nodes = 0
     let edges = 0
@@ -1270,6 +1351,7 @@ induceEl.addEventListener('click', async () => {
       showEmpty('error', `归纳失败：${result.message}`)
     }
   } finally {
+    inducing = false
     induceEl.disabled = false
     void refreshStatus()
   }

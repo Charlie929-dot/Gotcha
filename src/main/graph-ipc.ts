@@ -18,6 +18,7 @@ import type { FetchModelsResult } from '../understand/cloud/models'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
 import type { InductionRunOutcome, InductionSnapshot } from './induction-runtime'
 import type { HotkeyRegisterResult } from './hotkeys'
+import type { RevertThemeMergeResult, ThemeMergeGroupView } from '../understand/theme-merge'
 
 /** 跨进程返回时把 Error 摊平成字符串（structured clone 对 Error 的 message 不可靠） */
 export type GraphInduceResult =
@@ -73,6 +74,10 @@ export interface GraphIpcDeps {
   saveSettings(patch: unknown): GraphSettingsSaveResult
   /** 按当前阈值重算连线（不做节流：这是用户显式动作；在途回填时返回 busy） */
   recomputeGraph(): Promise<GraphRecomputeResult>
+  /** 未撤销的主题合并记录（设置抽屉「合并记录」用） */
+  listMerges(): ThemeMergeGroupView[]
+  /** 撤销一次合并（传 group_id）；撤销后渲染层会再触发一次重算 + 重新拉图 */
+  revertMerge(groupId: number): RevertThemeMergeResult
   /**
    * 保存成功后由主进程接手副作用（重绑热键 / 按确认门启停归纳）。
    * `previousConsent` 是**保存前**读到的确认门——保存后库里的值已经是新的，
@@ -356,6 +361,34 @@ export function createGraphIpcHandlers(
           // 只记「失败了」，不记主题正文 / 向量
           deps.log('warn', 'graph recompute failed', { error: String(error) })
           return { ok: false, reason: 'unavailable' } satisfies GraphRecomputeResult
+        }
+      }
+    ],
+    [
+      'graph:merges:list',
+      (event) => {
+        if (!ensureSender(event)) return []
+        try {
+          return deps.listMerges()
+        } catch (error) {
+          deps.log('warn', 'graph merges list failed', { error: String(error) })
+          return []
+        }
+      }
+    ],
+    [
+      'graph:merges:revert',
+      (event, groupId) => {
+        if (!ensureSender(event)) return { ok: false, reason: 'not-found' } satisfies RevertThemeMergeResult
+        if (typeof groupId !== 'number' || !Number.isInteger(groupId) || groupId <= 0) {
+          return { ok: false, reason: 'not-found' } satisfies RevertThemeMergeResult
+        }
+        try {
+          return deps.revertMerge(groupId)
+        } catch (error) {
+          // 只记「失败了」，不记主题正文
+          deps.log('warn', 'graph merge revert failed', { error: String(error) })
+          return { ok: false, reason: 'not-found' } satisfies RevertThemeMergeResult
         }
       }
     ],

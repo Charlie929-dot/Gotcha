@@ -183,3 +183,76 @@ describe('graph:recompute · 保存阈值后重算连线', () => {
     expect(logged).toEqual(['graph recompute failed'])
   })
 })
+
+describe('graph:merges · 合并记录与撤销', () => {
+  const group = {
+    groupId: 3,
+    into: { id: 1, title: '存活主题' },
+    from: [{ id: 2, title: '被并入主题' }],
+    mergedAt: 100
+  }
+
+  it('列出未撤销的合并记录（主 frame）', () => {
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.listMerges = () => [group]
+
+    expect(handlerOf(deps, 'graph:merges:list')(EVENT)).toEqual([group])
+  })
+
+  it('非图谱窗口 / 读库抛错：列表降级为空，不把错误抛给渲染层', () => {
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.listMerges = () => {
+      throw new Error('boom')
+    }
+    const intruder = { sender: { id: 99 }, senderFrame: MAIN_FRAME } as unknown as typeof EVENT
+
+    expect(handlerOf(deps, 'graph:merges:list')(intruder)).toEqual([])
+    expect(handlerOf(deps, 'graph:merges:list')(EVENT)).toEqual([])
+  })
+
+  it('撤销：主 frame 调用把 groupId 交给数据层并原样返回结果', () => {
+    const calls: number[] = []
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.revertMerge = (groupId) => {
+      calls.push(groupId)
+      return { ok: true, groupId, into: 1, from: [2] }
+    }
+
+    expect(handlerOf(deps, 'graph:merges:revert')(EVENT, 3)).toEqual({
+      ok: true,
+      groupId: 3,
+      into: 1,
+      from: [2]
+    })
+    expect(calls).toEqual([3])
+  })
+
+  it('撤销：非整数 / 非正 groupId 不落数据层；非图谱窗口同样拒绝', () => {
+    const revert = vi.fn()
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.revertMerge = revert
+    const handler = handlerOf(deps, 'graph:merges:revert')
+    const intruder = { sender: { id: 99 }, senderFrame: MAIN_FRAME } as unknown as typeof EVENT
+
+    expect(handler(EVENT, 0)).toEqual({ ok: false, reason: 'not-found' })
+    expect(handler(EVENT, 1.5)).toEqual({ ok: false, reason: 'not-found' })
+    expect(handler(EVENT, '3')).toEqual({ ok: false, reason: 'not-found' })
+    expect(handler(intruder, 3)).toEqual({ ok: false, reason: 'not-found' })
+    expect(revert).not.toHaveBeenCalled()
+  })
+
+  it('撤销抛错只记「失败了」，返回 not-found', () => {
+    const logged: string[] = []
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.revertMerge = () => {
+      throw new Error('boom')
+    }
+    deps.log = (_level, msg) => logged.push(msg)
+
+    expect(handlerOf(deps, 'graph:merges:revert')(EVENT, 3)).toEqual({
+      ok: false,
+      reason: 'not-found'
+    })
+    expect(logged).toEqual(['graph merge revert failed'])
+  })
+})

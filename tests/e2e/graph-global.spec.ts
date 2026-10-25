@@ -168,6 +168,47 @@ test.beforeAll(async () => {
     'INSERT INTO edges (id, src, dst, weight, kind, evidence) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(100, 1, 2, 0.82, 'embedding', '{"model":"bge"}')
 
+  // 已合并的主题：节点 3 曾作为「次归属」挂在时刻 1 上，后来被并进节点 1（merged_into=1）。
+  // 用来验证设置抽屉「合并记录」能列出来、撤销后拆回一条独立主题。
+  db.prepare(
+    `INSERT INTO nodes (id, level, type, title, summary, ts_start, ts_end, source_events, merged_into)
+     VALUES (3, 1, 'knowledge', '旧按钮主题', '已并入按钮调试', ?, ?, ?, 1)`
+  ).run(t1, t1 + 5 * 60_000, JSON.stringify([e1]))
+  db.prepare(
+    `INSERT INTO node_merges (group_id, from_node, into_node, merged_at, reason, before_json, reverted_at)
+     VALUES (1, 3, 1, ?, 'auto:0.97', ?, NULL)`
+  ).run(
+    t1 + 60_000,
+    JSON.stringify({
+      version: 1,
+      into: {
+        id: 1,
+        type: 'knowledge',
+        title: '按钮调试',
+        summary: '修复悬停态',
+        tsStart: t1,
+        tsEnd: t1 + 30 * 60_000,
+        sourceEvents: JSON.stringify([e1, e2])
+      },
+      from: {
+        id: 3,
+        type: 'knowledge',
+        title: '旧按钮主题',
+        summary: '已并入按钮调试',
+        tsStart: t1,
+        tsEnd: t1 + 5 * 60_000,
+        sourceEvents: JSON.stringify([e1]),
+        memberships: [],
+        conflicts: [
+          {
+            intoSource: 'owner',
+            membership: { momentId: 1, weight: 0.9, source: 'secondary', createdAt: 1 }
+          }
+        ]
+      }
+    })
+  )
+
   // D37 之后模型随仓库分发，dev 跑会直接命中 resources/models → 回填会真的算向量、
   // 覆盖掉上面种的假边，E2E 就不再确定。这里显式把模型目录指到不存在的路径：
   // 保持「结构回填 + 缺模型黄条」这条旧行为（自带模型的命中由 embedding-paths 单测覆盖）。
@@ -653,5 +694,28 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     await expect(graph.locator('#set-edge-sim')).toHaveValue('0.5')
     await expect(graph.locator('#set-edge-k')).toHaveValue('8')
     await graph.locator('#settings-close').click()
+  })
+
+  test('合并记录：撤销后拆回独立主题，这一对不再自动合并', async () => {
+    await graph.locator('#settings').click()
+    const row = graph.locator('#merge-list li')
+    await expect(row).toHaveCount(1)
+    await expect(row.locator('.merge-titles')).toHaveText('按钮调试 ← 旧按钮主题')
+
+    await row.locator('button').click()
+    await expect(graph.locator('#merge-status')).toHaveText(
+      '已拆开 1 个主题；这一对以后不会再自动合并',
+      { timeout: 15_000 }
+    )
+    // 撤销过的组不再列出来
+    await expect(graph.locator('#merge-list li')).toHaveCount(0)
+    await expect(graph.locator('#merge-empty')).toBeVisible()
+    await graph.locator('#settings-close').click()
+
+    // 画布上多出被拆开的那条主题：2 → 3 个主题，时刻仍 2 个
+    await expect(graph.locator('#node-count')).toContainText('3 个主题 · 2 个时刻', {
+      timeout: 15_000
+    })
+    await expect.poll(async () => (await nodeIds()).length, { timeout: 15_000 }).toBe(5)
   })
 })

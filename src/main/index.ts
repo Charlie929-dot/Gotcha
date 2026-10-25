@@ -42,6 +42,7 @@ import { runGraphBackfill } from './graph-backfill-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
 import { isModelReady } from '../understand/embedding/session'
 import { registerGraphIpc, type GraphRecomputeResult, type ProviderKeySaveResult } from './graph-ipc'
+import { listThemeMerges, revertThemeMerge } from '../understand/theme-merge'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
   CaptureController,
@@ -917,6 +918,21 @@ if (primaryInstance) {
       },
       onSettingsSaved: applyGraphSettings,
       recomputeGraph,
+      listMerges: () => {
+        // 只读查询：没建过库就没有合并记录，且不能因为「打开抽屉」建库（A3）
+        const db = connections.queryDb()
+        return db ? listThemeMerges(db) : []
+      },
+      revertMerge: (groupId) => {
+        // A3：从未建库时不存在可撤销的合并
+        if (!existsSync(dbPath)) return { ok: false, reason: 'not-found' }
+        const db = connections.ensureWritable().db
+        const result = revertThemeMerge(db, groupId)
+        if (result.ok) {
+          captureLog('info', 'graph merge reverted', { groupId, restored: result.from.length })
+        }
+        return result
+      },
       getHotkeys: () => hotkeyHandle?.results ?? [],
       openTimeline: (day) => openTimelineDay(day ?? null),
       fetchProviderModels: async (input) => {

@@ -15,6 +15,7 @@ import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-s
 import type { GraphInduceResult, GraphRecomputeResult, ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { InductionSnapshot } from '../main/induction-runtime'
 import type { HotkeyRegisterResult } from '../main/hotkeys'
+import type { RevertThemeMergeResult, ThemeMergeGroupView } from '../understand/theme-merge'
 
 export interface GraphApi {
   query(from: number, to: number): Promise<GraphDayData>
@@ -38,6 +39,10 @@ export interface GraphApi {
   saveSettings(patch: unknown): Promise<GraphSettingsSaveResult>
   /** 按库里当前的相似度阈值重算连线（保存阈值后调用；模型未就绪时只回填结构） */
   recomputeGraph(): Promise<GraphRecomputeResult>
+  /** 未撤销的主题合并记录（设置抽屉「合并记录」） */
+  merges(): Promise<ThemeMergeGroupView[]>
+  /** 撤销一次合并；撤销后这两个主题不会再自动合并（渲染层随后调 recomputeGraph） */
+  revertMerge(groupId: number): Promise<RevertThemeMergeResult>
   providerModels(input: ProviderModelsInput): Promise<FetchModelsResult>
   saveProviderKey(providerId: string, apiKey: string): Promise<ProviderKeySaveResult>
   providerKeys(): Promise<Record<string, ApiKeySource>>
@@ -77,6 +82,9 @@ const api: GraphApi = {
     ipcRenderer.invoke('graph:settings:save', patch) as Promise<GraphSettingsSaveResult>,
   recomputeGraph: () =>
     ipcRenderer.invoke('graph:recompute') as Promise<GraphRecomputeResult>,
+  merges: () => ipcRenderer.invoke('graph:merges:list') as Promise<ThemeMergeGroupView[]>,
+  revertMerge: (groupId) =>
+    ipcRenderer.invoke('graph:merges:revert', groupId) as Promise<RevertThemeMergeResult>,
   providerModels: (input) =>
     ipcRenderer.invoke('graph:provider:models', input) as Promise<FetchModelsResult>,
   saveProviderKey: (providerId, apiKey) =>

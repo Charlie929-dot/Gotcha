@@ -65,6 +65,7 @@ import {
 import { computeDayStats, dayTooltip, heatAlpha, DEFAULT_HEAT_FULL_SCALE, type DayStat } from './day-stats'
 import { createGlobalPanel } from './global-panel'
 import { createSettingsPanel, type SettingsChange } from './graph-settings-panel'
+import type { ThemeMergeGroupView } from '../../understand/theme-merge'
 import { modelWarningText, statusView } from './status-view'
 import './view-hook'
 
@@ -170,7 +171,89 @@ let savingPositions = false
 const settingsPanel = createSettingsPanel(document.body, window.gotchaGraph, (settings, changed) => {
   void applySavedSettings(settings, changed)
 })
-byId('settings').addEventListener('click', () => void settingsPanel.open())
+byId('settings').addEventListener('click', () => {
+  void settingsPanel.open()
+  void refreshMerges()
+})
+
+/* ------------------------------ 合并记录（撤销） ----------------------------- */
+
+const mergeListEl = byId<HTMLUListElement>('merge-list')
+const mergeEmptyEl = byId<HTMLParagraphElement>('merge-empty')
+const mergeStatusEl = byId<HTMLParagraphElement>('merge-status')
+
+const REVERT_ERROR_TEXT: Record<string, string> = {
+  'not-found': '记录不存在（可能已撤销）',
+  'already-reverted': '这次合并已经撤销过',
+  'bad-snapshot': '合并快照损坏，无法撤销',
+  'has-newer-merges': '这两个主题后来又合并过，请先撤销较新的那次'
+}
+
+function setMergeStatus(text: string, kind: 'ok' | 'error' | 'muted' = 'muted'): void {
+  mergeStatusEl.textContent = text
+  mergeStatusEl.style.color = kind === 'error' ? 'var(--error)' : kind === 'ok' ? 'var(--activity)' : ''
+}
+
+function formatMergedAt(ts: number): string {
+  const date = new Date(ts)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function renderMerges(groups: ThemeMergeGroupView[]): void {
+  mergeListEl.replaceChildren()
+  mergeEmptyEl.hidden = groups.length > 0
+  for (const group of groups) {
+    const item = document.createElement('li')
+    const titles = document.createElement('span')
+    titles.className = 'merge-titles'
+    titles.textContent = `${group.into.title} ← ${group.from.map((node) => node.title).join('、')}`
+    titles.title = titles.textContent
+    const time = document.createElement('time')
+    time.textContent = formatMergedAt(group.mergedAt)
+    const button = document.createElement('button')
+    // 关键：抽屉在 <form> 里，按钮默认是 submit，会把「撤销」变成一次设置保存
+    button.type = 'button'
+    button.textContent = '撤销'
+    button.dataset['group'] = String(group.groupId)
+    button.addEventListener('click', () => void revertMerge(group, button))
+    item.append(titles, time, button)
+    mergeListEl.append(item)
+  }
+}
+
+async function refreshMerges(): Promise<void> {
+  try {
+    renderMerges(await window.gotchaGraph.merges())
+  } catch {
+    renderMerges([])
+  }
+}
+
+async function revertMerge(group: ThemeMergeGroupView, button: HTMLButtonElement): Promise<void> {
+  button.disabled = true
+  setMergeStatus('撤销中…')
+  try {
+    const result = await window.gotchaGraph.revertMerge(group.groupId)
+    if (!result.ok) {
+      setMergeStatus(REVERT_ERROR_TEXT[result.reason] ?? '撤销失败', 'error')
+      return
+    }
+    setMergeStatus(`已拆开 ${result.from.length} 个主题；这一对以后不会再自动合并`, 'ok')
+    await refreshMerges()
+    // 撤销删掉了相关向量 / 连线：按当前阈值重算一次再拉图，画面与库保持一致
+    try {
+      await window.gotchaGraph.recomputeGraph()
+    } catch {
+      // 重算失败不影响已撤销的数据，下次打开图谱会补
+    }
+    await load()
+  } catch (error) {
+    setMergeStatus(`撤销失败：${String(error)}`, 'error')
+  } finally {
+    button.disabled = false
+  }
+}
 
 /* --------------------------------- 数据加载 -------------------------------- */
 

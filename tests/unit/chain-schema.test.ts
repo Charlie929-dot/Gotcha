@@ -1,0 +1,199 @@
+import Database from 'better-sqlite3'
+import { afterEach, describe, expect, it } from 'vitest'
+import {
+  CHAIN_TABLES,
+  ensureChainSchema,
+  type ChainSegmentRow,
+  type ChainShotRow
+} from '../../src/chain/schema'
+import {
+  findOverlaps,
+  validateContent,
+  validateEvent,
+  validateSegment,
+  validateShot
+} from '../../src/chain/invariants'
+
+let db: Database.Database | null = null
+
+function open(): Database.Database {
+  db = new Database(':memory:')
+  ensureChainSchema(db)
+  return db
+}
+
+afterEach(() => {
+  db?.close()
+  db = null
+})
+
+function segment(overrides: Partial<ChainSegmentRow> = {}): ChainSegmentRow {
+  return {
+    id: 1,
+    start_ts: 1_000,
+    end_ts: 61_000,
+    active_ms: 60_000,
+    idle_ms: 0,
+    day_key: '2026-10-26',
+    app: 'Firefox',
+    exe: 'firefox',
+    pid: 100,
+    hwnd: 200,
+    title_first: 'A',
+    title_last: 'A',
+    created_at: 1_000,
+    closed: 1,
+    ...overrides
+  }
+}
+
+describe('ensureChainSchema', () => {
+  it('建出八张表，且重复执行幂等', () => {
+    const database = open()
+    ensureChainSchema(database)
+    const names = database
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chain_%' ORDER BY name")
+      .all() as Array<{ name: string }>
+    expect(names.map((row) => row.name)).toEqual([...CHAIN_TABLES].sort())
+  })
+
+  it('不碰旧表：只建 chain_ 前缀', () => {
+    const database = open()
+    const names = database
+      .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+      .all() as Array<{ name: string }>
+    expect(names.every((row) => row.name.startsWith('chain_'))).toBe(true)
+  })
+
+  it('证据表能写入，段与非空字段的 CHECK 生效', () => {
+    const database = open()
+    database
+      .prepare(
+        `INSERT INTO chain_segment (start_ts, end_ts, active_ms, idle_ms, day_key, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(1_000, 61_000, 60_000, 0, '2026-10-26', 1_000)
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO chain_segment (start_ts, end_ts, active_ms, idle_ms, day_key, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(1_000, 61_000, -1, 0, '2026-10-26', 1_000)
+    ).toThrow()
+  })
+
+  it('事件类型与截图层级受 CHECK 约束', () => {
+    const database = open()
+    database.prepare('INSERT INTO chain_segment (id, start_ts, end_ts, active_ms, day_key, created_at) VALUES (1, 0, 1000, 1000, ?, 0)').run('2026-10-26')
+    expect(() =>
+      database.prepare('INSERT INTO chain_event (segment_id, ts, kind) VALUES (1, 10, ?)').run('keypress')
+    ).toThrow()
+    expect(() =>
+      database
+        .prepare("INSERT INTO chain_shot (segment_id, ts, source, tier) VALUES (1, 10, 'event', 'frozen')")
+        .run()
+    ).toThrow()
+    expect(() =>
+      database.prepare("INSERT INTO chain_shot (segment_id, ts, source) VALUES (1, 10, 'event')").run()
+    ).not.toThrow()
+  })
+
+  it('内容来源只能是 uia / ocr / manual', () => {
+    const database = open()
+    database.prepare('INSERT INTO chain_segment (id, start_ts, end_ts, active_ms, day_key, created_at) VALUES (1, 0, 1000, 1000, ?, 0)').run('2026-10-26')
+    expect(() =>
+      database
+        .prepare("INSERT INTO chain_content (segment_id, captured_at, source, text, chars, hash) VALUES (1, 1, 'guess', 'x', 1, 'h')")
+        .run()
+    ).toThrow()
+  })
+})
+
+describe('validateSegment', () => {
+  it('有效时长 + 空闲必须等于跨度', () => {
+    expect(validateSegment(segment())).toEqual([])
+    // 走开回来接续：跨度 60s，其中 20s 空闲
+    expect(validateSegment(segment({ active_ms: 40_000, idle_ms: 20_000 }))).toEqual([])
+    expect(validateSegment(segment({ active_ms: 40_000, idle_ms: 0 }))).toEqual([
+      '有效时长 + 空闲 (40000 + 0) 不等于跨度 60000'
+    ])
+  })
+
+  it('结束早于开始、负时长、空 day_key 都报错', () => {
+    expect(validateSegment(segment({ start_ts: 61_000, end_ts: 1_000 }))).toContain('段结束早于开始')
+    expect(validateSegment(segment({ active_ms: -1 }))).toContain('段时长不能为负')
+    expect(validateSegment(segment({ day_key: '  ' }))).toContain('段缺少 day_key')
+  })
+})
+
+describe('validateEvent / validateShot / validateContent', () => {
+  const base = segment()
+
+  it('事件必须落在段内且指向存在的段', () => {
+    expect(validateEvent({ id: 1, segment_id: 1, ts: 5_000, kind: 'click_left', x: 1, y: 2, delta: null }, base)).toEqual([])
+    expect(validateEvent({ id: 1, segment_id: 2, ts: 5_000, kind: 'click_left', x: null, y: null, delta: null }, base)).toContain(
+      '事件指向的段不存在'
+    )
+    expect(validateEvent({ id: 1, segment_id: 1, ts: 99_000, kind: 'wheel', x: null, y: null, delta: 1 }, base)).toContain(
+      '事件时刻落在段之外'
+    )
+  })
+
+  function shot(overrides: Partial<ChainShotRow> = {}): ChainShotRow {
+    return {
+      id: 1,
+      segment_id: 1,
+      event_id: null,
+      ts: 5_000,
+      path: '/tmp/a.webp',
+      width: 100,
+      height: 100,
+      bytes: 1000,
+      source: 'enter',
+      tier: 'hot',
+      container: null,
+      ...overrides
+    }
+  }
+
+  it('截图必须挂在存在的段上，挂的事件必须同段', () => {
+    expect(validateShot(shot(), base)).toEqual([])
+    expect(validateShot(shot({ segment_id: 9 }), base)).toContain('截图指向的段不存在')
+    expect(validateShot(shot({ event_id: 3 }), base)).toContain('截图挂在不存在的事件上')
+    expect(
+      validateShot(shot({ event_id: 3 }), base, { id: 3, segment_id: 2, ts: 5_000, kind: 'enter', x: null, y: null, delta: null })
+    ).toContain('截图与它的事件不属于同一段')
+    // 入场帧挂在 enter 事件上是正常的（每张截图都有锚点）
+    expect(
+      validateShot(
+        shot({ event_id: 3 }),
+        base,
+        { id: 3, segment_id: 1, ts: 5_000, kind: 'enter', x: null, y: null, delta: null }
+      )
+    ).toEqual([])
+  })
+
+  it('内容必须有正文，字符数要和正文对得上', () => {
+    expect(
+      validateContent({ id: 1, segment_id: 1, captured_at: 1, source: 'uia', text: '记忆球', chars: 3, hash: 'h' })
+    ).toEqual([])
+    expect(
+      validateContent({ id: 1, segment_id: 1, captured_at: 1, source: 'ocr', text: '  ', chars: 2, hash: 'h' })
+    ).toContain('内容为空')
+    expect(
+      validateContent({ id: 1, segment_id: 1, captured_at: 1, source: 'ocr', text: 'abc', chars: 9, hash: 'h' })
+    ).toContain('字符数 9 与正文长度 3 不一致')
+  })
+})
+
+describe('findOverlaps', () => {
+  it('相邻不算重叠，交错算', () => {
+    expect(findOverlaps([{ start_ts: 0, end_ts: 100 }, { start_ts: 100, end_ts: 200 }])).toEqual([])
+    expect(findOverlaps([{ start_ts: 0, end_ts: 150 }, { start_ts: 100, end_ts: 200 }])).toHaveLength(1)
+  })
+
+  it('乱序输入也能发现重叠', () => {
+    expect(findOverlaps([{ start_ts: 100, end_ts: 200 }, { start_ts: 0, end_ts: 150 }])).toHaveLength(1)
+  })
+})

@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:e2e": "electron-vite build && playwright test",
     "typecheck": "tsc --noEmit",
-    "recall-baseline": "node scripts/recall-baseline.mts"
+    "recall-baseline": "node scripts/recall-baseline.mts",
+    "chain-probe": "node scripts/chain-probe/analyze.mts"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",

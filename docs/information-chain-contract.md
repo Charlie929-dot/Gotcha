@@ -215,7 +215,7 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 
 > 窗口段 → 事件 → 截图 → 内容 → 能按时间与应用查出段，并从段反查到截图与内容原文。
 
-**状态（v0.4）**：写入与查询已实现并有测试，跑的是合成事件——链路的每一跳都通了。
+**状态（v0.4）**：写入、查询与传输侧的接口都实现了，跑的是合成事件 / 假事件源——链路的每一跳都通了。
 
 | 环节 | 落地 | 证据 |
 | - | - | - |
@@ -224,7 +224,10 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 | 动作 → 表（记录器） | `src/chain/recorder.ts` | `tests/unit/chain-recorder.test.ts` |
 | 采集策略（段机） | `src/chain/segmenter.ts` | `tests/unit/chain-segmenter.test.ts` |
 | 查询（按时间 / 应用 / 日期、段反查、按正文搜、当日汇总） | `src/chain/store.ts` | 同上 |
-| **系统钩子（真实事件源）** | **未做** | — |
-| 接进应用启动（建表 / 收尾 / 定时推进） | **未做** | — |
+| **传输层接口**（`DesktopEventSource`：原始事件 + `lastInputTickMs`） | `src/chain/hook/types.ts` | — |
+| **适配层**（滚轮手势合并、键盘 `activity` 判定、心跳 tick） | `src/chain/hook/adapter.ts` | `tests/unit/chain-hook-adapter.test.ts` |
+| **运行时**（建表 → 崩溃收尾 → 订阅 → 心跳 → 收口） | `src/chain/hook/runtime.ts` | `tests/unit/chain-runtime.test.ts` |
+| **系统钩子（真实事件源）** | **未做**（传输方式已定：自写 N-API addon，D41；本机缺 MSVC 与 Windows SDK，见 `gotchas.md`） | — |
+| 接进应用启动（把 `ChainRuntime` 接到 `src/main/`） | **未做** | — |
 
 双链、标签、向量、个人记忆都排它后面。

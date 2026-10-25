@@ -42,11 +42,17 @@ import {
 } from './induction-runtime'
 import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSettingsView } from './graph-settings'
 import { createDeterministicFakeLlm } from './fake-llm'
+import { createDeterministicFakeEmbedder, type DeterministicFakeEmbedder } from './fake-embedding'
 import { createGraphWindow } from './graph-window'
 import { runGraphBackfill, loadSharedEmbedder } from './graph-backfill-runtime'
 import { createMomentRuntime, type MomentRuntime } from './moment-runtime'
-import { createThemeOnlineRuntime, type ThemeOnlineRuntime } from './theme-online-runtime'
+import {
+  createThemeOnlineRuntime,
+  type OnlineTickResult,
+  type ThemeOnlineRuntime
+} from './theme-online-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
+import type { Embedder } from '../understand/embedding/types'
 import { isModelReady } from '../understand/embedding/session'
 import {
   registerGraphIpc,
@@ -111,6 +117,20 @@ const fakeLlmBundle = fakeLlm
   ? createDeterministicFakeLlm({
       delayMs: Math.max(0, Number(process.env.GOTCHA_FAKE_LLM_DELAY_MS) || 0)
     })
+  : null
+
+/**
+ * E2E 假向量：与假采集 / 假 LLM 同一套三条件门（显式开关 + 临时 userData + 非打包态）。
+ * 在线路径的 E2E 必须注入它（docs/m2-graph-redesign.md §13.2）：真模型要加载 ~0.5 s，
+ * 且相似度不可控，「哪个时刻归到哪个主题」的断言会随模型输出漂。
+ * 注入后 `readEmbeddingsReady()` 按就绪处理——这是测试口径，不是对用户的静默降级。
+ */
+const fakeEmbedding =
+  process.env.GOTCHA_FAKE_EMBEDDING === '1' &&
+  Boolean(process.env.GOTCHA_USER_DATA) &&
+  !app.isPackaged
+const fakeEmbeddingBundle: DeterministicFakeEmbedder | null = fakeEmbedding
+  ? createDeterministicFakeEmbedder()
   : null
 
 const dbPath = join(app.getPath('userData'), DB_FILE_NAME)
@@ -294,11 +314,28 @@ function resolveModelDir(): string {
 }
 
 /**
+ * 图谱回填 / 在线归属共用的 embedder 入口。
+ * E2E 注入假向量时直接返回假实现（不加载 95 MB 模型）；正常路径仍走进程内共享的真模型会话。
+ */
+function loadGraphEmbedder(): Promise<Embedder | null> {
+  if (fakeEmbeddingBundle) return Promise.resolve(fakeEmbeddingBundle.embedder)
+  return loadSharedEmbedder(resolveModelDir(), { log: captureLog })
+}
+
+/** 回填的 embedder 工厂：只有假向量注入时才显式给（真模型路径自己按 `modelDir` 加载） */
+function createEmbedderFactory(): { createEmbedder?: (modelDir: string) => Promise<Embedder> } {
+  if (!fakeEmbeddingBundle) return {}
+  const embedder = fakeEmbeddingBundle.embedder
+  return { createEmbedder: async () => embedder }
+}
+
+/**
  * 本地向量模型是否就绪（`model.onnx` + `vocab.txt` 都在）。
  * 只 stat 两个文件；读设置走只读连接，模型没装时更不能因为一次状态查询去建库（A3）。
+ * E2E 注入假向量时按就绪处理：在线路径的开关判定依赖它（`onlineThemesActive`）。
  */
 function readEmbeddingsReady(): boolean {
-  return isModelReady(resolveModelDir())
+  return fakeEmbeddingBundle !== null || isModelReady(resolveModelDir())
 }
 
 /** 归纳运行时未创建时的只读快照（不建库；图谱窗口在采集暂停时也能显示原因） */
@@ -437,7 +474,7 @@ function ensureThemeOnlineRuntime(): ThemeOnlineRuntime | null {
       return current ? getSetting(current, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
     },
     readEmbeddingsReady,
-    loadEmbedder: () => loadSharedEmbedder(resolveModelDir(), { log: captureLog }),
+    loadEmbedder: loadGraphEmbedder,
     readEnabled: readOnlineThemesEnabled,
     onGraphChanged: (outcome) => pushGraphChanged(outcome),
     log: captureLog
@@ -515,7 +552,12 @@ function runGraphBackfillInBackground(): void {
     })
     return
   }
-  void runGraphBackfill({ db, modelDir: resolveModelDir(), log: captureLog })
+  void runGraphBackfill({
+    db,
+    modelDir: resolveModelDir(),
+    log: captureLog,
+    ...createEmbedderFactory()
+  })
 }
 
 /**
@@ -539,7 +581,8 @@ async function recomputeGraph(): Promise<GraphRecomputeResult> {
     db,
     modelDir: resolveModelDir(),
     log: captureLog,
-    minIntervalMs: 0
+    minIntervalMs: 0,
+    ...createEmbedderFactory()
   })
   if (result.status === 'skipped') {
     return { ok: false, reason: result.reason === 'busy' ? 'busy' : 'unavailable' }
@@ -606,7 +649,7 @@ app.on('before-quit', (event) => {
     }
     connections.closeAll()
     trayShell?.dispose()
-    if (fakeCapture || fakeLlm) globalThis.__gotchaTest = undefined
+    if (fakeCapture || fakeLlm || fakeEmbedding) globalThis.__gotchaTest = undefined
     app.quit()
   })()
 })
@@ -921,7 +964,10 @@ async function toggleCapture(): Promise<void> {
   }
 }
 
-/** 测试钩子：只在假采集（临时 userData + 非打包）下挂到主进程 globalThis */
+/**
+ * 测试钩子：只在假采集 / 假 LLM / 假向量（临时 userData + 非打包）下挂到主进程 globalThis。
+ * 任何一条注入都意味着「这是测试进程」，钩子不额外放宽业务约束（`toggle()` 走同一个入口）。
+ */
 interface GotchaTestHook {
   toggle(): Promise<void>
   status(): string
@@ -931,6 +977,11 @@ interface GotchaTestHook {
   openTimeline(): void
   /** 假 LLM 请求计数（断言暂停后零新增请求 / 零真实网络） */
   fakeLlm(): { requests: number; aborted: number } | null
+  /**
+   * 在线归属跑一轮（S7 E2E）：60s 定时器对用例太慢，这里直接走 `runOnce()`。
+   * 采集没跑 / 暂停 / 销毁时返回 `skipped`，不绕过 D18（暂停仍零出网）。
+   */
+  onlineTick(): Promise<OnlineTickResult | null>
   induction(): InductionSnapshot
 }
 
@@ -952,6 +1003,10 @@ function installTestHook(): void {
       fakeLlmBundle
         ? { requests: fakeLlmBundle.counters.requests, aborted: fakeLlmBundle.counters.aborted }
         : null,
+    onlineTick: () => {
+      const runtime = ensureThemeOnlineRuntime()
+      return runtime ? runtime.runOnce() : Promise.resolve(null)
+    },
     induction: () => currentInductionSnapshot()
   }
 }
@@ -1123,7 +1178,7 @@ if (primaryInstance) {
       if (!quitRequested) app.quit()
     })
 
-    if (fakeCapture || fakeLlm) installTestHook()
+    if (fakeCapture || fakeLlm || fakeEmbedding) installTestHook()
 
     registerGlobalHotkeys()
 

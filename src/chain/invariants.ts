@@ -3,6 +3,9 @@
  *
  * 纯函数：不碰数据库，输入是待写入的行，输出是人能读的问题清单。
  * 写入前先过一遍，问题是**返回错误**而不是修补——证据层不许静默改数。
+ *
+ * 每张截图都挂在触发它的那个事件上（入场帧挂在 `enter` 事件上），
+ * 所以只允许 `event_id` 为空的一种情况：截图的证据事件被删了（不应发生，留作防御）。
  */
 import type { ChainContentRow, ChainEventRow, ChainSegmentRow, ChainShotRow } from './schema'
 
@@ -36,7 +39,6 @@ export function validateShot(shot: ChainShotRow, segment: ChainSegmentRow, event
     if (!event) problems.push('截图挂在不存在的事件上')
     else if (event.segment_id !== shot.segment_id) problems.push('截图与它的事件不属于同一段')
   }
-  if (shot.source === 'enter' && shot.event_id !== null) problems.push('入场帧不应关联普通事件')
   if (shot.ts < segment.start_ts || shot.ts > segment.end_ts) problems.push('截图时刻落在段之外')
   return problems
 }

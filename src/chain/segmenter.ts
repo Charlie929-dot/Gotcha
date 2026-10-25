@@ -9,10 +9,13 @@
  * - 采集只由事件驱动：入场 / 点击 / 滚轮 / 移动后暂停；
  * - 键盘：任何输入都重置「打字停顿」计时，停顿满 `typingSettleMs`（默认 3s）补采一张。
  *
+ * 动作契约：**事件一律上报**（它是段内的时间锚点，不是可选项），冷却只决定
+ * `capture` 为不为真（要不要顺手截一张）。这样「切过来 1 秒内点了一下」不会连锚点都丢。
+ *
  * `activity` 输入表示「系统有输入但拿不到是什么」（键盘），来自 `GetLastInputInfo`——
  * 因此不需要键盘钩子。
  */
-import type { ChainEventKind, ChainShotSource } from './schema'
+import type { ChainEventKind } from './schema'
 
 export interface SegmenterOptions {
   /** 空闲判定：这么久没有任何输入就算走了 */
@@ -42,7 +45,7 @@ export const DEFAULT_SEGMENTER_OPTIONS: SegmenterOptions = {
 }
 
 export type ChainInput =
-  | { kind: 'focus'; ts: number; pid: number; exe: string; title: string; hwnd: number }
+  | { kind: 'focus'; ts: number; pid: number; exe: string; title: string; hwnd: number; app?: string | null }
   | { kind: 'click'; ts: number; button: 'left' | 'right' | 'middle'; x: number; y: number }
   | { kind: 'wheel'; ts: number; delta: number; x: number; y: number }
   | { kind: 'move'; ts: number; x: number; y: number }
@@ -51,6 +54,16 @@ export type ChainInput =
   /** 时钟推进：只用来判空闲与打字停顿，不产生事件 */
   | { kind: 'tick'; ts: number }
 
+/** 开段时已知的信息（段行此时就要落库，子行才能拿到 segment_id） */
+export interface SegmentOpenDraft {
+  startTs: number
+  pid: number
+  exe: string
+  app: string | null
+  hwnd: number
+  title: string
+}
+
 export interface SegmentDraft {
   startTs: number
   endTs: number
@@ -58,13 +71,24 @@ export interface SegmentDraft {
   idleMs: number
   pid: number
   exe: string
+  app: string | null
   hwnd: number
   titleFirst: string
   titleLast: string
 }
 
 export type ChainAction =
-  | { type: 'capture'; source: ChainShotSource; at: number; eventKind: ChainEventKind | null }
+  | { type: 'segment-opened'; at: number; segment: SegmentOpenDraft }
+  | {
+      type: 'event'
+      at: number
+      kind: ChainEventKind
+      x: number | null
+      y: number | null
+      delta: number | null
+      /** 冷却允许的话，顺手截一张（截图只是证据，事件本身照记） */
+      capture: boolean
+    }
   | { type: 'segment-closed'; segment: SegmentDraft; reason: 'switch' | 'idle' | 'stop' }
   | { type: 'idle-start'; at: number }
   | { type: 'idle-end'; from: number; to: number }
@@ -79,6 +103,7 @@ interface OpenSegment {
   lastInputTs: number
   pid: number
   exe: string
+  app: string | null
   hwnd: number
   titleFirst: string
   title: string
@@ -131,9 +156,11 @@ export class ChainSegmenter {
       case 'click':
       case 'wheel': {
         actions.push(...this.settleMovePause(input.ts))
-        const kind = input.kind === 'click' ? clickKind(input.button) : 'wheel'
-        const capture = this.tryCapture('event', input.ts, kind)
-        if (capture) actions.push(capture)
+        const event =
+          input.kind === 'click'
+            ? this.recordEvent(input.ts, clickKind(input.button), Math.round(input.x), Math.round(input.y))
+            : this.recordEvent(input.ts, 'wheel', Math.round(input.x), Math.round(input.y), input.delta)
+        if (event) actions.push(event)
         break
       }
       case 'move':
@@ -169,10 +196,11 @@ export class ChainSegmenter {
     }
 
     if (this.typingDueAt !== null && now >= this.typingDueAt) {
+      // 停顿点若正好撞上截图冷却，就等到冷却结束再拍——「停顿满 3s 一定有一张」比守时更重要
       const due = Math.max(this.typingDueAt, this.lastCaptureTs + this.options.captureCooldownMs)
       if (now >= due) {
-        const capture = this.tryCapture('typing', due, null)
-        if (capture) actions.push(capture)
+        const event = this.recordEvent(due, 'typing')
+        if (event) actions.push(event)
         this.typingDueAt = null
       }
     }
@@ -214,8 +242,8 @@ export class ChainSegmenter {
     if (now - move.ts < this.options.movePauseMs) return []
     this.lastMove = null
     if (move.moved < this.options.movePauseDistPx) return []
-    const capture = this.tryCapture('event', move.ts + this.options.movePauseMs, 'move_pause')
-    return capture ? [capture] : []
+    const event = this.recordEvent(move.ts + this.options.movePauseMs, 'move_pause', Math.round(move.x), Math.round(move.y))
+    return event ? [event] : []
   }
 
   private trackMove(input: Extract<ChainInput, { kind: 'move' }>): void {
@@ -235,9 +263,7 @@ export class ChainSegmenter {
     this.idleClosed = null
 
     if (!this.open) {
-      this.open = this.startSegment(input, input.ts)
-      const capture = this.tryCapture('enter', input.ts, 'enter')
-      if (capture) actions.push(capture)
+      this.beginSegment(input, input.ts, actions)
       return actions
     }
 
@@ -245,8 +271,7 @@ export class ChainSegmenter {
 
     // 刚结束空闲就回到同一窗口：接续，只是段内多了一个空闲洞
     if (justResumed && sameWindow && input.title === this.open.title) {
-      const capture = this.tryCapture('enter', input.ts, 'enter')
-      if (capture) actions.push(capture)
+      this.pushEnter(input.ts, actions)
       return actions
     }
 
@@ -270,10 +295,31 @@ export class ChainSegmenter {
 
     if (this.pendingTitle) actions.push(...this.commitTitleSplit())
     if (this.open) actions.push(this.closeSegment(input.ts, 'switch'))
-    this.open = this.startSegment(input, input.ts)
-    const capture = this.tryCapture('enter', input.ts, 'enter')
-    if (capture) actions.push(capture)
+    this.beginSegment(input, input.ts, actions)
     return actions
+  }
+
+  /** 开段：先上报开段（行要落库），再上报入场事件 */
+  private beginSegment(input: Extract<ChainInput, { kind: 'focus' }>, ts: number, actions: ChainAction[]): void {
+    this.open = this.startSegment(input, ts)
+    actions.push({
+      type: 'segment-opened',
+      at: ts,
+      segment: {
+        startTs: ts,
+        pid: input.pid,
+        exe: input.exe,
+        app: input.app ?? null,
+        hwnd: input.hwnd,
+        title: input.title
+      }
+    })
+    this.pushEnter(ts, actions)
+  }
+
+  private pushEnter(ts: number, actions: ChainAction[]): void {
+    const event = this.recordEvent(ts, 'enter')
+    if (event) actions.push(event)
   }
 
   /** 标题抖动窗口过去了：段在标题变化那一刻收口，新段从那一刻开始 */
@@ -289,13 +335,25 @@ export class ChainSegmenter {
       lastInputTs: segment.lastInputTs,
       pid: segment.pid,
       exe: segment.exe,
+      app: segment.app,
       hwnd: segment.hwnd,
       titleFirst: pending.to,
       title: pending.to,
       idleRanges: []
     }
-    const capture = this.tryCapture('enter', pending.at, 'enter')
-    if (capture) actions.push(capture)
+    actions.push({
+      type: 'segment-opened',
+      at: pending.at,
+      segment: {
+        startTs: pending.at,
+        pid: segment.pid,
+        exe: segment.exe,
+        app: segment.app,
+        hwnd: segment.hwnd,
+        title: pending.to
+      }
+    })
+    this.pushEnter(pending.at, actions)
     return actions
   }
 
@@ -305,6 +363,7 @@ export class ChainSegmenter {
       lastInputTs: ts,
       pid: input.pid,
       exe: input.exe,
+      app: input.app ?? null,
       hwnd: input.hwnd,
       titleFirst: input.title,
       title: input.title,
@@ -336,17 +395,28 @@ export class ChainSegmenter {
       idleMs,
       pid: segment.pid,
       exe: segment.exe,
+      app: segment.app,
       hwnd: segment.hwnd,
       titleFirst: segment.titleFirst,
       titleLast: segment.title
     }
   }
 
-  private tryCapture(source: ChainShotSource, at: number, eventKind: ChainEventKind | null): ChainAction | null {
+  /**
+   * 上报一个事件。**事件本身不受冷却影响**（它是锚点，丢了就补不回来），
+   * 冷却只决定 `capture`——要不要顺便截一张。
+   */
+  private recordEvent(
+    at: number,
+    kind: ChainEventKind,
+    x: number | null = null,
+    y: number | null = null,
+    delta: number | null = null
+  ): ChainAction | null {
     if (!this.open) return null
-    if (at - this.lastCaptureTs < this.options.captureCooldownMs) return null
-    this.lastCaptureTs = at
-    return { type: 'capture', source, at, eventKind }
+    const capture = at - this.lastCaptureTs >= this.options.captureCooldownMs
+    if (capture) this.lastCaptureTs = at
+    return { type: 'event', at, kind, x, y, delta, capture }
   }
 }
 

@@ -6,6 +6,10 @@
  * 由调用方显式执行 `ensureChainSchema(db)`（第一版只被单测调用）。
  *
  * 证据层（段 / 事件 / 截图）只 INSERT；派生层（标签 / 双链 / 向量）可全删重建。
+ *
+ * 唯一例外（契约 v0.4）：段在开段时就要插入一行（子行要立刻拿到 `segment_id`，
+ * 且段可能长达数小时、不能全缓冲在内存里），`end_ts` / `active_ms` / `idle_ms` /
+ * `title_last` / `closed` 由收口时的**一次** UPDATE 落定；其余字段此后永不改。
  */
 
 /** 段：一个窗口的一段焦点占用 */
@@ -24,8 +28,10 @@ CREATE TABLE IF NOT EXISTS chain_segment (
   title_first TEXT,
   title_last  TEXT,
   created_at  INTEGER NOT NULL,
+  closed      INTEGER NOT NULL DEFAULT 0,  -- 0=还开着（end_ts/active_ms 只是暂定值），1=已收口
   CHECK (end_ts >= start_ts),
-  CHECK (active_ms >= 0 AND idle_ms >= 0)
+  CHECK (active_ms >= 0 AND idle_ms >= 0),
+  CHECK (closed IN (0, 1))
 );
 `
 
@@ -39,7 +45,7 @@ CREATE TABLE IF NOT EXISTS chain_event (
   x          INTEGER,
   y          INTEGER,
   delta      INTEGER,
-  CHECK (kind IN ('click_left', 'click_right', 'click_middle', 'wheel', 'move_pause', 'enter'))
+  CHECK (kind IN ('click_left', 'click_right', 'click_middle', 'wheel', 'move_pause', 'typing', 'enter'))
 );
 `
 
@@ -48,7 +54,7 @@ export const CHAIN_SHOT_DDL = `
 CREATE TABLE IF NOT EXISTS chain_shot (
   id         INTEGER PRIMARY KEY,
   segment_id INTEGER NOT NULL,
-  event_id   INTEGER,
+  event_id   INTEGER,             -- 触发它的那个事件（入场帧挂在 enter 事件上）
   ts         INTEGER NOT NULL,
   path       TEXT,
   width      INTEGER,
@@ -57,7 +63,7 @@ CREATE TABLE IF NOT EXISTS chain_shot (
   source     TEXT NOT NULL,
   tier       TEXT NOT NULL DEFAULT 'hot',
   container  TEXT,
-  CHECK (source IN ('event', 'enter')),
+  CHECK (source IN ('event', 'enter', 'typing')),
   CHECK (tier IN ('hot', 'warm', 'cold', 'archive'))
 );
 `
@@ -175,12 +181,16 @@ export const CHAIN_EVENT_KINDS = [
   'click_middle',
   'wheel',
   'move_pause',
+  'typing',
   'enter'
 ] as const
 export type ChainEventKind = (typeof CHAIN_EVENT_KINDS)[number]
 
+/** 鼠标事件（会带坐标 / 滚轮格数）；typing 与 enter 没有坐标 */
+export const CHAIN_POINTER_EVENT_KINDS = ['click_left', 'click_right', 'click_middle', 'wheel', 'move_pause'] as const
+
 /** 截图来源 */
-export const CHAIN_SHOT_SOURCES = ['event', 'enter'] as const
+export const CHAIN_SHOT_SOURCES = ['event', 'enter', 'typing'] as const
 export type ChainShotSource = (typeof CHAIN_SHOT_SOURCES)[number]
 
 /** 归档层级（契约 §5.1） */
@@ -205,6 +215,8 @@ export interface ChainSegmentRow {
   title_first: string | null
   title_last: string | null
   created_at: number
+  /** 0 = 还开着（`end_ts` / `active_ms` 只是暂定值，收口时由唯一一次 UPDATE 落定） */
+  closed: 0 | 1
 }
 
 export interface ChainEventRow {

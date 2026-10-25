@@ -42,6 +42,7 @@ function segment(overrides: Partial<ChainSegmentRow> = {}): ChainSegmentRow {
     title_first: 'A',
     title_last: 'A',
     created_at: 1_000,
+    closed: 1,
     ...overrides
   }
 }
@@ -156,16 +157,21 @@ describe('validateEvent / validateShot / validateContent', () => {
     }
   }
 
-  it('截图必须挂在存在的段上，入场帧不能挂普通事件', () => {
+  it('截图必须挂在存在的段上，挂的事件必须同段', () => {
     expect(validateShot(shot(), base)).toEqual([])
     expect(validateShot(shot({ segment_id: 9 }), base)).toContain('截图指向的段不存在')
     expect(validateShot(shot({ event_id: 3 }), base)).toContain('截图挂在不存在的事件上')
     expect(
       validateShot(shot({ event_id: 3 }), base, { id: 3, segment_id: 2, ts: 5_000, kind: 'enter', x: null, y: null, delta: null })
     ).toContain('截图与它的事件不属于同一段')
-    expect(validateShot(shot({ event_id: 3 }), base, { id: 3, segment_id: 1, ts: 5_000, kind: 'enter', x: null, y: null, delta: null })).toContain(
-      '入场帧不应关联普通事件'
-    )
+    // 入场帧挂在 enter 事件上是正常的（每张截图都有锚点）
+    expect(
+      validateShot(
+        shot({ event_id: 3 }),
+        base,
+        { id: 3, segment_id: 1, ts: 5_000, kind: 'enter', x: null, y: null, delta: null }
+      )
+    ).toEqual([])
   })
 
   it('内容必须有正文，字符数要和正文对得上', () => {

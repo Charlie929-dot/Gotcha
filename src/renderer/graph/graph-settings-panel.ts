@@ -105,6 +105,8 @@ export function createSettingsPanel(
    * 否则从经典页保存会把它写成空值 / 覆盖掉全局页的设置。
    */
   const dayHeatInput = root.querySelector<HTMLInputElement>('#set-day-heat')
+  /** 「时刻过多」提示阈值也只在全局图页有（经典页共用面板），同样容错、缺省不发字段 */
+  const scaleHintInput = root.querySelector<HTMLInputElement>('#set-scale-hint')
   /**
    * 相似度阈值 / 连线数同样只在全局图页有输入框（P3-b）。三项一起出现：
    * 缺一个就整组当成「本页没有」，不发送 thresholds——避免经典页保存时把某项写成空值。
@@ -511,6 +513,7 @@ export function createSettingsPanel(
       batchInput.value = String(settings.batchMaxMoments)
       maxTokensInput.value = String(settings.maxTokens)
       if (dayHeatInput) dayHeatInput.value = String(settings.dayHeatMax)
+    if (scaleHintInput) scaleHintInput.value = String(settings.scaleHintMoments)
       if (thresholdInputs) {
         thresholdInputs.mergeSimInput.value = String(settings.thresholds.themeMergeSim)
         thresholdInputs.edgeSimInput.value = String(settings.thresholds.edgeMinSim)
@@ -581,6 +584,7 @@ export function createSettingsPanel(
       }
       // 只有全局图页有这个输入框；缺省时不要带字段（免得清掉已有设置）
       if (dayHeatInput) payload.dayHeatMax = Number(dayHeatInput.value)
+      if (scaleHintInput) payload.scaleHintMoments = Number(scaleHintInput.value)
       const thresholdPatch = readThresholdPatch()
       if (thresholdPatch) payload.thresholds = thresholdPatch
       const result = await api.saveSettings(payload)
@@ -621,6 +625,7 @@ export function createSettingsPanel(
       hotkeyGraphInput.value = result.settings.hotkeys.openGraph
       consentInput.checked = result.settings.outboundConsent
       if (dayHeatInput) dayHeatInput.value = String(result.settings.dayHeatMax)
+      if (scaleHintInput) scaleHintInput.value = String(result.settings.scaleHintMoments)
       if (thresholdInputs) {
         thresholdInputs.mergeSimInput.value = String(result.settings.thresholds.themeMergeSim)
         thresholdInputs.edgeSimInput.value = String(result.settings.thresholds.edgeMinSim)

@@ -741,4 +741,44 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     })
     await expect.poll(async () => (await nodeIds()).length, { timeout: 15_000 }).toBe(5)
   })
+
+  test('时刻过多提示：阈值可调，点「只看主题」后消失', async () => {
+    // 默认阈值 2000，2 个时刻远低于它 → 不提示
+    await expect(graph.locator('#scale-hint')).toBeHidden()
+
+    // 把阈值调到 1（调试值）：2 个时刻 > 1 → 顶部提示
+    await graph.locator('#settings').click()
+    await graph.locator('#set-scale-hint').fill('1')
+    await graph.locator('#settings-save').click()
+    await expect(graph.locator('#settings-msg')).toHaveText('已保存', { timeout: 15_000 })
+
+    await expect(graph.locator('#scale-hint')).toBeVisible()
+    await expect(graph.locator('#scale-hint-text')).toContainText(
+      '已显示 2 个时刻（提示阈值 1 个）'
+    )
+    // 抽屉盖在提示条上，先关掉再点按钮
+    await graph.locator('#settings-close').click()
+
+    // 一键「只看主题」：时刻层隐藏，提示收起
+    await graph.locator('#scale-hint-only-themes').click()
+    await expect(graph.locator('#scale-hint')).toBeHidden()
+    await expect(graph.locator('#only-themes')).toBeChecked()
+    await expect.poll(async () => (await visibleCounts()).moments, { timeout: 10_000 }).toBe(0)
+    await expect(graph.locator('#node-count')).toContainText('只看主题')
+
+    // 阈值改回 2000 后仍然不提示；只看主题也恢复关掉
+    await graph.locator('#settings').click()
+    await graph.locator('#set-scale-hint').fill('2000')
+    await graph.locator('#settings-save').click()
+    await expect(graph.locator('#settings-msg')).toHaveText('已保存', { timeout: 15_000 })
+    await expect(graph.locator('#set-scale-hint')).toHaveValue('2000')
+    await graph.locator('#settings-close').click()
+    await graph.evaluate(() => {
+      ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setOnlyThemes(
+        false
+      )
+    })
+    await expect(graph.locator('#only-themes')).not.toBeChecked()
+    await expect(graph.locator('#scale-hint')).toBeHidden()
+  })
 })

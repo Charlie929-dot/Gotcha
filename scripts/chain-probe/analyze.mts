@@ -1,0 +1,804 @@
+/**
+ * 信息链探针 · 分析器（Node 24 原生跑 TS，无需编译）
+ *
+ * 输入是 `scripts/chain-probe/collect.ps1` 与 `uia-probe.ps1` 产出的 JSONL，
+ * 输出是「窗口占用段能不能切准」「截图触发有多密」「UIA 覆盖多少文本」的量化回答。
+ * 口径见 `docs/chain-probe.md`。
+ *
+ * 用法：
+ *   npm run chain-probe -- .tmp/chain-probe/collect-xxx.jsonl
+ *   npm run chain-probe -- .tmp/chain-probe/collect-xxx.jsonl --uia .tmp/chain-probe/uia-xxx.jsonl
+ *   npm run chain-probe -- .tmp/chain-probe/collect-xxx.jsonl --json
+ *
+ * 这个脚本不碰应用、不碰数据库、不出网：输入输出都是本地 JSONL / markdown。
+ */
+import { readFileSync, writeFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
+/* ------------------------------------------------------------------ *
+ * 类型
+ * ------------------------------------------------------------------ */
+
+export interface ProbeRecord {
+  type: string
+  ts: number
+  pid?: number
+  exe?: string
+  title?: string
+  hwnd?: number
+  x?: number
+  y?: number
+  button?: string
+  delta?: number
+  idleMs?: number
+}
+
+/** 一条「这个窗口此刻是前台」的状态记录（fg 切换或标题变化） */
+export interface WindowState {
+  ts: number
+  pid: number
+  exe: string
+  title: string
+  hwnd: number
+}
+
+export interface IdleRange {
+  start: number
+  end: number
+}
+
+export interface SegmentRule {
+  id: string
+  label: string
+  /** true：连同标题一起当身份（标题变化即切段）；false：只按进程合并 */
+  byTitle: boolean
+  /** 空闲超过这个时长就断开；0 表示不因空闲断开 */
+  idleSplitMs: number
+}
+
+/** 切分规则对比：段越碎，图谱上的「窗口球」越多，一段能承载的内容越少 */
+export const SEGMENT_RULES: readonly SegmentRule[] = [
+  { id: 'raw', label: '不合并：每次前台切换都切段', byTitle: true, idleSplitMs: 0 },
+  { id: 'window', label: '同窗口（进程 + 标题）连续占用；空闲 > 60s 断开', byTitle: true, idleSplitMs: 60_000 },
+  { id: 'app', label: '同应用（忽略标题）；空闲 > 60s 断开', byTitle: false, idleSplitMs: 60_000 },
+  { id: 'app-loose', label: '同应用（忽略标题）；空闲 > 5min 才断开', byTitle: false, idleSplitMs: 300_000 }
+]
+
+export interface Segment {
+  start: number
+  end: number
+  ms: number
+  pid: number
+  exe: string
+  title: string
+}
+
+export interface AppShare {
+  exe: string
+  ms: number
+  count: number
+}
+
+export interface SegmentStats {
+  id: string
+  label: string
+  segments: number
+  coveredMs: number
+  medianMs: number
+  p90Ms: number
+  longestMs: number
+  under5s: number
+  under5sShare: number
+  over30min: number
+  perHour: number
+  topApps: AppShare[]
+}
+
+export interface TriggerOptions {
+  /** 指针停下多久算「移动后暂停」 */
+  pauseMs: number
+  /** 停下前至少要移动多少像素，避免微小抖动算一次 */
+  moveDistancePx: number
+  /** 两次截图之间的最小间隔（去重） */
+  cooldownMs: number
+}
+
+export const DEFAULT_TRIGGER_OPTIONS: TriggerOptions = {
+  pauseMs: 400,
+  moveDistancePx: 40,
+  cooldownMs: 2000
+}
+
+export type TriggerKind = 'click' | 'wheel' | 'move-pause'
+
+export interface Trigger {
+  ts: number
+  kind: TriggerKind
+}
+
+export interface TriggerReport {
+  triggers: Trigger[]
+  rawByKind: Record<TriggerKind, number>
+  perHour: number
+  /** 每段触发次数（与段一一对应，按下标） */
+  perSegment: number[]
+  segmentsWithoutTrigger: number
+  medianPerSegment: number
+}
+
+export interface UiaRecord {
+  exe: string
+  title: string
+  ok: boolean
+  timedOut: boolean
+  elements: number
+  withName: number
+  chars: number
+  password: number
+  ms: number
+  error: string | null
+}
+
+/** UIA 名字字符数低于这个值就算「基本没抓到内容」，需要 OCR 兜底 */
+export const UIA_THIN_CHARS = 200
+
+export interface UiaAppSummary {
+  exe: string
+  windows: number
+  ok: number
+  empty: number
+  medianChars: number
+}
+
+export interface UiaSummary {
+  windows: number
+  ok: number
+  failed: number
+  timedOut: number
+  empty: number
+  thin: number
+  rich: number
+  passwordWindows: number
+  medianChars: number
+  medianMs: number
+  perApp: UiaAppSummary[]
+}
+
+export interface SessionInfo {
+  start: number
+  end: number
+  screen: [number, number] | null
+  titles: boolean
+}
+
+export interface ProbeReport {
+  session: SessionInfo
+  records: number
+  badLines: number
+  fgChanges: number
+  titleChanges: number
+  fgPerHour: number
+  idleMs: number
+  idleShare: number
+  ruleStats: SegmentStats[]
+  trigger: TriggerReport
+  uia: UiaSummary | null
+}
+
+/* ------------------------------------------------------------------ *
+ * 解析
+ * ------------------------------------------------------------------ */
+
+/** 逐行解析 JSONL：坏行不抛错，计数后跳过（探针数据宁缺毋错） */
+export function parseJsonl(text: string): { records: ProbeRecord[]; badLines: number } {
+  const records: ProbeRecord[] = []
+  let badLines = 0
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    try {
+      const parsed = JSON.parse(trimmed) as unknown
+      if (typeof parsed === 'object' && parsed !== null && typeof (parsed as ProbeRecord).type === 'string') {
+        records.push(parsed as ProbeRecord)
+      } else {
+        badLines++
+      }
+    } catch {
+      badLines++
+    }
+  }
+  return { records, badLines }
+}
+
+export function readSession(records: ProbeRecord[]): SessionInfo {
+  const header = records.find((r) => r.type === 'session')
+  const timed = records.filter((r) => typeof r.ts === 'number' && r.type !== 'session')
+  const start = typeof header?.ts === 'number' ? header.ts : (timed[0]?.ts ?? 0)
+  const end = timed.length > 0 ? Math.max(...timed.map((r) => r.ts)) : start
+  const screen = Array.isArray((header as unknown as { screen?: unknown })?.screen)
+    ? ((header as unknown as { screen: [number, number] }).screen)
+    : null
+  return {
+    start,
+    end,
+    screen,
+    titles: (header as unknown as { titles?: boolean })?.titles !== false
+  }
+}
+
+/** fg / title 记录 → 窗口状态序列（同 ts 重复状态去掉，保证严格递增） */
+export function buildStates(records: ProbeRecord[]): WindowState[] {
+  const states: WindowState[] = []
+  for (const record of records) {
+    if (record.type !== 'fg' && record.type !== 'title') continue
+    if (typeof record.ts !== 'number') continue
+    const state: WindowState = {
+      ts: record.ts,
+      pid: typeof record.pid === 'number' ? record.pid : 0,
+      exe: typeof record.exe === 'string' ? record.exe : '',
+      title: typeof record.title === 'string' ? record.title : '',
+      hwnd: typeof record.hwnd === 'number' ? record.hwnd : 0
+    }
+    const previous = states[states.length - 1]
+    if (previous) {
+      // 同一时刻重复上报：后到的覆盖前一条，不新增状态
+      if (state.ts <= previous.ts) {
+        states[states.length - 1] = state
+        continue
+      }
+      // 同窗口同标题（hook 与轮询撞车）：合并
+      if (state.pid === previous.pid && state.title === previous.title && record.type === 'title') continue
+    }
+    states.push(state)
+  }
+  return states
+}
+
+export function buildIdles(records: ProbeRecord[]): IdleRange[] {
+  const ranges: IdleRange[] = []
+  let open: number | null = null
+  for (const record of records) {
+    if (record.type === 'idle') {
+      open = record.ts
+    } else if (record.type === 'active' && open !== null) {
+      ranges.push({ start: open, end: record.ts })
+      open = null
+    }
+  }
+  if (open !== null) {
+    const last = records.reduce((max, r) => (typeof r.ts === 'number' && r.ts > max ? r.ts : max), open)
+    ranges.push({ start: open, end: last })
+  }
+  return ranges
+}
+
+/* ------------------------------------------------------------------ *
+ * 切段
+ * ------------------------------------------------------------------ */
+
+export function keyOf(state: { pid: number; title: string }, rule: SegmentRule): string {
+  return rule.byTitle ? `${state.pid}|${state.title}` : String(state.pid)
+}
+
+/**
+ * 状态序列 → 窗口占用段。
+ *
+ * 段的边界只有两种来源：窗口状态变化（切换 / 标题变化）、空闲区间。
+ * 相邻且身份相同的段合并；被空闲切开的段不合并（那正是「离开过」的证据）。
+ */
+export function buildSegments(
+  states: WindowState[],
+  idles: IdleRange[],
+  rule: SegmentRule,
+  sessionEnd: number
+): Segment[] {
+  if (states.length === 0) return []
+  const segments: Segment[] = []
+
+  for (let i = 0; i < states.length; i++) {
+    const state = states[i]
+    const next = states[i + 1]
+    const end = next ? next.ts : sessionEnd
+    if (end <= state.ts) continue
+
+    // 按空闲区间切开（空闲中的那部分不算占用）
+    const pieces: Array<[number, number]> = []
+    let cursor = state.ts
+    if (rule.idleSplitMs > 0) {
+      for (const idle of idles) {
+        if (idle.end <= cursor || idle.start >= end) continue
+        const idleStart = Math.max(cursor, idle.start)
+        if (idleStart > cursor) pieces.push([cursor, idleStart])
+        cursor = Math.max(cursor, idle.end)
+        if (cursor >= end) break
+      }
+    }
+    if (cursor < end) pieces.push([cursor, end])
+
+    for (const [start, pieceEnd] of pieces) {
+      if (pieceEnd <= start) continue
+      const key = keyOf(state, rule)
+      const last = segments[segments.length - 1]
+      if (last && last.end === start && keyOf(last, rule) === key) {
+        last.end = pieceEnd
+        last.ms = last.end - last.start
+        continue
+      }
+      segments.push({
+        start,
+        end: pieceEnd,
+        ms: pieceEnd - start,
+        pid: state.pid,
+        exe: state.exe,
+        title: state.title
+      })
+    }
+  }
+  return segments
+}
+
+/* ------------------------------------------------------------------ *
+ * 统计
+ * ------------------------------------------------------------------ */
+
+export function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0 ? Math.round((sorted[mid - 1] + sorted[mid]) / 2) : sorted[mid]
+}
+
+export function percentile(values: number[], ratio: number): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(ratio * sorted.length) - 1))
+  return sorted[index]
+}
+
+export function summarizeSegments(
+  segments: Segment[],
+  rule: SegmentRule,
+  sessionMs: number
+): SegmentStats {
+  const durations = segments.map((s) => s.ms)
+  const coveredMs = durations.reduce((sum, ms) => sum + ms, 0)
+  const under5s = durations.filter((ms) => ms < 5_000).length
+  const over30min = durations.filter((ms) => ms >= 30 * 60_000).length
+
+  const byApp = new Map<string, AppShare>()
+  for (const segment of segments) {
+    const key = segment.exe || '(unknown)'
+    const entry = byApp.get(key) ?? { exe: key, ms: 0, count: 0 }
+    entry.ms += segment.ms
+    entry.count++
+    byApp.set(key, entry)
+  }
+  const topApps = [...byApp.values()].sort((a, b) => b.ms - a.ms).slice(0, 5)
+
+  return {
+    id: rule.id,
+    label: rule.label,
+    segments: segments.length,
+    coveredMs,
+    medianMs: median(durations),
+    p90Ms: percentile(durations, 0.9),
+    longestMs: durations.length > 0 ? Math.max(...durations) : 0,
+    under5s,
+    under5sShare: segments.length > 0 ? under5s / segments.length : 0,
+    over30min,
+    perHour: sessionMs > 0 ? (segments.length / sessionMs) * 3_600_000 : 0,
+    topApps
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 截图触发估算
+ * ------------------------------------------------------------------ */
+
+function distance(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  const dx = a.x - b.x
+  const dy = a.y - b.y
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+/**
+ * 事件流 → 截图触发点。
+ *
+ * 触发规则（与「事件点」口径一致）：左 / 右 / 中键按下、滚轮、以及「移动一段距离后停下」。
+ * 最后一种只能在下一条事件到来时确认，所以末尾单独补一次；同类触发有冷却，避免连点刷屏。
+ */
+export function estimateTriggers(
+  records: ProbeRecord[],
+  options: TriggerOptions = DEFAULT_TRIGGER_OPTIONS,
+  sessionEnd?: number
+): { triggers: Trigger[]; rawByKind: Record<TriggerKind, number> } {
+  const events = records
+    .filter(
+      (r) =>
+        (r.type === 'move' || r.type === 'click' || r.type === 'wheel') &&
+        typeof r.ts === 'number' &&
+        typeof r.x === 'number' &&
+        typeof r.y === 'number'
+    )
+    .sort((a, b) => a.ts - b.ts)
+
+  const rawByKind: Record<TriggerKind, number> = { click: 0, wheel: 0, 'move-pause': 0 }
+  const candidates: Trigger[] = []
+  let pending: { ts: number; x: number; y: number; moved: number } | null = null
+
+  const flushPause = (until: number): void => {
+    if (!pending) return
+    if (until - pending.ts >= options.pauseMs && pending.moved >= options.moveDistancePx) {
+      rawByKind['move-pause']++
+      candidates.push({ ts: pending.ts, kind: 'move-pause' })
+    }
+    pending = null
+  }
+
+  for (const event of events) {
+    const point = { x: event.x as number, y: event.y as number }
+    if (event.type === 'move') {
+      if (!pending) {
+        pending = { ts: event.ts, x: point.x, y: point.y, moved: 0 }
+      } else {
+        pending.moved += distance(point, pending)
+        pending.x = point.x
+        pending.y = point.y
+        pending.ts = event.ts
+      }
+      continue
+    }
+    flushPause(event.ts)
+    if (event.type === 'click') {
+      rawByKind.click++
+      candidates.push({ ts: event.ts, kind: 'click' })
+    } else if (event.type === 'wheel') {
+      rawByKind.wheel++
+      candidates.push({ ts: event.ts, kind: 'wheel' })
+    }
+  }
+  flushPause(sessionEnd ?? (candidates.length > 0 ? candidates[candidates.length - 1].ts : 0))
+
+  const triggers: Trigger[] = []
+  let lastTs = Number.NEGATIVE_INFINITY
+  for (const candidate of candidates.sort((a, b) => a.ts - b.ts)) {
+    if (candidate.ts - lastTs < options.cooldownMs) continue
+    triggers.push(candidate)
+    lastTs = candidate.ts
+  }
+  return { triggers, rawByKind }
+}
+
+export function summarizeTriggers(
+  triggers: Trigger[],
+  segments: Segment[],
+  sessionMs: number
+): TriggerReport {
+  // 最后一段的结束时间就是最后一条记录的时刻，落在那一刻的触发也要算进这一段
+  const perSegment = segments.map((segment, index) => {
+    const isLast = index === segments.length - 1
+    return triggers.filter(
+      (trigger) => trigger.ts >= segment.start && (isLast ? trigger.ts <= segment.end : trigger.ts < segment.end)
+    ).length
+  })
+  return {
+    triggers,
+    rawByKind: { click: 0, wheel: 0, 'move-pause': 0 },
+    perHour: sessionMs > 0 ? (triggers.length / sessionMs) * 3_600_000 : 0,
+    perSegment,
+    segmentsWithoutTrigger: perSegment.filter((count) => count === 0).length,
+    medianPerSegment: median(perSegment)
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * UIA 覆盖
+ * ------------------------------------------------------------------ */
+
+export function toUiaRecords(records: ProbeRecord[]): UiaRecord[] {
+  const output: UiaRecord[] = []
+  for (const record of records) {
+    if (record.type !== 'uia') continue
+    const raw = record as unknown as Record<string, unknown>
+    output.push({
+      exe: typeof raw.exe === 'string' ? raw.exe : '(unknown)',
+      title: typeof raw.title === 'string' ? raw.title : '',
+      ok: raw.ok === true,
+      timedOut: raw.timedOut === true,
+      elements: typeof raw.elements === 'number' ? raw.elements : 0,
+      withName: typeof raw.withName === 'number' ? raw.withName : 0,
+      chars: typeof raw.chars === 'number' ? raw.chars : 0,
+      password: typeof raw.password === 'number' ? raw.password : 0,
+      ms: typeof raw.ms === 'number' ? raw.ms : 0,
+      error: typeof raw.error === 'string' ? raw.error : null
+    })
+  }
+  return output
+}
+
+export function summarizeUia(records: UiaRecord[]): UiaSummary | null {
+  if (records.length === 0) return null
+  const ok = records.filter((r) => r.ok)
+  const empty = ok.filter((r) => r.chars === 0)
+  const thin = ok.filter((r) => r.chars > 0 && r.chars < UIA_THIN_CHARS)
+  const rich = ok.filter((r) => r.chars >= UIA_THIN_CHARS)
+
+  const byApp = new Map<string, UiaRecord[]>()
+  for (const record of records) {
+    const key = record.exe || '(unknown)'
+    const list = byApp.get(key) ?? []
+    list.push(record)
+    byApp.set(key, list)
+  }
+  const perApp: UiaAppSummary[] = [...byApp.entries()]
+    .map(([exe, list]) => ({
+      exe,
+      windows: list.length,
+      ok: list.filter((r) => r.ok).length,
+      empty: list.filter((r) => r.ok && r.chars === 0).length,
+      medianChars: median(list.filter((r) => r.ok).map((r) => r.chars))
+    }))
+    .sort((a, b) => b.windows - a.windows)
+
+  return {
+    windows: records.length,
+    ok: ok.length,
+    failed: records.length - ok.length - records.filter((r) => r.timedOut).length,
+    timedOut: records.filter((r) => r.timedOut).length,
+    empty: empty.length,
+    thin: thin.length,
+    rich: rich.length,
+    passwordWindows: records.filter((r) => r.password > 0).length,
+    medianChars: median(ok.map((r) => r.chars)),
+    medianMs: median(records.map((r) => r.ms)),
+    perApp
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 报告
+ * ------------------------------------------------------------------ */
+
+export function buildReport(
+  collectRecords: ProbeRecord[],
+  uiaRecords: UiaRecord[],
+  badLines = 0
+): ProbeReport {
+  const session = readSession(collectRecords)
+  const sessionMs = Math.max(0, session.end - session.start)
+  const states = buildStates(collectRecords)
+  const idles = buildIdles(collectRecords)
+  const idleMs = idles.reduce((sum, range) => sum + Math.max(0, range.end - range.start), 0)
+
+  const ruleStats = SEGMENT_RULES.map((rule) =>
+    summarizeSegments(buildSegments(states, idles, rule, session.end), rule, sessionMs)
+  )
+
+  const primary = buildSegments(states, idles, SEGMENT_RULES[1], session.end)
+  const { triggers, rawByKind } = estimateTriggers(collectRecords, DEFAULT_TRIGGER_OPTIONS, session.end)
+  const trigger = summarizeTriggers(triggers, primary, sessionMs)
+  trigger.rawByKind = rawByKind
+
+  return {
+    session,
+    records: collectRecords.length,
+    badLines,
+    fgChanges: collectRecords.filter((r) => r.type === 'fg').length,
+    titleChanges: collectRecords.filter((r) => r.type === 'title').length,
+    fgPerHour: sessionMs > 0 ? (collectRecords.filter((r) => r.type === 'fg').length / sessionMs) * 3_600_000 : 0,
+    idleMs,
+    idleShare: sessionMs > 0 ? idleMs / sessionMs : 0,
+    ruleStats,
+    trigger,
+    uia: summarizeUia(uiaRecords)
+  }
+}
+
+function seconds(ms: number): string {
+  const total = Math.round(ms / 1000)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+  if (hours > 0) return `${hours}h${String(minutes).padStart(2, '0')}m`
+  if (minutes > 0) return `${minutes}m${String(secs).padStart(2, '0')}s`
+  return `${secs}s`
+}
+
+function percent(ratio: number): string {
+  return `${(ratio * 100).toFixed(1)}%`
+}
+
+export function formatReport(report: ProbeReport): string {
+  const lines: string[] = []
+  const session = report.session
+  const sessionMs = Math.max(0, session.end - session.start)
+
+  lines.push('# 信息链探针报告')
+  lines.push('')
+  if (sessionMs < 5 * 60_000) {
+    lines.push('> ⚠ 样本不足 5 分钟：比率类指标（段/小时、触发/小时）只能看趋势，不能当结论。至少跑 20 分钟再判读。')
+    lines.push('')
+  }
+  lines.push(`- 采样时长：${seconds(sessionMs)}；记录 ${report.records} 条（坏行 ${report.badLines}）`)
+  lines.push(`- 前台切换 ${report.fgChanges} 次（${report.fgPerHour.toFixed(1)}/小时）；标题变化 ${report.titleChanges} 次`)
+  lines.push(`- 空闲占比：${percent(report.idleShare)}（${seconds(report.idleMs)}）`)
+  lines.push('')
+
+  lines.push('## 1. 窗口占用段：四种切法的对比')
+  lines.push('')
+  lines.push('| 规则 | 段数 | 中位时长 | P90 | 最长 | <5s 占比 | ≥30min | 段/小时 |')
+  lines.push('| - | -: | -: | -: | -: | -: | -: | -: |')
+  for (const stat of report.ruleStats) {
+    lines.push(
+      `| ${stat.label} | ${stat.segments} | ${seconds(stat.medianMs)} | ${seconds(stat.p90Ms)} | ${seconds(stat.longestMs)} | ${percent(stat.under5sShare)} | ${stat.over30min} | ${stat.perHour.toFixed(1)} |`
+    )
+  }
+  lines.push('')
+  lines.push('判读：中位时长在分钟级、<5s 占比低，才适合当「一段窗口记忆」；如果 <5s 占三成以上，说明按标题切会把一段经历切碎。')
+  lines.push('')
+
+  lines.push('## 2. 截图触发密度（按「同窗口」规则）')
+  lines.push('')
+  lines.push(`- 触发点 ${report.trigger.triggers.length} 个，${report.trigger.perHour.toFixed(1)}/小时`)
+  lines.push(
+    `- 原始计数：点击 ${report.trigger.rawByKind.click}、滚轮 ${report.trigger.rawByKind.wheel}、移动后暂停 ${report.trigger.rawByKind['move-pause']}（冷却 2s 前去重）`
+  )
+  lines.push(
+    `- 每段触发数中位 ${report.trigger.medianPerSegment}；没有任何触发的段 ${report.trigger.segmentsWithoutTrigger} 个（占比 ${percent(
+      report.trigger.perSegment.length > 0 ? report.trigger.segmentsWithoutTrigger / report.trigger.perSegment.length : 0
+    )}）`
+  )
+  lines.push('')
+  lines.push('判读：无触发的段意味着这一段没有证据截图，AI 只能靠内容判断、无法精确定位到某一帧。')
+  lines.push('')
+
+  if (report.uia) {
+    const uia = report.uia
+    lines.push('## 3. UIA 覆盖率')
+    lines.push('')
+    lines.push(`- 探测窗口 ${uia.windows} 个：成功 ${uia.ok}、无输出/抛错 ${uia.failed}、超时 ${uia.timedOut}`)
+    lines.push(
+      `- 文本量：为 0 ${uia.empty} 个、<${UIA_THIN_CHARS} 字 ${uia.thin} 个、≥${UIA_THIN_CHARS} 字 ${uia.rich} 个；中位 ${uia.medianChars} 字`
+    )
+    lines.push(`- 含密码控件的窗口 ${uia.passwordWindows} 个；单窗口耗时中位 ${uia.medianMs}ms`)
+    lines.push('')
+    if (uia.perApp.length > 0) {
+      lines.push('| 应用 | 窗口数 | 成功 | 无文本 | 文本中位 |')
+      lines.push('| - | -: | -: | -: | -: |')
+      for (const app of uia.perApp.slice(0, 15)) {
+        lines.push(`| ${app.exe} | ${app.windows} | ${app.ok} | ${app.empty} | ${app.medianChars} |`)
+      }
+      lines.push('')
+    }
+    lines.push('判读：无文本窗口必须走 OCR 兜底；有文本但很薄的，说明 UIA 只拿到了标题栏一类外层信息。')
+    lines.push('')
+  }
+
+  lines.push('## 4. 建议')
+  lines.push('')
+  for (const advice of advise(report)) lines.push(`- ${advice}`)
+  lines.push('')
+  return lines.join('\n')
+}
+
+/** 基于数字给出的下一步建议（不改验收标准，只做判读辅助） */
+export function advise(report: ProbeReport): string[] {
+  const advice: string[] = []
+  const raw = report.ruleStats.find((stat) => stat.id === 'raw')
+  const window = report.ruleStats.find((stat) => stat.id === 'window')
+  const app = report.ruleStats.find((stat) => stat.id === 'app')
+
+  if (raw && raw.under5sShare > 0.3) {
+    advice.push(
+      `前台切换里有 ${percent(raw.under5sShare)} 是 <5s 的一瞥（切窗口看一眼就又走了）：切段规则要能把这些并进相邻段，否则图谱上全是碎球。`
+    )
+  }
+  if (report.idleShare > 0.3) {
+    advice.push(
+      `空闲占 ${percent(report.idleShare)}：不按空闲断段的话，一段「窗口占用」会把离开的十几分钟也算进去，内容和时长都会失真。`
+    )
+  }
+  if (window && app && app.segments <= window.segments) {
+    advice.push(
+      `标题几乎不影响段数（同窗口 ${window.segments} 段 / 同应用 ${app.segments} 段）：标题更适合当段内属性，而不是段的身份。`
+    )
+  } else if (window && app && app.segments > 0 && window.segments > app.segments * 1.5) {
+    advice.push(
+      `忽略标题能把段数从 ${window.segments} 降到 ${app.segments}：标题变化多半是同一段内容里的页面跳转。`
+    )
+  }
+  if (window && window.medianMs < 60_000) {
+    advice.push(`同窗口规则的中位时长只有 ${seconds(window.medianMs)}：一段记忆太短，双链和内容摘要都没有足够材料。`)
+  }
+  if (report.trigger.perHour > 300) {
+    advice.push(`触发点 ${report.trigger.perHour.toFixed(0)}/小时偏密：截图存储和 AI 核验都会被拖重，需要提高冷却或只在内容变化时截图。`)
+  }
+  if (report.trigger.perHour > 0 && report.trigger.perHour < 20) {
+    advice.push(`触发点只有 ${report.trigger.perHour.toFixed(0)}/小时：证据可能不够密，回查时容易找不到对应的那一帧。`)
+  }
+  if (report.uia && report.uia.windows > 0) {
+    const emptyShare = report.uia.empty / Math.max(1, report.uia.ok)
+    if (emptyShare > 0.3) {
+      advice.push(`${percent(emptyShare)} 的窗口 UIA 拿不到文本：OCR 兜底不是可选项，是主路径之一。`)
+    }
+  }
+  if (advice.length === 0) advice.push('各项指标都在合理区间，下一步可以拿这份数据去定窗口段的正式切分规则。')
+  return advice
+}
+
+/* ------------------------------------------------------------------ *
+ * CLI
+ * ------------------------------------------------------------------ */
+
+function printUsage(): void {
+  console.error('用法：npm run chain-probe -- <collect.jsonl> [--uia <uia.jsonl>] [--json] [--out <file.md>]')
+}
+
+/** Windows 下 argv 是反斜杠、URL 是正斜杠，比较前统一 */
+function normalizePath(path: string): string {
+  const resolved = path.replace(/\\/g, '/')
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved
+}
+
+export function runCli(argv: string[]): number {
+  const args = argv.slice(2)
+  if (args.includes('--help') || args.includes('-h') || args.length === 0) {
+    printUsage()
+    return args.length === 0 ? 2 : 0
+  }
+
+  const uiaIndex = args.indexOf('--uia')
+  const uiaPath = uiaIndex >= 0 ? args[uiaIndex + 1] : undefined
+  const outIndex = args.indexOf('--out')
+  const outPath = outIndex >= 0 ? args[outIndex + 1] : undefined
+  const asJson = args.includes('--json')
+  // 只有真的出现了这个选项，它的值才需要跳过（否则 -1 + 1 = 0 会把采集文件也吃掉）
+  const flagValues = new Set<number>()
+  if (uiaIndex >= 0) flagValues.add(uiaIndex + 1)
+  if (outIndex >= 0) flagValues.add(outIndex + 1)
+  const positional = args.filter((arg, index) => !arg.startsWith('--') && !flagValues.has(index))
+  const collectPath = positional[0]
+  if (!collectPath) {
+    printUsage()
+    return 2
+  }
+
+  let collectRecords: ProbeRecord[]
+  let badLines = 0
+  try {
+    const parsed = parseJsonl(readFileSync(collectPath, 'utf8'))
+    collectRecords = parsed.records
+    badLines = parsed.badLines
+  } catch (error) {
+    console.error(`读不了采集文件：${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  }
+
+  let uiaRecords: UiaRecord[] = []
+  if (uiaPath) {
+    try {
+      uiaRecords = toUiaRecords(parseJsonl(readFileSync(uiaPath, 'utf8')).records)
+    } catch (error) {
+      console.error(`读不了 UIA 文件：${error instanceof Error ? error.message : String(error)}`)
+      return 1
+    }
+  }
+
+  const report = buildReport(collectRecords, uiaRecords, badLines)
+  const text = asJson ? `${JSON.stringify(report, null, 2)}\n` : `${formatReport(report)}\n`
+  if (outPath) {
+    writeFileSync(outPath, text, 'utf8')
+    console.error(`已写报告：${outPath}`)
+  } else {
+    process.stdout.write(text)
+  }
+  return 0
+}
+
+const invokedPath = process.argv[1]
+if (
+  invokedPath !== undefined &&
+  normalizePath(invokedPath) === normalizePath(fileURLToPath(import.meta.url))
+) {
+  process.exitCode = runCli(process.argv)
+}

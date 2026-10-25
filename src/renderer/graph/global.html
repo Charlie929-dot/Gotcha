@@ -192,6 +192,13 @@
           <h3>视图</h3>
           <label>日历热力满量（事件/天）<input id="set-day-heat" type="number" min="100" max="200000" step="100" /></label>
           <p class="hint">当天事件数占这个值的比例决定日格颜色深浅；一天全在使用约 3000–4000。</p>
+          <label>自动合并阈值（相似度）<input id="set-merge-sim" type="number" min="0" max="1" step="0.01" /></label>
+          <label>主题连线阈值（相似度）<input id="set-edge-sim" type="number" min="0" max="1" step="0.01" /></label>
+          <label>每主题连线数<input id="set-edge-k" type="number" min="0" max="32" step="1" /></label>
+          <p class="hint">
+            保存后按新阈值重算相似连线（本机向量模型就绪时，几秒到十几秒）。合并阈值只影响之后的新主题——
+            已经合并的主题不会因为调高阈值自动拆开。
+          </p>
         </section>
 
         <section>

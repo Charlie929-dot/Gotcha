@@ -64,7 +64,7 @@ import {
 } from './time-of-day'
 import { computeDayStats, dayTooltip, heatAlpha, DEFAULT_HEAT_FULL_SCALE, type DayStat } from './day-stats'
 import { createGlobalPanel } from './global-panel'
-import { createSettingsPanel } from './graph-settings-panel'
+import { createSettingsPanel, type SettingsChange } from './graph-settings-panel'
 import { modelWarningText, statusView } from './status-view'
 import './view-hook'
 
@@ -167,8 +167,8 @@ let settleMs: number | null = null
 let loadStartedAt = 0
 let savingPositions = false
 
-const settingsPanel = createSettingsPanel(document.body, window.gotchaGraph, (settings) => {
-  void applySavedSettings(settings)
+const settingsPanel = createSettingsPanel(document.body, window.gotchaGraph, (settings, changed) => {
+  void applySavedSettings(settings, changed)
 })
 byId('settings').addEventListener('click', () => void settingsPanel.open())
 
@@ -1119,10 +1119,15 @@ async function loadDayHeatMax(): Promise<void> {
   }
 }
 
-async function applySavedSettings(settings: GraphSettingsView): Promise<void> {
+async function applySavedSettings(
+  settings: GraphSettingsView,
+  changed: SettingsChange
+): Promise<void> {
   applyDayHeatMax(settings.dayHeatMax)
   await refreshStatus()
-  if (settings.outboundConsent) await load()
+  // 阈值变了：主进程已按新阈值重算过连线，重新拉一次图（否则连线还是旧的）
+  if (changed.thresholds) await load()
+  else if (settings.outboundConsent) await load()
 }
 
 window.gotchaGraph.onStatus(applySnapshot)

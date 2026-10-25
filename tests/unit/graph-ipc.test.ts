@@ -128,3 +128,58 @@ describe('graph:settings:save · 确认门顺序', () => {
     expect(onSaved).not.toHaveBeenCalled()
   })
 })
+
+describe('graph:recompute · 保存阈值后重算连线', () => {
+  it('主 frame 调用：把主进程的重算结果原样返回', async () => {
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.recomputeGraph = async () => ({ ok: true, edges: 172, merges: 2, embeddings: true })
+
+    const result = await handlerOf(deps, 'graph:recompute')(EVENT)
+
+    expect(result).toEqual({ ok: true, edges: 172, merges: 2, embeddings: true })
+  })
+
+  it('模型未就绪（embeddings=false）也照原样返回，不伪装成已重算', async () => {
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.recomputeGraph = async () => ({ ok: true, edges: 0, merges: 0, embeddings: false })
+
+    expect(await handlerOf(deps, 'graph:recompute')(EVENT)).toEqual({
+      ok: true,
+      edges: 0,
+      merges: 0,
+      embeddings: false
+    })
+  })
+
+  it('回填在途（busy）如实透传，渲染层据此提示稍后再试', async () => {
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.recomputeGraph = async () => ({ ok: false, reason: 'busy' })
+
+    expect(await handlerOf(deps, 'graph:recompute')(EVENT)).toEqual({ ok: false, reason: 'busy' })
+  })
+
+  it('非图谱窗口主 frame 的调用不触发重算', async () => {
+    const recompute = vi.fn()
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.recomputeGraph = recompute
+    const intruder = { sender: { id: 99 }, senderFrame: MAIN_FRAME } as unknown as typeof EVENT
+
+    expect(await handlerOf(deps, 'graph:recompute')(intruder)).toMatchObject({ ok: false })
+    expect(recompute).not.toHaveBeenCalled()
+  })
+
+  it('重算抛错只记「失败了」，返回 unavailable', async () => {
+    const logged: string[] = []
+    const deps = fakeDeps({ previous: settingsView(), saved: settingsView() })
+    deps.recomputeGraph = async () => {
+      throw new Error('boom')
+    }
+    deps.log = (_level, msg) => logged.push(msg)
+
+    expect(await handlerOf(deps, 'graph:recompute')(EVENT)).toEqual({
+      ok: false,
+      reason: 'unavailable'
+    })
+    expect(logged).toEqual(['graph recompute failed'])
+  })
+})

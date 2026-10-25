@@ -12,7 +12,7 @@ import type { SaveNodePositionsResult } from '../understand/node-positions'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
-import type { GraphInduceResult, ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
+import type { GraphInduceResult, GraphRecomputeResult, ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { InductionSnapshot } from '../main/induction-runtime'
 import type { HotkeyRegisterResult } from '../main/hotkeys'
 
@@ -36,6 +36,8 @@ export interface GraphApi {
   setConsent(consented: boolean): Promise<InductionSnapshot>
   settings(): Promise<GraphSettingsView>
   saveSettings(patch: unknown): Promise<GraphSettingsSaveResult>
+  /** 按库里当前的相似度阈值重算连线（保存阈值后调用；模型未就绪时只回填结构） */
+  recomputeGraph(): Promise<GraphRecomputeResult>
   providerModels(input: ProviderModelsInput): Promise<FetchModelsResult>
   saveProviderKey(providerId: string, apiKey: string): Promise<ProviderKeySaveResult>
   providerKeys(): Promise<Record<string, ApiKeySource>>
@@ -73,6 +75,8 @@ const api: GraphApi = {
   settings: () => ipcRenderer.invoke('graph:settings:get') as Promise<GraphSettingsView>,
   saveSettings: (patch) =>
     ipcRenderer.invoke('graph:settings:save', patch) as Promise<GraphSettingsSaveResult>,
+  recomputeGraph: () =>
+    ipcRenderer.invoke('graph:recompute') as Promise<GraphRecomputeResult>,
   providerModels: (input) =>
     ipcRenderer.invoke('graph:provider:models', input) as Promise<FetchModelsResult>,
   saveProviderKey: (providerId, apiKey) =>

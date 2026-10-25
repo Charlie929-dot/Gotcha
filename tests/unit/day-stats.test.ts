@@ -6,6 +6,7 @@ import {
   MAX_DAYS_PER_THEME,
   computeDayStats,
   dayTooltip,
+  hasPending,
   hasRecord,
   heatAlpha,
   heatRatio
@@ -22,8 +23,23 @@ describe('computeDayStats', () => {
       { dayKey: '2026-10-23', events: 3_120, moments: 210 },
       { dayKey: '2026-10-22', events: 40, moments: 3 }
     ])
-    expect(stats.get('2026-10-23')).toEqual({ events: 3_120, moments: 210, themes: 0 })
-    expect(stats.get('2026-10-22')).toEqual({ events: 40, moments: 3, themes: 0 })
+    expect(stats.get('2026-10-23')).toEqual({ events: 3_120, moments: 210, themes: 0, pending: 0 })
+    expect(stats.get('2026-10-22')).toEqual({ events: 40, moments: 3, themes: 0, pending: 0 })
+  })
+
+  it('待归纳（pending）来自 dayActivity：同一天多条记录累加，缺省 / 非法按 0', () => {
+    const stats = computeDayStats([], [
+      { dayKey: '2026-10-23', events: 12, moments: 4, pending: 3 },
+      { dayKey: '2026-10-23', events: 0, moments: 0, pending: 2 },
+      { dayKey: '2026-10-22', events: 5, moments: 1 },
+      { dayKey: '2026-10-21', events: 9, moments: 2, pending: Number.NaN },
+      { dayKey: '2026-10-20', events: 9, moments: 2, pending: -4 }
+    ])
+    expect(stats.get('2026-10-23')?.pending).toBe(5)
+    // 旧调用方 / 旧数据没有这字段 → 不凭空长出空心点
+    expect(stats.get('2026-10-22')?.pending).toBe(0)
+    expect(stats.get('2026-10-21')?.pending).toBe(0)
+    expect(stats.get('2026-10-20')?.pending).toBe(0)
   })
 
   it('主题按区间铺到每一天（含首尾），同一天多个主题累加', () => {
@@ -44,7 +60,7 @@ describe('computeDayStats', () => {
     const stats = computeDayStats([{ tsStart: ts(2026, 10, 23, 9), tsEnd: ts(2026, 10, 23, 10) }], [
       { dayKey: '2026-10-23', events: 7, moments: 1 }
     ])
-    expect(stats.get('2026-10-23')).toEqual({ events: 7, moments: 1, themes: 1 })
+    expect(stats.get('2026-10-23')).toEqual({ events: 7, moments: 1, themes: 1, pending: 0 })
   })
 
   it('非法输入跳过：坏 dayKey / NaN 时间戳 / 倒序区间 / 负计数', () => {
@@ -60,7 +76,7 @@ describe('computeDayStats', () => {
         { dayKey: '2026-10-25', events: -5, moments: Number.NaN }
       ]
     )
-    expect(stats.get('2026-10-25')).toEqual({ events: 0, moments: 0, themes: 0 })
+    expect(stats.get('2026-10-25')).toEqual({ events: 0, moments: 0, themes: 0, pending: 0 })
     expect(stats.size).toBe(1)
   })
 
@@ -113,20 +129,41 @@ describe('hasRecord / dayTooltip', () => {
   it('没有记录：tooltip 只说日期', () => {
     expect(hasRecord(undefined)).toBe(false)
     expect(dayTooltip('2026-10-24', undefined)).toBe('2026-10-24 · 无记录')
-    expect(dayTooltip('2026-10-24', { events: 0, moments: 0, themes: 0 })).toBe('2026-10-24 · 无记录')
+    expect(dayTooltip('2026-10-24', { events: 0, moments: 0, themes: 0, pending: 0 })).toBe(
+      '2026-10-24 · 无记录'
+    )
   })
 
   it('有记录：事件带百分比 + 时刻 + 主题', () => {
-    expect(dayTooltip('2026-10-23', { events: 1_000, moments: 82, themes: 12 }, 4_000)).toBe(
+    expect(dayTooltip('2026-10-23', { events: 1_000, moments: 82, themes: 12, pending: 0 }, 4_000)).toBe(
       '2026-10-23 · 1000 条事件（25%）· 82 个时刻 · 12 个主题'
     )
   })
 
   it('只有主题也算有记录（百分比 0%）', () => {
-    expect(hasRecord({ events: 0, moments: 0, themes: 2 })).toBe(true)
-    expect(dayTooltip('2026-10-23', { events: 0, moments: 0, themes: 2 }, 4_000)).toBe(
+    expect(hasRecord({ events: 0, moments: 0, themes: 2, pending: 0 })).toBe(true)
+    expect(dayTooltip('2026-10-23', { events: 0, moments: 0, themes: 2, pending: 0 }, 4_000)).toBe(
       '2026-10-23 · 0 条事件（0%）· 0 个时刻 · 2 个主题'
     )
+  })
+
+  it('有未归属主题的时刻：tooltip 末尾补「N 个时刻待归纳」，0 时不补', () => {
+    expect(
+      dayTooltip('2026-10-23', { events: 1_000, moments: 82, themes: 12, pending: 7 }, 4_000)
+    ).toBe('2026-10-23 · 1000 条事件（25%）· 82 个时刻 · 12 个主题 · 7 个时刻待归纳')
+    expect(dayTooltip('2026-10-23', { events: 3, moments: 2, themes: 2, pending: 0 }, 4_000)).toBe(
+      '2026-10-23 · 3 条事件（0%）· 2 个时刻 · 2 个主题'
+    )
+  })
+})
+
+describe('hasPending（日格空心点）', () => {
+  it('只有 pending > 0 才标空心点', () => {
+    expect(hasPending(undefined)).toBe(false)
+    expect(hasPending({ events: 5, moments: 2, themes: 1, pending: 0 })).toBe(false)
+    expect(hasPending({ events: 5, moments: 2, themes: 1, pending: 1 })).toBe(true)
+    // 全未归纳（时刻都在、主题 0 个）同样要标
+    expect(hasPending({ events: 9, moments: 3, themes: 0, pending: 3 })).toBe(true)
   })
 })
 

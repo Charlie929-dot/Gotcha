@@ -370,6 +370,12 @@ export interface DayActivityDto {
   events: number
   /** 当天时刻数（`moments` 表，含未归属主题的） */
   moments: number
+  /**
+   * 当天**还没归属任何主题**的时刻数（「待归纳」，日历空心点用）。
+   * 口径是时刻 → 主题，不是事件 → 时刻：事件成时刻是本地分组、回填一跑就补齐；
+   * 时刻成主题要过归纳（D28 只自动归纳今天），这才是会长期积压的那一层。
+   */
+  pending: number
 }
 
 export interface GraphGlobalStats {
@@ -434,16 +440,17 @@ export function emptyGlobalGraph(): GraphGlobalData {
 }
 
 /**
- * 按本地日汇总活动量（日历日格热力）。
- * - 事件：`events.ts` 逐条落本地日（含未进时刻的积压——日格计数要的是「这天有多忙」）；
- * - 时刻：`moments` 表按 `day_key` 计数（含未归属主题的，与事件数同口径）。
+ * 按本地日汇总活动量（日历日格热力 + 空心点）。
+ * - 事件：`events` 表按本地日逐条计数（含未进时刻的积压——日格计数要的是「这天有多忙」）；
+ * - 时刻：`moments` 表按 `day_key` 计数（含未归属主题的，与事件数同口径）；
+ * - 待归纳：`moments` 里还没出现在 `theme_moments` 的时刻（有时刻没主题＝这天归纳没跑完）。
  */
 function queryDayActivity(db: Db): DayActivityDto[] {
   const byDay = new Map<string, DayActivityDto>()
   const bucket = (key: string): DayActivityDto => {
     const existing = byDay.get(key)
     if (existing) return existing
-    const created: DayActivityDto = { dayKey: key, events: 0, moments: 0 }
+    const created: DayActivityDto = { dayKey: key, events: 0, moments: 0, pending: 0 }
     byDay.set(key, created)
     return created
   }
@@ -459,6 +466,19 @@ function queryDayActivity(db: Db): DayActivityDto[] {
   for (const row of momentRows) {
     if (!row.day_key) continue
     bucket(row.day_key).moments += isFiniteNumber(row.moments) ? row.moments : 0
+  }
+  // 时刻还没挂到任何主题上（`theme_moments` 无行）——「待归纳」
+  const pendingRows = db
+    .prepare(
+      `SELECT m.day_key AS day_key, COUNT(*) AS pending
+       FROM moments m
+       WHERE NOT EXISTS (SELECT 1 FROM theme_moments t WHERE t.moment_id = m.id)
+       GROUP BY m.day_key`
+    )
+    .all() as Array<{ day_key: string | null; pending: number }>
+  for (const row of pendingRows) {
+    if (!row.day_key) continue
+    bucket(row.day_key).pending += isFiniteNumber(row.pending) ? row.pending : 0
   }
 
   return [...byDay.values()].sort((a, b) => a.dayKey.localeCompare(b.dayKey))

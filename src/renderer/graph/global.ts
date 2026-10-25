@@ -62,7 +62,14 @@ import {
   windowSpan,
   type ClockRange
 } from './time-of-day'
-import { computeDayStats, dayTooltip, heatAlpha, DEFAULT_HEAT_FULL_SCALE, type DayStat } from './day-stats'
+import {
+  computeDayStats,
+  dayTooltip,
+  hasPending,
+  heatAlpha,
+  DEFAULT_HEAT_FULL_SCALE,
+  type DayStat
+} from './day-stats'
 import { createGlobalPanel } from './global-panel'
 import { createSettingsPanel, type SettingsChange } from './graph-settings-panel'
 import type { ThemeMergeGroupView } from '../../understand/theme-merge'
@@ -523,6 +530,8 @@ function renderCalendar(): void {
     const stat = dayStats.get(day.key)
     const alpha = heatAlpha(stat?.events ?? 0, dayHeatMax)
     if (alpha > 0) button.style.setProperty('--heat-alpha', String(alpha))
+    // 空心点：这天有时刻还没归属主题（归纳没跑完）；与「今天」的实心点错开位置
+    button.classList.toggle('pending', hasPending(stat))
     button.title = dayTooltip(day.key, stat, dayHeatMax)
     button.addEventListener('mousedown', (event) => onDayMouseDown(event, day.key))
     button.addEventListener('mouseenter', (event) => onDayMouseEnter(event, day.key))

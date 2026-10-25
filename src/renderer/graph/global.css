@@ -484,6 +484,20 @@ foam-graph {
   background: var(--accent);
 }
 
+/* 空心点：这天有时刻还没归属主题（归纳没跑完）。
+   与「今天」的实心点错开——实心点在底部中间，空心环放右下角，同一天两者都在也看得清。 */
+.cal-grid button.pending::before {
+  content: '';
+  position: absolute;
+  right: 4px;
+  bottom: 3px;
+  width: 5px;
+  height: 5px;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  background: transparent;
+}
+
 .cal-presets {
   display: flex;
   gap: 6px;

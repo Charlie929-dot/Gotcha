@@ -169,23 +169,27 @@ describe('queryGlobalGraph', () => {
     }
   })
 
-  it('dayActivity 按本地日汇总：事件含未成时刻的积压，时刻按 day_key 计数', () => {
+  it('dayActivity：事件含未成时刻的积压，时刻按 day_key 计数，待归纳＝没归属主题的时刻', () => {
     const db = openDatabase(':memory:')
     try {
-      // 10-22 两条事件，其中一条没进任何时刻（积压）
+      // 10-22 两条事件（都进了时刻），10-21 一条事件（还没成时刻的积压）
       insertEvent(db, { ts: at(22, 9), app: 'Code', ocrText: 'a' })
       insertEvent(db, { ts: at(22, 10), app: 'Code', ocrText: 'b' })
       insertEvent(db, { ts: at(21, 9), app: 'Chrome', ocrText: 'c' })
       seedMoment(db, 1, '2026-10-22', at(22, 9))
       seedMoment(db, 2, '2026-10-22', at(22, 10))
       seedMoment(db, 3, '2026-10-21', at(21, 9))
+      // 时刻 1 有主题归属 → 只有时刻 2 算「待归纳」；10-21 的时刻一直没主题
+      seedTheme(db, 1)
+      seedMembership(db, 1, 1)
 
       const data = queryGlobalGraph(db)
-      // 没有归属主题 → moments 列表为空，但 dayActivity 仍按「这天有多忙」统计
-      expect(data.moments).toEqual([])
+      // 时刻 1 挂上了主题 → 出现在图里；2 / 3 没归属，默认不画，但 dayActivity 仍按「这天有多忙」统计
+      expect(data.moments.map((moment) => moment.id)).toEqual([1])
       expect(data.dayActivity).toEqual([
-        { dayKey: '2026-10-21', events: 1, moments: 1 },
-        { dayKey: '2026-10-22', events: 2, moments: 2 }
+        { dayKey: '2026-10-21', events: 1, moments: 1, pending: 1 },
+        // 事件 2 条都成了时刻（events 2 / moments 2），但只有 1 个时刻挂上了主题
+        { dayKey: '2026-10-22', events: 2, moments: 2, pending: 1 }
       ])
     } finally {
       db.close()

@@ -153,6 +153,15 @@ test.beforeAll(async () => {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
   ).run(2, t3, t3, todayKey, 'Chrome', '文档', '查 API 用法', JSON.stringify([e3]))
 
+  // 待归纳积压：otherKey 这天有一条事件 / 一个时刻，但故意不挂主题 →
+  // 日历那格要出现空心点（tooltip 报「1 个时刻待归纳」）。分组口径同样与 groupMoments 一致。
+  const t4 = t1 - 3 * DAY_MS
+  const e4 = insertEvent(db, { ts: t4, app: 'Code', windowTitle: 'old.ts', ocrText: '待归纳的截图' })
+  db.prepare(
+    `INSERT INTO moments (id, start_ts, end_ts, day_key, app, window_title, ocr_summary, event_ids, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
+  ).run(3, t4, t4, localDayKey(t4), 'Code', 'old.ts', '待归纳的截图', JSON.stringify([e4]))
+
   // 时刻 2 同时属于两个主题（owner=查文档，secondary=按钮调试）
   db.prepare(
     'INSERT INTO theme_moments (theme_id, moment_id, weight, source, created_at) VALUES (?, ?, 1, ?, 1)'
@@ -447,6 +456,20 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     await expect(graph.locator('#cal-grid button')).toHaveCount(42)
     await graph.locator('#cal-prev').click()
     expect(await heatAlphaOf()).toBeGreaterThan(before)
+
+    // 空心点：otherKey 那天的时刻故意没挂主题 → 格子带 .pending，tooltip 报待归纳数；
+    // 今天 2 个时刻都已归属主题 → 不标。otherKey 落在上个月时先翻回去找格子。
+    await expect(todayCell()).not.toHaveClass(/\bpending\b/)
+    let pendingCell = graph.locator(`#cal-grid button[data-key="${otherKey}"]`)
+    if ((await pendingCell.count()) === 0) {
+      await graph.locator('#cal-prev').click()
+      pendingCell = graph.locator(`#cal-grid button[data-key="${otherKey}"]`)
+    }
+    await expect(pendingCell).toHaveClass(/\bpending\b/)
+    await expect(pendingCell).toHaveAttribute(
+      'title',
+      `${otherKey} · 1 条事件（1%）· 1 个时刻 · 0 个主题 · 1 个时刻待归纳`
+    )
 
     await graph.locator('#cal-close').click()
     await expect(graph.locator('#calendar')).toBeHidden()

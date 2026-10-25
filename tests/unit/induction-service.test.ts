@@ -223,7 +223,14 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
         completeJson: (_payload, options) =>
           new Promise((_resolve, reject) => {
             options?.signal?.addEventListener('abort', () => reject(new LlmAbortError()))
-          })
+          }),
+        // P2 在线路径（命名 / 模糊确认）在本用例里不会发生
+        completeNaming: async () => {
+          throw new Error('unused: completeNaming')
+        },
+        completeAssignments: async () => {
+          throw new Error('unused: completeAssignments')
+        }
       }
       const service = makeService(db, pending)
       const running = service.runOnce()

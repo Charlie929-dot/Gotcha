@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { buildCloudPayload, buildCloudMomentPayload, type CloudPayload, type RedactableEvent } from '../../src/understand/cloud/redact'
+import {
+  buildCloudPayload,
+  buildCloudMomentPayload,
+  buildThemeAssignmentPayload,
+  buildThemeNamingPayload,
+  type CloudPayload,
+  type RedactableEvent
+} from '../../src/understand/cloud/redact'
 import { LLM_DEFAULTS } from '../../src/understand/cloud/constants'
 
 function event(overrides: Partial<RedactableEvent> = {}): RedactableEvent {
@@ -228,5 +235,91 @@ describe('buildCloudPayload · 出云唯一出口', () => {
     real.events[0].ocr = 'RAW'
     // 运行时仍以类型为准：以上两行由图外 typecheck（tsconfig include tests）兜住
     expect(typeof real.events[0].ocr).toBe('string')
+  })
+})
+
+describe('P2 S4 载荷 · 主题命名 / 模糊确认（同一脱敏墙）', () => {
+  it('命名载荷：只带代表时刻；password 类整条剔掉，其余照常剥离', () => {
+    const result = buildThemeNamingPayload([
+      {
+        app: 'chrome.exe',
+        title: '搜索结果',
+        startTs: 1_700_000_000_000,
+        endTs: 1_700_000_030_000,
+        ocr: `邮箱 ${SECRET_EMAIL}`,
+        eventIds: [11, 12]
+      },
+      {
+        app: '1password.exe',
+        title: '密码库',
+        startTs: 1_700_000_100_000,
+        endTs: 1_700_000_100_000,
+        ocr: 'vault',
+        eventIds: [13, 14]
+      }
+    ])
+
+    expect(result.payload.moments).toEqual([
+      {
+        eventIds: [11, 12],
+        ts: 1_700_000_000_000,
+        tsEnd: 1_700_000_030_000,
+        app: 'chrome.exe',
+        title: '搜索结果',
+        ocr: '邮箱 [已脱敏]'
+      }
+    ])
+    expect(result.blockedIds).toEqual([13, 14])
+    expect(result.redactedIds).toEqual([11, 12])
+    expect(JSON.stringify(result.payload)).not.toContain(SECRET_EMAIL)
+  })
+
+  it('确认载荷：候选主题只保留已脱敏且未被剔的；被剔候选的时刻进 noCandidateMomentIds', () => {
+    const result = buildThemeAssignmentPayload(
+      [
+        { momentId: 7, app: 'chrome.exe', title: '搜索结果', ocr: 'rust', candidateThemeIds: [1, 2] },
+        { momentId: 8, app: 'notepad.exe', title: '笔记', ocr: '普通', candidateThemeIds: [2] }
+      ],
+      [
+        { id: 1, title: 'Rust 学习', summary: '生命周期' },
+        { id: 2, title: '密码输入', summary: '请输入密码' }
+      ]
+    )
+
+    expect(result.blockedThemeIds).toEqual([2])
+    expect(result.payload.themes).toEqual([{ themeId: 1, title: 'Rust 学习', summary: '生命周期' }])
+    expect(result.payload.moments).toEqual([
+      {
+        momentId: 7,
+        app: 'chrome.exe',
+        title: '搜索结果',
+        ocr: 'rust',
+        candidateThemeIds: [1]
+      }
+    ])
+    expect(result.noCandidateMomentIds).toEqual([8])
+  })
+
+  it('确认载荷：时刻命中 password 类整条不出云；主题标题里的敏感串被剥离', () => {
+    const result = buildThemeAssignmentPayload(
+      [
+        {
+          momentId: 9,
+          app: 'chrome.exe',
+          title: '登录',
+          ocr: `token ${SECRET_JWT}`,
+          candidateThemeIds: [1]
+        },
+        { momentId: 10, app: 'vault.exe', title: '密码', ocr: 'x', candidateThemeIds: [1] }
+      ],
+      [{ id: 1, title: `联系 ${SECRET_EMAIL}`, summary: '账号信息' }]
+    )
+
+    expect(result.blockedMomentIds).toEqual([10])
+    expect(result.payload.moments).toHaveLength(1)
+    const serialized = JSON.stringify(result.payload)
+    expect(serialized).not.toContain(SECRET_JWT)
+    expect(serialized).not.toContain(SECRET_EMAIL)
+    expect(result.payload.themes[0].title).toContain('[已脱敏]')
   })
 })

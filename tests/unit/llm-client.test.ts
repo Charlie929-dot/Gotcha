@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
-import { buildCloudPayload } from '../../src/understand/cloud/redact'
+import {
+  buildCloudPayload,
+  buildThemeAssignmentPayload,
+  buildThemeNamingPayload
+} from '../../src/understand/cloud/redact'
+import { LLM_DEFAULTS } from '../../src/understand/cloud/constants'
 import { createDeepSeekClient } from '../../src/understand/cloud/deepseek'
 import {
   LlmAbortError,
@@ -363,5 +368,100 @@ describe('DeepSeek 客户端 · JSON Output（只接收出云载荷）', () => {
       })
     ).toThrow(LlmError)
     expect(fetchImpl).not.toHaveBeenCalled()
+  })
+})
+
+describe('P2 在线路径请求 · 新主题命名 / 模糊确认（S4）', () => {
+  function namingPayload() {
+    return buildThemeNamingPayload([
+      {
+        app: 'chrome.exe',
+        title: '页面',
+        startTs: 1_700_000_000_000,
+        endTs: 1_700_000_060_000,
+        ocr: '内容',
+        eventIds: [1, 2]
+      }
+    ]).payload
+  }
+
+  function assignmentPayload() {
+    return buildThemeAssignmentPayload(
+      [
+        {
+          momentId: 7,
+          app: 'chrome.exe',
+          title: '页面',
+          ocr: '内容',
+          candidateThemeIds: [1, 2]
+        }
+      ],
+      [
+        { id: 1, title: '主题一', summary: '摘要一' },
+        { id: 2, title: '主题二', summary: '摘要二' }
+      ]
+    ).payload
+  }
+
+  it('命名请求：system 是命名契约，用户消息是脱敏时刻，prompt 与归纳路径不串线', async () => {
+    const fetchImpl = vi.fn(async () =>
+      okResponse('{"title":"Rust","summary":"学习笔记","type":"knowledge"}')
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const result = await client.completeNaming(namingPayload(), {
+      maxTokens: LLM_DEFAULTS.namingMaxTokens
+    })
+
+    expect(result.json).toEqual({ title: 'Rust', summary: '学习笔记', type: 'knowledge' })
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.deepseek.com/chat/completions')
+    const body = JSON.parse(String(init.body)) as {
+      messages: Array<{ role: string; content: string }>
+      max_tokens: number
+    }
+    expect(body.max_tokens).toBe(LLM_DEFAULTS.namingMaxTokens)
+    expect(body.messages[0].content).toContain('主题命名器')
+    expect(body.messages[0].content).not.toContain('归纳器')
+    const user = JSON.parse(body.messages[1].content) as {
+      moments: Array<{ event_ids: number[]; app: string }>
+    }
+    expect(user.moments[0].event_ids).toEqual([1, 2])
+    expect(user.moments[0].app).toBe('chrome.exe')
+  })
+
+  it('模糊确认请求：时刻带候选 id、主题标题摘要原样进 prompt（模型只能从候选里挑）', async () => {
+    const fetchImpl = vi.fn(async () => okResponse('{"assignments":[{"moment_id":7,"theme_ids":[1]}]}'))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const result = await client.completeAssignments(assignmentPayload(), {
+      maxTokens: LLM_DEFAULTS.assignmentMaxTokens
+    })
+
+    expect(result.json).toEqual({ assignments: [{ moment_id: 7, theme_ids: [1] }] })
+    const [_url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as {
+      messages: Array<{ role: string; content: string }>
+    }
+    expect(body.messages[0].content).toContain('主题归属确认器')
+    const user = JSON.parse(body.messages[1].content) as {
+      themes: Array<{ theme_id: number; title: string; summary: string }>
+      moments: Array<{
+        moment_id: number
+        app: string
+        title: string
+        ocr: string
+        candidate_theme_ids: number[]
+      }>
+    }
+    expect(user.themes).toEqual([
+      { theme_id: 1, title: '主题一', summary: '摘要一' },
+      { theme_id: 2, title: '主题二', summary: '摘要二' }
+    ])
+    expect(user.moments[0]).toEqual({
+      moment_id: 7,
+      app: 'chrome.exe',
+      title: '页面',
+      ocr: '内容',
+      candidate_theme_ids: [1, 2]
+    })
   })
 })

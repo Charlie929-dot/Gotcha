@@ -194,6 +194,13 @@ describe('InductionRuntime：供应商状态与暂停取消', () => {
           )
         })
         return { json: { nodes: [], edges: [] }, usage: { promptTokens: 1, completionTokens: 1 } }
+      },
+      // P2 在线路径（命名 / 模糊确认）在本用例里不会发生
+      completeNaming: async () => {
+        throw new Error('unused: completeNaming')
+      },
+      completeAssignments: async () => {
+        throw new Error('unused: completeAssignments')
       }
     }
     const runtime = runtimeFor(db, () => ({ ok: true, client }))

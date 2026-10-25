@@ -54,20 +54,37 @@ export interface SegmentRule {
   byTitle: boolean
   /** 空闲超过这个时长就断开；0 表示不因空闲断开 */
   idleSplitMs: number
+  /**
+   * 走开之后又回到同一个窗口：接续成同一段，中间的空闲**不计入**占用时长。
+   * 这就是拍板人的口径——走开不等于换了一件事，回来就还是那段经历。
+   */
+  mergeIdle?: boolean
+  /** 接续的上限：离开超过这么久就另起一段（0 / 不填 = 无限接续） */
+  mergeIdleGapMs?: number
 }
 
 /** 切分规则对比：段越碎，图谱上的「窗口球」越多，一段能承载的内容越少 */
 export const SEGMENT_RULES: readonly SegmentRule[] = [
   { id: 'raw', label: '不合并：每次前台切换都切段', byTitle: true, idleSplitMs: 0 },
   { id: 'window', label: '同窗口（进程 + 标题）连续占用；空闲 > 60s 断开', byTitle: true, idleSplitMs: 60_000 },
-  { id: 'app', label: '同应用（忽略标题）；空闲 > 60s 断开', byTitle: false, idleSplitMs: 60_000 },
-  { id: 'app-loose', label: '同应用（忽略标题）；空闲 > 5min 才断开', byTitle: false, idleSplitMs: 300_000 }
+  {
+    id: 'window-idle-merge',
+    label: '同窗口；空闲 > 60s 断开但走开回来接续（空闲不计入时长，最多接续 30 分钟）',
+    byTitle: true,
+    idleSplitMs: 60_000,
+    mergeIdle: true,
+    mergeIdleGapMs: 30 * 60_000
+  },
+  { id: 'app', label: '同应用（忽略标题）；空闲 > 60s 断开', byTitle: false, idleSplitMs: 60_000 }
 ]
 
 export interface Segment {
   start: number
   end: number
+  /** 有效占用时长（不含被排除的空闲） */
   ms: number
+  /** 段内被排除的空闲时长（走开又回来的那部分） */
+  idleMs: number
   pid: number
   exe: string
   title: string
@@ -90,6 +107,8 @@ export interface SegmentStats {
   under5s: number
   under5sShare: number
   over30min: number
+  /** 段内被排除的空闲合计（接续规则才有） */
+  excludedIdleMs: number
   perHour: number
   topApps: AppShare[]
 }
@@ -347,15 +366,28 @@ export function buildSegments(
       if (pieceEnd <= start) continue
       const key = keyOf(state, rule)
       const last = segments[segments.length - 1]
-      if (last && last.end === start && keyOf(last, rule) === key) {
+      const contiguous = last && last.end === start && keyOf(last, rule) === key
+      if (last && contiguous) {
+        // 同一身份、中间没有空隙：直接延长
         last.end = pieceEnd
-        last.ms = last.end - last.start
+        last.ms += pieceEnd - start
+        continue
+      }
+      // 走开又回来：同一个窗口，中间那段是空闲 → 接续，空闲不计入占用时长
+      const gap = last ? start - last.end : 0
+      const gapIsIdle = last !== undefined && gap > 0 && isIdleCovered(idles, last.end, start)
+      const withinCap = rule.mergeIdleGapMs === undefined || rule.mergeIdleGapMs <= 0 || gap <= rule.mergeIdleGapMs
+      if (last && rule.mergeIdle && gapIsIdle && withinCap && keyOf(last, rule) === key) {
+        last.end = pieceEnd
+        last.ms += pieceEnd - start
+        last.idleMs += gap
         continue
       }
       segments.push({
         start,
         end: pieceEnd,
         ms: pieceEnd - start,
+        idleMs: 0,
         pid: state.pid,
         exe: state.exe,
         title: state.title
@@ -363,6 +395,18 @@ export function buildSegments(
     }
   }
   return segments
+}
+
+/** [from, to) 是否整段被空闲区间覆盖 */
+function isIdleCovered(idles: IdleRange[], from: number, to: number): boolean {
+  let cursor = from
+  for (const idle of idles) {
+    if (idle.end <= cursor) continue
+    if (idle.start > cursor) return false
+    cursor = Math.max(cursor, idle.end)
+    if (cursor >= to) return true
+  }
+  return cursor >= to
 }
 
 /* ------------------------------------------------------------------ *
@@ -414,6 +458,7 @@ export function summarizeSegments(
     under5s,
     under5sShare: segments.length > 0 ? under5s / segments.length : 0,
     over30min,
+    excludedIdleMs: segments.reduce((sum, segment) => sum + segment.idleMs, 0),
     perHour: sessionMs > 0 ? (segments.length / sessionMs) * 3_600_000 : 0,
     topApps
   }
@@ -833,7 +878,8 @@ export function buildReport(
     summarizeSegments(buildSegments(states, idles, rule, session.end), rule, sessionMs)
   )
 
-  const primary = buildSegments(states, idles, SEGMENT_RULES[1], session.end)
+  const primaryRule = SEGMENT_RULES.find((rule) => rule.id === 'window') ?? SEGMENT_RULES[1]
+  const primary = buildSegments(states, idles, primaryRule, session.end)
   const { triggers, rawByKind } = estimateTriggers(collectRecords, DEFAULT_TRIGGER_OPTIONS, session.end)
   const trigger = summarizeTriggers(triggers, primary, sessionMs)
   trigger.rawByKind = rawByKind
@@ -908,6 +954,13 @@ export function formatReport(report: ProbeReport): string {
     )
   }
   lines.push('')
+  const mergedIdle = report.ruleStats.find((stat) => stat.excludedIdleMs > 0)
+  if (mergedIdle) {
+    lines.push(
+      `接续规则（走开回来算同一段）下，从段内排除的空闲合计 **${seconds(mergedIdle.excludedIdleMs)}**——这些时间不属于任何窗口占用；探针只做减法，空闲段本身由采集侧记录。`
+    )
+    lines.push('')
+  }
   lines.push('判读：中位时长在分钟级、<5s 占比低，才适合当「一段窗口记忆」；如果 <5s 占三成以上，说明按标题切会把一段经历切碎。')
   lines.push('')
 

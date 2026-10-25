@@ -53,8 +53,8 @@ function wheel(seconds: number): ProbeRecord {
   return { type: 'wheel', ts: at(seconds), delta: 120, x: 10, y: 10 }
 }
 
-const windowRule = SEGMENT_RULES[1]
-const appRule = SEGMENT_RULES[2]
+const windowRule = SEGMENT_RULES.find((rule) => rule.id === 'window')!
+const appRule = SEGMENT_RULES.find((rule) => rule.id === 'app')!
 
 describe('parseJsonl', () => {
   it('逐行解析，坏行计数但不抛错', () => {
@@ -154,6 +154,38 @@ describe('buildSegments', () => {
     const segments = buildSegments(states, idles, SEGMENT_RULES[0], at(360))
     expect(segments).toHaveLength(2)
     expect(segments[0].ms).toBe(300_000)
+  })
+
+  it('走开又回到同一窗口：接续成一段，空闲不计入占用时长', () => {
+    const rule = SEGMENT_RULES.find((r) => r.id === 'window-idle-merge')!
+    const states = buildStates([fg(0, 1, 'a'), fg(300, 2, 'b')])
+    const idles = buildIdles([{ type: 'idle', ts: at(60) }, { type: 'active', ts: at(240) }])
+    const segments = buildSegments(states, idles, rule, at(360))
+    // 窗口 a 走开 3 分钟又回来，仍是同一段；b 另起
+    expect(segments).toHaveLength(2)
+    expect(segments[0].ms).toBe(120_000)
+    expect(segments[0].idleMs).toBe(180_000)
+    expect(segments[0].end - segments[0].start).toBe(300_000)
+  })
+
+  it('离开超过接续上限就另起一段', () => {
+    const rule = { ...SEGMENT_RULES.find((r) => r.id === 'window-idle-merge')!, mergeIdleGapMs: 120_000 }
+    const states = buildStates([fg(0, 1, 'a'), fg(1000, 2, 'b')])
+    const idles = buildIdles([{ type: 'idle', ts: at(60) }, { type: 'active', ts: at(900) }])
+    const segments = buildSegments(states, idles, rule, at(1200))
+    // a 被切成两段（中间离开 14 分钟，超过 2 分钟上限），b 第三段
+    expect(segments).toHaveLength(3)
+    expect(segments[0].idleMs).toBe(0)
+    expect(segments[1].start).toBe(at(900))
+  })
+
+  it('回到的是另一个窗口就不接续', () => {
+    const rule = SEGMENT_RULES.find((r) => r.id === 'window-idle-merge')!
+    const states = buildStates([fg(0, 1, 'a'), fg(300, 2, 'b')])
+    const idles = buildIdles([{ type: 'idle', ts: at(60) }, { type: 'active', ts: at(240) }])
+    const segments = buildSegments(states, idles, rule, at(360))
+    expect(segments[1].pid).toBe(2)
+    expect(segments[1].idleMs).toBe(0)
   })
 
   it('空序列返回空段', () => {
@@ -435,6 +467,7 @@ describe('formatReport / advise', () => {
           under5s: 60,
           under5sShare: 0.6,
           over30min: 0,
+          excludedIdleMs: 0,
           perHour: 600,
           topApps: []
         },
@@ -449,6 +482,7 @@ describe('formatReport / advise', () => {
           under5s: 40,
           under5sShare: 0.5,
           over30min: 0,
+          excludedIdleMs: 0,
           perHour: 480,
           topApps: []
         },
@@ -463,6 +497,7 @@ describe('formatReport / advise', () => {
           under5s: 10,
           under5sShare: 0.25,
           over30min: 0,
+          excludedIdleMs: 0,
           perHour: 240,
           topApps: []
         }

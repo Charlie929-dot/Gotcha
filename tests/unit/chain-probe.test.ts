@@ -455,6 +455,7 @@ describe('formatReport / advise', () => {
       fgPerHour: 0,
       idleMs: 0,
       idleShare: 0,
+      idleMarkers: { count: 0, medianMs: 0 },
       ruleStats: [
         {
           id: 'raw',
@@ -543,6 +544,7 @@ describe('formatReport / advise', () => {
       fgPerHour: 0,
       idleMs: 1_800_000,
       idleShare: 0.5,
+      idleMarkers: { count: 1, medianMs: 1_800_000 },
       ruleStats: [],
       trigger: {
         triggers: [],
@@ -571,6 +573,7 @@ describe('formatReport / advise', () => {
       fgPerHour: 0,
       idleMs: 0,
       idleShare: 0,
+      idleMarkers: { count: 0, medianMs: 0 },
       ruleStats: [],
       trigger: {
         triggers: [],

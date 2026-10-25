@@ -199,6 +199,8 @@ export interface ProbeReport {
   fgPerHour: number
   idleMs: number
   idleShare: number
+  /** 空闲标记：只作时间轴上的标记，不产生段 / 球 */
+  idleMarkers: { count: number; medianMs: number }
   ruleStats: SegmentStats[]
   trigger: TriggerReport
   /** 按密度下限筛选的影响（回答「能不能用密度筛段」） */
@@ -893,6 +895,7 @@ export function buildReport(
     fgPerHour: sessionMs > 0 ? (collectRecords.filter((r) => r.type === 'fg').length / sessionMs) * 3_600_000 : 0,
     idleMs,
     idleShare: sessionMs > 0 ? idleMs / sessionMs : 0,
+    idleMarkers: { count: idles.length, medianMs: median(idles.map((range) => Math.max(0, range.end - range.start))) },
     ruleStats,
     trigger,
     density: densityImpact(primary, collectRecords),
@@ -937,7 +940,9 @@ export function formatReport(report: ProbeReport): string {
   }
   lines.push(`- 采样时长：${seconds(sessionMs)}；记录 ${report.records} 条（坏行 ${report.badLines}）`)
   lines.push(`- 前台切换 ${report.fgChanges} 次（${report.fgPerHour.toFixed(1)}/小时）；标题变化 ${report.titleChanges} 次`)
-  lines.push(`- 空闲占比：${percent(report.idleShare)}（${seconds(report.idleMs)}）`)
+  lines.push(
+    `- 空闲占比：${percent(report.idleShare)}（${seconds(report.idleMs)}）；空闲标记 ${report.idleMarkers.count} 个，中位 ${seconds(report.idleMarkers.medianMs)}——**空闲只是时间轴上的标记，不产生段、也不上图**`
+  )
   if (report.trailingIdleStart !== null) {
     const offset = seconds(Math.max(0, report.trailingIdleStart - session.start))
     lines.push(`- 采样结束时仍在空闲（开始于 +${offset}）：这段时长未知，未计入空闲占比`)
@@ -957,7 +962,7 @@ export function formatReport(report: ProbeReport): string {
   const mergedIdle = report.ruleStats.find((stat) => stat.excludedIdleMs > 0)
   if (mergedIdle) {
     lines.push(
-      `接续规则（走开回来算同一段）下，从段内排除的空闲合计 **${seconds(mergedIdle.excludedIdleMs)}**——这些时间不属于任何窗口占用；探针只做减法，空闲段本身由采集侧记录。`
+      `接续规则（走开回来算同一段）下，从段内排除的空闲合计 **${seconds(mergedIdle.excludedIdleMs)}**——这些时间不属于任何窗口占用，只在时间轴上留一条空闲标记。`
     )
     lines.push('')
   }

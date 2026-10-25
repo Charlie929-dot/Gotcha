@@ -1,5 +1,7 @@
 # M2 知识行为图谱 · 实施方案（v0.2）
 
+> **⚠ 2026-10-25 已冻结（D38）**：M2 归纳管线整体冻结；其中隐私、供应商、设置部分仍有效。见 `docs/agent/decisions.md` D38 与 `docs/information-chain-direction.md`。
+
 > 状态：**已获书面拍板（2026-10-23）**，本文件作为 M2 事实源，收口时归档至 `docs/archive/m2-plan.md`。Q1–Q8 结论见 §8，留痕 decisions.md D17–D23。
 > v0.1 → v0.2：按拍板结论修订——Q4 改为注册 `Alt+Space` 且热键可配置 + 冲突检测；Q6 改为多供应商 / 自定义 OpenAI 兼容供应商配置；Q7 改为归纳参数全部可调（不写死）；补 Phase 2 设置面板与快捷键管理。
 > 上游依据：技术方案 §3 / §4 / §5.1 / §6.2 / §7（M2 行）/ §7.1；策划案 §6 模块二、§8.2、§9（V0.5）；decisions D5 / D8 / D10 / D12 / D14；security.md、testing.md、workflow.md、gotchas.md。

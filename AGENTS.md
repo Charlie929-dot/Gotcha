@@ -1,7 +1,7 @@
 # AGENTS.md — 记忆球（Gotcha / MemoryOrb）
 
 > **会话第一动作**：`git status -sb` 看实况 → 只读本次相关材料 → 一句话说清做什么、怎么验收，再动手。
-> **项目**：常驻 Windows 桌面边缘的记忆球——记录屏幕使用，沉淀成可缩放探索的关系图谱，找东西时轻轻提示「这个你之前见过」｜阶段：**M1a ✅ 完成（2026-10-22 收口）**；**M1b ✅ 完成（2026-10-23 收口）**；**M2 Phase 0 ✅（PR #23）、Phase 1 归纳管线 ✅（PR #24）、Phase 2 图谱交互闭环 ✅（2026-10-23）；Phase 3 真机验收待开工**｜事实源：`记忆球-产品策划案.md`、`记忆球-产品技术方案.md`（冲突先问拍板人）；M1a / M1b 历史方案已归档至 `docs/archive/m1a-plan.md`、`docs/archive/m1b-plan.md`，当前里程碑以 workflow.md §8 为准。
+> **项目**：常驻 Windows 桌面边缘的记忆球——记录屏幕使用，沉淀成可缩放探索的关系图谱，找东西时轻轻提示「这个你之前见过」｜阶段：**M1a ✅ 完成（2026-10-22 收口）**；**M1b ✅ 完成（2026-10-23 收口）**；**M2 Phase 0 ✅（PR #23）、Phase 1 归纳管线 ✅（PR #24）、Phase 2 图谱交互闭环 ✅（2026-10-23）；Phase 3 真机验收待开工**；2026-10-25 架构 v2 设计（窗口球 + 双链球、个人记忆独立成层）已落 `docs/memory-orb-architecture-v2.md`，实施待拍板｜事实源：`记忆球-产品策划案.md`、`记忆球-产品技术方案.md`（冲突先问拍板人）；M1a / M1b 历史方案已归档至 `docs/archive/m1a-plan.md`、`docs/archive/m1b-plan.md`，当前里程碑以 workflow.md §8 为准。
 > **边界**：自用；不做密钥管理、云同步、多端、通用截图工具（详见策划案 §四、§十）。
 
 ## 常驻指令（违反就是 bug）
@@ -37,4 +37,5 @@
 | 写测试 / 定验收 | `docs/agent/testing.md` |
 | 密钥 / 隐私 / 出网 / 破坏性操作 | `docs/agent/security.md` |
 | 改已拍板决策 | `docs/agent/decisions.md` |
+| 改图谱模型 / 记忆分层 / Hindsight | `docs/memory-orb-architecture-v2.md` |
 | 遇到怪问题 / 踩坑 | `docs/agent/gotchas.md` |

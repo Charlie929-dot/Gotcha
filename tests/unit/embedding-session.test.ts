@@ -33,6 +33,29 @@ afterEach(() => {
   }
 })
 
+describe('isModelReady（D37：模型随仓库分发，要防 lfs 指针文件）', () => {
+  it('真模型（够大）+ vocab 才算就绪', () => {
+    const dir = makeModelDir({
+      'model.onnx': Buffer.alloc(1_000_000),
+      'vocab.txt': VOGUE_VOCAB
+    })
+    expect(isModelReady(dir)).toBe(true)
+  })
+
+  it('git-lfs 指针文件（130 B 文本）不算就绪', () => {
+    const dir = makeModelDir({
+      'model.onnx': 'version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 94851877\n',
+      'vocab.txt': VOGUE_VOCAB
+    })
+    expect(isModelReady(dir)).toBe(false)
+  })
+
+  it('缺 vocab / 目录不存在都不算就绪', () => {
+    expect(isModelReady(makeModelDir({ 'model.onnx': Buffer.alloc(1_000_000) }))).toBe(false)
+    expect(isModelReady(join(tmpdir(), 'gotcha-embed-not-exist'))).toBe(false)
+  })
+})
+
 /** 假 ORT：记录每次 run 的 feeds，输出 [batch, seq, 3] 的 last_hidden_state */
 function fakeOrt(options: { inputs?: string[]; failOnRun?: boolean } = {}): {
   ort: OrtModuleLike

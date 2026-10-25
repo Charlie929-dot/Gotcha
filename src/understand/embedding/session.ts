@@ -7,7 +7,7 @@
  * - 日志红线：错误只带 code / 路径存在性，不带主题正文或向量。
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { BERT_MAX_LENGTH, encodeText, loadVocab, type BertVocab } from './tokenizer'
 import {
@@ -53,6 +53,12 @@ export interface LocalEmbedderOptions {
   loadOrt?: () => Promise<OrtModuleLike>
 }
 
+/**
+ * `model.onnx` 的合理下界：真模型 90 MB 量级，git-lfs 指针文件只有 ~130 B。
+ * 低于这个数量级一律当「没就绪」。
+ */
+export const MIN_MODEL_ONNX_BYTES = 1_000_000
+
 /** 模型目录下的关键文件 */
 export function modelFiles(modelDir: string): { modelPath: string; vocabPath: string; configPath: string } {
   return {
@@ -62,10 +68,20 @@ export function modelFiles(modelDir: string): { modelPath: string; vocabPath: st
   }
 }
 
-/** 模型是否就绪（UI 用来区分「未安装模型」与「计算失败」） */
+/**
+ * 模型是否就绪（UI 用来区分「未安装模型」与「计算失败」）。
+ *
+ * `model.onnx` 还要**够大**才认：仓库里这个文件走 git-lfs，没装 lfs 的机器克隆下来是
+ * 130 字节的文本指针——只看 `existsSync` 会把它当「就绪」，然后在 ORT 加载时才炸，
+ * 报错跟真正的原因对不上（2026-10-25 随模型入库时加）。
+ */
 export function isModelReady(modelDir: string): boolean {
   const { modelPath, vocabPath } = modelFiles(modelDir)
-  return existsSync(modelPath) && existsSync(vocabPath)
+  try {
+    return statSync(modelPath).size >= MIN_MODEL_ONNX_BYTES && existsSync(vocabPath)
+  } catch {
+    return false
+  }
 }
 
 /** 从 config.json 读 hidden_size（缺失/坏文件回退 512） */

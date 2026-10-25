@@ -22,6 +22,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { insertEvent, openDatabase } from '../../src/db'
+import { setSetting } from '../../src/db/settings'
 
 const APP_ARGS = ['.'] as const
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -166,6 +167,11 @@ test.beforeAll(async () => {
   db.prepare(
     'INSERT INTO edges (id, src, dst, weight, kind, evidence) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(100, 1, 2, 0.82, 'embedding', '{"model":"bge"}')
+
+  // D37 之后模型随仓库分发，dev 跑会直接命中 resources/models → 回填会真的算向量、
+  // 覆盖掉上面种的假边，E2E 就不再确定。这里显式把模型目录指到不存在的路径：
+  // 保持「结构回填 + 缺模型黄条」这条旧行为（自带模型的命中由 embedding-paths 单测覆盖）。
+  setSetting(db, 'graph.embedding_model_dir', join(userDataDir, 'no-model-for-e2e'))
   db.close()
 
   app = await electron.launch({
@@ -212,7 +218,7 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
   })
 
   test('模型缺失：顶部黄条提示「新主题暂无法计算」，已有图照画', async () => {
-    // E2E 的 userData 里没有 bge 模型 → isModelReady=false
+    // beforeAll 把 graph.embedding_model_dir 指到了不存在的目录 → isModelReady=false
     await expect(graph.locator('#model-warning')).toBeVisible({ timeout: 15_000 })
     await expect(graph.locator('#model-warning')).toContainText('新主题暂无法计算')
     await expect(graph.locator('#model-warning-text')).toContainText('bge-small-zh-v1.5')

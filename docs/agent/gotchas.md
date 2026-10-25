@@ -114,6 +114,8 @@
 | 在线路径 E2E 等 60s 定时器 / 撞上自动刷新去重窗口 | 在线归属运行时默认 60s 一轮：想验证「第二个时刻归到已有主题」要么等 60s，要么手工改 interval；画布自动刷新还有 1.5s 去重（`AUTO_REFRESH_DEDUPE_MS`，刚全量拉过图的推送被静默丢掉），刚打开图谱就制造变化会等到超时（2026-10-25 做 P2 · S7 时确认） | 主进程测试钩子 `__gotchaTest.onlineTick()` 直接跑 `runOnce()`（不绕过暂停 / 授权 / 预算门）；制造变化前先 `waitForTimeout(1600)` 过掉去重窗口。假向量模型名用 `fake-embedding-v1` 与真模型分开（库里按 `model` 过滤，不会被当成真向量复用）；`graph.embedding_model_dir` 指向不存在的目录也能就绪，正好证明「就绪」来自注入 |
 | 前台有全屏应用时 `ball.spec` 置顶断言必红（不是代码问题） | 2026-10-25 全量 E2E 连续 5 次在 `ball.spec`「球窗口：64×64、置顶…」红：`ball.alwaysOnTop` 期望 true、实际 false；单独跑有时绿有时红，与创建顺序 / `transparent` / `setContentProtection` / `showInactive` 都无稳定相关。用 30 行最小 Electron 脚本复现：`new BrowserWindow({ transparent: true, alwaysOnTop: true })` 后 `isAlwaysOnTop()` 也可能恒为 false。查 `SHQueryUserNotificationState` 得 **2（有全屏应用在跑）**，当时前台是 Firefox 全屏播视频 | 这是 Windows 在全屏独占应用前台时对顶层窗口的抑制，**别改产品代码去「修」**（试过显示后重设 topmost，同样无效）。跑全量 E2E 前先退出全屏视频 / 游戏，或把这条失败按环境问题记录（附 QUNS=2 证据）；`isAlwaysOnTop()` 读的是真实窗口样式，不是 Electron 缓存，所以单测也兜不住 |
 
+| Node 24 脚本用 `.mts` 但有三个坑 | 新增 `scripts/recall-baseline.mts`（门一基线计分）：Node 24 原生跑 TS 没问题，但 ① 测试里 `import '../../scripts/x.mts'` 被 tsc 拒（TS5097，要 `allowImportingTsExtensions`）；② 省扩展名 import 又被拒（TS2307，bundler 解析找不到 `.mts`）；③ `scripts/**` 不在 tsconfig `include` 里，typecheck 根本没检查脚本（2026-10-25 实测 TS 7） | `tsconfig.json` 加 `"allowImportingTsExtensions": true`（`noEmit: true` 前提下合法）+ include `scripts/**/*.mts`；测试用显式 `.mts` 扩展名。直接运行判定别用 `import.meta.url.startsWith('file:')`（恒真，vitest import 时会执行 main）——用 `fileURLToPath(import.meta.url) === resolve(process.argv[1])`（Windows 先 `toLowerCase`）。脚本后缀用 `.mts` 而不是 `.ts`：仓库 package.json 没有 `"type": "module"`，`.ts` 会被当成 CJS 触发 `MODULE_TYPELESS_PACKAGE_JSON` 警告（Node 24.13 实测） |
+
 ## 规则
 
 - 同一个坑第二次出现，说明这里没记住——先补本文件，再修代码。

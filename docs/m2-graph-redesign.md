@@ -627,7 +627,7 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
 - 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）；P2 在线化 S1 ✅（#67 时刻在线化）、S2 ✅（#68 归属引擎）、S3 ✅（#69 增量向量维护，schema v6）、S4 ✅（2026-10-25 命名 + 模糊确认两条 LLM 调用与兜底）、S5 ✅（2026-10-25 串行队列 / 暂停零出网 / 恢复补发）、S6 ✅（2026-10-25 在线归属运行时接线 + `graph.online_themes` 开关 + 与补历史共存）、S7 ✅（2026-10-25 在线路径 E2E：假向量注入 + 采集→时刻→归属/命名→画布刷新一条链）。
 - 检索（提案门一）✅ v1（#48）：`events_fts`（trigram，归一化文本）+ 三触发器同步 + v5 迁移回填，双路查询（MATCH ≥3 字 / LIKE 兜底），结果按时刻卡片呈现；未归纳事件同等可查。
-- 仍需补：打包 `asarUnpack` 与第三方声明、P3-b 余下的 LOD（归 M3，当前只做「时刻过多」提示 + 阈值可调）、门一 20 题回忆基线真机验收。
+- 仍需补：打包 `asarUnpack` 与第三方声明、P3-b 余下的 LOD（归 M3，当前只做「时刻过多」提示 + 阈值可调）、门一 20 题回忆基线真机验收（协议 / 模板 / 计分脚本已备：`docs/gate-one-recall-baseline.md`、`scripts/recall-baseline.mts`；20 题题集与 A/B 两轮真机跑待拍板人，跑完才谈门一验收）。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 
 ## 15. 风险与回退

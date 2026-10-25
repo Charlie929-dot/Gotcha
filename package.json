@@ -12,6 +12,8 @@
     "test": "vitest run",
     "test:e2e": "electron-vite build && playwright test",
     "typecheck": "tsc --noEmit",
+    "build:native": "node-gyp rebuild --directory native/chain-hook",
+    "chain-hook-smoke": "node scripts/chain-hook-smoke.mts",
     "recall-baseline": "node scripts/recall-baseline.mts",
     "chain-probe": "node scripts/chain-probe/analyze.mts"
   },
@@ -31,6 +33,7 @@
     "graphology": "0.26.0",
     "graphology-layout-forceatlas2": "0.10.1",
     "lit": "^3.3.3",
+    "node-gyp": "10.3.1",
     "sigma": "4.0.3",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",

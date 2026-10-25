@@ -1,8 +1,9 @@
 /**
- * 时刻向量、主题质心与合并计划（docs/m2-graph-redesign.md §5.1）
+ * 时刻向量、主题质心与合并计划（docs/m2-graph-redesign.md §5.1；增量口径见 P2 · S3）
  *
  * - 时刻向量 = 成员事件向量的均值再 L2（与 v0.2 的「成员均值质心」口径一致）；
  * - 主题质心 = 该主题 owner 归属时刻的成员事件向量均值再 L2；
+ * - `membersHash` = 参与求均值的（去重）事件 id 集合指纹：成员没变就整行复用，不必重算；
  * - 合并候选/连通分量是纯函数（只吃向量与成员数），不碰库、不调模型，用例用假向量；
  * - 铁律：合并判定只用**成员事件质心**，`title+summary` 向量（`node_embeddings`）只用于连线。
  */
@@ -14,12 +15,17 @@ import {
   encodeVector,
   normalizeVector
 } from './graph-edges'
+import { eventIdsFingerprint } from './vector-fingerprint'
+import { readOwnerMemberships } from './theme-membership'
+import { readMomentEventIds } from './moments'
 
 /** 一条已归一化的质心向量 + 参与求均值的去重事件数 */
 export interface ThemeCentroid {
   nodeId: number
   vec: Float32Array
   memberEvents: number
+  /** 参与求均值的事件 id 集合指纹；老行为 undefined（下次维护补上） */
+  membersHash?: string
 }
 
 /** 主题身份（合并候选要同 type，否则不合并） */
@@ -85,6 +91,7 @@ export function computeMomentVectors(
 /**
  * 按 owner 归属求主题质心。
  * 同一事件被多个时刻引用只算一次（去重），成员事件数取去重后实际有向量的条数。
+ * 同时给每行算 `membersHash`（参与求均值的事件 id 集合指纹），供增量维护判断「成员变了没有」。
  */
 export function computeThemeCentroids(
   memberships: readonly { themeId: number; momentId: number }[],
@@ -94,6 +101,7 @@ export function computeThemeCentroids(
   const seen = new Map<number, Set<number>>()
   const sum = new Map<number, { vec: Float32Array; dim: number }>()
   const count = new Map<number, number>()
+  const contributing = new Map<number, number[]>()
 
   const accumulate = (themeId: number, eventId: number, vec: Float32Array): void => {
     let ids = seen.get(themeId)
@@ -111,6 +119,9 @@ export function computeThemeCentroids(
     if (vec.length !== acc.dim) return
     for (let i = 0; i < acc.dim; i += 1) acc.vec[i] += vec[i]
     count.set(themeId, (count.get(themeId) ?? 0) + 1)
+    const list = contributing.get(themeId)
+    if (list) list.push(eventId)
+    else contributing.set(themeId, [eventId])
   }
 
   for (const membership of memberships) {
@@ -128,7 +139,12 @@ export function computeThemeCentroids(
     if (n === 0) continue
     const mean = new Float32Array(acc.dim)
     for (let i = 0; i < acc.dim; i += 1) mean[i] = acc.vec[i] / n
-    out.set(themeId, { nodeId: themeId, vec: normalizeVector(mean), memberEvents: n })
+    out.set(themeId, {
+      nodeId: themeId,
+      vec: normalizeVector(mean),
+      memberEvents: n,
+      membersHash: eventIdsFingerprint(contributing.get(themeId) ?? [])
+    })
   }
   return out
 }
@@ -155,6 +171,110 @@ export function findMergeCandidates(
   }
   candidates.sort((x, y) => (y.sim === x.sim ? (x.a === y.a ? x.b - y.b : x.a - y.a) : y.sim - x.sim))
   return candidates
+}
+
+/**
+ * 主题成员 → 需要重算质心的主题（P2 · S3 增量）。
+ *
+ * 输入都是「现读或注入」：归属（owner + manual）、时刻→事件 id、以及**已有该模型向量的**事件 id。
+ * 判据只看 `members_hash`（参与求均值的事件 id 集合指纹）：
+ * - 没有质心行 / 换了模型 / 指纹变了 → `stale`（重算）；
+ * - 指纹一致 → `reused`（整行复用，不解 BLOB、不做加法）；
+ * - 有归属但一个可用向量都没有（模型没算完）→ `pending`，原行留着，等下一轮；
+ * - 有质心行但成员已经没了（主题被合并 / 归属被清）→ `dropped`。
+ *
+ * 纯读；写与删由调用方（`vector-maintenance.ts` 的 `syncThemeCentroids`）落库。
+ */
+export interface ThemeMembershipRef {
+  themeId: number
+  momentId: number
+}
+
+export interface ThemeCentroidPlanOptions {
+  model: string
+  dim: number
+  memberships?: readonly ThemeMembershipRef[]
+  momentEventIds?: ReadonlyMap<number, readonly number[]>
+  /** 有该 model+dim 向量的事件 id（缺省现读 `event_embeddings`） */
+  eventVectorIds?: ReadonlySet<number>
+}
+
+export interface ThemeCentroidPlan {
+  /** 需要重算（或新建）的主题 id，升序 */
+  stale: number[]
+  /** 指纹一致、直接复用的主题数 */
+  reused: number
+  /** 成员已经没了、该删掉质心行的主题 id，升序 */
+  dropped: number[]
+  /** 有归属但还没有可用事件向量的主题数（原行保留，等向量补齐） */
+  pending: number
+}
+
+/** 有该模型 + 维度向量的事件 id（只读 id，不解 BLOB） */
+export function readEventVectorIds(db: Db, model: string, dim: number): Set<number> {
+  const rows = db
+    .prepare('SELECT event_id FROM event_embeddings WHERE model = ? AND dim = ? ORDER BY event_id ASC')
+    .all(model, Math.floor(dim)) as Array<{ event_id: number }>
+  return new Set(rows.map((row) => row.event_id))
+}
+
+export function planThemeCentroids(
+  db: Db,
+  options: ThemeCentroidPlanOptions
+): ThemeCentroidPlan {
+  const memberships = options.memberships ?? readOwnerMemberships(db)
+  const momentEventIds = options.momentEventIds ?? readMomentEventIds(db)
+  const eventVectorIds =
+    options.eventVectorIds ?? readEventVectorIds(db, options.model, options.dim)
+
+  // 每个主题实际能参与求均值的事件 id（去重；事件属于哪个时刻由 `moments` 决定）
+  const memberIds = new Map<number, Set<number>>()
+  for (const membership of memberships) {
+    const eventIds = momentEventIds.get(membership.momentId)
+    if (!eventIds || eventIds.length === 0) continue
+    let ids = memberIds.get(membership.themeId)
+    if (!ids) {
+      ids = new Set<number>()
+      memberIds.set(membership.themeId, ids)
+    }
+    for (const eventId of eventIds) {
+      if (eventVectorIds.has(eventId)) ids.add(eventId)
+    }
+  }
+
+  const existing = new Map<number, { model: string; membersHash: string | null }>()
+  const rows = db
+    .prepare('SELECT node_id, model, members_hash FROM theme_centroids ORDER BY node_id ASC')
+    .all() as Array<{ node_id: number; model: string; members_hash: string | null }>
+  for (const row of rows) {
+    existing.set(row.node_id, { model: row.model, membersHash: row.members_hash ?? null })
+  }
+
+  const stale: number[] = []
+  const dropped: number[] = []
+  let reused = 0
+  let pending = 0
+  for (const [themeId, ids] of memberIds) {
+    if (ids.size === 0) {
+      // 有归属、但向量还没算出来：报 pending，别把现有质心删掉
+      pending += 1
+      continue
+    }
+    const hash = eventIdsFingerprint(ids)
+    const row = existing.get(themeId)
+    if (row && row.model === options.model && row.membersHash === hash) {
+      reused += 1
+      continue
+    }
+    stale.push(themeId)
+  }
+  for (const themeId of existing.keys()) {
+    if (!memberIds.has(themeId)) dropped.push(themeId)
+  }
+
+  stale.sort((a, b) => a - b)
+  dropped.sort((a, b) => a - b)
+  return { stale, reused, dropped, pending }
 }
 
 function findRoot(parent: Map<number, number>, id: number): number {
@@ -264,14 +384,15 @@ export function writeThemeCentroids(
 ): WriteCentroidsResult {
   const now = options.now ?? Date.now()
   const insert = db.prepare(
-    `INSERT INTO theme_centroids (node_id, model, dim, vec, member_events, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO theme_centroids (node_id, model, dim, vec, member_events, updated_at, members_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(node_id) DO UPDATE SET
        model = excluded.model,
        dim = excluded.dim,
        vec = excluded.vec,
        member_events = excluded.member_events,
-       updated_at = excluded.updated_at`
+       updated_at = excluded.updated_at,
+       members_hash = excluded.members_hash`
   )
   let written = 0
   let skipped = 0
@@ -291,13 +412,22 @@ export function writeThemeCentroids(
         centroid.vec.length,
         encodeVector(centroid.vec),
         centroid.memberEvents,
-        now
+        now,
+        centroid.membersHash ?? null
       )
       written += 1
     }
   })
   run()
   return { written, skipped }
+}
+
+/** 删掉质心行（成员已经没了的主题；主题被合并时 `theme-merge` 也会删） */
+export function deleteThemeCentroids(db: Db, nodeIds: readonly number[]): number {
+  const ids = nodeIds.filter((id) => Number.isInteger(id) && id > 0)
+  if (ids.length === 0) return 0
+  const placeholders = ids.map(() => '?').join(',')
+  return db.prepare(`DELETE FROM theme_centroids WHERE node_id IN (${placeholders})`).run(...ids).changes
 }
 
 export interface ReadCentroidsResult {
@@ -315,11 +445,22 @@ export function readThemeCentroids(
     options.model
       ? db
           .prepare(
-            'SELECT node_id, model, dim, vec, member_events FROM theme_centroids WHERE model = ? ORDER BY node_id ASC'
+            'SELECT node_id, model, dim, vec, member_events, members_hash FROM theme_centroids WHERE model = ? ORDER BY node_id ASC'
           )
           .all(options.model)
-      : db.prepare('SELECT node_id, model, dim, vec, member_events FROM theme_centroids ORDER BY node_id ASC').all()
-  ) as Array<{ node_id: number; model: string; dim: number; vec: Buffer; member_events: number }>
+      : db
+          .prepare(
+            'SELECT node_id, model, dim, vec, member_events, members_hash FROM theme_centroids ORDER BY node_id ASC'
+          )
+          .all()
+  ) as Array<{
+    node_id: number
+    model: string
+    dim: number
+    vec: Buffer
+    member_events: number
+    members_hash: string | null
+  }>
 
   const centroids = new Map<number, ThemeCentroid>()
   let model: string | null = null
@@ -331,7 +472,12 @@ export function readThemeCentroids(
       skipped += 1
       continue
     }
-    centroids.set(row.node_id, { nodeId: row.node_id, vec, memberEvents: row.member_events })
+    centroids.set(row.node_id, {
+      nodeId: row.node_id,
+      vec,
+      memberEvents: row.member_events,
+      membersHash: row.members_hash ?? undefined
+    })
   }
   return { model, centroids, skipped }
 }

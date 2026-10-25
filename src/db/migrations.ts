@@ -158,6 +158,32 @@ export const migrations: Migration[] = [
       db.exec('DROP TRIGGER IF EXISTS events_fts_ai')
       db.exec('DROP TABLE IF EXISTS events_fts')
     }
+  },
+  {
+    /**
+     * v6：派生向量的重算指纹（P2 · S3 增量维护，docs/m2-graph-redesign.md §5.1 / §5.2）。
+     * - `node_embeddings.text_hash`：标题 + 摘要的指纹，文本变了才重新推理；
+     * - `theme_centroids.members_hash`：参与求均值的去重事件 id 集合指纹，成员变了才重算。
+     * 老行是 NULL → 视为「不知道能不能复用」，第一次增量维护各自重算一次后自愈。
+     * 都是派生数据：down 直接丢列，L0 事件与归属不受影响。
+     */
+    version: 6,
+    up(db) {
+      if (!hasColumn(db, 'node_embeddings', 'text_hash')) {
+        db.exec('ALTER TABLE node_embeddings ADD COLUMN text_hash TEXT')
+      }
+      if (!hasColumn(db, 'theme_centroids', 'members_hash')) {
+        db.exec('ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT')
+      }
+    },
+    down(db) {
+      if (hasColumn(db, 'theme_centroids', 'members_hash')) {
+        db.exec('ALTER TABLE theme_centroids DROP COLUMN members_hash')
+      }
+      if (hasColumn(db, 'node_embeddings', 'text_hash')) {
+        db.exec('ALTER TABLE node_embeddings DROP COLUMN text_hash')
+      }
+    }
   }
 ]
 

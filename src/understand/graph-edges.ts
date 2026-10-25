@@ -21,6 +21,8 @@ export const EMBEDDING_EDGE_DEFAULTS = {
 export interface ThemeVector {
   nodeId: number
   vec: Float32Array
+  /** 生成它的文本指纹（`vector-fingerprint.ts`）；旧行为 null，读到 NULL 视为「该重算」 */
+  textHash?: string | null
 }
 
 export interface EmbeddingEdge {
@@ -180,13 +182,14 @@ export function writeThemeVectors(
   const now = options.now ?? Date.now()
   const dim = Math.floor(options.dim)
   const insert = db.prepare(
-    `INSERT INTO node_embeddings (node_id, model, dim, vec, updated_at)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO node_embeddings (node_id, model, dim, vec, updated_at, text_hash)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(node_id) DO UPDATE SET
        model = excluded.model,
        dim = excluded.dim,
        vec = excluded.vec,
-       updated_at = excluded.updated_at`
+       updated_at = excluded.updated_at,
+       text_hash = excluded.text_hash`
   )
   let written = 0
   let skipped = 0
@@ -196,7 +199,14 @@ export function writeThemeVectors(
         skipped += 1
         continue
       }
-      insert.run(item.nodeId, options.model, dim, encodeVector(item.vec), now)
+      insert.run(
+        item.nodeId,
+        options.model,
+        dim,
+        encodeVector(item.vec),
+        now,
+        item.textHash ?? null
+      )
       written += 1
     }
   })
@@ -217,10 +227,14 @@ export function readThemeVectors(db: Db, options: { model?: string } = {}): Read
   const rows = (
     options.model
       ? db
-          .prepare('SELECT node_id, model, dim, vec FROM node_embeddings WHERE model = ? ORDER BY node_id ASC')
+          .prepare(
+            'SELECT node_id, model, dim, vec, text_hash FROM node_embeddings WHERE model = ? ORDER BY node_id ASC'
+          )
           .all(options.model)
-      : db.prepare('SELECT node_id, model, dim, vec FROM node_embeddings ORDER BY node_id ASC').all()
-  ) as Array<{ node_id: number; model: string; dim: number; vec: Buffer }>
+      : db
+          .prepare('SELECT node_id, model, dim, vec, text_hash FROM node_embeddings ORDER BY node_id ASC')
+          .all()
+  ) as Array<{ node_id: number; model: string; dim: number; vec: Buffer; text_hash: string | null }>
 
   const vectors: ThemeVector[] = []
   let model: string | null = null
@@ -232,7 +246,7 @@ export function readThemeVectors(db: Db, options: { model?: string } = {}): Read
       skipped += 1
       continue
     }
-    vectors.push({ nodeId: row.node_id, vec })
+    vectors.push({ nodeId: row.node_id, vec, textHash: row.text_hash ?? null })
   }
   return { model, vectors, skipped }
 }

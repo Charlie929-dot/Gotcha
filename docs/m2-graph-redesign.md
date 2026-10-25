@@ -1,6 +1,6 @@
 # 图谱重做方案 v0.3 · 全局主题图 + 时刻层 + 时间筛选
 
-> 状态：**实施中（2026-10-25）**——P0（Foam 内核 F1–F13）✅、P1（schema v3 + 数据层 + 向量回填）✅、P0.5（主题合并 + 次归属，schema v4）✅、P3-a（`graph:global` IPC + 默认全局 Foam 页 + 日历调暗 + 旧 sigma 页开关）✅、P3-b 已落 日格计数 ✅ / 模型缺失黄条 ✅ / 阈值控件 ✅ / 撤销合并入口 ✅ / 未归纳空心点 ✅ / 自动归纳后画布刷新 ✅ / 「时刻过多」收窄提示 ✅；P2（在线 assigner/labeler）与 LOD（归 M3）待做。
+> 状态：**实施中（2026-10-25）**——P0（Foam 内核 F1–F13）✅、P1（schema v3 + 数据层 + 向量回填）✅、P0.5（主题合并 + 次归属，schema v4）✅、P3-a（`graph:global` IPC + 默认全局 Foam 页 + 日历调暗 + 旧 sigma 页开关）✅、P3-b 已落 日格计数 ✅ / 模型缺失黄条 ✅ / 阈值控件 ✅ / 撤销合并入口 ✅ / 未归纳空心点 ✅ / 自动归纳后画布刷新 ✅ / 「时刻过多」收窄提示 ✅；P2 在线化 已落 S1 时刻在线化 ✅ / S2 归属引擎 ✅ / S3 增量向量维护 ✅（schema v6：文本/成员指纹）；LOD（归 M3）与 P2 的 S4–S7（LLM 命名/模糊确认、队列暂停、接线开关）待做。
 > 已定方向（拍板人）：① 不做 3D，保留 Foam 2D 与其活布局/惯性/粒子动效；② 只保留一张全局图，时间只做筛选/调暗；③ 主题节点 + 时刻点，时刻可同时属于多个主题；④ LLM 只做新主题命名、模糊归属确认与提示文案，不再批量归纳节点/边；⑤ 主题圈（韦恩背景）不做。
 > 事实源：本文件；D27 的内核（Foam + 本地向量 + 距离编码）保留，D27 的「按日构图」由本文件修订（「事件默认不上画布」仍成立：原始事件不上，新增时刻点层）；D28 的按日归纳降级为补历史/调试；新增 **D29**。
 > v0.2 已归档至 `docs/archive/m2-graph-redesign-v0.2.md`（ONNX 实测数据仍有效，见 §10）。
@@ -64,7 +64,7 @@ Foam <foam-graph>：活布局、时间 dimmed、主题/时刻两层
 - 主进程只多一个**本地** embedding 服务；LLM 只做语义命名/确认，出网仍走唯一出口（`redact.ts`）与 D24 确认门。
 - SQLite 仍是唯一事实源；模型文件不进库、不进 git。
 
-## 4. 数据模型（schema v4；v5 另有检索索引 `events_fts`，见 `docs/memory-orb-design-proposal.md` §3）
+## 4. 数据模型（schema v4；v5 另有检索索引 `events_fts`，见 `docs/memory-orb-design-proposal.md` §3；v6 给两张派生向量表加输入指纹列，见 §4.3）
 
 ### 4.1 时刻
 
@@ -140,8 +140,18 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 );
 ```
 
-- 事件向量逐条缓存、只补缺失（中断可续）；质心每次回填按 owner 归属重算（229 主题 × ~14 事件，毫秒级）。
+- 事件向量逐条缓存、只补缺失（中断可续）；质心按 owner 归属重算，**只在成员变了时**（见 §5.2 S3）。
 - `node_embeddings` 只放 `title+summary`（连线），`theme_centroids` 只放成员事件均值（合并判定），口径不同不混存。
+
+**v6 追加（P2 · S3，2026-10-25）**：两张派生表各加一列「输入指纹」，让增量维护能判断「谁真的变了」：
+
+```sql
+ALTER TABLE node_embeddings ADD COLUMN text_hash TEXT;      -- 标题+摘要的指纹
+ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值的事件 id 集合指纹
+```
+
+- 两列都可为空：老库升级后是 `NULL` → 视为「不知道能不能复用」，第一次维护各自重算一次把指纹补上（自愈）；
+- 只用于本地判断「变了没有」，不进日志、不出网；down 直接 `DROP COLUMN`，不影响 L0 事件与归属。
 
 
 
@@ -304,6 +314,31 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 注意：默认阈值下**次归属很稀有**——`themeMemberMinSim` 与 `themeDuplicateSim` 都是 0.92，候选要「离时刻 ≥0.92」又「离 owner <0.92」在几何上几乎不可能（真库实测 823 个有归属时刻里只有 78 个有次归属）。想放宽次归属，先调小 `themeDuplicateSim`，不要只降 `themeMemberMinSim`。
 
 另：相似度并列时按 id 升序取，保证同一份库上结果确定。单测 9 条（`tests/unit/theme-assign.test.ts`：归属 / 模糊 / 近重复豁免 / 新主题 / 维度与 protected 过滤 / 次归属阈值与上限 / 并列确定性 / DB 端到端 / 缺向量缺图状态）。
+
+**S3 增量向量维护 实施（2026-10-25，P2 第 3 步；纯本地，零出网）**
+
+要解决的问题：向量是派生数据，但旧口径只看「**有没有这一行**」（`onlyMissing`）。归纳批量路径会**原地改摘要**（`induction.ts`：同日 + 同 type + 同标题 → `UPDATE nodes SET summary = ?`），主题成员也是追加写的——于是过期向量永远留着，重算又只能整表重算。
+
+做法：给输入算指纹，**只重算指纹变了的行**。
+
+- `src/understand/vector-fingerprint.ts`：64 位 FNV-1a（两个种子拼 16 位十六进制），确定性、不依赖随机盐；事件 id 集合**先排序去重**再算（追加顺序不同不该触发重算）。只回答「变了没有」，不是安全哈希。
+- 标题向量（`theme-embeddings.ts`）：`planThemeTextVectors()` 每行比对 `node_embeddings.text_hash`；旧 = `{ all, stale, reused, skippedEmpty }`。`embedThemeVectors` 只把 `stale` 送模型，报告新增 `reused` / `skippedEmpty`；`onlyMissing: false` 仍可强制全量（调试 / 换模型）。
+- 主题质心（`theme-centroids.ts`）：`computeThemeCentroids` 顺手给每行算 `membersHash`（实际参与求均值的去重事件 id）；`planThemeCentroids()` 只回 `{ stale, reused, dropped, pending }`——`pending` = 有归属但事件向量还没算出来（**不删旧行**，等下一轮），`dropped` = 成员已经没了（主题被合并 / 归属被清）。
+- 编排（`vector-maintenance.ts`）：`syncThemeCentroids()` 只重算 `stale`（并按 `dropped` 删行），返回同步后的**全量**质心 + 操作计数；`refreshThemeCentroid(db, themeId)` 是「新时刻归到这个主题」后的最小增量（只动一行）；`maintainMomentVectors(db, momentIds)` 只算这些时刻自己的质心，不碰主题质心。
+- 接线（`graph-backfill.ts`）：质心同步改走 `syncThemeCentroids`（合并固定点的每一轮也只重算被碰过的主题）；次归属的时刻向量只算**有归属的时刻**，不再遍历全部时刻。
+
+验证（真库**只读副本** `.tmp/s3-check*/memory.db`，431 个存活主题 / 444 个 L1 节点 / 8,979 条事件向量；原库只导出未写）：
+
+| 场景 | 结果 |
+| - | - |
+| v5 → v6 迁移 | 成功，两列传为 NULL |
+| 第一次 `syncThemeCentroids` | `stale 431 / recomputed 431 / reused 0`，80–87 ms（含读 8,979 条事件向量 + 求均值） |
+| 第二次（没改数据） | `stale 0 / recomputed 0 / reused 431`，**19–21 ms** |
+| `planThemeTextVectors` 首跑 | `444 stale`（老行没有指纹，需重算一次；其中 13 个主题没有质心/向量，与 §5.2 标定的 431 对上） |
+
+代价与边界：升级后**第一次**打开图谱会把 444 个主题的标题向量重算一遍（自愈过期摘要，一次性，后台分批跑）；之后文本没变就 0 次推理。指纹只覆盖「输入是否一致」，不保证向量本身正确（模型换了靠 `model` + `dim` 判断，`dim` 不同即重算）。
+
+单测 15 条：`tests/unit/vector-fingerprint.test.ts` 4 条（确定性 / 同前缀不同长度 / 集合顺序无关 / 坏值忽略）、`tests/unit/vector-maintenance.test.ts` 9 条（改标题 / 改摘要只重算一行、老库 NULL 自愈、强制全量、质心首次全算第二次全复用、新增归属只重算该主题、成员清空删行、pending 不误删、`refreshThemeCentroid` 只动一行、新时刻只算自己）、`tests/unit/migrations.test.ts` +2 条（v6 加列 / 只回滚列）。
 
 ### 5.3 存量数据
 
@@ -549,9 +584,9 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 | P3 | 主题/时刻 UI、日历、设置、E2E、验收、文档 | 3–4 天 |
 
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
-- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）。
+- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）；P2 在线化 S1 ✅（#67 时刻在线化）、S2 ✅（#68 归属引擎）、S3 ✅（#69 增量向量维护，schema v6）。
 - 检索（提案门一）✅ v1（#48）：`events_fts`（trigram，归一化文本）+ 三触发器同步 + v5 迁移回填，双路查询（MATCH ≥3 字 / LIKE 兜底），结果按时刻卡片呈现；未归纳事件同等可查。
-- 仍需补：P2 在线 assigner/labeler（新主题增量向量、模糊带确认、暂停/队列）、打包 `asarUnpack` 与第三方声明、P3-b 余下的 LOD（归 M3，当前只做「时刻过多」提示 + 阈值可调）。
+- 仍需补：P2 的 S4–S7（LLM 只剩命名 + 模糊确认、串行队列 / 暂停零出网、接线开关与「补历史」共存、E2E）、打包 `asarUnpack` 与第三方声明、P3-b 余下的 LOD（归 M3，当前只做「时刻过多」提示 + 阈值可调）。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 
 ## 15. 风险与回退

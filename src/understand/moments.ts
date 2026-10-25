@@ -149,6 +149,20 @@ export interface MomentDayBackfillResult {
   created: number
   /** 已存在（同 day_key/start_ts/event_ids）而跳过的时刻数 */
   existing: number
+  /** 因为「还没收口」（结束时间距窗口末尾不足 settleMs）而留到下一轮的时刻数 */
+  deferred: number
+}
+
+export interface MomentDayBackfillOptions {
+  /** 写入 created_at 的时间；用例注入固定值 */
+  now?: number
+  /**
+   * 收口时间（毫秒）：只有 `endTs < nextDayStart - settleMs` 的组才落库。
+   * 在线补跑（`src/main/moment-runtime.ts`）用它避免把「还在长个子」的组先落成半成品时刻——
+   * 幂等键是 `(day_key, start_ts, event_ids)` 全等，半成品和补齐后的全量会被当成两个时刻。
+   * 缺省 0：整段都算收口（打开图谱的全量回填保持原有行为）。
+   */
+  settleMs?: number
 }
 
 export interface MomentBackfillOptions {
@@ -198,19 +212,24 @@ export function backfillMomentsForDay(
   db: Db,
   dayStart: number,
   nextDayStart: number,
-  options: { now?: number } = {}
+  options: MomentDayBackfillOptions = {}
 ): MomentDayBackfillResult {
   const dayKey = localDayKey(dayStart)
   const now = options.now ?? Date.now()
+  const settleMs = Math.max(0, options.settleMs ?? 0)
+  const settleBefore = nextDayStart - settleMs
   const events = selectDayEvents(db, dayStart, nextDayStart)
   const groups = groupMoments(events)
+  // 组按时间升序：只有末尾那些「结束时间贴到窗口末尾」的组还没收口，留到下一轮
+  const ready = groups.filter((group) => group.endTs < settleBefore)
+  const deferred = groups.length - ready.length
 
   const findExisting = db.prepare(FIND_EXISTING_SQL)
   const insert = db.prepare(INSERT_MOMENT_SQL)
   let created = 0
   let existing = 0
   const run = db.transaction(() => {
-    for (const group of groups) {
+    for (const group of ready) {
       const eventIds = JSON.stringify(group.eventIds)
       const found = findExisting.get(dayKey, group.startTs, eventIds) as { id: number } | undefined
       if (found) {
@@ -232,7 +251,7 @@ export function backfillMomentsForDay(
   })
   run()
 
-  return { dayKey, events: events.length, created, existing }
+  return { dayKey, events: events.length, created, existing, deferred }
 }
 
 /** 时刻 → 成员事件 id（坏 JSON 视为空数组；供质心/次归属计算用） */

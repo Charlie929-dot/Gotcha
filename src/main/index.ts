@@ -44,6 +44,7 @@ import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSet
 import { createDeterministicFakeLlm } from './fake-llm'
 import { createGraphWindow } from './graph-window'
 import { runGraphBackfill } from './graph-backfill-runtime'
+import { createMomentRuntime, type MomentRuntime } from './moment-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
 import { isModelReady } from '../understand/embedding/session'
 import {
@@ -131,6 +132,8 @@ let trayShell: TrayShell | null = null
 let hotkeyHandle: HotkeyHandle | null = null
 let hotkeyNoticeShown = false
 let inductionRuntime: InductionRuntime | null = null
+/** 采集运行时的时刻在线补跑（M2 P2 · S1；本地、零出网） */
+let momentRuntime: MomentRuntime | null = null
 let disposeGraphIpc: (() => void) | null = null
 let startupCountdown: StartupResumeCountdown | null = null
 /** 倒计时到点后的 starting 阶段，Alt+P 可把自动恢复接管为显式开启 */
@@ -361,6 +364,28 @@ function ensureInductionRuntime(): InductionRuntime {
   return inductionRuntime
 }
 
+/**
+ * 时刻在线补跑（M2 P2 · S1）：采集跑起来时每 60s 把稳定下来的事件补成时刻。
+ * 本地、零出网、不依赖向量模型，因此不受 D24 出网门约束。
+ * A3 口径：一次都没跑过采集（库还没建）时不为了定时器建库，直接不起。
+ */
+function ensureMomentRuntime(): MomentRuntime | null {
+  if (momentRuntime) return momentRuntime
+  if (!connections.queryDb()) return null
+  try {
+    momentRuntime = createMomentRuntime({
+      db: connections.ensureWritable().db,
+      log: captureLog
+    })
+  } catch (error) {
+    captureLog('warn', 'moment runtime unavailable', {
+      error: error instanceof Error ? error.name : 'unknown'
+    })
+    return null
+  }
+  return momentRuntime
+}
+
 function readHotkeyBindings(): HotkeyBindings {
   const db = connections.queryDb()
   if (!db) return { ...DEFAULT_HOTKEYS }
@@ -504,6 +529,8 @@ app.on('before-quit', (event) => {
   disposeGraphIpc?.()
   inductionRuntime?.dispose()
   inductionRuntime = null
+  momentRuntime?.stop()
+  momentRuntime = null
   // 退出前等 stop 收口（在途 OCR 丢弃、stats 落盘、流释放）；3s 超时后放弃并强退。
   // 用 before-quit + preventDefault：will-quit 阶段再拦会被 Electron 当成 quit 已在进行。
   event.preventDefault()
@@ -658,6 +685,11 @@ const controller = new CaptureController({
     trayShell?.update(status)
     if (!shuttingDown && (status === 'running' || status === 'paused' || status === 'stopping')) {
       ensureInductionRuntime().onCaptureStatus(status)
+    }
+    // 时刻在线补跑只跟采集状态走：暂停 / 停止时没有新事件，停掉定时器不空转
+    if (!shuttingDown) {
+      if (status === 'running') ensureMomentRuntime()?.start()
+      else if (status === 'paused' || status === 'stopping') momentRuntime?.stop()
     }
     if (!shuttingDown) pushGraphSnapshot()
   }

@@ -76,11 +76,97 @@ export interface ThemeMergeReport {
   merges: Array<{ groupId: number; into: number; from: number[] }>
 }
 
+/** 设置抽屉「合并记录」里的一行：一次合并（同 group_id）的存活主题与源主题 */
+export interface ThemeMergeGroupView {
+  groupId: number
+  into: { id: number; title: string }
+  from: Array<{ id: number; title: string }>
+  mergedAt: number
+}
+
+const TITLE_FALLBACK = '（无标题）'
+
 const NODE_COLUMNS =
   'id, type, title, summary, ts_start, ts_end, source_events, merged_into'
 
 function readNode(db: Db, id: number): NodeRow | undefined {
   return db.prepare(`SELECT ${NODE_COLUMNS} FROM nodes WHERE id = ?`).get(id) as NodeRow | undefined
+}
+
+/**
+ * 这对 (from, into) 是否被人工撤销过——撤销即「以后别再自动合并这两个」。
+ * 只看**最近一次**涉及这对的合并记录：若它是撤销过的，就一直否决，直到数据被重新合并
+ * （重新合并需要用户手动/以后的重合并入口）；这样「撤销」不会在下次回填里被立刻合回去。
+ */
+export function isMergeVetoed(db: Db, fromNode: number, intoNode: number): boolean {
+  const latest = db
+    .prepare(
+      `SELECT reverted_at FROM node_merges
+       WHERE (from_node = ? AND into_node = ?) OR (from_node = ? AND into_node = ?)
+       ORDER BY merged_at DESC, id DESC LIMIT 1`
+    )
+    .get(fromNode, intoNode, intoNode, fromNode) as { reverted_at: number | null } | undefined
+  return latest !== undefined && latest.reverted_at !== null
+}
+
+/** 未撤销的合并记录（新到旧），供设置抽屉「合并记录」列出来并逐条撤销 */
+export function listThemeMerges(db: Db, limit = 20): ThemeMergeGroupView[] {
+  const groupRows = db
+    .prepare(
+      `SELECT group_id, MAX(merged_at) AS merged_at FROM node_merges
+       WHERE reverted_at IS NULL
+       GROUP BY group_id
+       ORDER BY merged_at DESC, group_id DESC
+       LIMIT ?`
+    )
+    .all(limit) as Array<{ group_id: number; merged_at: number }>
+  if (groupRows.length === 0) return []
+
+  const groupIds = groupRows.map((row) => row.group_id)
+  const rows = db
+    .prepare(
+      `SELECT id, group_id, from_node, into_node, merged_at FROM node_merges
+       WHERE reverted_at IS NULL AND group_id IN (${groupIds.map(() => '?').join(',')})
+       ORDER BY id ASC`
+    )
+    .all(...groupIds) as Array<{
+    id: number
+    group_id: number
+    from_node: number
+    into_node: number
+    merged_at: number
+  }>
+
+  const nodeIds = new Set<number>()
+  for (const row of rows) {
+    nodeIds.add(row.from_node)
+    nodeIds.add(row.into_node)
+  }
+  const titles = new Map<number, string>()
+  const titleRows = db
+    .prepare(`SELECT id, title FROM nodes WHERE id IN (${[...nodeIds].map(() => '?').join(',')})`)
+    .all(...nodeIds) as Array<{ id: number; title: string | null }>
+  for (const row of titleRows) {
+    const title = (row.title ?? '').trim()
+    titles.set(row.id, title === '' ? TITLE_FALLBACK : title)
+  }
+
+  const groups = new Map<number, ThemeMergeGroupView>()
+  for (const row of rows) {
+    const existing = groups.get(row.group_id)
+    const into = { id: row.into_node, title: titles.get(row.into_node) ?? TITLE_FALLBACK }
+    const from = { id: row.from_node, title: titles.get(row.from_node) ?? TITLE_FALLBACK }
+    if (existing) {
+      existing.from.push(from)
+      continue
+    }
+    groups.set(row.group_id, { groupId: row.group_id, into, from: [from], mergedAt: row.merged_at })
+  }
+
+  // 输出顺序跟群组顺序（新到旧）
+  return groupRows
+    .map((row) => groups.get(row.group_id))
+    .filter((group): group is ThemeMergeGroupView => group !== undefined)
 }
 
 function snapshotOf(row: NodeRow): NodeSnapshot {
@@ -182,9 +268,15 @@ export function applyThemeMerges(
   const run = db.transaction(() => {
     for (const plan of plans) {
       const intoRow = readNode(db, plan.into)
+      // 人工撤销过的 (from → into) 对不再自动合并（撤销语义：这两个以后别再合）
+      const fromIds = plan.from.filter((id) => !isMergeVetoed(db, id, plan.into))
+      if (fromIds.length === 0) {
+        report.skipped += 1
+        continue
+      }
       const fromRows: NodeRow[] = []
       let skip = false
-      for (const id of plan.from) {
+      for (const id of fromIds) {
         const row = readNode(db, id)
         if (!row) {
           skip = true
@@ -197,8 +289,8 @@ export function applyThemeMerges(
         continue
       }
       if (
-        fromRows.length === 0 ||
-        plan.from.some((id) => id === plan.into || seen.has(id)) ||
+        fromIds.length === 0 ||
+        fromIds.some((id) => id === plan.into || seen.has(id)) ||
         seen.has(plan.into)
       ) {
         report.skipped += 1

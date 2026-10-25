@@ -302,6 +302,8 @@ export async function backfillThemeGraph(
       aggregate.droppedMemberships += applied.droppedMemberships
       aggregate.merges.push(...applied.merges)
       for (const id of applied.touched) touched.add(id)
+      // 一个都没合上（候选全被人工撤销过的对挡掉）：已经是固定点，别再空转 8 轮
+      if (applied.applied === 0) break
       owners = readOwnerMemberships(db)
       centroids = computeThemeCentroids(owners, momentEventIds, eventVectors)
       writeAllCentroids(db, centroids, embedder.model, now)

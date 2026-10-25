@@ -570,3 +570,44 @@ foam-graph {
 #panel-related[hidden] {
   display: none !important;
 }
+
+/* 设置抽屉「合并记录」：一条合并 = 存活主题 ← 被并入的主题 */
+.merge-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.merge-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.merge-list .merge-titles {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-list time {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.merge-list button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+

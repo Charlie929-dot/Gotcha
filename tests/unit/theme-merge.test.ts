@@ -4,7 +4,7 @@ import { writeThemeVectors } from '../../src/understand/graph-edges'
 import { backfillAllMoments } from '../../src/understand/moments'
 import { backfillThemeMemberships } from '../../src/understand/theme-membership'
 import { writeThemeCentroids } from '../../src/understand/theme-centroids'
-import { applyThemeMerges, revertThemeMerge } from '../../src/understand/theme-merge'
+import { applyThemeMerges, isMergeVetoed, listThemeMerges, revertThemeMerge } from '../../src/understand/theme-merge'
 
 function at(hour: number, minute = 0): number {
   return new Date(2026, 9, 22, hour, minute, 0, 0).getTime()
@@ -292,6 +292,77 @@ describe('revertThemeMerge', () => {
       expect(revertThemeMerge(db, 999)).toEqual({ ok: false, reason: 'not-found' })
       db.prepare('UPDATE node_merges SET before_json = ? WHERE group_id = ?').run('{broken', groupId)
       expect(revertThemeMerge(db, groupId)).toEqual({ ok: false, reason: 'bad-snapshot' })
+    } finally {
+      db.close()
+    }
+  })
+})
+
+describe('撤销否决 + 合并记录（设置抽屉数据源）', () => {
+  function mergedPair(): { db: Db; groupId: number } {
+    const db = openDatabase(':memory:')
+    seedBase(db)
+    seedTheme(db, 1, { title: '主题一', tsStart: at(9), tsEnd: at(10), sourceEvents: [1, 3] })
+    seedTheme(db, 2, { title: '主题二', tsStart: at(12), tsEnd: at(14), sourceEvents: [1, 2, 4] })
+    backfillThemeMemberships(db, { now: 2 })
+    seedSideTables(db)
+    const report = applyThemeMerges(db, [{ into: 1, from: [2], reason: '测试合并' }], { now: 100 })
+    return { db, groupId: report.merges[0].groupId }
+  }
+
+  it('撤销过的一对不再自动合并（方向无关），审计行不新增', () => {
+    const { db, groupId } = mergedPair()
+    try {
+      expect(isMergeVetoed(db, 2, 1)).toBe(false)
+
+      const list = listThemeMerges(db)
+      expect(list).toEqual([
+        {
+          groupId,
+          into: { id: 1, title: '主题一' },
+          from: [{ id: 2, title: '主题二' }],
+          mergedAt: 100
+        }
+      ])
+
+      expect(revertThemeMerge(db, groupId, { now: 200 }).ok).toBe(true)
+      // 撤销 = 这一对以后别再合（方向无关）
+      expect(isMergeVetoed(db, 2, 1)).toBe(true)
+      expect(isMergeVetoed(db, 1, 2)).toBe(true)
+      // 撤销过的组不再出现在「合并记录」里
+      expect(listThemeMerges(db)).toEqual([])
+
+      // 回填再遇到同一对：跳过，不能把刚拆开的主题又合回去
+      const again = applyThemeMerges(db, [{ into: 1, from: [2], reason: '测试合并' }], { now: 300 })
+      expect(again.applied).toBe(0)
+      expect(again.skipped).toBe(1)
+      const count = db.prepare('SELECT COUNT(*) AS n FROM node_merges').get() as { n: number }
+      expect(count.n).toBe(1)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('列表按组聚合、新到旧排序，limit 按组截断', () => {
+    const db = openDatabase(':memory:')
+    try {
+      seedTheme(db, 1, { title: '存活一' })
+      seedTheme(db, 2, { title: '并入一' })
+      seedTheme(db, 3, { title: '存活二' })
+      seedTheme(db, 4, { title: '并入二甲' })
+      seedTheme(db, 5, { title: '并入二乙' })
+      const insert = db.prepare(
+        `INSERT INTO node_merges (group_id, from_node, into_node, merged_at, reason, before_json, reverted_at)
+         VALUES (?, ?, ?, ?, 'test', '{}', NULL)`
+      )
+      insert.run(10, 2, 1, 100)
+      insert.run(11, 4, 3, 200)
+      insert.run(11, 5, 3, 200)
+
+      expect(listThemeMerges(db).map((group) => group.groupId)).toEqual([11, 10])
+      expect(listThemeMerges(db, 1).map((group) => group.groupId)).toEqual([11])
+      // 同组多个源节点聚到一行
+      expect(listThemeMerges(db)[0]?.from.map((node) => node.title)).toEqual(['并入二甲', '并入二乙'])
     } finally {
       db.close()
     }

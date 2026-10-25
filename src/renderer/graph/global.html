@@ -202,6 +202,17 @@
         </section>
 
         <section>
+          <h3>合并记录</h3>
+          <p class="hint">
+            相似度 ≥ 合并阈值的同类型主题会自动合并成一条。点「撤销」拆开：拆开后这一对主题不会再被自动合并
+            （想恢复只能改阈值后重算，且不会自动合回来）。
+          </p>
+          <ul id="merge-list" class="merge-list"></ul>
+          <p id="merge-empty" class="hint">没有可撤销的合并。</p>
+          <p id="merge-status" class="hint"></p>
+        </section>
+
+        <section>
           <h3>供应商</h3>
           <p class="hint">
             直接填写 API Key 即可（保存后立即生效）：密钥写入本机 userData/.env，不进设置库、不写日志、

@@ -43,8 +43,9 @@ import {
 import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSettingsView } from './graph-settings'
 import { createDeterministicFakeLlm } from './fake-llm'
 import { createGraphWindow } from './graph-window'
-import { runGraphBackfill } from './graph-backfill-runtime'
+import { runGraphBackfill, loadSharedEmbedder } from './graph-backfill-runtime'
 import { createMomentRuntime, type MomentRuntime } from './moment-runtime'
+import { createThemeOnlineRuntime, type ThemeOnlineRuntime } from './theme-online-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
 import { isModelReady } from '../understand/embedding/session'
 import {
@@ -134,6 +135,8 @@ let hotkeyNoticeShown = false
 let inductionRuntime: InductionRuntime | null = null
 /** 采集运行时的时刻在线补跑（M2 P2 · S1；本地、零出网） */
 let momentRuntime: MomentRuntime | null = null
+/** 在线归属（M2 P2 · S6）：新时刻 → 主题 / 命名 / 模糊确认；本地模型就绪时接管新数据 */
+let themeOnlineRuntime: ThemeOnlineRuntime | null = null
 let disposeGraphIpc: (() => void) | null = null
 let startupCountdown: StartupResumeCountdown | null = null
 /** 倒计时到点后的 starting 阶段，Alt+P 可把自动恢复接管为显式开启 */
@@ -228,8 +231,9 @@ function saveProviderKey(providerId: string, apiKey: string): ProviderKeySaveRes
     captureLog('warn', 'provider key write failed', { error: String(error) })
     return { ok: false, error: '无法写入 userData/.env（检查文件权限）' }
   }
-  // 密钥立即生效：刷新图谱窗口的供应商状态
+  // 密钥立即生效：刷新图谱窗口的供应商状态；在线路径也唤醒一下（等待中的命名 / 确认可以发了）
   pushGraphSnapshot()
+  themeOnlineRuntime?.wake()
   const source = apiKeySource(provider.apiKeyEnv, process.env, loadUserEnv())
   return source === 'env'
     ? { ok: true, warning: `已写入 .env；但同名环境变量 ${provider.apiKeyEnv} 存在，实际仍用它` }
@@ -350,6 +354,11 @@ function ensureInductionRuntime(): InductionRuntime {
     },
     onSnapshot: (snapshot) => pushGraphSnapshot(snapshot),
     /**
+     * 在线路径可用时，自动批量归纳让位（P2 · S6）：新数据由在线归属处理，
+     * 批量归纳降级为「补历史 / 调试」；手动「立即归纳」不受影响。
+     */
+    shouldAutoRun: () => !onlineThemesActive(),
+    /**
      * 归纳落库后推 `graph:changed`：自动归纳跑完，开着的画布就地刷新
      * （以前只有手动「立即归纳」会重新拉图，自动跑完得关掉窗口再打开才看得到）。
      */
@@ -384,6 +393,56 @@ function ensureMomentRuntime(): MomentRuntime | null {
     return null
   }
   return momentRuntime
+}
+
+/** 在线归属开关（`graph.online_themes`，缺省开）；无库时不建库、按默认开处理 */
+function readOnlineThemesEnabled(): boolean {
+  const db = connections.queryDb()
+  return db ? getSetting(db, GRAPH_SETTING_KEYS.onlineThemes) === '1' : true
+}
+
+/**
+ * 在线路径是否真的能接手新数据：开关打开 + 本地向量模型就绪。
+ * 自动批量归纳据此让位（`inductionRuntime` 的 `shouldAutoRun`）——模型没装时
+ * 在线路径算不出向量，批量归纳仍是唯一的建主题路径（G5）。
+ */
+function onlineThemesActive(): boolean {
+  if (!readOnlineThemesEnabled()) return false
+  return readEmbeddingsReady()
+}
+
+/**
+ * 在线归属运行时（M2 P2 · S6）：采集 running 时每 60s 跑一轮。
+ * - 本地归属 / 向量零出网；命名与模糊确认走 `theme-queue` 串行队列；
+ * - 出网受 D24 确认门、D18 暂停、每日预算与指数退避约束（队列层 + 本层钳制）；
+ * - A3：库还没建（一次都没跑过采集）时不为了定时器建库。
+ */
+function ensureThemeOnlineRuntime(): ThemeOnlineRuntime | null {
+  if (themeOnlineRuntime) return themeOnlineRuntime
+  if (!connections.queryDb()) return null
+  let db: Db
+  try {
+    db = connections.ensureWritable().db
+  } catch (error) {
+    captureLog('warn', 'theme online runtime unavailable', {
+      error: error instanceof Error ? error.name : 'unknown'
+    })
+    return null
+  }
+  themeOnlineRuntime = createThemeOnlineRuntime({
+    db,
+    resolveClient,
+    readConsent: () => {
+      const current = connections.queryDb()
+      return current ? getSetting(current, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
+    },
+    readEmbeddingsReady,
+    loadEmbedder: () => loadSharedEmbedder(resolveModelDir(), { log: captureLog }),
+    readEnabled: readOnlineThemesEnabled,
+    onGraphChanged: (outcome) => pushGraphChanged(outcome),
+    log: captureLog
+  })
+  return themeOnlineRuntime
 }
 
 function readHotkeyBindings(): HotkeyBindings {
@@ -433,10 +492,13 @@ function registerGlobalHotkeys(): void {
  */
 function applyGraphSettings(settings: GraphSettingsView, previousConsent: boolean): void {
   registerGlobalHotkeys()
-  if (!inductionRuntime) return
-  if (previousConsent !== settings.outboundConsent) {
+  if (inductionRuntime && previousConsent !== settings.outboundConsent) {
     inductionRuntime.setConsent(settings.outboundConsent)
   }
+  // 在线路径：撤权立刻 abort 在途（D24），授权后重新唤醒等待中的命名 / 确认任务
+  if (!settings.outboundConsent) themeOnlineRuntime?.pauseEgress()
+  else themeOnlineRuntime?.resumeEgress()
+  themeOnlineRuntime?.reconfigure()
 }
 
 /** 打开图谱时后台回填 v3 结构（时刻/归属）与主题向量；模型缺失时只回填结构 */
@@ -531,6 +593,8 @@ app.on('before-quit', (event) => {
   inductionRuntime = null
   momentRuntime?.stop()
   momentRuntime = null
+  themeOnlineRuntime?.dispose()
+  themeOnlineRuntime = null
   // 退出前等 stop 收口（在途 OCR 丢弃、stats 落盘、流释放）；3s 超时后放弃并强退。
   // 用 before-quit + preventDefault：will-quit 阶段再拦会被 Electron 当成 quit 已在进行。
   event.preventDefault()
@@ -688,8 +752,13 @@ const controller = new CaptureController({
     }
     // 时刻在线补跑只跟采集状态走：暂停 / 停止时没有新事件，停掉定时器不空转
     if (!shuttingDown) {
-      if (status === 'running') ensureMomentRuntime()?.start()
-      else if (status === 'paused' || status === 'stopping') momentRuntime?.stop()
+      if (status === 'running') {
+        ensureMomentRuntime()?.start()
+        ensureThemeOnlineRuntime()?.start()
+      } else if (status === 'paused' || status === 'stopping') {
+        momentRuntime?.stop()
+        themeOnlineRuntime?.pause()
+      }
     }
     if (!shuttingDown) pushGraphSnapshot()
   }
@@ -975,7 +1044,12 @@ if (primaryInstance) {
       getSnapshot: currentInductionSnapshot,
       runInductionNow: (dayStart?: number) =>
         ensureInductionRuntime().runOnce({ manual: true, dayStart }),
-      setConsent: (consented) => ensureInductionRuntime().setConsent(consented),
+      setConsent: (consented) => {
+        ensureInductionRuntime().setConsent(consented)
+        // 在线路径有独立队列：撤权要立刻 abort 在途，授权后唤醒等待中的任务
+        if (consented) themeOnlineRuntime?.resumeEgress()
+        else themeOnlineRuntime?.pauseEgress()
+      },
       readSettings: () => readGraphSettings(connections.queryDb()),
       saveSettings: (patch) => {
         // 显式 UI 动作：允许打开写连接（默认暂停仍不建库）

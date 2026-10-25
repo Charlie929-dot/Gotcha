@@ -94,6 +94,8 @@ export function createSettingsPanel(
   const closeButton = byId<HTMLButtonElement>(root, 'settings-close')
   const form = byId<HTMLFormElement>(root, 'settings-form')
   const autoInput = byId<HTMLInputElement>(root, 'set-auto')
+  /** 在线归属开关（P2 · S6）：两个图谱页都有；缺元素时不发字段 */
+  const onlineInput = root.querySelector<HTMLInputElement>('#set-online')
   const intervalInput = byId<HTMLInputElement>(root, 'set-interval')
   const budgetInput = byId<HTMLInputElement>(root, 'set-budget')
   const backoffInput = byId<HTMLInputElement>(root, 'set-backoff')
@@ -507,6 +509,7 @@ export function createSettingsPanel(
       }
       current = settings
       autoInput.checked = settings.auto
+      if (onlineInput) onlineInput.checked = settings.onlineThemes
       intervalInput.value = String(settings.intervalMinutes)
       budgetInput.value = String(settings.budgetTokensPerDay)
       backoffInput.value = settings.retryBackoffMinutes
@@ -585,6 +588,7 @@ export function createSettingsPanel(
       // 只有全局图页有这个输入框；缺省时不要带字段（免得清掉已有设置）
       if (dayHeatInput) payload.dayHeatMax = Number(dayHeatInput.value)
       if (scaleHintInput) payload.scaleHintMoments = Number(scaleHintInput.value)
+      if (onlineInput) payload.onlineThemes = onlineInput.checked
       const thresholdPatch = readThresholdPatch()
       if (thresholdPatch) payload.thresholds = thresholdPatch
       const result = await api.saveSettings(payload)
@@ -624,6 +628,7 @@ export function createSettingsPanel(
       hotkeyToggleInput.value = result.settings.hotkeys.toggleCapture
       hotkeyGraphInput.value = result.settings.hotkeys.openGraph
       consentInput.checked = result.settings.outboundConsent
+      if (onlineInput) onlineInput.checked = result.settings.onlineThemes
       if (dayHeatInput) dayHeatInput.value = String(result.settings.dayHeatMax)
       if (scaleHintInput) scaleHintInput.value = String(result.settings.scaleHintMoments)
       if (thresholdInputs) {

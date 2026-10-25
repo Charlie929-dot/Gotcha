@@ -21,6 +21,7 @@ const MAIN_FRAME = { mainFrame: true }
 function settingsView(overrides: Partial<GraphSettingsView> = {}): GraphSettingsView {
   return {
     auto: true,
+    onlineThemes: true,
     intervalMinutes: 10,
     budgetTokensPerDay: 1_000_000,
     retryBackoffMinutes: '1,5,15',

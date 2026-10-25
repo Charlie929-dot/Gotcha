@@ -1,6 +1,6 @@
 # 图谱重做方案 v0.3 · 全局主题图 + 时刻层 + 时间筛选
 
-> 状态：**实施中（2026-10-25）**——P0（Foam 内核 F1–F13）✅、P1（schema v3 + 数据层 + 向量回填）✅、P0.5（主题合并 + 次归属，schema v4）✅、P3-a（`graph:global` IPC + 默认全局 Foam 页 + 日历调暗 + 旧 sigma 页开关）✅、P3-b 已落 日格计数 ✅ / 模型缺失黄条 ✅ / 阈值控件 ✅ / 撤销合并入口 ✅ / 未归纳空心点 ✅ / 自动归纳后画布刷新 ✅ / 「时刻过多」收窄提示 ✅；P2 在线化 已落 S1 时刻在线化 ✅ / S2 归属引擎 ✅ / S3 增量向量维护 ✅（schema v6：文本/成员指纹）/ S4 命名与模糊确认两条 LLM 调用 ✅（未接线）/ S5 串行队列与暂停零出网 ✅（未接线）；LOD（归 M3）与 P2 的 S6–S7（接线开关与「补历史」共存、E2E）待做。
+> 状态：**实施中（2026-10-25）**——P0（Foam 内核 F1–F13）✅、P1（schema v3 + 数据层 + 向量回填）✅、P0.5（主题合并 + 次归属，schema v4）✅、P3-a（`graph:global` IPC + 默认全局 Foam 页 + 日历调暗 + 旧 sigma 页开关）✅、P3-b 已落 日格计数 ✅ / 模型缺失黄条 ✅ / 阈值控件 ✅ / 撤销合并入口 ✅ / 未归纳空心点 ✅ / 自动归纳后画布刷新 ✅ / 「时刻过多」收窄提示 ✅；P2 在线化 已落 S1 时刻在线化 ✅ / S2 归属引擎 ✅ / S3 增量向量维护 ✅（schema v6：文本/成员指纹）/ S4 命名与模糊确认两条 LLM 调用 ✅ / S5 串行队列与暂停零出网 ✅ / S6 接线（在线归属运行时 + 开关 + 与「补历史」共存）✅；LOD（归 M3）与 P2 的 S7（在线路径 E2E）待做。
 > 已定方向（拍板人）：① 不做 3D，保留 Foam 2D 与其活布局/惯性/粒子动效；② 只保留一张全局图，时间只做筛选/调暗；③ 主题节点 + 时刻点，时刻可同时属于多个主题；④ LLM 只做新主题命名、模糊归属确认与提示文案，不再批量归纳节点/边；⑤ 主题圈（韦恩背景）不做。
 > 事实源：本文件；D27 的内核（Foam + 本地向量 + 距离编码）保留，D27 的「按日构图」由本文件修订（「事件默认不上画布」仍成立：原始事件不上，新增时刻点层）；D28 的按日归纳降级为补历史/调试；新增 **D29**。
 > v0.2 已归档至 `docs/archive/m2-graph-redesign-v0.2.md`（ONNX 实测数据仍有效，见 §10）。
@@ -461,7 +461,7 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 5. `edge-builder`：主题向量变化 → 增量重连（§6.1）；
 6. `positioner`：新节点 seed 坐标；沉降后保存。
 
-- 队列串行；同一主题/时刻在途则合并；暂停时本地 embedding/分配继续，LLM 调用排队，恢复后补（D18 仍零出网）；调度层实现在 `src/understand/theme-queue.ts`（S5），接线在 S6；
+- 队列串行；同一主题/时刻在途则合并；暂停时零出网：在途 abort、结果丢弃，恢复后按序补（D18）；本地归属只在采集运行中跑（暂停时没有新事件，定时器一并停掉省 CPU），但**不会因为 LLM 退避 / 缺 key / 未授权而停**——这才是 D18 要保的；调度层实现在 `src/understand/theme-queue.ts`（S5），接线在 `src/main/theme-online-runtime.ts`（S6）；
 - LLM 调用只发生在「新主题」与「模糊归属」，不逐事件；每批最多 20 个时刻；
 - 预算/退避/间隔沿用 D22 settings；用量只记 calls/tokens/耗时，不记正文。
 
@@ -483,6 +483,7 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 - 现有批量归纳（20 时刻/批，输出节点+边）保留为「补历史」工具，用于没有主题的旧日子；
 - 补完后：生成 moments/memberships、embedding、全局边；旧 `ai` 边隐藏；
 - 不再作为新数据的自动主路径；D28 的按日按钮保留为补历史/调试。
+- **S6 起**：在线开关打开且本地模型就绪时，**自动**批量归纳让位（手动入口保留）；两条路径互相跳过对方处理过的数据——批量归纳跳过 `theme_moments` 已归属的事件，在线路径跳过事件已进节点 `source_events` 的时刻（详见 §9.1 的 S6 实施段）。
 
 ### 9.3 LLM 输出
 
@@ -506,6 +507,18 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 - **上限**：排队时刻数默认 200（`THEME_QUEUE_DEFAULTS.maxPendingMoments`，命名按代表时刻数算），满了只收放得下的、其余如实返回 `dropped`，由调用方下一轮再试；回调抛错只记一行日志，不拖垮后面的任务。
 - 计数只供日志 / 状态行（不记正文）：`calls / promptTokens / completionTokens / skippedMoments / droppedMoments / mergedJobs / failures / abortedCalls`。预算 / 退避沿用 D22，S6 接线时套在这一层外面。
 - 单测 13 条（`tests/unit/theme-queue.test.ts`：串行与顺序 / 回调容错 / 暂停零请求与恢复补发 / 在途取消丢弃并重做 / 暂停期间继续入队仍按序 / 同主题命名合并 / 同时刻排队与在途去重 / 20 条分批 / 上限 dropped / 缺客户端留住 + wake / 请求失败只影响一条 / 销毁后不再发）。
+
+**S6 接线 / 开关 / 与「补历史」共存 实施（2026-10-25，P2 第 6 步；在线闭环真正跑起来）**
+
+- **运行时** `src/main/theme-online-runtime.ts`：采集 `running` 时每 60s 一轮（与时刻补跑同频），只跟采集状态走（暂停即停定时器）。一轮 = ① 给还在等命名的主题重排队（进程重启后靠库里的标记补回来）② 选最近 2 天、`theme_moments` 里还没有归属的时刻 ③ 只给这些时刻的成员事件补事件向量（`event_embeddings` 里已有的不重算）④ `assignMoment()` 本地判定 ⑤ 按结果落库 / 建主题 / 排队确认 ⑥ 刷新派生数据。A3：没建过库不为定时器建库。embedding 是主进程开销，一轮最多 20 个时刻（`ONLINE_MAX_MOMENTS_PER_TICK`）。
+- **业务层** `src/understand/theme-online.ts`（不碰 Electron、便于单测）：`selectOnlineMoments()` / `persistAssignment()` / `createOnlineTheme()` / `applyNamingToNode()` / `applyAssignmentDecision()` / `refreshOnlineThemeCentroid()`。三条硬约束：**不重复**（`theme_moments` 有行谁也别再写）、**不丢追溯**（主归属写入时同步扩展 `nodes.ts_start/ts_end` 并把成员事件并进 `source_events`；次归属只写关系）、**命名可补**（新主题先落本地兜底标题 + `meta_json.namePending`，模型命名回来覆盖；重启后 `selectPendingNameThemes()` 还能捞回来——队列只在内存里，不能只靠它）。已合并主题的候选会跟随到存活根；确认结果里给了 `new_title` 就直接当名字用，不再多花一次命名调用。
+- **开关**：settings `graph.online_themes`（默认 `1`），设置抽屉「新数据即时归主题（在线）」复选框。「在线路径可用」= 开关开 **且** 本地向量模型就绪（模型没装时算不出向量，自动批量归纳仍是唯一建主题路径，G5 不变）。
+- **与「补历史」共存**：在线路径可用时**自动**批量归纳让位（`InductionService.shouldAutoRun` → `status='skipped', reason='online'`），手动「立即归纳」保留为补历史 / 调试（D28/D29）。两条路径互相跳过对方处理过的数据：在线路径跳过「事件已进节点 `source_events`」的时刻（自动归纳前一步先到），批量归纳跳过「`theme_moments` 已有归属」的事件（`cloud/batch.ts` 新增 `readAssignedEventIds`）——同一天不会被两条路径各建一次主题。
+- **暂停 / 授权 / 预算 / 退避（D18 / D22 / D24）**：采集暂停 → 在途 abort + 定时器停；撤销出网授权 → `pauseEgress()` 立刻 abort 在途、本地归属继续；没有客户端（未授权 / 缺 key）→ 队列把任务留住、零请求，每个 tick `wake()` 重试；每日预算（与批量归纳同一份 `readUsage` 记账）用完 → 同样留住、零请求；请求失败 / 输出非法 → 按 `graph.retry_backoff_minutes` 退避并**暂停队列**（只钳制入队不够，已排的会继续打满），退避期间只做本地归属。用量经 `recordUsage` 记进同一份日账。
+- **派生数据**：归属写入后只重算被碰过的主题质心（只读该主题自己的成员事件向量，不拉全表）、按文本指纹补标题向量、重建 embedding 边；命名回写同一套。主题 ≥0.95 合并仍只在打开图谱时的回填里做（在线路径不抢跑合并，新主题可能短暂近重复）。
+- **单测 26 条**：`tests/unit/theme-online.test.ts` 15（选时刻 / 翻页不被覆盖时刻堵死 / 待命名标记 / 命名回写与合并保护 / 代表时刻 / 主次归属与追溯并集 / 幂等 / 合并跟随 / 确认落库 / new_title / 什么也不给 / 时刻质心 / 单主题质心 / 无向量不写假质心 / 增量事件向量）；`tests/unit/theme-online-runtime.test.ts` 11（无客户端照建主题 + 补 key 后补名 / 命名回写并通知画布 / 同主题一次命名 / 暂停零出网与恢复 / 撤销授权留住任务 / 预算耗尽 / 失败退避不再发 / 模型未就绪仍可命名 / 开关关闭 / 跳过批量已覆盖 / 模糊确认落库）；另 `batch` +1（`theme_moments` 过滤）、`induction-service` +1（online 让位）、`graph-settings` +1（开关读写）。
+- **E2E 口径**：`tests/e2e/graph.spec.ts`（旧 sigma 按日页 + 批量归纳）显式 `graph.online_themes=0`——模型随仓库分发后在线路径会抢在「立即归纳」前把种子时刻归好，请求数不再等于批量归纳的 1 次；这条 spec 测的是批量路径，在线路径的 E2E 留 S7（需要假 embedding 注入，别拿真模型做断言）。
+- **已知边界**：① 一轮并发出现多个「新主题」时刻时各建一个主题（在线聚类粒度 = 一轮一批），后续相似时刻会归进来，近重复等打开图谱时的 ≥0.95 合并收拾；② 在线归属会持续把成员事件并进 `source_events`（兼容字段），长期会变大；③ 模型就绪后的历史积压按 20 个时刻/分钟消化，一天几百个时刻要跑一阵；④ 时刻若被批量归纳部分覆盖（事件交集），在线路径整条跳过，留作「待归属」空心点。
 
 ## 10. 向量运行时（沿用 v0.2 实测）
 
@@ -563,7 +576,7 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 ### 13.2 E2E（假采集 + 假 LLM + 假 embedding）
 
 - 全局页（`tests/e2e/graph-global.spec.ts`，2026-10-24）：主题/时刻/相似连线计数；主题下钻成员事件；多归属时刻「也属于」+ 原始事件；日历 `setDays` 调暗后节点数不变、空范围提示；日历真实鼠标（点日期不关弹层 / 拖拽涂抹连续范围 / 快捷范围不关弹层 / `×` 只关弹层）；「只看主题」；沉降后主题坐标回写 `node_positions`；全局页 ↔ 经典页互切。
-- 经典页（`tests/e2e/graph.spec.ts`）：确认门、立即归纳落库、下钻 + 时间线定位、设置抽屉、类型显隐、单击/双击语义、暂停零请求。
+- 经典页（`tests/e2e/graph.spec.ts`）：确认门、立即归纳落库、下钻 + 时间线定位、设置抽屉、类型显隐、单击/双击语义、暂停零请求。**S6 起这条 spec 显式 `graph.online_themes=0`**：模型随仓库分发后在线路径会在确认出网后抢先归主题，`立即归纳` 不再是唯一的建主题路径；本 spec 测的是批量路径，在线路径的 E2E 留 S7。
 - 日历 `Ctrl/Cmd+点` 加减、`Shift+点` 扩展：语义由 `calendar.ts` 纯函数用例覆盖；真实鼠标只测了单点与涂抹，这两个组合键的真机手感留 P3-b。
 - 模型缺失黄条 / 新主题待算：P3-b → **已上线（#54，2026-10-25）**，E2E 见 `graph-global.spec.ts`「模型缺失：顶部黄条提示…」。
 - 阈值控件（合并阈值 / 连线阈值 / 连线数）：E2E 见 `graph-global.spec.ts`「相似度阈值：抽屉可调，保存后落库；模型未就绪时如实说「没重算连线」」+ 经典页「保存不覆盖阈值」断言（2026-10-25）。
@@ -601,9 +614,9 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 | P3 | 主题/时刻 UI、日历、设置、E2E、验收、文档 | 3–4 天 |
 
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
-- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）；P2 在线化 S1 ✅（#67 时刻在线化）、S2 ✅（#68 归属引擎）、S3 ✅（#69 增量向量维护，schema v6）、S4 ✅（2026-10-25 命名 + 模糊确认两条 LLM 调用与兜底，未接线）、S5 ✅（2026-10-25 串行队列 / 暂停零出网 / 恢复补发，未接线）。
+- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）；P2 在线化 S1 ✅（#67 时刻在线化）、S2 ✅（#68 归属引擎）、S3 ✅（#69 增量向量维护，schema v6）、S4 ✅（2026-10-25 命名 + 模糊确认两条 LLM 调用与兜底）、S5 ✅（2026-10-25 串行队列 / 暂停零出网 / 恢复补发）、S6 ✅（2026-10-25 在线归属运行时接线 + `graph.online_themes` 开关 + 与补历史共存）。
 - 检索（提案门一）✅ v1（#48）：`events_fts`（trigram，归一化文本）+ 三触发器同步 + v5 迁移回填，双路查询（MATCH ≥3 字 / LIKE 兜底），结果按时刻卡片呈现；未归纳事件同等可查。
-- 仍需补：P2 的 S6–S7（接线开关与「补历史」共存、E2E）、打包 `asarUnpack` 与第三方声明、P3-b 余下的 LOD（归 M3，当前只做「时刻过多」提示 + 阈值可调）。
+- 仍需补：P2 的 S7（在线路径 E2E：假 embedding 注入 + 采集→归属→命名→画布刷新一条链）、打包 `asarUnpack` 与第三方声明、P3-b 余下的 LOD（归 M3，当前只做「时刻过多」提示 + 阈值可调）。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 
 ## 15. 风险与回退

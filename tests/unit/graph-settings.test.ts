@@ -15,6 +15,7 @@ describe('readGraphSettings', () => {
     const defaults = readGraphSettings(null)
     expect(defaults).toMatchObject({
       auto: true,
+      onlineThemes: true,
       intervalMinutes: 10,
       budgetTokensPerDay: 1_000_000,
       retryBackoffMinutes: '1,5,15',
@@ -34,6 +35,27 @@ describe('readGraphSettings', () => {
     const db = openDatabase(':memory:')
     expect(readGraphSettings(db)).toEqual(defaults)
     db.close()
+  })
+
+  it('在线归属开关（P2 · S6）：默认开、可关可开，非布尔值整单拒绝', () => {
+    const db = openDatabase(':memory:')
+    try {
+      expect(readGraphSettings(db).onlineThemes).toBe(true)
+
+      const off = saveGraphSettings(db, { onlineThemes: false })
+      expect(off.ok).toBe(true)
+      if (off.ok) expect(off.settings.onlineThemes).toBe(false)
+      expect(readGraphSettings(db).onlineThemes).toBe(false)
+
+      const on = saveGraphSettings(db, { onlineThemes: true })
+      expect(on.ok).toBe(true)
+      if (on.ok) expect(on.settings.onlineThemes).toBe(true)
+      expect(readGraphSettings(db).onlineThemes).toBe(true)
+
+      expect(saveGraphSettings(db, { onlineThemes: 'yes' })).toMatchObject({ ok: false })
+    } finally {
+      db.close()
+    }
   })
 
   it('日格满量：库里的脏值（0 / 负数 / 越界 / 小数 / 非数字）一律回退默认', () => {

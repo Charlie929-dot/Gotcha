@@ -29,6 +29,8 @@ import {
 
 export const GRAPH_SETTING_KEYS = {
   auto: 'graph.auto',
+  /** 在线归属（P2 · S6）：采集时新时刻直接归主题；关掉 = 回到按日批量归纳 */
+  onlineThemes: 'graph.online_themes',
   intervalMinutes: 'graph.interval_minutes',
   budgetTokensPerDay: 'graph.budget_tokens_per_day',
   retryBackoffMinutes: 'graph.retry_backoff_minutes',
@@ -64,6 +66,11 @@ export interface GraphUsageView {
 
 export interface GraphSettingsView {
   auto: boolean
+  /**
+   * 在线归属开关（P2 · S6）。开 = 采集时新时刻本地归主题、新主题走命名 / 模糊确认；
+   * 关 = 回到按日批量归纳（`auto` 控制自动跑不跑）。本地模型未就绪时在线路径自动让位。
+   */
+  onlineThemes: boolean
   intervalMinutes: number
   budgetTokensPerDay: number
   retryBackoffMinutes: string
@@ -85,6 +92,7 @@ export interface GraphSettingsView {
 
 export interface GraphSettingsPatch {
   auto?: boolean
+  onlineThemes?: boolean
   intervalMinutes?: number
   budgetTokensPerDay?: number
   /** 分钟列表（与 settings 的 `1,5,15` 文本互转） */
@@ -172,6 +180,7 @@ export function readGraphSettings(db: Db | null, now = Date.now()): GraphSetting
   if (!db) {
     return {
       auto: true,
+      onlineThemes: true,
       intervalMinutes: 10,
       budgetTokensPerDay: 1_000_000,
       retryBackoffMinutes: '1,5,15',
@@ -193,6 +202,7 @@ export function readGraphSettings(db: Db | null, now = Date.now()): GraphSetting
   const usage = readUsage(db, now)
   return {
     auto: getSetting(db, GRAPH_SETTING_KEYS.auto) === '1',
+    onlineThemes: getSetting(db, GRAPH_SETTING_KEYS.onlineThemes) === '1',
     intervalMinutes: getNumberSetting(db, GRAPH_SETTING_KEYS.intervalMinutes, 10),
     budgetTokensPerDay: getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000),
     retryBackoffMinutes: parseBackoffText(getSetting(db, GRAPH_SETTING_KEYS.retryBackoffMinutes)),
@@ -246,6 +256,7 @@ function validatePatch(input: unknown): { ok: true; patch: GraphSettingsPatch } 
   if (!isRecord(input)) return { ok: false, error: '设置必须是对象' }
   const allowed = [
     'auto',
+    'onlineThemes',
     'intervalMinutes',
     'budgetTokensPerDay',
     'retryBackoffMinutes',
@@ -271,6 +282,12 @@ function validatePatch(input: unknown): { ok: true; patch: GraphSettingsPatch } 
   if ('auto' in input) {
     if (typeof input.auto !== 'boolean') return { ok: false, error: 'auto 必须是布尔值' }
     patch.auto = input.auto
+  }
+  if ('onlineThemes' in input) {
+    if (typeof input.onlineThemes !== 'boolean') {
+      return { ok: false, error: 'onlineThemes 必须是布尔值' }
+    }
+    patch.onlineThemes = input.onlineThemes
   }
   if ('outboundConsent' in input) {
     if (typeof input.outboundConsent !== 'boolean') {
@@ -399,6 +416,9 @@ export function saveGraphSettings(db: Db, input: unknown, now = Date.now()): Gra
       }
 
       if (patch.auto !== undefined) setSetting(db, GRAPH_SETTING_KEYS.auto, patch.auto ? '1' : '0')
+      if (patch.onlineThemes !== undefined) {
+        setSetting(db, GRAPH_SETTING_KEYS.onlineThemes, patch.onlineThemes ? '1' : '0')
+      }
       if (patch.outboundConsent !== undefined) {
         setSetting(db, GRAPH_SETTING_KEYS.outboundConsent, patch.outboundConsent ? '1' : '0')
       }

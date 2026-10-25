@@ -18,6 +18,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { insertEvent, openDatabase } from '../../src/db'
+import { setSetting } from '../../src/db/settings'
 
 const APP_ARGS = ['.'] as const
 
@@ -110,6 +111,11 @@ test.beforeAll(async () => {
     windowTitle: '示例页面',
     ocrText: '页面内容'
   })
+  // 本 spec 验证的是**旧 sigma 按日页 + 批量归纳（补历史 / 手动「立即归纳」）**。
+  // 在线归属（P2 · S6）在模型随仓库分发后默认开启，会在确认出网后抢先把这两个时刻
+  // 直接归主题、把请求数变成 2；这里显式关掉在线路径，保证测的是批量路径。
+  // 在线路径自己的用例见 `tests/unit/theme-online-runtime.test.ts`（E2E 留 S7）。
+  setSetting(db, 'graph.online_themes', '0')
   db.close()
 
   app = await electron.launch({

@@ -77,6 +77,11 @@ export interface InductionRuntimeOptions {
    */
   onGraphChanged?: (outcome: Extract<RunOutcome, { status: 'ok' }>) => void
   /**
+   * 自动跑批是否该让位给在线路径（P2 · S6）：在线归属可用时返回 false，
+   * 自动批量归纳跳过、手动「立即归纳」保留为补历史 / 调试。
+   */
+  shouldAutoRun?: () => boolean
+  /**
    * 本地向量模型是否就绪（缺省视为就绪：没接线的地方不该凭空报黄条）。
    * 每次取快照现读，用户装好模型后下一次刷新就能消失。
    */
@@ -198,6 +203,7 @@ export function createInductionRuntime(options: InductionRuntimeOptions): Induct
         const resolved = options.resolveClient()
         return resolved.ok ? resolved.client : null
       },
+      ...(options.shouldAutoRun ? { shouldAutoRun: options.shouldAutoRun } : {}),
       now: options.now,
       firstDelayMs: options.firstDelayMs,
       intervalMs: options.intervalMs,

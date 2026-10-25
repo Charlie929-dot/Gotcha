@@ -226,6 +226,29 @@ export function readInducedEventIds(db: Db, from: number, to: number): Set<numbe
   return ids
 }
 
+/**
+ * 已被主题归属（`theme_moments`，含次归属）的时刻覆盖的事件 id。
+ *
+ * 在线路径（P2 · S6）把新时刻直接归到主题、不再走批量归纳；按日批量归纳（补历史 / 调试）
+ * 如果还按老口径只看 `nodes.source_events`，同一天里在线路径刚归好的事件会被再归纳一遍、
+ * 建出重复主题。v3 起 `theme_moments` 才是归属权威（`source_events` 是兼容并集），
+ * 所以这里把它并进「已处理」集合。
+ */
+export function readAssignedEventIds(db: Db, from: number, to: number): Set<number> {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT m.event_ids AS event_ids
+         FROM moments m JOIN theme_moments tm ON tm.moment_id = m.id
+        WHERE m.start_ts <= ? AND m.end_ts >= ?`
+    )
+    .all(to, from) as Array<{ event_ids: string | null }>
+  const ids = new Set<number>()
+  for (const row of rows) {
+    for (const id of parseSourceEventIds(row.event_ids)) ids.add(id)
+  }
+  return ids
+}
+
 /** 按本地日读取原始事件（ts 升序）；默认上限 2 万条，防单日异常数据一次拉爆内存 */
 export function selectDayEvents(
   db: Db,
@@ -255,6 +278,8 @@ export interface ReadDayBatchOptions {
  * 按天取一批：只返回该天尚未被节点覆盖的事件。
  * - 自动归纳传今天；手动归纳传当前查看日；
  * - 已归纳事件（含占位）跳过，因此重复点击是幂等的，不会重复出云；
+ * - **已归属主题的时刻**（`theme_moments`，在线路径写的）也跳过：同一天的数据不能被
+ *   在线路径与批量归纳各建一次主题（P2 · S6 共存口径）；
  * - 不推进旧游标（`graph.cursor_*` 仅保留兼容，不再驱动归纳）。
  */
 export function readDayBatch(
@@ -266,6 +291,8 @@ export function readDayBatch(
   const events = selectDayEvents(db, from, to, { limit: options.limit })
   if (events.length === 0) return { moments: [], consumed: [] }
   const induced = readInducedEventIds(db, from, to)
-  const uninduced = induced.size === 0 ? events : events.filter((event) => !induced.has(event.id))
+  const assigned = readAssignedEventIds(db, from, to)
+  const covered = assigned.size === 0 ? induced : new Set([...induced, ...assigned])
+  const uninduced = covered.size === 0 ? events : events.filter((event) => !covered.has(event.id))
   return mergeMoments(uninduced, { maxMoments: options.maxMoments })
 }

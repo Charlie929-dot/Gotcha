@@ -84,6 +84,8 @@
         <section>
           <h3>归纳</h3>
           <label class="check"><input id="set-auto" type="checkbox" /> 采集运行中自动归纳</label>
+          <label class="check"><input id="set-online" type="checkbox" /> 新数据即时归主题（在线）</label>
+          <p class="hint">在线路径在采集时把新时刻归到主题，只有「新主题命名 / 模糊归属」两条 LLM 调用；本地向量模型就绪时自动归纳让位给它（手动「立即归纳」仍可补历史）。</p>
           <label>间隔（分钟）<input id="set-interval" type="number" min="1" max="1440" /></label>
           <label>每日 token 预算<input id="set-budget" type="number" min="1000" max="100000000" /></label>
           <label>失败退避（分钟，逗号分隔）<input id="set-backoff" type="text" /></label>

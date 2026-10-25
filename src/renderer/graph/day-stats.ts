@@ -4,7 +4,10 @@
  * 口径：
  * - **事件量**（决定颜色深浅）：`graph:global` 的 `dayActivity`，按本地日统计的**全部**
  *   事件数，含还没进时刻的积压——日格要回答的是「这天有多忙」；
- * - 时刻 / 主题：时刻按 `day_key` 计数，主题按 `[tsStart, tsEnd]` 覆盖到这一天计数（tooltip 用）。
+ * - 时刻 / 主题：时刻按 `day_key` 计数，主题按 `[tsStart, tsEnd]` 覆盖到这一天计数（tooltip 用）；
+ * - **待归纳**（空心点）：`dayActivity.pending`＝当天还没归属任何主题的时刻数。
+ *   空心点表示「这天有时刻没归纳完」；事件→时刻是本地分组、回填一跑就补齐，
+ *   时刻→主题要过归纳（D28 只自动归纳今天），长期积压在这一层。
  *
  * 连续热力：当天事件 ÷ 满量（`fullScale`，设置抽屉可调，默认 4000＝一天全在用）＝百分比，
  * 百分比映射成同一色相的不透明度（`rgba(79,195,247,α)`），α ∈ [0.06, 0.45]，
@@ -37,6 +40,8 @@ export interface DayStat {
   moments: number
   /** 区间覆盖这一天的主题数 */
   themes: number
+  /** 当天还没归属主题的时刻数（>0 时格子标空心点） */
+  pending: number
 }
 
 export interface DayStatTheme {
@@ -48,11 +53,18 @@ export interface DayActivityInput {
   dayKey: string
   events: number
   moments: number
+  /** 当天待归纳的时刻数（缺省按 0，旧调用方不会凭空长出空心点） */
+  pending?: number
 }
 
 /** 某一天是否「有记录」（决定日格是否着色 + tooltip 文案）。 */
 export function hasRecord(stat: DayStat | undefined): boolean {
   return stat !== undefined && (stat.events > 0 || stat.moments > 0 || stat.themes > 0)
+}
+
+/** 这天是不是「归纳没跑完」（有时刻还没归属主题）——日格空心点。 */
+export function hasPending(stat: DayStat | undefined): boolean {
+  return stat !== undefined && stat.pending > 0
 }
 
 /** 当天事件数占满量的百分比（0–1，超过满量按 1 封顶；满量非法时回退默认）。 */
@@ -70,7 +82,7 @@ export function heatAlpha(events: number, fullScale: number): number {
   return Math.round(alpha * 1000) / 1000
 }
 
-/** 日格 tooltip：无记录只说日期，有记录给「事件（百分比）· 时刻 · 主题」。 */
+/** 日格 tooltip：无记录只说日期，有记录给「事件（百分比）· 时刻 · 主题」，待归纳时附一句。 */
 export function dayTooltip(
   key: string,
   stat: DayStat | undefined,
@@ -78,11 +90,12 @@ export function dayTooltip(
 ): string {
   if (!hasRecord(stat) || stat === undefined) return `${key} · 无记录`
   const percent = Math.round(heatRatio(stat.events, fullScale) * 100)
-  return `${key} · ${stat.events} 条事件（${percent}%）· ${stat.moments} 个时刻 · ${stat.themes} 个主题`
+  const base = `${key} · ${stat.events} 条事件（${percent}%）· ${stat.moments} 个时刻 · ${stat.themes} 个主题`
+  return stat.pending > 0 ? `${base} · ${stat.pending} 个时刻待归纳` : base
 }
 
 /**
- * 逐日聚合：事件 / 时刻来自主进程的 `dayActivity`，主题由区间铺天。
+ * 逐日聚合：事件 / 时刻 / 待归纳来自主进程的 `dayActivity`，主题由区间铺天。
  * 非法输入（NaN / 空 key / 倒序区间）跳过，不做静默纠正。
  */
 export function computeDayStats(
@@ -94,7 +107,7 @@ export function computeDayStats(
   const bucket = (key: string): DayStat => {
     const existing = stats.get(key)
     if (existing) return existing
-    const created: DayStat = { events: 0, moments: 0, themes: 0 }
+    const created: DayStat = { events: 0, moments: 0, themes: 0, pending: 0 }
     stats.set(key, created)
     return created
   }
@@ -104,6 +117,7 @@ export function computeDayStats(
     const stat = bucket(day.dayKey)
     if (Number.isFinite(day.events) && day.events > 0) stat.events += day.events
     if (Number.isFinite(day.moments) && day.moments > 0) stat.moments += day.moments
+    if (Number.isFinite(day.pending) && (day.pending ?? 0) > 0) stat.pending += day.pending ?? 0
   }
 
   for (const theme of themes) {

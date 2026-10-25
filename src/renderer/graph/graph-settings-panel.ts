@@ -21,6 +21,12 @@ export interface SettingsPanel {
   isOpen(): boolean
 }
 
+/** 保存后哪些「需要重算图」的设置变了（调用方据此决定要不要重新拉图） */
+export interface SettingsChange {
+  /** 相似度阈值 / 连线数变了：主进程已按新阈值重算连线，调用方重新 load 即可 */
+  thresholds: boolean
+}
+
 type KeySource = 'env' | 'file' | 'none' | 'unknown'
 
 const ELEMENT_IDS = [
@@ -82,7 +88,7 @@ function deriveEnvName(id: string): string {
 export function createSettingsPanel(
   root: HTMLElement,
   api: GraphApi,
-  onSaved: (settings: GraphSettingsView) => void
+  onSaved: (settings: GraphSettingsView, changed: SettingsChange) => void
 ): SettingsPanel {
   const drawer = byId(root, 'drawer')
   const closeButton = byId<HTMLButtonElement>(root, 'settings-close')
@@ -99,6 +105,17 @@ export function createSettingsPanel(
    * 否则从经典页保存会把它写成空值 / 覆盖掉全局页的设置。
    */
   const dayHeatInput = root.querySelector<HTMLInputElement>('#set-day-heat')
+  /**
+   * 相似度阈值 / 连线数同样只在全局图页有输入框（P3-b）。三项一起出现：
+   * 缺一个就整组当成「本页没有」，不发送 thresholds——避免经典页保存时把某项写成空值。
+   */
+  const mergeSimInput = root.querySelector<HTMLInputElement>('#set-merge-sim')
+  const edgeSimInput = root.querySelector<HTMLInputElement>('#set-edge-sim')
+  const edgeKInput = root.querySelector<HTMLInputElement>('#set-edge-k')
+  const thresholdInputs =
+    mergeSimInput && edgeSimInput && edgeKInput
+      ? { mergeSimInput, edgeSimInput, edgeKInput }
+      : null
   const consentInput = byId<HTMLInputElement>(root, 'set-consent')
   const usageEl = byId(root, 'usage')
   const activeSelect = byId<HTMLSelectElement>(root, 'set-active')
@@ -120,6 +137,57 @@ export function createSettingsPanel(
   function setMessage(text: string, kind: 'ok' | 'error' | 'muted' = 'muted'): void {
     messageEl.textContent = text
     messageEl.style.color = kind === 'error' ? 'var(--error)' : kind === 'ok' ? 'var(--activity)' : ''
+  }
+
+  /**
+   * 阈值输入框 → `thresholds` patch。空框不发（保留库里已有值）；
+   * 非数字原样发（JSON 里变 null，主进程按区间校验整单拒绝），这里不静默兜底。
+   */
+  function readThresholdPatch(): Record<string, number> | null {
+    if (!thresholdInputs) return null
+    const fields: Array<[string, HTMLInputElement]> = [
+      ['themeMergeSim', thresholdInputs.mergeSimInput],
+      ['edgeMinSim', thresholdInputs.edgeSimInput],
+      ['edgeTopK', thresholdInputs.edgeKInput]
+    ]
+    const patch: Record<string, number> = {}
+    for (const [key, input] of fields) {
+      const raw = input.value.trim()
+      if (raw === '') continue
+      patch[key] = Number(raw)
+    }
+    return Object.keys(patch).length > 0 ? patch : null
+  }
+
+  /** 三个「要重算图」的阈值有没有变——没变就不触发回填 */
+  function changedThresholds(
+    before: GraphSettingsView['thresholds'],
+    after: GraphSettingsView['thresholds']
+  ): boolean {
+    return (
+      before.themeMergeSim !== after.themeMergeSim ||
+      before.edgeMinSim !== after.edgeMinSim ||
+      before.edgeTopK !== after.edgeTopK
+    )
+  }
+
+  /** 阈值变了 -> 让主进程按新阈值重算连线，并给出可读结果（不抛错） */
+  async function recomputeAfterThresholdChange(): Promise<string> {
+    try {
+      const result = await api.recomputeGraph()
+      if (!result.ok) {
+        return result.reason === 'busy'
+          ? '已保存；图谱正在回填，稍后重新打开图谱会按新阈值重算'
+          : '已保存；数据库暂不可用，本次没能重算连线'
+      }
+      if (!result.embeddings) {
+        return '已保存；本地向量模型未就绪，本次没有重算连线'
+      }
+      const merged = result.merges > 0 ? `，合并 ${result.merges} 个近重复主题` : ''
+      return `已保存；已按新阈值重算 ${result.edges} 条相似连线${merged}`
+    } catch {
+      return '已保存；重算连线失败，下次打开图谱会自动重算'
+    }
   }
 
   function nextCustomId(): string {
@@ -443,6 +511,11 @@ export function createSettingsPanel(
       batchInput.value = String(settings.batchMaxMoments)
       maxTokensInput.value = String(settings.maxTokens)
       if (dayHeatInput) dayHeatInput.value = String(settings.dayHeatMax)
+      if (thresholdInputs) {
+        thresholdInputs.mergeSimInput.value = String(settings.thresholds.themeMergeSim)
+        thresholdInputs.edgeSimInput.value = String(settings.thresholds.edgeMinSim)
+        thresholdInputs.edgeKInput.value = String(settings.thresholds.edgeTopK)
+      }
       consentInput.checked = settings.outboundConsent
       hotkeyToggleInput.value = settings.hotkeys.toggleCapture
       hotkeyGraphInput.value = settings.hotkeys.openGraph
@@ -475,6 +548,8 @@ export function createSettingsPanel(
   form.addEventListener('submit', async (event) => {
     event.preventDefault()
     if (!current) return
+    /** 保存前先留一份阈值：保存后库和 `current` 都是新值，只有这里能判断「真的变了」 */
+    const before = current.thresholds
     saveButton.disabled = true
     setMessage('保存中…')
     try {
@@ -506,6 +581,8 @@ export function createSettingsPanel(
       }
       // 只有全局图页有这个输入框；缺省时不要带字段（免得清掉已有设置）
       if (dayHeatInput) payload.dayHeatMax = Number(dayHeatInput.value)
+      const thresholdPatch = readThresholdPatch()
+      if (thresholdPatch) payload.thresholds = thresholdPatch
       const result = await api.saveSettings(payload)
       if (!result.ok) {
         setMessage(result.error, 'error')
@@ -544,13 +621,30 @@ export function createSettingsPanel(
       hotkeyGraphInput.value = result.settings.hotkeys.openGraph
       consentInput.checked = result.settings.outboundConsent
       if (dayHeatInput) dayHeatInput.value = String(result.settings.dayHeatMax)
+      if (thresholdInputs) {
+        thresholdInputs.mergeSimInput.value = String(result.settings.thresholds.themeMergeSim)
+        thresholdInputs.edgeSimInput.value = String(result.settings.thresholds.edgeMinSim)
+        thresholdInputs.edgeKInput.value = String(result.settings.thresholds.edgeTopK)
+      }
       void refreshKeyStatus()
       void refreshHotkeyStatus()
-      onSaved(result.settings)
+
+      // 阈值变了才重算（没变就不打扰后台回填）；重算完调用方再重新拉图
+      const thresholdsChanged =
+        thresholdInputs !== null && changedThresholds(before, result.settings.thresholds)
+      let recomputeNote = ''
+      if (thresholdsChanged) {
+        setMessage('已保存，正在按新阈值重算连线…')
+        recomputeNote = await recomputeAfterThresholdChange()
+      }
+      onSaved(result.settings, { thresholds: thresholdsChanged })
+
       if (failures.length > 0) {
         setMessage(`设置已保存，但密钥未保存：${failures.join('；')}`, 'error')
       } else if (warnings.length > 0) {
         setMessage(`已保存；${warnings.join('；')}`, 'ok')
+      } else if (recomputeNote !== '') {
+        setMessage(recomputeNote, 'ok')
       } else {
         setMessage('已保存', 'ok')
       }

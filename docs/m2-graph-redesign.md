@@ -1,6 +1,6 @@
 # 图谱重做方案 v0.3 · 全局主题图 + 时刻层 + 时间筛选
 
-> 状态：**实施中（2026-10-24）**——P0（Foam 内核 F1–F13）✅、P1（schema v3 + 数据层 + 向量回填）✅、P0.5（主题合并 + 次归属，schema v4）✅、P3-a（`graph:global` IPC + 默认全局 Foam 页 + 日历调暗 + 旧 sigma 页开关）✅；P2（在线 assigner/labeler）与 P3-b（日格计数 / 阈值控件 / 撤销合并入口 / 模型缺失黄条）待做。
+> 状态：**实施中（2026-10-25）**——P0（Foam 内核 F1–F13）✅、P1（schema v3 + 数据层 + 向量回填）✅、P0.5（主题合并 + 次归属，schema v4）✅、P3-a（`graph:global` IPC + 默认全局 Foam 页 + 日历调暗 + 旧 sigma 页开关）✅、P3-b 已落 日格计数 ✅ / 模型缺失黄条 ✅ / 阈值控件 ✅；P2（在线 assigner/labeler）与 P3-b 余下（撤销合并入口 / 未归纳空心点 / >2k 时刻 LOD）待做。
 > 已定方向（拍板人）：① 不做 3D，保留 Foam 2D 与其活布局/惯性/粒子动效；② 只保留一张全局图，时间只做筛选/调暗；③ 主题节点 + 时刻点，时刻可同时属于多个主题；④ LLM 只做新主题命名、模糊归属确认与提示文案，不再批量归纳节点/边；⑤ 主题圈（韦恩背景）不做。
 > 事实源：本文件；D27 的内核（Foam + 本地向量 + 距离编码）保留，D27 的「按日构图」由本文件修订（「事件默认不上画布」仍成立：原始事件不上，新增时刻点层）；D28 的按日归纳降级为补历史/调试；新增 **D29**。
 > v0.2 已归档至 `docs/archive/m2-graph-redesign-v0.2.md`（ONNX 实测数据仍有效，见 §10）。
@@ -329,7 +329,8 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 - 旧 sigma 按日页保留为 `graph.html`，工具栏「经典视图 / 全局视图」互切；P0 harness 页移除（`harness*.ts/html/css`）。
 - 真机副本冒烟（`better-sqlite3 backup()` 复制用户库）：230 主题 / 1,047 个有归属时刻（总 2,113）/ 1,151 条归属 / 171 条相似边；画布 1,277 节点 + 1,322 连线，沉降 3.1–4.9 s；230 条主题坐标回写到副本。
 - 日格热力（P3-b 第一项，2026-10-24/25，PR #52 已合并，`src/renderer/graph/day-stats.ts`）：**连续变化**——当天事件数 ÷ 满量（默认 4000 条/天，设置抽屉「视图」可调）＝百分比，映射成 `rgba(79,195,247,α)`，α ∈ 0.06–0.45、中间走 `ratio^0.6`；tooltip「N 条事件（P%）· M 个时刻 · K 个主题」。事件量来自主进程 `graph:global.dayActivity`（按本地日统计 `events` 全量，**含未成时刻的积压**），时刻按 `day_key`、主题按 `[tsStart, tsEnd]` 铺天。「归纳未跑完＝空心点」仍需「当天有多少事件还没成时刻」的口径（未做）。
-- 未做（P3-b 余下）：设置抽屉阈值控件（合并阈值 / 连线 k）、撤销合并入口、未归纳空心点、>2k 时刻 LOD / 收窄提示。
+- 阈值控件（P3-b，2026-10-25，`feat/graph-threshold-controls`）：设置抽屉「视图」段暴露 `graph.theme_merge_sim`（自动合并阈值）/ `graph.edge_min_sim`（主题连线阈值）/ `graph.edge_top_k`（每主题连线数，0–32），只在全局图页出现（经典页共用面板，按 `querySelector` 判空、缺省不带 `thresholds`）。保存后渲染层显式调新通道 `graph:recompute`（仅图谱窗口主 frame）→ 主进程 `runGraphBackfill({ minIntervalMs: 0 })` 按库里阈值**重建 embedding 边**并再跑合并固定点，返回 `{ edges, merges, embeddings }`；`embeddings:false`（模型未就绪）时只回填结构、UI 明说「本次没有重算连线」，在途回填返回 `busy`。**合并阈值只影响之后的新主题**，已合并的不会自动拆开（撤销入口 `revertThemeMerge` 仍未接 UI）。
+- 未做（P3-b 余下）：撤销合并入口、未归纳空心点、>2k 时刻 LOD / 收窄提示。
 
 ## 8. 时间筛选
 
@@ -431,7 +432,8 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 - 全局页（`tests/e2e/graph-global.spec.ts`，2026-10-24）：主题/时刻/相似连线计数；主题下钻成员事件；多归属时刻「也属于」+ 原始事件；日历 `setDays` 调暗后节点数不变、空范围提示；日历真实鼠标（点日期不关弹层 / 拖拽涂抹连续范围 / 快捷范围不关弹层 / `×` 只关弹层）；「只看主题」；沉降后主题坐标回写 `node_positions`；全局页 ↔ 经典页互切。
 - 经典页（`tests/e2e/graph.spec.ts`）：确认门、立即归纳落库、下钻 + 时间线定位、设置抽屉、类型显隐、单击/双击语义、暂停零请求。
 - 日历 `Ctrl/Cmd+点` 加减、`Shift+点` 扩展：语义由 `calendar.ts` 纯函数用例覆盖；真实鼠标只测了单点与涂抹，这两个组合键的真机手感留 P3-b。
-- 模型缺失黄条 / 新主题待算：P3-b。
+- 模型缺失黄条 / 新主题待算：P3-b → **已上线（#54，2026-10-25）**，E2E 见 `graph-global.spec.ts`「模型缺失：顶部黄条提示…」。
+- 阈值控件（合并阈值 / 连线阈值 / 连线数）：E2E 见 `graph-global.spec.ts`「相似度阈值：抽屉可调，保存后落库；模型未就绪时如实说「没重算连线」」+ 经典页「保存不覆盖阈值」断言（2026-10-25）。
 - 原有 26 条 E2E 回归全绿（2026-10-24：33 条）。
 
 ### 13.3 验收口径
@@ -465,7 +467,7 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
 - 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）。
 - 检索（提案门一）✅ v1（#48）：`events_fts`（trigram，归一化文本）+ 三触发器同步 + v5 迁移回填，双路查询（MATCH ≥3 字 / LIKE 兜底），结果按时刻卡片呈现；未归纳事件同等可查。
-- 仍需补：P2 在线 assigner/labeler（新主题增量向量、模糊带确认、暂停/队列）、打包 `asarUnpack` 与第三方声明、撤销合并的 UI 入口（`revertThemeMerge` 已有接口）、P3-b（日历日格计数 / 设置抽屉阈值控件 / 模型缺失黄条 / 自动归纳完成后的画布自动刷新）。
+- 仍需补：P2 在线 assigner/labeler（新主题增量向量、模糊带确认、暂停/队列）、打包 `asarUnpack` 与第三方声明、撤销合并的 UI 入口（`revertThemeMerge` 已有接口）、P3-b 余下（未归纳空心点 / >2k 时刻 LOD / 自动归纳完成后的画布自动刷新）。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 
 ## 15. 风险与回退

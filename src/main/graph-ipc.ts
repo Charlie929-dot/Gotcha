@@ -41,6 +41,15 @@ export type ProviderKeySaveResult =
 
 export type ProviderKeyStatus = Record<string, ApiKeySource>
 
+/**
+ * `graph:recompute`：按库里当前的相似度阈值重算相似连线（保存阈值后由渲染层调用）。
+ * - `embeddings=false`：本地向量模型未就绪，只回填了结构，连线没动；
+ * - `busy`：已有回填在跑（打开图谱的后台回填），本次没重算。
+ */
+export type GraphRecomputeResult =
+  | { ok: true; edges: number; merges: number; embeddings: boolean }
+  | { ok: false; reason: 'busy' | 'unavailable' }
+
 export interface GraphIpcDeps {
   getGraphWindow(): BrowserWindow | null
   queryGraph(from: number, to: number): GraphDayData
@@ -62,6 +71,8 @@ export interface GraphIpcDeps {
   setConsent(consented: boolean): void
   readSettings(): GraphSettingsView
   saveSettings(patch: unknown): GraphSettingsSaveResult
+  /** 按当前阈值重算连线（不做节流：这是用户显式动作；在途回填时返回 busy） */
+  recomputeGraph(): Promise<GraphRecomputeResult>
   /**
    * 保存成功后由主进程接手副作用（重绑热键 / 按确认门启停归纳）。
    * `previousConsent` 是**保存前**读到的确认门——保存后库里的值已经是新的，
@@ -332,6 +343,19 @@ export function createGraphIpcHandlers(
             ok: false,
             error: error instanceof Error ? error.message : String(error)
           } satisfies GraphSettingsSaveResult
+        }
+      }
+    ],
+    [
+      'graph:recompute',
+      async (event) => {
+        if (!ensureSender(event)) return { ok: false, reason: 'unavailable' } satisfies GraphRecomputeResult
+        try {
+          return await deps.recomputeGraph()
+        } catch (error) {
+          // 只记「失败了」，不记主题正文 / 向量
+          deps.log('warn', 'graph recompute failed', { error: String(error) })
+          return { ok: false, reason: 'unavailable' } satisfies GraphRecomputeResult
         }
       }
     ],

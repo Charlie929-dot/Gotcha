@@ -411,6 +411,34 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     await expect(graph.locator('#calendar')).toBeHidden()
   })
 
+  test('相似度阈值：抽屉可调，保存后落库；模型未就绪时如实说「没重算连线」', async () => {
+    await graph.locator('#settings').click()
+    await expect(graph.locator('#set-merge-sim')).toHaveValue('0.95')
+    await expect(graph.locator('#set-edge-sim')).toHaveValue('0.64')
+    await expect(graph.locator('#set-edge-k')).toHaveValue('4')
+
+    await graph.locator('#set-merge-sim').fill('0.8')
+    await graph.locator('#set-edge-sim').fill('0.5')
+    await graph.locator('#set-edge-k').fill('8')
+    await graph.locator('#settings-save').click()
+    // 种子库把模型目录指到了不存在的路径 → 重算只回填结构，不能假装连线已按新阈值更新
+    await expect(graph.locator('#settings-msg')).toHaveText(
+      '已保存；本地向量模型未就绪，本次没有重算连线',
+      { timeout: 15_000 }
+    )
+    await graph.locator('#settings-close').click()
+
+    // 重算后的重新拉图不能把画布清空（种子仍是 2 主题 + 2 时刻）
+    await expect.poll(async () => (await nodeIds()).length, { timeout: 15_000 }).toBe(4)
+
+    // 重开抽屉：值来自库，不是输入框残留
+    await graph.locator('#settings').click()
+    await expect(graph.locator('#set-merge-sim')).toHaveValue('0.8')
+    await expect(graph.locator('#set-edge-sim')).toHaveValue('0.5')
+    await expect(graph.locator('#set-edge-k')).toHaveValue('8')
+    await graph.locator('#settings-close').click()
+  })
+
   test('日历时段滚轮：选起时立即调暗，全天一键复位', async () => {
     await graph.evaluate((day) => {
       ;(window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.setDays([day])
@@ -599,6 +627,7 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     // 且不能把全局页的日格满量（上一条用例改成 100）用空值覆盖回 4000
     await graph.locator('#settings').click()
     await expect(graph.locator('#set-day-heat')).toHaveCount(0)
+    await expect(graph.locator('#set-merge-sim')).toHaveCount(0)
     await graph.locator('#settings-save').click()
     await expect(graph.locator('#settings-msg')).toHaveText('已保存', { timeout: 15_000 })
     await graph.locator('#settings-close').click()
@@ -617,5 +646,12 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
       `${todayKey} · 3 条事件（3%）· 2 个时刻 · 2 个主题`
     )
     await graph.locator('#cal-close').click()
+
+    // 阈值同样没被经典页的保存清掉（经典页不发送 thresholds 字段）
+    await graph.locator('#settings').click()
+    await expect(graph.locator('#set-merge-sim')).toHaveValue('0.8')
+    await expect(graph.locator('#set-edge-sim')).toHaveValue('0.5')
+    await expect(graph.locator('#set-edge-k')).toHaveValue('8')
+    await graph.locator('#settings-close').click()
   })
 })

@@ -41,7 +41,7 @@ import { createGraphWindow } from './graph-window'
 import { runGraphBackfill } from './graph-backfill-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
 import { isModelReady } from '../understand/embedding/session'
-import { registerGraphIpc, type ProviderKeySaveResult } from './graph-ipc'
+import { registerGraphIpc, type GraphRecomputeResult, type ProviderKeySaveResult } from './graph-ipc'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
   CaptureController,
@@ -394,6 +394,40 @@ function runGraphBackfillInBackground(): void {
     return
   }
   void runGraphBackfill({ db, modelDir: resolveModelDir(), log: captureLog })
+}
+
+/**
+ * 用户改了相似度阈值 / 连线数后按新阈值重算连线（设置抽屉保存后由渲染层显式触发）。
+ * - 不做 60s 节流：这是显式动作；但同一时间只允许一次回填（在途返回 `busy`）；
+ * - 模型未就绪时不报错：只回填结构，`embeddings: false` 让渲染层如实提示「没重算连线」；
+ * - A3 红线同 `runGraphBackfillInBackground`：没建过库不因为一次重算就建库。
+ */
+async function recomputeGraph(): Promise<GraphRecomputeResult> {
+  if (shuttingDown || !existsSync(dbPath)) return { ok: false, reason: 'unavailable' }
+  let db: Db
+  try {
+    db = connections.ensureWritable().db
+  } catch (error) {
+    captureLog('warn', 'graph recompute: database unavailable', {
+      error: error instanceof Error ? error.name : 'unknown'
+    })
+    return { ok: false, reason: 'unavailable' }
+  }
+  const result = await runGraphBackfill({
+    db,
+    modelDir: resolveModelDir(),
+    log: captureLog,
+    minIntervalMs: 0
+  })
+  if (result.status === 'skipped') {
+    return { ok: false, reason: result.reason === 'busy' ? 'busy' : 'unavailable' }
+  }
+  return {
+    ok: true,
+    edges: result.theme?.structure.edges?.inserted ?? 0,
+    merges: result.theme?.merges?.applied ?? 0,
+    embeddings: result.theme !== null
+  }
 }
 
 function showGraphWindow(): void {
@@ -882,6 +916,7 @@ if (primaryInstance) {
         return saveGraphSettings(db, patch)
       },
       onSettingsSaved: applyGraphSettings,
+      recomputeGraph,
       getHotkeys: () => hotkeyHandle?.results ?? [],
       openTimeline: (day) => openTimelineDay(day ?? null),
       fetchProviderModels: async (input) => {

@@ -14,6 +14,10 @@ export const LLM_DEFAULTS = {
   retryBaseMs: 1_000,
   /** 归纳输出上限（JSON 截断会导致解析失败，宁大勿小） */
   maxTokens: 2_000,
+  /** 新主题命名的输出上限（只有 title / summary / type，256 足够） */
+  namingMaxTokens: 256,
+  /** 模糊确认的输出上限（≤20 条 assignments） */
+  assignmentMaxTokens: 800,
   temperature: 0,
   /** 出云字段截断（D19 / 成本控制） */
   appMaxChars: 80,

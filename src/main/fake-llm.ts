@@ -6,7 +6,11 @@
  * 在契约内、边只连本批节点。测试与 E2E 通过 `counters` 断言「零真实请求 / 暂停取消」。
  */
 
-import type { CloudPayload } from '../understand/cloud/redact'
+import type {
+  CloudPayload,
+  ThemeAssignmentPayload,
+  ThemeNamingPayload
+} from '../understand/cloud/redact'
 import {
   LlmAbortError,
   type LlmClient,
@@ -89,6 +93,57 @@ export function createDeterministicFakeLlm(options: { delayMs?: number } = {}): 
       return {
         json: { nodes, edges },
         usage: { promptTokens, completionTokens }
+      }
+    },
+
+    /** 命名：用第一个时刻的代表 id 拼标题，保证 E2E 断言可复现 */
+    async completeNaming(
+      payload: ThemeNamingPayload,
+      callOptions: LlmCompleteOptions = {}
+    ): Promise<LlmJsonResult> {
+      counters.requests += 1
+      counters.lastEventIds = payload.moments.flatMap((moment) => [...moment.eventIds])
+      try {
+        if (delayMs > 0 || callOptions.signal) {
+          await abortableDelay(delayMs, callOptions.signal)
+        }
+      } catch (error) {
+        if (error instanceof LlmAbortError) counters.aborted += 1
+        throw error
+      }
+      const first = payload.moments[0]
+      const promptTokens = 60 + counters.lastEventIds.length
+      return {
+        json: {
+          title: truncate(`模拟主题 ${first?.eventIds[0] ?? 0}`, 24),
+          summary: truncate(`来自 ${first?.app ?? '未知应用'} 的模拟命名`, 80),
+          type: 'knowledge'
+        },
+        usage: { promptTokens, completionTokens: 12 }
+      }
+    },
+
+    /** 模糊确认：每个时刻归给它的第一个候选主题（候选为空时给空数组） */
+    async completeAssignments(
+      payload: ThemeAssignmentPayload,
+      callOptions: LlmCompleteOptions = {}
+    ): Promise<LlmJsonResult> {
+      counters.requests += 1
+      try {
+        if (delayMs > 0 || callOptions.signal) {
+          await abortableDelay(delayMs, callOptions.signal)
+        }
+      } catch (error) {
+        if (error instanceof LlmAbortError) counters.aborted += 1
+        throw error
+      }
+      const assignments = payload.moments.map((moment) => ({
+        moment_id: moment.momentId,
+        theme_ids: moment.candidateThemeIds.length > 0 ? [moment.candidateThemeIds[0]] : []
+      }))
+      return {
+        json: { assignments },
+        usage: { promptTokens: 120 + payload.moments.length * 10, completionTokens: 8 + assignments.length * 4 }
       }
     }
   }

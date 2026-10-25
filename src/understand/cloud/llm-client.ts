@@ -6,7 +6,11 @@
  * 测试与 E2E 用 FakeLlmClient，绝不发真实网络；错误信息不含 prompt / 响应正文。
  */
 
-import type { CloudPayload } from './redact'
+import type {
+  CloudPayload,
+  ThemeAssignmentPayload,
+  ThemeNamingPayload
+} from './redact'
 
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant'
@@ -41,7 +45,15 @@ export interface LlmCompleteOptions {
 }
 
 export interface LlmClient {
+  /** 批量归纳（补历史路径）：整批时刻 → 节点 + 边 */
   completeJson(payload: CloudPayload, options?: LlmCompleteOptions): Promise<LlmJsonResult>
+  /** 新主题命名（P2 在线路径；S4）：一个主题的代表时刻 → { title, summary, type } */
+  completeNaming(payload: ThemeNamingPayload, options?: LlmCompleteOptions): Promise<LlmJsonResult>
+  /** 模糊归属确认（P2 在线路径；S4）：时刻 + 候选主题 → { assignments } */
+  completeAssignments(
+    payload: ThemeAssignmentPayload,
+    options?: LlmCompleteOptions
+  ): Promise<LlmJsonResult>
 }
 
 /** 可重试性由子类 / 连接层决定，业务层只按类型判断 */
@@ -102,6 +114,9 @@ export type FakeLlmReply =
 /** 假客户端：按队列返回预置结果，记录请求供断言（测试 / E2E 专用） */
 export class FakeLlmClient implements LlmClient {
   readonly requests: CloudPayload[] = []
+  /** P2 在线路径的两次调用单独留痕，避免和批量归纳的断言混在一起 */
+  readonly namingRequests: ThemeNamingPayload[] = []
+  readonly assignmentRequests: ThemeAssignmentPayload[] = []
   /** 每次调用的选项（signal / repairHint 等），供暂停 / 修复重试断言 */
   readonly optionCalls: LlmCompleteOptions[] = []
   private readonly replies: FakeLlmReply[]
@@ -118,11 +133,7 @@ export class FakeLlmClient implements LlmClient {
     return this.replies.length
   }
 
-  async completeJson(
-    payload: CloudPayload,
-    options: LlmCompleteOptions = {}
-  ): Promise<LlmJsonResult> {
-    this.requests.push(payload)
+  private take(options: LlmCompleteOptions): LlmJsonResult {
     this.optionCalls.push(options)
     if (options.signal?.aborted) throw new LlmAbortError()
     const reply = this.replies.shift()
@@ -135,5 +146,29 @@ export class FakeLlmClient implements LlmClient {
         completionTokens: reply.usage?.completionTokens ?? 0
       }
     }
+  }
+
+  async completeJson(
+    payload: CloudPayload,
+    options: LlmCompleteOptions = {}
+  ): Promise<LlmJsonResult> {
+    this.requests.push(payload)
+    return this.take(options)
+  }
+
+  async completeNaming(
+    payload: ThemeNamingPayload,
+    options: LlmCompleteOptions = {}
+  ): Promise<LlmJsonResult> {
+    this.namingRequests.push(payload)
+    return this.take(options)
+  }
+
+  async completeAssignments(
+    payload: ThemeAssignmentPayload,
+    options: LlmCompleteOptions = {}
+  ): Promise<LlmJsonResult> {
+    this.assignmentRequests.push(payload)
+    return this.take(options)
   }
 }

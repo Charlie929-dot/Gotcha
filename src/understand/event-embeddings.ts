@@ -49,17 +49,59 @@ interface EventTextRow {
   ocr_text: string | null
 }
 
+export interface ListEventTextsOptions {
+  onlyMissing?: boolean
+  model?: string
+  scope?: 'assigned' | 'all'
+  /**
+   * 只算这些事件（在线路径：新时刻的成员事件，它们还没被任何主题归属引用，
+   * `scope='assigned'` 的口径永远覆盖不到）。给了这个就忽略 `scope`。
+   */
+  eventIds?: readonly number[]
+}
+
+/** IN 查询分块：SQLite 变量上限足够高，这里按批切只为查询计划稳定 */
+const EVENT_ID_CHUNK = 500
+
 /**
  * 列出待算向量的事件（纯读）。
- * `scope='assigned'`（默认）只取被 owner 归属时刻引用的事件；`scope='all'` 取全部事件。
+ * `scope='assigned'`（默认）只取被 owner 归属时刻引用的事件；`scope='all'` 取全部事件；
+ * `eventIds` 只取指定事件（在线路径增量，优先于 scope）。
  */
-export function listEventTexts(
-  db: Db,
-  options: { onlyMissing?: boolean; model?: string; scope?: 'assigned' | 'all' } = {}
-): EventText[] {
+export function listEventTexts(db: Db, options: ListEventTextsOptions = {}): EventText[] {
   const model = options.model ?? EMBEDDING_MODEL_NAME
   const scope = options.scope ?? 'assigned'
   const onlyMissing = options.onlyMissing === true
+  const texts: EventText[] = []
+
+  const missingSql = `NOT EXISTS (
+      SELECT 1 FROM event_embeddings ee WHERE ee.event_id = e.id AND ee.model = ?
+    )`
+
+  if (options.eventIds) {
+    const ids = [
+      ...new Set(options.eventIds.filter((id) => Number.isInteger(id) && id > 0))
+    ].sort((a, b) => a - b)
+    if (ids.length === 0) return texts
+    const sql = `SELECT e.id, e.window_title, e.ocr_text FROM events e
+       WHERE e.id IN (${ids.map(() => '?').join(',')})${onlyMissing ? ` AND ${missingSql}` : ''}
+       ORDER BY e.id ASC`
+    const seen = new Set<number>()
+    for (let start = 0; start < ids.length; start += EVENT_ID_CHUNK) {
+      const chunk = ids.slice(start, start + EVENT_ID_CHUNK)
+      const rows = (onlyMissing
+        ? db.prepare(sql).all(...chunk, model)
+        : db.prepare(sql).all(...chunk)) as EventTextRow[]
+      for (const row of rows) {
+        if (seen.has(row.id)) continue
+        seen.add(row.id)
+        const text = eventEmbeddingText(row.window_title, row.ocr_text)
+        if (text === '') continue
+        texts.push({ id: row.id, text })
+      }
+    }
+    return texts
+  }
 
   const assignedSql = `
     SELECT e.id, e.window_title, e.ocr_text
@@ -72,9 +114,6 @@ export function listEventTexts(
       WHERE tm.source IN ('owner', 'manual')
     )`
   const allSql = `SELECT e.id, e.window_title, e.ocr_text FROM events e`
-  const missingSql = `NOT EXISTS (
-      SELECT 1 FROM event_embeddings ee WHERE ee.event_id = e.id AND ee.model = ?
-    )`
 
   const sql =
     scope === 'assigned'
@@ -82,7 +121,6 @@ export function listEventTexts(
       : `${allSql}${onlyMissing ? ` WHERE ${missingSql}` : ''} ORDER BY e.id ASC`
 
   const rows = (onlyMissing ? db.prepare(sql).all(model) : db.prepare(sql).all()) as EventTextRow[]
-  const texts: EventText[] = []
   for (const row of rows) {
     const text = eventEmbeddingText(row.window_title, row.ocr_text)
     if (text === '') continue
@@ -133,6 +171,8 @@ export interface EmbedEventVectorsOptions {
   onlyMissing?: boolean
   /** 每次写库的事件数（默认 64；推理批大小由 embedder 自己决定） */
   writeChunkSize?: number
+  /** 只算这些事件（在线路径：新时刻的成员事件）；缺省走 `scope='assigned'` */
+  eventIds?: readonly number[]
 }
 
 /**
@@ -148,7 +188,11 @@ export async function embedEventVectors(
   const onlyMissing = options.onlyMissing !== false
   const chunkSize = Math.max(1, Math.floor(options.writeChunkSize ?? 64))
 
-  const texts = listEventTexts(db, { onlyMissing, model: embedder.model })
+  const texts = listEventTexts(db, {
+    onlyMissing,
+    model: embedder.model,
+    ...(options.eventIds ? { eventIds: options.eventIds } : {})
+  })
   const result: EventEmbeddingResult = {
     ok: true,
     events: texts.length,
@@ -260,6 +304,54 @@ export function readEventVectors(
       continue
     }
     vectors.set(row.event_id, vec)
+  }
+  return { model, vectors, skipped }
+}
+
+/**
+ * 只读这些事件的向量（在线路径重算单个主题质心用：不把整表 BLOB 拉进内存）。
+ * `model` 缺省不限模型；维度不一致 / BLOB 损坏的条数记在 `skipped`。
+ */
+export function readEventVectorsByIds(
+  db: Db,
+  eventIds: readonly number[],
+  options: { model?: string } = {}
+): ReadEventVectorsResult {
+  const ids = [...new Set(eventIds.filter((id) => Number.isInteger(id) && id > 0))].sort(
+    (a, b) => a - b
+  )
+  const vectors = new Map<number, Float32Array>()
+  if (ids.length === 0) return { model: options.model ?? null, vectors, skipped: 0 }
+
+  let model: string | null = options.model ?? null
+  let skipped = 0
+  for (let start = 0; start < ids.length; start += EVENT_ID_CHUNK) {
+    const chunk = ids.slice(start, start + EVENT_ID_CHUNK)
+    const placeholders = chunk.map(() => '?').join(',')
+    const rows = (
+      options.model
+        ? db
+            .prepare(
+              `SELECT event_id, model, dim, vec FROM event_embeddings
+                WHERE model = ? AND event_id IN (${placeholders}) ORDER BY event_id ASC`
+            )
+            .all(options.model, ...chunk)
+        : db
+            .prepare(
+              `SELECT event_id, model, dim, vec FROM event_embeddings
+                WHERE event_id IN (${placeholders}) ORDER BY event_id ASC`
+            )
+            .all(...chunk)
+    ) as Array<{ event_id: number; model: string; dim: number; vec: Buffer }>
+    for (const row of rows) {
+      if (model === null) model = row.model
+      const vec = decodeVector(row.vec)
+      if (row.dim !== vec.length) {
+        skipped += 1
+        continue
+      }
+      vectors.set(row.event_id, vec)
+    }
   }
   return { model, vectors, skipped }
 }

@@ -87,6 +87,35 @@ function getEmbedder(modelDir: string, factory: (dir: string) => Promise<Embedde
   return created
 }
 
+/**
+ * 进程内共享的本地向量会话：图谱回填（打开图谱）与在线归属（采集时）共用同一份，
+ * 同一模型目录只加载一次（`onnxruntime` 会话 ~0.5s + 90MB 模型，不能每个 tick 重建）。
+ * 用例可注入 `createEmbedder`；真实路径用批 1 的推理参数（见上）。
+ */
+export async function loadSharedEmbedder(
+  modelDir: string,
+  options: {
+    log?: (level: BackfillLogLevel, msg: string, data?: Record<string, unknown>) => void
+    createEmbedder?: (dir: string) => Promise<Embedder>
+  } = {}
+): Promise<Embedder | null> {
+  const factory =
+    options.createEmbedder ??
+    ((dir: string) =>
+      createLocalEmbedder({
+        modelDir: dir,
+        ...BACKFILL_EMBEDDER_OPTIONS
+      }))
+  try {
+    return await getEmbedder(modelDir, factory)
+  } catch (error) {
+    options.log?.('warn', 'shared embedder unavailable', {
+      error: error instanceof Error ? error.name : 'unknown'
+    })
+    return null
+  }
+}
+
 /** 打开图谱窗口时调用；失败已就地记录，不会向调用方抛错 */
 export async function runGraphBackfill(deps: GraphBackfillRuntimeDeps): Promise<GraphBackfillRunResult> {
   const now = deps.now?.() ?? Date.now()

@@ -265,6 +265,30 @@ export function readMomentEventIds(db: Db): Map<number, number[]> {
   return map
 }
 
+/**
+ * 只读这些时刻的成员事件 id（在线路径重算单个主题质心用；不把整张 `moments` 拉进内存）。
+ * 不存在的时刻不出现在结果里。
+ */
+export function readMomentEventIdsFor(
+  db: Db,
+  momentIds: readonly number[]
+): Map<number, number[]> {
+  const ids = [...new Set(momentIds.filter((id) => Number.isInteger(id) && id > 0))]
+  const map = new Map<number, number[]>()
+  if (ids.length === 0) return map
+  const chunkSize = 500
+  for (let start = 0; start < ids.length; start += chunkSize) {
+    const chunk = ids.slice(start, start + chunkSize)
+    const rows = db
+      .prepare(
+        `SELECT id, event_ids FROM moments WHERE id IN (${chunk.map(() => '?').join(',')}) ORDER BY id ASC`
+      )
+      .all(...chunk) as Array<{ id: number; event_ids: string | null }>
+    for (const row of rows) map.set(row.id, parseSourceEventIds(row.event_ids))
+  }
+  return map
+}
+
 /** 取事件时间范围（没有事件返回 null） */
 export function eventTimeRange(db: Db): { min: number; max: number } | null {  const row = db
     .prepare('SELECT MIN(ts) AS minTs, MAX(ts) AS maxTs FROM events')

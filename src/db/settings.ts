@@ -16,6 +16,9 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'graph.max_consecutive_failures': '5',
   'graph.batch_max_moments': '20',
   'graph.max_tokens': '2000',
+  // 在线归属（P2 · S6）：采集时把新时刻本地归到主题、新主题只走命名/模糊确认两条 LLM 调用；
+  // 关掉 = 回到「按日批量归纳」的老路径（`graph.auto` 控制自动跑不跑）
+  'graph.online_themes': '1',
   // 本地向量模型目录（留空 = `<userData>/models/bge-small-zh-v1.5`；D29 / 方案 §10）
   'graph.embedding_model_dir': '',
   // 图谱相似度阈值（docs/m2-graph-redesign.md §5.2；在合并后的真实主题集上标定）

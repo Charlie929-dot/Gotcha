@@ -5,6 +5,7 @@ import {
   readBatch,
   readCursor,
   readDayBatch,
+  readAssignedEventIds,
   readInducedEventIds,
   selectBatchEvents,
   writeCursor,
@@ -213,6 +214,37 @@ describe('按天取批（D28）', () => {
       const second = readDayBatch(db, DAY, DAY_END)
       expect(second.moments).toEqual([])
       expect(second.consumed).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('在线路径已归属的时刻按 theme_moments 过滤：同一天不会被两条路径各建一次主题', () => {
+    const { db, ids } = seedDay()
+    try {
+      // 在线路径已经把这个时刻归到主题（还没进节点 source_events）
+      db.prepare(
+        `INSERT INTO moments (start_ts, end_ts, day_key, app, window_title, ocr_summary, event_ids, created_at)
+         VALUES (?, ?, '2026-10-23', 'a.exe', 'A', '', ?, ?)`
+      ).run(DAY + 60 * 60_000, DAY + 60 * 60_000 + 60_000, JSON.stringify([ids[0]]), DAY)
+      const themeId = Number(
+        db
+          .prepare(
+            `INSERT INTO nodes (level, type, title, summary, ts_start, ts_end, source_events, meta_json)
+             VALUES (1, 'activity', '在线主题', '', ?, ?, '[]', NULL)`
+          )
+          .run(DAY + 60 * 60_000, DAY + 60 * 60_000).lastInsertRowid
+      )
+      db.prepare(
+        `INSERT INTO theme_moments (theme_id, moment_id, weight, source, created_at)
+         VALUES (?, 1, 1, 'owner', ?)`
+      ).run(themeId, DAY)
+
+      expect([...readAssignedEventIds(db, DAY, DAY_END)]).toEqual([ids[0]])
+      // source_events 还没覆盖它，但 theme_moments 已归属 → 批量归纳必须跳过
+      expect([...readInducedEventIds(db, DAY, DAY_END)]).toEqual([])
+      const batch = readDayBatch(db, DAY, DAY_END)
+      expect(batch.moments.flatMap((moment) => moment.eventIds)).toEqual([ids[1]])
     } finally {
       db.close()
     }

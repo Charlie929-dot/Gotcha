@@ -70,7 +70,7 @@ export type RunOutcome =
       coverage?: { filled: number; uncovered: number }
     }
   | { status: 'empty' }
-  | { status: 'skipped'; reason: 'auto-off' | 'in-flight' | 'not-configured' | 'budget' | 'paused' }
+  | { status: 'skipped'; reason: 'auto-off' | 'in-flight' | 'not-configured' | 'budget' | 'paused' | 'online' }
   | { status: 'aborted' }
   | { status: 'error'; error: Error }
 
@@ -119,6 +119,12 @@ export interface InductionServiceOptions {
   db: Db
   /** 返回 null = 未配置（缺 key / 未允许出网）：跳过，不报错 */
   getClient: () => LlmClient | null
+  /**
+   * 自动跑批是否该让位给在线路径（P2 · S6）。为 false 时**只**影响自动跑批：
+   * 在线归属可用（开关 + 本地模型就绪）后，新数据由在线路径处理，批量归纳降级为
+   * 「补历史 / 调试」；手动「立即归纳」不受影响。
+   */
+  shouldAutoRun?: () => boolean
   now?: () => number
   firstDelayMs?: number
   /** settings 读取失败时的兜底间隔（正常走 graph.interval_minutes） */
@@ -145,7 +151,8 @@ const DEFAULT_MAX_CONSECUTIVE_FAILURES = 5
 /** 解析层失败的修复提示（固定文案，不含模型输出） */
 const PARSE_REPAIR_ERROR = '上一次输出不是合法 json（可能为空 content 或截断），请只输出完整 json 并覆盖全部输入 id'
 
-function parseBackoffMinutes(raw: string): number[] {
+/** 退避分钟数（归纳与在线路径共用同一份 D22 设置口径） */
+export function parseBackoffMinutes(raw: string): number[] {
   const minutes = raw
     .split(',')
     .map((part) => Number(part.trim()))
@@ -266,6 +273,11 @@ export function createInductionService(options: InductionServiceOptions): Induct
       if (!runOptions.manual && getSetting(db, 'graph.auto') !== '1') {
         setState({ status: 'idle' })
         return { status: 'skipped', reason: 'auto-off' }
+      }
+      // 在线路径可用时自动批量归纳让位（新数据走在线归属；手动「立即归纳」仍是补历史入口）
+      if (!runOptions.manual && options.shouldAutoRun && !options.shouldAutoRun()) {
+        setState({ status: 'idle' })
+        return { status: 'skipped', reason: 'online' }
       }
 
       currentNow = now()

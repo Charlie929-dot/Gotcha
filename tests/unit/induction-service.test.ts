@@ -315,6 +315,25 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
     }
   })
 
+  it('在线路径可用时自动跑批让位（online），手动「立即归纳」仍可补历史', async () => {
+    const db = makeDb()
+    try {
+      const client = new FakeLlmClient([{ json: VALID }])
+      const service = createInductionService({
+        db,
+        getClient: () => client,
+        now: () => NOW,
+        shouldAutoRun: () => false
+      })
+      expect(await service.runOnce()).toEqual({ status: 'skipped', reason: 'online' })
+      expect(client.requests).toHaveLength(0)
+      expect((await service.runOnce({ manual: true })).status).toBe('ok')
+      expect(client.requests).toHaveLength(1)
+    } finally {
+      db.close()
+    }
+  })
+
   it('无新事件返回 empty；未配置供应商返回 not-configured', async () => {
     const emptyDb = openDatabase(':memory:')
     const db = makeDb()

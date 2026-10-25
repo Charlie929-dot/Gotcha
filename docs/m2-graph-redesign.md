@@ -290,6 +290,21 @@ CREATE TABLE IF NOT EXISTS theme_centroids (    -- 主题成员事件质心
 
 > 脚本与原始输出留在 `.tmp/calibrate-theme-new-min-sim.cjs` / `.tmp/calib-out.json`（未入库；要复现就照上表口径重写一遍，约 20 行 SQL + 向量点积）。
 
+**S2 归属引擎 实施（2026-10-25，P2 第 2 步；纯本地，只读不写）**
+
+`src/understand/theme-assign.ts`：`assignMoment()` 是纯函数，输入时刻质心 + 存活主题质心，输出 `{ reason, owner, secondaries, top1, top2, gap, nearDuplicateTop }`；`reason` 三态 `assigned` / `ambiguous` / `new-theme`，调用方拿 `ambiguous` 去排 LLM 确认队列（写库与排队在 S5/S6 接）。
+
+判定顺序（照上面标定结论，不是拍脑袋）：
+
+1. top1 `< themeNewMinSim`（0.78）→ `new-theme`；
+2. top1 / top2 **互为近重复**（主题间 ≥ `themeDuplicateSim` 0.92）→ 直接取 argmax，`assigned`，**不出网**；
+3. 其余 `gap = top1 − top2 < themeGapConfirm`（**新设置键 `graph.theme_gap_confirm`，默认 0.02**）→ `ambiguous`；
+4. 次归属：`sim ≥ themeMemberMinSim`、排除与 owner 近重复的主题、上限 `themeSecondaryMax`；`protected` 主题既不当候选也不做次归属。
+
+注意：默认阈值下**次归属很稀有**——`themeMemberMinSim` 与 `themeDuplicateSim` 都是 0.92，候选要「离时刻 ≥0.92」又「离 owner <0.92」在几何上几乎不可能（真库实测 823 个有归属时刻里只有 78 个有次归属）。想放宽次归属，先调小 `themeDuplicateSim`，不要只降 `themeMemberMinSim`。
+
+另：相似度并列时按 id 升序取，保证同一份库上结果确定。单测 9 条（`tests/unit/theme-assign.test.ts`：归属 / 模糊 / 近重复豁免 / 新主题 / 维度与 protected 过滤 / 次归属阈值与上限 / 并列确定性 / DB 端到端 / 缺向量缺图状态）。
+
 ### 5.3 存量数据
 
 - 现有 210 个主题作为种子，不重新聚类；`theme_moments` 由 `source_events` 回填为主归属；

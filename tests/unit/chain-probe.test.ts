@@ -1,17 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import {
+  activityProfile,
   advise,
   buildIdles,
   buildReport,
   buildSegments,
   buildStates,
+  densityImpact,
+  emptySegments,
   DEFAULT_TRIGGER_OPTIONS,
   estimateTriggers,
   formatReport,
+  inputTimestamps,
+  inputTouches,
+  longestSegmentsWithActivity,
   median,
   parseJsonl,
   percentile,
   readSession,
+  segmentDensity,
   SEGMENT_RULES,
   summarizeUia,
   toUiaRecords,
@@ -212,6 +219,58 @@ describe('estimateTriggers', () => {
   })
 })
 
+describe('事件密度', () => {
+  it('密度 = 事件数 / 分钟，零长度段算 0', () => {
+    expect(segmentDensity(60, 60_000)).toBe(60)
+    expect(segmentDensity(30, 60_000)).toBe(30)
+    expect(segmentDensity(5, 0)).toBe(0)
+    expect(segmentDensity(0, 600_000)).toBe(0)
+  })
+
+  it('按密度下限筛段：只留真有输入的段', () => {
+    const records: ProbeRecord[] = [fg(0, 1, 'a'), click(10), fg(60, 2, 'b'), fg(300, 1, 'a')]
+    const segments = buildSegments(buildStates(records), [], appRule, at(300))
+    expect(segments).toHaveLength(2)
+    const impact = densityImpact(segments, records, [0, 1])
+    expect(impact[0]).toMatchObject({ minPerMinute: 0, segments: 2, keptSegmentShare: 1 })
+    // 第一段 60s 内 1 个事件 = 1/分钟 → 保留；第二段 240s 无事件 → 筛掉
+    expect(impact[1].segments).toBe(1)
+    expect(impact[1].keptTimeShare).toBeCloseTo(60 / 300, 5)
+  })
+
+  it('空段统计给出中位时长', () => {
+    const records: ProbeRecord[] = [click(1), fg(60, 2, 'b'), fg(240, 3, 'c')]
+    const segments = buildSegments(buildStates(records), [], appRule, at(300))
+    const empty = emptySegments(segments, records)
+    expect(empty.count).toBe(2)
+    expect(empty.medianMs).toBe(120_000)
+  })
+})
+describe('操作次数与段内活跃度', () => {
+  it('间隔 ≥1 秒才算新的一次操作，连着动算一次', () => {
+    const burst: ProbeRecord[] = [move(0, 0, 0), move(0.1, 40, 0), move(0.2, 80, 0)]
+    expect(inputTouches(burst)).toHaveLength(1)
+    expect(inputTouches([...burst, move(2, 0, 0)])).toHaveLength(2)
+  })
+
+  it('段内有效时长 = 每个事件之后 60 秒，重叠合并', () => {
+    const records: ProbeRecord[] = [fg(0, 1, 'a'), click(10), { type: 'stop', ts: at(190) }]
+    const segments = buildSegments(buildStates(records), [], appRule, at(190))
+    const profile = activityProfile(segments[0], inputTimestamps(records), 60_000)
+    expect(profile.totalMs).toBe(190_000)
+    expect(profile.activeMs).toBe(60_000)
+    expect(profile.activeShare).toBeCloseTo(60 / 190, 5)
+  })
+
+  it('一段里 39 个事件挤在一次操作里：活跃度高但操作数只有 1（视频页就是这样）', () => {
+    const records: ProbeRecord[] = [fg(0, 1, 'video'), ...Array.from({ length: 39 }, (_, i) => move(i * 0.01, i * 5, 0)), { type: 'stop', ts: at(61) }]
+    const segments = buildSegments(buildStates(records), [], appRule, at(61))
+    const row = longestSegmentsWithActivity(segments, records, 1)[0]
+    expect(row.touches).toBe(1)
+    expect(row.events).toBe(39)
+    expect(row.activity.activeShare).toBeGreaterThan(0.9)
+  })
+})
 describe('summarizeUia', () => {
   function uiaRecord(overrides: Partial<UiaRecord>): UiaRecord {
     return {
@@ -324,14 +383,15 @@ describe('formatReport / advise', () => {
     const text = formatReport(buildReport(records, []))
     expect(text).toContain('## 1. 窗口占用段')
     expect(text).toContain('## 2. 截图触发密度')
-    expect(text).toContain('## 4. 建议')
+    expect(text).toContain('## 3. 事件密度')
+    expect(text).toContain('## 5. 建议')
     expect(text).not.toContain('undefined')
     expect(text).not.toContain('NaN')
   })
 
   it('有 UIA 数据时才输出第三节', () => {
     const base: ProbeRecord[] = [{ type: 'session', ts: at(0) }, fg(0, 1, 'a'), fg(60, 2, 'b')]
-    expect(formatReport(buildReport(base, []))).not.toContain('## 3. UIA 覆盖率')
+    expect(formatReport(buildReport(base, []))).not.toContain('## 4. UIA 覆盖率')
     const uia = toUiaRecords([
       {
         type: 'uia',
@@ -349,7 +409,7 @@ describe('formatReport / advise', () => {
       } as unknown as ProbeRecord
     ])
     const text = formatReport(buildReport(base, uia))
-    expect(text).toContain('## 3. UIA 覆盖率')
+    expect(text).toContain('## 4. UIA 覆盖率')
     expect(text).toContain('| a | 1 | 1 | 0 | 900 |')
   })
 
@@ -428,6 +488,9 @@ describe('formatReport / advise', () => {
         medianMs: 100,
         perApp: []
       },
+      density: [],
+      emptySegments: { count: 0, ms: 0, medianMs: 0 },
+      activity: { activeMs: 0, coveredMs: 0, activeShare: 0, longest: [] },
       trailingIdleStart: null
     })
     expect(advice.some((line) => line.includes('一瞥'))).toBe(true)
@@ -455,6 +518,9 @@ describe('formatReport / advise', () => {
         medianPerSegment: 0
       },
       uia: null,
+      density: [],
+      emptySegments: { count: 0, ms: 0, medianMs: 0 },
+      activity: { activeMs: 0, coveredMs: 0, activeShare: 0, longest: [] },
       trailingIdleStart: null
     })
     expect(advice.some((line) => line.includes('按空闲断段'))).toBe(true)
@@ -480,6 +546,9 @@ describe('formatReport / advise', () => {
         medianPerSegment: 0
       },
       uia: null,
+      density: [],
+      emptySegments: { count: 0, ms: 0, medianMs: 0 },
+      activity: { activeMs: 0, coveredMs: 0, activeShare: 0, longest: [] },
       trailingIdleStart: null
     })
     expect(advice[0]).toContain('下一步可以拿这份数据去定')

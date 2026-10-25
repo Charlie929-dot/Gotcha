@@ -182,6 +182,17 @@ export interface ProbeReport {
   idleShare: number
   ruleStats: SegmentStats[]
   trigger: TriggerReport
+  /** 按密度下限筛选的影响（回答「能不能用密度筛段」） */
+  density: DensityBucket[]
+  /** 完全没有输入事件的段 */
+  emptySegments: { count: number; ms: number; medianMs: number }
+  /** 按「60 秒内无输入 = 空闲」重算的段内有效时长 */
+  activity: {
+    activeMs: number
+    coveredMs: number
+    activeShare: number
+    longest: ReturnType<typeof longestSegmentsWithActivity>
+  }
   uia: UiaSummary | null
   /** 采样结束时仍在空闲：起点 ts，时长未知 */
   trailingIdleStart: number | null
@@ -509,6 +520,237 @@ export function summarizeTriggers(
 }
 
 /* ------------------------------------------------------------------ *
+ * 事件密度（能不能用密度筛段）
+ * ------------------------------------------------------------------ */
+
+/** 参与密度计算的输入事件类型 */
+const INPUT_TYPES = new Set(['move', 'click', 'wheel'])
+
+export function inputTimestamps(records: ProbeRecord[]): number[] {
+  return records
+    .filter((r) => INPUT_TYPES.has(r.type) && typeof r.ts === 'number')
+    .map((r) => r.ts)
+    .sort((a, b) => a - b)
+}
+
+/** 段内事件数 / 分钟（段长按分钟折算；零长度算 0） */
+export function segmentDensity(events: number, ms: number): number {
+  if (ms <= 0) return 0
+  return events / (ms / 60_000)
+}
+
+export interface DensityBucket {
+  /** 密度下限（次/分钟） */
+  minPerMinute: number
+  segments: number
+  coveredMs: number
+  /** 保留的段数占全部段数的比例 */
+  keptSegmentShare: number
+  /** 保留的时长占全部段时长的比例 */
+  keptTimeShare: number
+}
+
+/**
+ * 密度筛选的影响：给定若干个密度下限，算各自留下多少段、多少时长。
+ * 用来回答「用密度筛段会不会把有内容的段一起筛掉」。
+ */
+export function densityImpact(
+  segments: Segment[],
+  records: ProbeRecord[],
+  thresholds: readonly number[] = [0, 0.5, 1, 2, 5]
+): DensityBucket[] {
+  const times = inputTimestamps(records)
+  const totalMs = segments.reduce((sum, segment) => sum + segment.ms, 0)
+  const rows: Array<{ segment: Segment; events: number; density: number }> = segments.map((segment) => {
+    const events = countInRange(times, segment.start, segment.end)
+    return { segment, events, density: segmentDensity(events, segment.ms) }
+  })
+
+  return thresholds.map((minPerMinute) => {
+    const kept = rows.filter((row) => row.density >= minPerMinute)
+    const coveredMs = kept.reduce((sum, row) => sum + row.segment.ms, 0)
+    return {
+      minPerMinute,
+      segments: kept.length,
+      coveredMs,
+      keptSegmentShare: segments.length > 0 ? kept.length / segments.length : 0,
+      keptTimeShare: totalMs > 0 ? coveredMs / totalMs : 0
+    }
+  })
+}
+
+/** 落在 [start, end) 的事件数；end 是最后一段时用 <= */
+function countInRange(times: number[], start: number, end: number): number {
+  let count = 0
+  for (const ts of times) {
+    if (ts < start) continue
+    if (ts >= end) break
+    count++
+  }
+  return count
+}
+
+/**
+ * 「操作次数」：把连续输入合并成一次操作。
+ *
+ * 原始事件数**不能**当密度用——它取决于钩子的抽稀步长（`-MoveStepPx 4` 时一段能刷出
+ * 1000+ 事件/分钟，改成 8px 就少一半）。所以任何要写进设置、要放进滑块的阈值，
+ * 都必须落在这个稳定单位上：两次输入间隔 ≥ `gapMs` 才算新的一次操作。
+ */
+export function inputTouches(records: ProbeRecord[], gapMs = 1000): number[] {
+  const times = inputTimestamps(records)
+  const touches: number[] = []
+  let last = Number.NEGATIVE_INFINITY
+  for (const ts of times) {
+    if (ts - last >= gapMs) touches.push(ts)
+    last = ts
+  }
+  return touches
+}
+
+/** 段内的操作次数（按 inputTouches 口径） */
+export function countTouchesInRange(touches: number[], start: number, end: number, isLast: boolean): number {
+  let count = 0
+  for (const ts of touches) {
+    if (ts < start) continue
+    if (ts > end || (ts === end && !isLast)) break
+    count++
+  }
+  return count
+}
+
+/** 零事件段（密度为 0）统计 */
+export function emptySegments(segments: Segment[], records: ProbeRecord[]): { count: number; ms: number; medianMs: number } {
+  const times = inputTimestamps(records)
+  const empty = segments.filter((segment) => countInRange(times, segment.start, segment.end) === 0)
+  return {
+    count: empty.length,
+    ms: empty.reduce((sum, segment) => sum + segment.ms, 0),
+    medianMs: median(empty.map((segment) => segment.ms))
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 局部活跃度：「60 秒内没有输入 = 空闲」
+ * ------------------------------------------------------------------ */
+
+export interface ActivityProfile {
+  totalMs: number
+  /** 「最近 idleGapMs 内有输入」的时长 */
+  activeMs: number
+  activeShare: number
+  /** 段内按分钟切，零事件的分桶数 */
+  emptyMinutes: number
+  minutes: number
+}
+
+/**
+ * 段内有效时长：每个输入事件把它之后的 `idleGapMs` 算作「有人在操作」，合并重叠。
+ *
+ * 这正是「60 秒内无任何输入 = 空闲」的口径，比段内平均密度靠谱——
+ * 长段可以把几秒密集操作和几分钟静止平均成中等密度，看不出中间的空白。
+ */
+export function activityProfile(
+  segment: Segment,
+  times: number[],
+  idleGapMs = 60_000
+): ActivityProfile {
+  const totalMs = segment.ms
+  const ranges: Array<[number, number]> = []
+  for (const ts of times) {
+    if (ts < segment.start) continue
+    if (ts >= segment.end) break
+    const from = Math.max(segment.start, ts)
+    const to = Math.min(segment.end, ts + idleGapMs)
+    const last = ranges[ranges.length - 1]
+    if (last && from <= last[1]) {
+      last[1] = Math.max(last[1], to)
+    } else {
+      ranges.push([from, to])
+    }
+  }
+  const activeMs = ranges.reduce((sum, [from, to]) => sum + Math.max(0, to - from), 0)
+
+  // 按分钟分桶统计「这一分钟里有没有事件」
+  const minutes = Math.max(1, Math.ceil(totalMs / 60_000))
+  const perMinute = new Array<number>(minutes).fill(0)
+  for (const ts of times) {
+    if (ts < segment.start) continue
+    if (ts >= segment.end) break
+    const index = Math.min(minutes - 1, Math.floor((ts - segment.start) / 60_000))
+    perMinute[index]++
+  }
+
+  return {
+    totalMs,
+    activeMs,
+    activeShare: totalMs > 0 ? activeMs / totalMs : 0,
+    emptyMinutes: perMinute.filter((count) => count === 0).length,
+    minutes
+  }
+}
+
+/** 全部段的「有效时长」合计（60 秒无输入 = 空闲） */
+export function summarizeActivity(
+  segments: Segment[],
+  records: ProbeRecord[],
+  idleGapMs = 60_000
+): {
+  activeMs: number
+  coveredMs: number
+  activeShare: number
+  longest: ReturnType<typeof longestSegmentsWithActivity>
+} {
+  const times = inputTimestamps(records)
+  let activeMs = 0
+  let coveredMs = 0
+  for (const segment of segments) {
+    coveredMs += segment.ms
+    activeMs += activityProfile(segment, times, idleGapMs).activeMs
+  }
+  return {
+    activeMs,
+    coveredMs,
+    activeShare: coveredMs > 0 ? activeMs / coveredMs : 0,
+    longest: longestSegmentsWithActivity(segments, records, 5, idleGapMs)
+  }
+}
+
+/** 最长的几个段 + 各自的活跃度（报告里只看前几个，多了没必要） */
+export function longestSegmentsWithActivity(
+  segments: Segment[],
+  records: ProbeRecord[],
+  top = 5,
+  idleGapMs = 60_000
+): Array<{
+  segment: Segment
+  events: number
+  touches: number
+  density: number
+  touchRate: number
+  activity: ActivityProfile
+}> {
+  const times = inputTimestamps(records)
+  const touches = inputTouches(records)
+  return [...segments]
+    .sort((a, b) => b.ms - a.ms)
+    .slice(0, top)
+    .map((segment) => {
+      const events = countInRange(times, segment.start, segment.end)
+      const touchCount = countTouchesInRange(touches, segment.start, segment.end, false)
+      return {
+        segment,
+        events,
+        touches: touchCount,
+        density: segmentDensity(events, segment.ms),
+        touchRate: segmentDensity(touchCount, segment.ms),
+        activity: activityProfile(segment, times, idleGapMs)
+      }
+    })
+}
+
+
+/* ------------------------------------------------------------------ *
  * UIA 覆盖
  * ------------------------------------------------------------------ */
 
@@ -607,6 +849,9 @@ export function buildReport(
     idleShare: sessionMs > 0 ? idleMs / sessionMs : 0,
     ruleStats,
     trigger,
+    density: densityImpact(primary, collectRecords),
+    emptySegments: emptySegments(primary, collectRecords),
+    activity: summarizeActivity(primary, collectRecords),
     uia: summarizeUia(uiaRecords),
     trailingIdleStart: trailingIdleStart(collectRecords)
   }
@@ -624,6 +869,13 @@ function seconds(ms: number): string {
 
 function percent(ratio: number): string {
   return `${(ratio * 100).toFixed(1)}%`
+}
+
+/** 段标题在表里只留前 24 字，避免撑破表格 */
+function truncateLabel(title: string): string {
+  const clean = title.replace(/\|/g, '/').replace(/\s+/g, ' ').trim()
+  if (!clean) return '(无标题)'
+  return clean.length > 24 ? `${clean.slice(0, 24)}…` : clean
 }
 
 export function formatReport(report: ProbeReport): string {
@@ -674,9 +926,49 @@ export function formatReport(report: ProbeReport): string {
   lines.push('判读：无触发的段意味着这一段没有证据截图，AI 只能靠内容判断、无法精确定位到某一帧。')
   lines.push('')
 
+  lines.push('## 3. 事件密度：能不能用它筛段')
+  lines.push('')
+  lines.push(
+    `- 按「60 秒内无任何输入 = 空闲」重算：段内有效时长 ${seconds(report.activity.activeMs)} / ${seconds(report.activity.coveredMs)}（**${percent(report.activity.activeShare)}**）`
+  )
+  lines.push(
+    `- 完全没有输入事件的段：${report.emptySegments.count} 个（共 ${seconds(report.emptySegments.ms)}，中位 ${seconds(report.emptySegments.medianMs)}）`
+  )
+  lines.push('')
+  if (report.activity.longest.length > 0) {
+    lines.push('| 段（按长度取前 5） | 时长 | 原始事件 | 操作次数 | 操作/分钟 | 有输入的时长 | 有效占比 | 空转分钟 |')
+    lines.push('| - | -: | -: | -: | -: | -: | -: | -: |')
+    for (const row of report.activity.longest) {
+      lines.push(
+        `| ${row.segment.exe} · ${truncateLabel(row.segment.title)} | ${seconds(row.segment.ms)} | ${row.events} | ${row.touches} | ${row.touchRate.toFixed(1)} | ${seconds(row.activity.activeMs)} | ${percent(row.activity.activeShare)} | ${row.activity.emptyMinutes}/${row.activity.minutes} |`
+      )
+    }
+    lines.push('')
+  }
+  lines.push('| 密度下限（段内平均，次/分钟） | 保留段数 | 段数占比 | 时长占比 |')
+  lines.push('| -: | -: | -: | -: |')
+  for (const bucket of report.density) {
+    lines.push(
+      `| ≥${bucket.minPerMinute} | ${bucket.segments} | ${percent(bucket.keptSegmentShare)} | ${percent(bucket.keptTimeShare)} |`
+    )
+  }
+  lines.push('')
+  lines.push(
+    '判读：**看平均密度会得出假结论**——长时间段能把「几秒密集操作 + 几分钟不动」平均成中等密度，两轮实测里密度 ≥0.5 就几乎筛不掉任何时长。真正有区分度的是局部口径：段内「60 秒内有输入」的时长占比。'
+  )
+  lines.push('')
+  lines.push(
+    '**阈值要落在稳定单位上**：原始事件数取决于钩子的抽稀步长（`-MoveStepPx 4` 时一段能刷出上千个事件/分钟，改成 8px 就少一半），所以写进设置、放进滑块的应该是「操作次数」（两次输入间隔 ≥1 秒算新的一次）而不是原始事件数。'
+  )
+  lines.push('')
+  lines.push(
+    '所以密度适合做**显示优先级 / 段内切分**（哪几段值得先画、哪一段中间是空转），不适合当「这段记忆要不要留」的判据——读长文、看视频时鼠标可以静止很久，而键盘输入压根不产生鼠标事件。留存判据只能是「任何输入都没有」（`GetLastInputInfo`，含键鼠）。'
+  )
+  lines.push('')
+
   if (report.uia) {
     const uia = report.uia
-    lines.push('## 3. UIA 覆盖率')
+    lines.push('## 4. UIA 覆盖率')
     lines.push('')
     lines.push(`- 探测窗口 ${uia.windows} 个：成功 ${uia.ok}、无输出/抛错 ${uia.failed}、超时 ${uia.timedOut}`)
     lines.push(
@@ -696,7 +988,7 @@ export function formatReport(report: ProbeReport): string {
     lines.push('')
   }
 
-  lines.push('## 4. 建议')
+  lines.push('## 5. 建议')
   lines.push('')
   for (const advice of advise(report)) lines.push(`- ${advice}`)
   lines.push('')
@@ -745,6 +1037,12 @@ export function advise(report: ProbeReport): string[] {
     }
   }
   if (advice.length === 0) advice.push('各项指标都在合理区间，下一步可以拿这份数据去定窗口段的正式切分规则。')
+  const onePerMinute = report.density.find((bucket) => bucket.minPerMinute === 1)
+  if (onePerMinute && onePerMinute.keptTimeShare < 0.7) {
+    advice.push(
+      `密度 ≥1 次/分钟只留下 ${percent(onePerMinute.keptTimeShare)} 的时长：被筛掉的多半是阅读 / 观看这类「有内容但不动鼠标」的段，密度只能用来决定画布上显示什么，不能当留存判据。`
+    )
+  }
   return advice
 }
 

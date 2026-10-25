@@ -34,14 +34,24 @@ import {
   type LlmProvider
 } from '../understand/cloud/providers'
 import { fetchProviderModels as fetchModelsFromProvider } from '../understand/cloud/models'
-import { createInductionRuntime, type ClientResolution, type InductionRuntime, type InductionSnapshot } from './induction-runtime'
+import {
+  createInductionRuntime,
+  type ClientResolution,
+  type InductionRuntime,
+  type InductionSnapshot
+} from './induction-runtime'
 import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSettingsView } from './graph-settings'
 import { createDeterministicFakeLlm } from './fake-llm'
 import { createGraphWindow } from './graph-window'
 import { runGraphBackfill } from './graph-backfill-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
 import { isModelReady } from '../understand/embedding/session'
-import { registerGraphIpc, type GraphRecomputeResult, type ProviderKeySaveResult } from './graph-ipc'
+import {
+  registerGraphIpc,
+  type GraphChangedEvent,
+  type GraphRecomputeResult,
+  type ProviderKeySaveResult
+} from './graph-ipc'
 import { listThemeMerges, revertThemeMerge } from '../understand/theme-merge'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
@@ -306,6 +316,25 @@ function pushGraphSnapshot(snapshot?: InductionSnapshot): void {
   graphWindow.webContents.send('graph:status', snapshot ?? currentInductionSnapshot())
 }
 
+/**
+ * 归纳落库后通知开着的图谱窗口就地刷新（手动 / 自动都推）。
+ * 没有窗口就什么都不做——下次打开自然会拉到新数据，不为了通知去建窗口。
+ */
+function pushGraphChanged(outcome: {
+  nodes: number
+  edges: number
+  placeholders: number
+}): void {
+  if (!graphWindow || graphWindow.isDestroyed()) return
+  const event: GraphChangedEvent = {
+    nodes: outcome.nodes,
+    edges: outcome.edges,
+    placeholders: outcome.placeholders,
+    at: Date.now()
+  }
+  graphWindow.webContents.send('graph:changed', event)
+}
+
 /** 懒创建：只有采集真正跑起来 / 图谱窗口需要动作时才拿写连接，默认暂停不建库（A3） */
 function ensureInductionRuntime(): InductionRuntime {
   if (inductionRuntime) return inductionRuntime
@@ -317,6 +346,11 @@ function ensureInductionRuntime(): InductionRuntime {
       return db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
     },
     onSnapshot: (snapshot) => pushGraphSnapshot(snapshot),
+    /**
+     * 归纳落库后推 `graph:changed`：自动归纳跑完，开着的画布就地刷新
+     * （以前只有手动「立即归纳」会重新拉图，自动跑完得关掉窗口再打开才看得到）。
+     */
+    onGraphChanged: (outcome) => pushGraphChanged(outcome),
     /**
      * 本地向量模型是否就绪：顶部黄条「新主题暂无法计算」用。
      * 每次取快照现读，用户装好模型后下一次刷新就会消失。

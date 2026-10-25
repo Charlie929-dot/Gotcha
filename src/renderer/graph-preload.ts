@@ -12,7 +12,13 @@ import type { SaveNodePositionsResult } from '../understand/node-positions'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
-import type { GraphInduceResult, GraphRecomputeResult, ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
+import type {
+  GraphChangedEvent,
+  GraphInduceResult,
+  GraphRecomputeResult,
+  ProviderKeySaveResult,
+  ProviderModelsInput
+} from '../main/graph-ipc'
 import type { InductionSnapshot } from '../main/induction-runtime'
 import type { HotkeyRegisterResult } from '../main/hotkeys'
 import type { RevertThemeMergeResult, ThemeMergeGroupView } from '../understand/theme-merge'
@@ -33,6 +39,11 @@ export interface GraphApi {
   ): Promise<SaveNodePositionsResult>
   status(): Promise<InductionSnapshot>
   onStatus(callback: (snapshot: InductionSnapshot) => void): () => void
+  /**
+   * 归纳落库后主进程推来的「图谱有变化」（自动 / 手动都推）。
+   * 渲染层据此就地刷新，保持相机与筛选；返回取消订阅函数。
+   */
+  onGraphChanged(callback: (event: GraphChangedEvent) => void): () => void
   induceNow(dayStart?: number): Promise<GraphInduceResult>
   setConsent(consented: boolean): Promise<InductionSnapshot>
   settings(): Promise<GraphSettingsView>
@@ -71,6 +82,15 @@ const api: GraphApi = {
     ipcRenderer.on('graph:status', listener)
     return () => {
       ipcRenderer.removeListener('graph:status', listener)
+    }
+  },
+  onGraphChanged(callback) {
+    const listener = (_event: IpcRendererEvent, payload: GraphChangedEvent): void => {
+      callback(payload)
+    }
+    ipcRenderer.on('graph:changed', listener)
+    return () => {
+      ipcRenderer.removeListener('graph:changed', listener)
     }
   },
   induceNow: (dayStart?: number) =>

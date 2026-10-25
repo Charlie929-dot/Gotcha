@@ -345,3 +345,62 @@ describe('InductionRuntime：结构化日志（可观测性）', () => {
     db.close()
   })
 })
+
+describe('InductionRuntime：落库后通知画布刷新（graph:changed）', () => {
+  it('成功落库才回调：带新增节点 / 边（自动跑批也走同一条回调）', async () => {
+    const db = openDatabase(':memory:')
+    const id = seed(db)
+    const changed: Array<{ nodes: number; edges: number; placeholders: number }> = []
+    const runtime = runtimeFor(db, () => ({ ok: true, client: clientOk([id]) }), {
+      onGraphChanged: (outcome) =>
+        changed.push({
+          nodes: outcome.nodes,
+          edges: outcome.edges,
+          placeholders: outcome.placeholders
+        })
+    })
+    runtime.grantConsent()
+    runtime.onCaptureStatus('running')
+
+    // 不带 manual：和调度器 tick 里跑的那次同路径
+    expect((await runtime.runOnce()).status).toBe('ok')
+    expect(changed).toEqual([{ nodes: 1, edges: 0, placeholders: 0 }])
+    runtime.dispose()
+    db.close()
+  })
+
+  it('跳过 / 失败不回调：画布没变化就不白刷', async () => {
+    const empty = openDatabase(':memory:')
+    let emptyCalls = 0
+    const idleRuntime = runtimeFor(empty, () => ({ ok: true, client: new FakeLlmClient([]) }), {
+      onGraphChanged: () => {
+        emptyCalls += 1
+      }
+    })
+    idleRuntime.grantConsent()
+    idleRuntime.onCaptureStatus('running')
+    expect((await idleRuntime.runOnce()).status).not.toBe('ok')
+    expect(emptyCalls).toBe(0)
+    idleRuntime.dispose()
+    empty.close()
+
+    const failed = openDatabase(':memory:')
+    seed(failed)
+    let failedCalls = 0
+    const failingRuntime = runtimeFor(
+      failed,
+      () => ({ ok: true, client: new FakeLlmClient([new LlmHttpError(500)]) }),
+      {
+        onGraphChanged: () => {
+          failedCalls += 1
+        }
+      }
+    )
+    failingRuntime.grantConsent()
+    failingRuntime.onCaptureStatus('running')
+    expect((await failingRuntime.runOnce()).status).toBe('error')
+    expect(failedCalls).toBe(0)
+    failingRuntime.dispose()
+    failed.close()
+  })
+})

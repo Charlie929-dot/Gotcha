@@ -1,6 +1,6 @@
 # 图谱重做方案 v0.3 · 全局主题图 + 时刻层 + 时间筛选
 
-> 状态：**实施中（2026-10-25）**——P0（Foam 内核 F1–F13）✅、P1（schema v3 + 数据层 + 向量回填）✅、P0.5（主题合并 + 次归属，schema v4）✅、P3-a（`graph:global` IPC + 默认全局 Foam 页 + 日历调暗 + 旧 sigma 页开关）✅、P3-b 已落 日格计数 ✅ / 模型缺失黄条 ✅ / 阈值控件 ✅ / 撤销合并入口 ✅ / 未归纳空心点 ✅ / 自动归纳后画布刷新 ✅ / 「时刻过多」收窄提示 ✅；P2 在线化 已落 S1 时刻在线化 ✅ / S2 归属引擎 ✅ / S3 增量向量维护 ✅（schema v6：文本/成员指纹）；LOD（归 M3）与 P2 的 S4–S7（LLM 命名/模糊确认、队列暂停、接线开关）待做。
+> 状态：**实施中（2026-10-25）**——P0（Foam 内核 F1–F13）✅、P1（schema v3 + 数据层 + 向量回填）✅、P0.5（主题合并 + 次归属，schema v4）✅、P3-a（`graph:global` IPC + 默认全局 Foam 页 + 日历调暗 + 旧 sigma 页开关）✅、P3-b 已落 日格计数 ✅ / 模型缺失黄条 ✅ / 阈值控件 ✅ / 撤销合并入口 ✅ / 未归纳空心点 ✅ / 自动归纳后画布刷新 ✅ / 「时刻过多」收窄提示 ✅；P2 在线化 已落 S1 时刻在线化 ✅ / S2 归属引擎 ✅ / S3 增量向量维护 ✅（schema v6：文本/成员指纹）/ S4 命名与模糊确认两条 LLM 调用 ✅（未接线）/ S5 串行队列与暂停零出网 ✅（未接线）；LOD（归 M3）与 P2 的 S6–S7（接线开关与「补历史」共存、E2E）待做。
 > 已定方向（拍板人）：① 不做 3D，保留 Foam 2D 与其活布局/惯性/粒子动效；② 只保留一张全局图，时间只做筛选/调暗；③ 主题节点 + 时刻点，时刻可同时属于多个主题；④ LLM 只做新主题命名、模糊归属确认与提示文案，不再批量归纳节点/边；⑤ 主题圈（韦恩背景）不做。
 > 事实源：本文件；D27 的内核（Foam + 本地向量 + 距离编码）保留，D27 的「按日构图」由本文件修订（「事件默认不上画布」仍成立：原始事件不上，新增时刻点层）；D28 的按日归纳降级为补历史/调试；新增 **D29**。
 > v0.2 已归档至 `docs/archive/m2-graph-redesign-v0.2.md`（ONNX 实测数据仍有效，见 §10）。
@@ -461,7 +461,7 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 5. `edge-builder`：主题向量变化 → 增量重连（§6.1）；
 6. `positioner`：新节点 seed 坐标；沉降后保存。
 
-- 队列串行；同一主题/时刻在途则合并；暂停时本地 embedding/分配继续，LLM 调用排队，恢复后补（D18 仍零出网）；
+- 队列串行；同一主题/时刻在途则合并；暂停时本地 embedding/分配继续，LLM 调用排队，恢复后补（D18 仍零出网）；调度层实现在 `src/understand/theme-queue.ts`（S5），接线在 S6；
 - LLM 调用只发生在「新主题」与「模糊归属」，不逐事件；每批最多 20 个时刻；
 - 预算/退避/间隔沿用 D22 settings；用量只记 calls/tokens/耗时，不记正文。
 
@@ -496,6 +496,16 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 - 模糊确认 `src/understand/theme-confirm.ts`：`validateAssignments()` 逐条校验——未知 `moment_id` / 非候选 `theme_id` 丢弃，主题 id 去重并裁到 3 个（`trimmed` 计数），`new_title` 裁到 24 字，既没主题也没新标题的条目等于「不归属」；只有根结构非法才作废这一次调用。`confirmThemeAssignments(client, moments, themes)` 单批最多 20 个时刻，**请求失败 / 输出非法 / 没有候选 → 整批进 `pendingMomentIds` 留到下一轮**，不整批失败、不写库；敏感时刻 / 敏感主题在载荷层就剔掉（`blockedMomentIds` / `blockedThemeIds`）。两条路径都**不做修复重试**：失败代价是「兜底标题」或「延后一轮」，与批量归纳「整批卡死」不同，多调一次既贵又不可靠（`temperature=0` 的教训）。
 - 出云仍走唯一出口：`redact.ts` 新增 `buildThemeNamingPayload()` / `buildThemeAssignmentPayload()`（brand 在类型层），命名只带代表时刻，确认只带时刻文本 + 候选主题的标题 / 摘要；候选 id 由本地 embedding 给出（`assignMoment()` 的 top-k），模型不能自由挑。`LlmClient` 相应新增 `completeNaming()` / `completeAssignments()`，DeepSeek 客户端与两个假客户端都已实现；prompt 与批量归纳同规格（`temperature=0`、`json_object`、错误文案不含正文），三条路径共用同一套重试 / 退避 / 取消语义。
 - 单测 30 条：`theme-naming` 12（校验 / 截断 / 未知字段 / 兜底三级 / 输出非法 / 请求失败 / 未配置 / 敏感剔空 / 取消外抛 / 载荷脱敏）、`theme-confirm` 13（升序 / 去重裁剪 / 未知 id / 空归属 / new_title 裁剪 / 根非法 / 成功 / 请求失败 / 输出非法 / 未配置 / 敏感剔除 / 20 条上限 / 取消外抛）、`redact` +3（两类载荷的脱敏与 blocked）、`llm-client` +2（两条 prompt 不串线、候选 id 原样进 prompt）。接线（串行队列 / 暂停零出网 / 开关与「补历史」共存）在 S5 / S6。
+
+**S5 队列 / 暂停 / 恢复 实施（2026-10-25，P2 第 5 步；只做调度层，尚未接线）**
+
+- `src/understand/theme-queue.ts`：`createThemeQueue()` 只做调度、不写库。两类任务——命名（`themeId` + 代表时刻）、模糊确认（时刻 + 候选主题）——**串行**执行（任何时刻最多一个请求在途），按入队顺序；`drain()` 等到跑不动为止（空 / 暂停 / 等客户端 / 销毁），给用例与优雅退出用。
+- **合并**：同一主题还在排队 → 覆盖代表时刻（调用方每次传当前代表时刻，最后一份最准，返回 `merged`）；同一主题正在命名 → 忽略（`duplicate`，在途响应会覆盖标题，再排一次没意义）；同一时刻不重复排队（排队 + 在途都算，`skipped`）；新的确认时刻并进还没发出的最后一批（`CONFIRM_BATCH_MAX = 20` 一批），少一次请求就少一次出网。`accepted / skipped / dropped` 如实回给调用方，调用方据此决定下一轮。
+- **暂停零出网（D18）**：`pause()` 立刻 abort 在途请求，`LlmAbortError` 把任务放回**队首**、结果丢弃（`abortedCalls`），暂停期间只入队不发；`resume()` 按原顺序补，不重扫库、不重复落库。
+- **没有客户端 ≠ 请求失败**：请求失败走 `nameTheme()` 的兜底 / `confirmThemeAssignments()` 的 pending，回调照发（主题照建、时刻留到下一轮）；没有客户端（D24 门没确认 / 缺 key）则任务留在队首、零请求（`waitingClient`），等调用方 `wake()`——否则会给主题落一个**永远补不回来**的兜底标题。
+- **上限**：排队时刻数默认 200（`THEME_QUEUE_DEFAULTS.maxPendingMoments`，命名按代表时刻数算），满了只收放得下的、其余如实返回 `dropped`，由调用方下一轮再试；回调抛错只记一行日志，不拖垮后面的任务。
+- 计数只供日志 / 状态行（不记正文）：`calls / promptTokens / completionTokens / skippedMoments / droppedMoments / mergedJobs / failures / abortedCalls`。预算 / 退避沿用 D22，S6 接线时套在这一层外面。
+- 单测 13 条（`tests/unit/theme-queue.test.ts`：串行与顺序 / 回调容错 / 暂停零请求与恢复补发 / 在途取消丢弃并重做 / 暂停期间继续入队仍按序 / 同主题命名合并 / 同时刻排队与在途去重 / 20 条分批 / 上限 dropped / 缺客户端留住 + wake / 请求失败只影响一条 / 销毁后不再发）。
 
 ## 10. 向量运行时（沿用 v0.2 实测）
 
@@ -591,9 +601,9 @@ ALTER TABLE theme_centroids ADD COLUMN members_hash TEXT;   -- 参与求均值�
 | P3 | 主题/时刻 UI、日历、设置、E2E、验收、文档 | 3–4 天 |
 
 - 先做 P0+P0.5+P1+P3（用现有归纳数据出图），7–9 天；P2 再 3–4 天。
-- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）；P2 在线化 S1 ✅（#67 时刻在线化）、S2 ✅（#68 归属引擎）、S3 ✅（#69 增量向量维护，schema v6）、S4 ✅（2026-10-25 命名 + 模糊确认两条 LLM 调用与兜底，未接线）。
+- 进度：P0 ✅（#36）；P1 ✅（数据层 #37；向量回填 + 打开图谱后台回填 #38）；P0.5 ✅（合并固定点 + 次归属 + 阈值重标定，schema v4）；P3-a ✅（2026-10-24：`graph:global` / `graph:moment-events` / `graph:positions:save`、默认全局 Foam 页 + 日历调暗 + 时刻「也属于」、旧 sigma 页开关）；P3-a 追加 ✅（#50：日历内嵌时段滚轮 + 输入即筛图谱、点「检索」才出卡片）；P2 在线化 S1 ✅（#67 时刻在线化）、S2 ✅（#68 归属引擎）、S3 ✅（#69 增量向量维护，schema v6）、S4 ✅（2026-10-25 命名 + 模糊确认两条 LLM 调用与兜底，未接线）、S5 ✅（2026-10-25 串行队列 / 暂停零出网 / 恢复补发，未接线）。
 - 检索（提案门一）✅ v1（#48）：`events_fts`（trigram，归一化文本）+ 三触发器同步 + v5 迁移回填，双路查询（MATCH ≥3 字 / LIKE 兜底），结果按时刻卡片呈现；未归纳事件同等可查。
-- 仍需补：P2 的 S5–S7（串行队列 / 暂停零出网、接线开关与「补历史」共存、E2E）、打包 `asarUnpack` 与第三方声明、P3-b 余下的 LOD（归 M3，当前只做「时刻过多」提示 + 阈值可调）。
+- 仍需补：P2 的 S6–S7（接线开关与「补历史」共存、E2E）、打包 `asarUnpack` 与第三方声明、P3-b 余下的 LOD（归 M3，当前只做「时刻过多」提示 + 阈值可调）。
 - **开工前**：先合 PR #34（`feat/graph-interactions`，含 D28 与单击/双击语义），再从 main 切 `feat/graph-foam-global`；不要从当前 main 直接切（缺 D28）。
 
 ## 15. 风险与回退

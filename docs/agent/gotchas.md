@@ -152,6 +152,7 @@
 | 向量检索默认 `minSimilarity = 0` 会挡掉负余弦 | 2026-10-26 标定：合成库 2 000 条向量只有 1 003 条余弦 ≥ 0 进入排序，`stats.vectors` 小于 `COUNT(chain_vector)`——不是丢向量，是方向相反的相似度被默认阈值挡掉 | 想按全量排名就把 `minSimilarity` 显式设成 `-1`；别把「`stats.vectors` < 向量行数」当 bug（换模型 / 字节坏另有 `skippedVectors` 计数） |
 | 检索命中 ≠ 截图文件还在 | 2026-10-26：cold / archive 层的截图 `path` 为 null、二进制在容器里（D44），拿 `chain_shot.path` 直接 `existsSync` 会得到假的「文件没了」 | 检索只保证「段 / 事件 / 截图行」在；要看图先按 `tier` / `container` 走 `archive.ts` 的解出路径，别只判 `path` |
 | 证据截图复用了 OCR 的 2× 抓帧口径 → 采集一开鼠标周期性卡顿 | 2026-10-27 真机：`npm run dev:capture` 后「鼠标隔几秒卡一次」。实测主进程 190s/11min（≈29%）、采集渲染进程 283s/11.5min（≈41%）、证据图 135 张/11 分钟（≈每 4.9 秒一张）。根因：`computeCaptureGeometry` 对所有抓帧一律走 `ocrTargetSize`（2×），2560 宽的窗先画成 5120×2880 的 PNG，证据图再由主进程 `nativeImage` 解码 + 缩回 1920——多画 4 倍像素、多解码 4 倍大的图 | 抓帧尺寸参数化：`captureTargetSize(w, h, { upscale, maxWidth })`（`src/capture/ocr-scaling.ts`，默认仍是 2× / 封顶 3840），证据图传 `EVIDENCE_CAPTURE_TARGET = { upscale: 1, maxWidth: 1920 }`（`src/main/chain-shot.ts`），`ScreenCapture.capture()` 第 4 个参数透传。判据：`main.log` 出现 `chain shot slow {"ms":…}` 就回看尺寸口径 |
+| 「每个事件都算截图触发点」比尺寸更致命 | 2026-10-27：把 2× 关掉之后仍然卡——`move_pause` / `click` / `wheel` / `typing` 每个事件都可能是触发点，2s 冷却下约每 1.5 秒一张，单张 420–600ms（主进程解码 + 重编码），按住鼠标拖动时前半秒就被占住；41 分钟 291 张 / 175 MB | 触发口径改成「从 ≥2s 静默里发起的点击 / 打字被打断 / 滚轮停 2s」（契约 v0.11，`segmenter.ts`），并且证据 JPEG 在**渲染进程**编码、主进程只写字节。判据：`chain_shot` 每小时张数应与「点击 + 打断 + 滚动」次数同量级，几十张而不是几百张 |
 
 ## 规则
 

@@ -829,27 +829,7 @@ function createSession(): Promise<CaptureSession> {
 }
 
 /**
- * 采集即编码（D44）：屏幕流给的 PNG（窗口裁好、为 OCR 放大 2×）→ JPEG q85 原分辨率。
- * 实测 6.4× 省字节、OCR 还能读出 99.6% 的字（`chain/retention.ts` 的标定表）。
- * 解码失败就抛错，抓帧侧会回退到原 PNG——不为了省字节丢证据。
- *
- * 证据截图的 PNG 已经是 `upscale: 1, maxWidth: 1920`（`chain-shot.ts` 的
- * `EVIDENCE_CAPTURE_TARGET`）：这里不再面对放大后的 5120 宽大图，解码量小一个量级。
- */
-function encodeChainShotJpeg(input: { imagePath: string; tempDir: string; at: number }): {
-  imagePath: string
-  width: number
-  height: number
-} {
-  const image = nativeImage.createFromPath(input.imagePath)
-  if (image.isEmpty()) throw new Error('采集帧解码失败')
-  const size = image.getSize()
-  const target = join(input.tempDir, `frame-${input.at}.jpg`)
-  writeFileSync(target, image.toJPEG(DEFAULT_RETENTION.hot.quality))
-  return { imagePath: target, width: size.width, height: size.height }
-}
-
-/** 保留期重编码（D44）：同一个 nativeImage 编码器，按档位缩放 + 质量 */
+ * 保留期重编码（D44）：同一个 nativeImage 编码器，按档位缩放 + 质量 */
 function encodeRetentionImage(input: Buffer, encoding: RetentionEncoding): EncodedImage {
   const image = nativeImage.createFromBuffer(input)
   if (image.isEmpty()) throw new Error('证据图解码失败')
@@ -889,8 +869,6 @@ function ensureChainRecording(): ChainRecordingHandle | null {
     screen: screenCapture ?? undefined,
     userDataDir: app.getPath('userData'),
     log: captureLog,
-    // 采集即编码（D44）：证据图落盘就是 JPEG q85，不是 1.5 MB 的 PNG
-    encode: encodeChainShotJpeg,
     // 内容来源（D43）：UIA 优先、OCR 兜底。脚本缺失 / 工作器起不来都会降级成「留空」，不会崩
     content: {
       uiaScript: scriptResourcePath('chain', 'uia-text.ps1'),

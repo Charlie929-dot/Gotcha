@@ -12,6 +12,7 @@
  *
  * 时刻口径：`captured_at` 用**触发事件**的时刻（和截图一致），不因读取慢而漂。
  */
+import { rmSync } from 'node:fs'
 import type { ContentPayload } from '../chain/recorder'
 import {
   createContentReader,
@@ -32,8 +33,10 @@ export interface ChainContentShot {
   /** 段身份对应窗口的句柄 */
   hwnd: number
   executable: string
-  /** 这次抓帧落下的证据图（OCR 兜底读它） */
+  /** 这次抓帧落下的证据图（长期保存的那份） */
   framePath: string
+  /** 同一次抓帧另出的 2× PNG（只给 OCR；读完删掉，省得 tmp-chain 越积越多） */
+  ocrPath?: string
 }
 
 export interface ChainContentStats {
@@ -96,7 +99,8 @@ export function createChainContentCapture(options: ChainContentCaptureOptions): 
       const payload = await options.reader.read({
         hwnd: shot.hwnd,
         executable: shot.executable,
-        framePath: shot.framePath
+        // OCR 读 2× 的那张（字认得出）；没有就用证据图本身
+        framePath: shot.ocrPath ?? shot.framePath
       })
       if (!payload) {
         stats.empty += 1
@@ -114,6 +118,15 @@ export function createChainContentCapture(options: ChainContentCaptureOptions): 
         eventId: shot.eventId,
         error: String(error)
       })
+    } finally {
+      // OCR 副图是临时文件：读完（成功 / 失败 / 空）都清掉，别让 tmp-chain 长胖
+      if (shot.ocrPath) {
+        try {
+          rmSync(shot.ocrPath, { force: true })
+        } catch {
+          // 删不掉就留给启动清理
+        }
+      }
     }
   }
 

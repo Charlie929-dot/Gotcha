@@ -35,12 +35,14 @@ export interface Rect {
 
 export interface CapturedFrame {
   imagePath: string
-  /** OCR 图宽（放大 2×，上限 MAX_OCR_WIDTH） */
+  /** 主图宽（旧管线 = OCR 的 2× / 上限 3840；证据图 = 原生像素 / 上限 1920） */
   width: number
-  /** OCR 图高 */
+  /** 主图高 */
   height: number
   /** 90x80 灰度图的 dHash 指纹；尺寸必须用 DIFF_WIDTH/DIFF_HEIGHT 算 */
   diffHash: bigint
+  /** 另出的 OCR 用 2× PNG（只有证据图这条带；旧管线没有） */
+  ocrPath?: string
 }
 
 /** 与 Electron Display 同形，便于单测注入 */

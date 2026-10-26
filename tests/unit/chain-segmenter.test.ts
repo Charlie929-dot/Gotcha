@@ -134,80 +134,94 @@ describe('空闲与停采', () => {
   })
 })
 
-describe('截图触发', () => {
-  it('点击与滚轮各触发一次，冷却期内不重复', () => {
+describe('截图触发（v0.11：从静默里发起的动作才拍）', () => {
+  it('点击从 2s 静默里发起才拍；紧接着的连点不拍（事件照记）', () => {
     const segmenter = new ChainSegmenter()
-    const actions = feedAll(segmenter, [focus(0, 1, 'A'), click(5), click(5.5), wheel(10)])
-    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter', 'click_left', 'wheel'])
-    // 冷却期内的点击不截图，但**事件照记**——锚点丢了就补不回来
-    expect(events(actions).map((shot) => shot.kind)).toEqual(['enter', 'click_left', 'click_left', 'wheel'])
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), click(5), click(5.5), click(6)])
+    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter', 'click_left'])
+    // 事件本身一个都不丢（锚点）
+    expect(events(actions).filter((event) => event.kind.startsWith('click'))).toHaveLength(3)
+  })
+
+  it('滚轮停 2s 才拍「滚动结果」；滚动中不出图', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), wheel(5), wheel(5.3), tick(6)])
+    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter'])
+    // 距最后一次滚动 2s 整：这一拍交出去
+    const later = feedAll(segmenter, [tick(7.3)])
+    expect(shots(later).map((shot) => shot.kind)).toEqual(['wheel'])
+    expect(shots(later)[0].delta).toBe(240)
+  })
+
+  it('滚动中点了鼠标：滚轮那张作废，事件都照记', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), wheel(5), click(5.5)])
+    expect(events(actions).map((event) => event.kind)).toEqual(['enter', 'wheel', 'click_left'])
+    // 点击距上一输入 0.5s，不满足 2s 静默 → 不拍
+    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter'])
   })
 
   it('事件带上坐标与滚轮格数', () => {
     const segmenter = new ChainSegmenter()
-    const actions = feedAll(segmenter, [focus(0, 1, 'A'), click(5), wheel(10)])
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), click(5), wheel(10), tick(12.1)])
     const [enter, clicked, scrolled] = events(actions)
     expect(enter).toMatchObject({ kind: 'enter', x: null, y: null, delta: null })
     expect(clicked).toMatchObject({ kind: 'click_left', x: 10, y: 10, delta: null })
     expect(scrolled).toMatchObject({ kind: 'wheel', x: 10, y: 10, delta: 120 })
   })
 
-  it('移动一段距离后停下算一次', () => {
+  it('移动后暂停只记事件，永不截图', () => {
     const segmenter = new ChainSegmenter()
     const actions = feedAll(segmenter, [focus(0, 1, 'A'), move(2, 0), move(2.1, 100), tick(3)])
-    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter', 'move_pause'])
+    expect(events(actions).map((event) => event.kind)).toEqual(['enter', 'move_pause'])
+    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter'])
   })
 
-  it('只挪几像素不算', () => {
+  it('只挪几像素不算（也不截图）', () => {
     const segmenter = new ChainSegmenter()
     const actions = feedAll(segmenter, [focus(0, 1, 'A'), move(2, 0), move(2.1, 5), tick(3)])
+    expect(events(actions)).toHaveLength(1)
     expect(shots(actions)).toHaveLength(1)
   })
 })
 
-describe('打字停顿补采', () => {
-  it('持续打字不截图，停顿满 3 秒补一张', () => {
+describe('打字与截图（v0.11：打字只在被打断时拍）', () => {
+  it('持续打字、停 3 秒：只补 typing 事件，不截图', () => {
     const segmenter = new ChainSegmenter()
-    // 每 0.5s 一次输入，持续 10 秒
     const typing = Array.from({ length: 20 }, (_, index) => activity(1 + index * 0.5))
     const actions = feedAll(segmenter, [focus(0, 1, 'A'), ...typing, tick(11), tick(13.5)])
-    const taken = shots(actions)
-    // 入场一张 + 停顿后一张
-    expect(taken.map((shot) => shot.kind)).toEqual(['enter', 'typing'])
+    expect(events(actions).some((event) => event.kind === 'typing')).toBe(true)
+    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter'])
   })
 
-  it('停顿后又继续输入，就重新倒计时', () => {
+  it('打字被点击打断：立刻拍一张（保住刚敲进去的内容）', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), activity(5), activity(5.4), click(5.6)])
+    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter', 'click_left'])
+  })
+
+  it('打断也守 2s 最小间隔（离入场帧太近就不拍）', () => {
     const segmenter = new ChainSegmenter()
     const actions = feedAll(segmenter, [
-      focus(0, 1, 'A'),
-      activity(1),
-      tick(1.5), // 还没到 3s
-      activity(3.5), // 重新计时
-      tick(4),
-      tick(6.4), // 距 activity(3.5) 才 2.9s
-      tick(6.6) // 满 3s
+      focus(1, 1, 'A'),
+      activity(1.2),
+      click(1.4),
+      activity(1.6),
+      click(1.8)
     ])
-    const taken = shots(actions)
-    expect(taken.map((shot) => shot.kind)).toEqual(['enter', 'typing'])
-    expect(taken[1].at).toBe(at(6.5))
-  })
-
-  it('打字补采也不会突破截图冷却', () => {
-    const segmenter = new ChainSegmenter()
-    const actions = feedAll(segmenter, [focus(0, 1, 'A'), click(1), activity(1.2), tick(4.3), tick(4.5)])
-    // 点击在 1s，打字停顿在 4.2s——冷却已过，两张都在
-    expect(shots(actions)).toHaveLength(2)
+    expect(shots(actions).map((shot) => shot.kind)).toEqual(['enter'])
   })
 })
 
 describe('默认值', () => {
-  it('空闲 60s、接续上限 30 分钟、打字停顿 3s、冷却 2s', () => {
+  it('空闲 60s、接续上限 30 分钟、打字停顿 3s、冷却 2s、滚轮 2s 后拍', () => {
     expect(DEFAULT_SEGMENTER_OPTIONS).toMatchObject({
       idleMs: 60_000,
       mergeIdleCapMs: 30 * 60_000,
       titleFlapMs: 3_000,
       typingSettleMs: 3_000,
-      captureCooldownMs: 2_000
+      captureCooldownMs: 2_000,
+      wheelCaptureDelayMs: 2_000
     })
   })
 })

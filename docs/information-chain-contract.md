@@ -1,12 +1,13 @@
-# 信息链契约 v0.7（提案，待拍板）
+# 信息链契约 v0.8（提案，待拍板）
 
 > 状态：**提案**。拍板后本文件成为 `src/chain/` 的实现依据。
+> v0.8（2026-10-26）：**派生层落地**（D45）：段向量（本地 bge，512 维，`chain_vector.content_max_id` 水位）+ 标签 / 双链（LLM 抽概念 / 实体名，名字按 **≥0.95 直接复用、0.90–0.95 问模型、<0.90 新建** 合并）。送模型前段正文先**按行去重 + 空白归一 + 6000 字上限**；出网复用 **D24 一次性确认 + D22 每日预算**，未确认 / 缺 key / 超预算只建向量。新增 `chain_derive`（抽没抽过的进度账）与 §5.0.3 第 14 条；§2.5 / §3 第 7 条 / §6 同步。
 > v0.7（2026-10-26）：**保留期分层落地**（D44）。四层参数用 **9 张真机证据图标定**（不是拍脑袋）：hot = 采集即编码 **JPEG q85 原分辨率**（均值 232 KB，比原 PNG 省 6.4×，OCR 字符保留 99.6%）；warm = 宽 ≤1920 q85；cold = 宽 ≤1440 q80 + 打进当天容器；archive = 宽 ≤1280 q75 + 打进当天容器。**缩小宽度比降 JPEG 质量更伤可读性**（原分辨率 q85→q60 相似度只掉 0.03；1920→1280 从 0.84 掉到 0.60），所以分层主要靠宽度。cold / archive 进 `<day>-<tier>.cgar` 自描述容器（`path` 置空、`container` 指向它，解出来与打包前逐字节相同）。§2.3 / §3 第 6 条 / §5.0.2 / §5.1 / §6 同步。
 > v0.6（2026-10-26）：**内容来源落地**（D43）。段内文本 = **抓帧落定后异步读一次**（不占抓帧队列）、**同段 15s 节流**、**UIA 优先（< 200 字符转 OCR）**、OCR 读**该次抓帧的那张图**；UIA 走**长驻 PowerShell worker**（3s 超时杀进程、4000 元素 / 100k 字符上限、`IsPassword` 不取）；内容按**段 id** 写回（读回来时段可能已收口）。§2.4 / §5.0 第 12 条 / §6 同步。
 > v0.5（2026-10-26）：**接进应用启动 + 真实截图落地**（D42）。截图来源定为「**事件触发时现抓一帧**」（否决「复用采集管线 ≤2s 旧帧」：证据会错位），并因此补三条纪律：**抓帧前后各校验一次窗口身份**、**原生层启动补报一次当前前台**（钩子只报变化，不补就永远没有段）、**采图回调允许异步**（记录器串行落库 + `drain()` 等在途）。§2.3 / §5.0 / §6 同步。
 > v0.4（2026-10-26）：存储与查询层落地（`src/chain/store.ts` / `src/chain/recorder.ts`），据此定下三处实现细节：**段行两期落定**（§2.1）、**`typing` 事件与截图来源**（§2.2 / §2.3）、**每张截图都挂在锚点事件上**。§5.2 的键盘规则已落定并写进代码（停顿 3s 补采）。
 > v0.3（2026-10-26）：§5 六项全部落定（空闲即停采、视频不采、内容变化率整项砍掉、保留策略按重编码三级）。
-> 依据：D38（方向：冻结旧时刻—主题管线）、D39（段与空闲语义）、D40（段行两期落定）、D41（传输方式）、D42（接线与截图来源）、D43（内容来源与时机）、D44（保留期分层与采集即编码）、探针实测（`docs/chain-probe.md`）。
+> 依据：D38（方向：冻结旧时刻—主题管线）、D39（段与空闲语义）、D40（段行两期落定）、D41（传输方式）、D42（接线与截图来源）、D43（内容来源与时机）、D44（保留期分层与采集即编码）、D45（派生层：向量 + 标签 / 双链）、探针实测（`docs/chain-probe.md`）。
 > 概念出处：`docs/information-chain-direction.md`（窗口球 / 双链球 / 事件点 / 证据截图）。
 > 这份契约只回答「数据长什么样、什么不许变」，不回答「怎么采集」（钩子方案另议）。
 
@@ -147,14 +148,29 @@ CREATE TABLE chain_content (
 ### 2.5 派生层（可重建）
 
 ```sql
-CREATE TABLE chain_tag        (id INTEGER PRIMARY KEY, segment_id INTEGER, name TEXT, source TEXT);
-CREATE TABLE chain_link       (id INTEGER PRIMARY KEY, name TEXT UNIQUE, aliases TEXT);
-CREATE TABLE chain_link_seg   (link_id INTEGER, segment_id INTEGER, weight REAL, PRIMARY KEY (link_id, segment_id));
-CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim INTEGER, vec BLOB, text_hash TEXT);
+CREATE TABLE chain_tag          (id INTEGER PRIMARY KEY, segment_id INTEGER, name TEXT, source TEXT);
+CREATE TABLE chain_link         (id INTEGER PRIMARY KEY, name TEXT UNIQUE, aliases TEXT);  -- aliases = JSON 数组
+CREATE TABLE chain_link_segment (link_id INTEGER, segment_id INTEGER, weight REAL, PRIMARY KEY (link_id, segment_id));
+CREATE TABLE chain_vector       (segment_id INTEGER PRIMARY KEY, model TEXT, dim INTEGER, vec BLOB, text_hash TEXT,
+                                 content_max_id INTEGER);  -- v0.8：建向量时的内容水位
+CREATE TABLE chain_derive       (segment_id INTEGER PRIMARY KEY, text_hash TEXT, content_max_id INTEGER,
+                                 derived_at INTEGER);      -- v0.8：这一段这个指纹抽过标签 / 双链了
 ```
 
-- 标签、双链、向量、摘要、命名**全部可重建**：删掉能从 `chain_content` 重算。
-- 双链是**多对多**（方向文档的「双链球可以指向多个窗口」），生成规则待定（§5）。
+- 标签、双链、向量、摘要、命名**全部可重建**：删掉能从 `chain_content` 重算；`chain_derive` 也是派生账，一起删（删了就重抽一遍）。
+- 双链是**多对多**（方向文档的「双链球可以指向多个窗口」）。
+- **生成规则（v0.8，D45）**：每段收口后先由 LLM 抽一次 `{tags, links}`（标签 2–5 个、双链 ≤8 个；硬上限 8 / 10，超长截断而不是整条丢）。然后名字与**已有名字**做本地语义比对并合并：
+  - **相似度 ≥ 0.95**：直接复用已有写法，不问模型；
+  - **0.90–0.95**：模糊带，攒成一批问模型「是不是同一个概念 / 实体」，判同才复用；
+  - **< 0.90**：新建。
+  - 复用时写法不同（「记忆系统设计」↔「记忆系统」）记进 `chain_link.aliases`；`chain_link_segment.weight` 暂统一 **1.0**（出现即关联，权重语义以后有需要再定）。
+  - 相似度 = 两个名字各自过本地 `bge-small-zh-v1.5`（512 维）后的余弦；**精确同名 / 别名命中不花模型**。合并只影响「这一段的标签叫法 / 挂到哪条双链」，不删 `chain_link`（别的段还在用）。
+- **送模型前的正文整理**：`chain_content` 是 UIA 整窗树 + OCR 的叠加，同一段里会攒下多份几乎相同的文本。派生时先**按行去重**（保留第一次出现的顺序）、空白归一、**上限 6000 字**（超了截断并标 `truncated`）。指纹算在**截断后**的正文上：上限之外的滚动不触发重抽，上限之内的变化才重抽。实测一段 UIA 整窗 21 409 字 → 去重后 6 000 字（丢掉 80 行重复），OCR 段基本不变。
+- **幂等 / 水位**：`chain_vector.text_hash`、`chain_derive.text_hash` 记「这个指纹算过了」；`content_max_id` 是更便宜的判据——又读回来一条内容（`MAX(chain_content.id)` 变大）才重新看指纹，指纹没变就只推水位、不花 token。重抽时**整段替换**该段的 `chain_tag` / `chain_link_segment` 行。
+- **出网门与预算**：复用 **D24 一次性确认**（`graph.outbound_consent`）与 **D22 每日预算**（`graph.budget_tokens_per_day`，与图谱共用同一份日账 `graph.usage.<day>`）；确认文案覆盖「信息链段内文本也会脱敏后发往供应商」。未确认 / 缺 key / 超预算时**只建本地向量**，抽取留在待办里，下次开始采集再补（不静默假装抽过）。载荷仍由 `understand/cloud/redact.ts` 唯一出口产出（brand 在类型层）。
+- **运行时机**：跟采集总开关走（暂停 / 退出即停，在途请求 abort、结果丢弃）。开采集先扫一轮（**最近 200 段**），之后每 **10 分钟**一轮；段收口 / 内容写入只是**叫醒**（防抖 5s，让晚到的 UIA / OCR 先落库）。失败按 1 / 2 / 4 … 最长 30 分钟退避，避免同一段每轮重抽。
+- **模型**：段向量与名字向量用**信息链自己的**本地 bge 会话（`maxLength 512`，批 1），与图谱那份（256 token）分开——段正文比单条 OCR 长。模型缺失只关向量与名字语义合并（标签 / 双链退化为精确同名复用），不阻塞采集。
+- 派生层不写证据表；唯一读证据层的地方是 `MAX(chain_content.id)`（只取水位，不读正文）。
 
 ## 3. 不变量（写测试时逐条对应）
 
@@ -166,7 +182,7 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 | 4 | 每张截图必然挂在一个存在的段上；`event_id` 非空时必须属于同一个段 |
 | 5 | 每条内容必须有 `source`，且 `chars = text.length` |
 | 6 | 事件 / 截图 / 内容只有 INSERT；**段的收口字段（`end_ts` / `active_ms` / `idle_ms` / `title_last` / `closed`）由收口时唯一一次 UPDATE 落定**（D40）；其余更新仅限两类：**保留期**改截图的 `tier` / `container` / `path` / `bytes` / `width` / `height`（v0.7，D44），以及**剪载荷**（置空字段，行不删） |
-| 7 | 派生层可以随时全删重建，重建后检索结果不劣化 |
+| 7 | 派生层（标签 / 双链 / 向量 / `chain_derive`）可以随时全删重建，重建后检索结果不劣化 |
 | 8 | 旧 `events` / `moments` / `themes` 不被新代码写入 |
 | 9 | 截图进入任何归档层后，`shot.id` 与其事件 / 段的映射仍可解出，解压后能回到原来那一刻 |
 | 10 | 同一时刻最多一个 `closed=0` 的段；启动时必须先收尾遗留的开段，才允许开新段 |
@@ -210,6 +226,12 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 | - | - | - | - |
 | 13 | 保留期四层的编码参数与实现口径 | **采集即编码**：hot = JPEG q85 原分辨率（省 6.4×，OCR 字符 99.6%）；warm = 宽 ≤1920 q85；cold = 宽 ≤1440 q80 + 容器；archive = 宽 ≤1280 q75 + 容器。**分层主要靠宽度**（缩宽比降质量更伤可读性，见 §5.1 实测）。执行器跟着采集开（暂停 / 退出即停表，下次开采集补做）：开采集跑一轮、之后每 6h 一轮；**先写新、再改行（事务）、最后删旧**，崩了最坏多留一个文件；每张让出一拍（`setImmediate`），单轮上限 2000 张。cold / archive 进自描述容器 `<日期>-<层>.cgar`（索引在尾部，解出来与打包前逐字节相同），同一天同层的旧容器在没人引用后删掉 | ✅ 已定（D44） |
 
+### 5.0.3 v0.8 追加（写派生层时定）
+
+| # | 事项 | 结论 | 状态 |
+| - | - | - | - |
+| 14 | 向量 / 标签 / 双链的落地口径 | **向量一段一向量**（`chain_vector`，本地 bge-small-zh-v1.5 / 512 维 / 零出网；方向文档提过「长段再切子块」，本轮不加表）；**标签 / 双链 = LLM 抽概念 / 实体名**（每段一次 `{tags, links}`，标签 2–5、双链 ≤8，硬上限 8 / 10）；名字合并 **≥0.95 直接复用、0.90–0.95 问模型（一批问完）、<0.90 新建**，复用不同写法记 `aliases`，权重暂统一 1.0。送模型前正文**按行去重 + 空白归一 + 6000 字上限**（实测 21 409 → 6 000 字、丢 80 行重复），指纹算在截断后；`content_max_id` 水位判断要不要重看指纹。**出网复用 D24 确认门 + D22 每日预算**（同一份 `graph.usage.<day>`），未确认 / 缺 key / 超预算只建向量。跟采集开关走：开采集补最近 200 段、之后每 10 分钟；收口 / 内容写入只是叫醒（防抖 5s）；失败按 1/2/4…30 分钟退避；暂停 abort 在途、结果丢弃 | ✅ 已定（D45） |
+
 ### 5.1 保留策略落地参数（v0.7：实测标定，不是估的）
 
 **标定方法（2026-10-26）**：9 张真机证据图（`npm run dev:capture` 在 DSH / Obsidian / RustDesk 上跑出来，3206–3840 宽、486 KB–6.4 MB），用生产同款编码器（Electron `nativeImage`）重编码，再用 WinRT OCR 比对「重编码后还能读出原图多少字」。
@@ -252,7 +274,7 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 
 > 窗口段 → 事件 → 截图 → 内容 → 能按时间与应用查出段，并从段反查到截图与内容原文。
 
-**状态（v0.7）**：真实事件源已接进应用启动；截图是**事件触发现抓**的真实帧；段内文本由**UIA 优先、OCR 兜底**在抓帧后异步读入；证据图**采集即编码 JPEG**，并按 **hot / warm / cold / archive** 四层重编码 / 打包（参数见 §5.1 实测表）。整条「段 → 事件 → 截图 → 内容 → 反查」在真机上跑通；派生层还差双链、标签、向量。
+**状态（v0.8）**：真实事件源已接进应用启动；截图是**事件触发现抓**的真实帧；段内文本由**UIA 优先、OCR 兜底**在抓帧后异步读入；证据图**采集即编码 JPEG**，并按 **hot / warm / cold / archive** 四层重编码 / 打包（参数见 §5.1 实测表）；**派生层**（段向量、标签、双链）已接进采集，向量本地算、抽取走 D24 确认门与 D22 预算。整条「段 → 事件 → 截图 → 内容 → 派生（标签 / 双链 / 向量）」在真机上跑通；个人记忆（另一套系统）仍未开工。
 
 | 环节 | 落地 | 证据 |
 | - | - | - |
@@ -269,6 +291,7 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 | **接进应用启动**（原生源加载 + 运行时装配 + 跟随采集开关 + 退出收口） | `src/main/chain-recording.ts`、`src/main/index.ts` | `tests/unit/chain-recording.test.ts`；**真机**：`npm run dev:capture` + `GOTCHA_USER_DATA=.tmp/...`，起来即有段与入场截图，Alt+P 暂停后 `chain recording stopped {"pending":0}` |
 | **内容来源**（UIA 优先 + OCR 兜底、抓帧后异步读、15s 节流、按段 id 写回） | `src/chain/content/`（worker / uia / reader）、`src/main/chain-content.ts`、`resources/chain/uia-text.ps1` | `tests/unit/chain-content-{worker,reader,capture}.test.ts`（7 / 11 / 9 条）；**真机**：见下「内容来源验证」 |
 | **保留期分层 + 采集即编码**（四层参数实测、重编码、归档容器、按天打包、幂等） | `src/chain/retention.ts`（计划）、`src/chain/archive.ts`（容器）、`src/main/chain-retention.ts`（执行器）、`src/main/chain-shot.ts`（采集即编码注入） | `tests/unit/chain-retention.test.ts`（13）、`tests/unit/chain-archive.test.ts`（8）、`tests/unit/chain-retention-sweep.test.ts`（9）、`tests/unit/chain-shot.test.ts`（编码 3 条）；**真机**：见下「保留期验证」 |
+| **派生层：向量 + 标签 / 双链**（正文去重、名字合并分带、幂等水位、预算 / 确认门、退避） | `src/chain/derive/`（text / names / parse / store / runner）、`src/understand/cloud/redact.ts`（段正文 / 合并载荷）、`src/understand/cloud/deepseek.ts`（两条 prompt）、`src/main/chain-recording.ts`（生命周期）、`src/main/index.ts`（客户端 / 模型 / 确认门接线） | `tests/unit/chain-derive-{text,names,parse,store,runner,outbound}.test.ts`（7 / 7 / 9 / 12 / 9 / 11）、`tests/unit/chain-recorder.test.ts`（回调 2 条）、`tests/unit/chain-recording.test.ts`（接线 3 条）、`tests/unit/chain-schema.test.ts`（v1→v2 迁移）；**真机**：见下「派生层验证」 |
 
 **真机验证记录（2026-10-26，D42）**：`--capture` 起应用 → 立即建段（启动补报当前前台）→ 入场帧拍下当期窗口（目视核对是 Firefox 的搜索页）→ 打字停顿 / 点击各补一帧 → 真实 Alt+P 暂停后 13 个段全部 `closed=1`、`pending=0`、0 张孤儿截图。**已知噪音**：IME（`textinputhost`）、shell「任务切换」窗口、可见区域 0×0 的窗口会成为瞬时段，截图按身份 / 可见性被丢弃（计入 `droppedShots`）；要不要把它们排除成段**还没拍板**。
 
@@ -282,4 +305,13 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 
 **采集即编码真机验证（2026-10-26）**：`npm run dev:capture` + `GOTCHA_USER_DATA=.tmp/chain-retention-live` + 真实 SendInput 点击 → 3 张证据全部落成 **`.jpg`（各 698 KB）**，`chain_shot.bytes` 与磁盘一致；内容侧 2 条 `uia`（20 267 / 20 493 字符）照常写入；日志无 error / warn（保留期在启动时跑过一轮，库里没有老数据所以 0 动作）。
 
-双链、标签、向量、个人记忆都排它后面。
+**派生层验证（2026-10-26，D45）**：
+
+- **迁移**：复制 `.tmp/chain-content-run/memory.db`（v1、4 段）跑 `ensureChainSchema` → **v1 → v2**，`chain_derive` 建出、`chain_vector` 补 `content_max_id`，4 段 / 6 条内容一行不丢；真实用户库副本（还没有信息链表）→ 直接建到 v2，不报错、不写业务数据。
+- **离线真跑**（真 `bge-small-zh-v1.5` + 本地 HTTP 假模型，只发 127.0.0.1，不碰真密钥）：4 段 → **4 条 512 维向量**（每行 2 048 B）、**4 条标签**、**1 条双链挂 4 段**（同名精确复用）、4 次抽取请求；**第二轮 0 请求**（幂等）；日账 `{"calls":4,"prompt_tokens":480,"completion_tokens":48}`。
+- **正文整理**：DSH 段 UIA **21 409 字 → 6 000 字**（丢 80 行重复、标 `truncated`）；OCR 段 301–1 432 字基本不变。
+- **真机接线**（`npm run dev:capture` + 临时 userData，默认未确认出网）：日志 `chain recording started {"derive":true}` → 切走窗口后 `chain derive: 未确认出网，只建向量不抽标签 / 双链 {"pending":1}` + `chain derive sweep {"vectors":1,"extracted":0,…}`；库里 Firefox 段（4 条内容）拿到**真模型 512 维向量**，`chain_derive` / `chain_tag` 都是 0 行、零 LLM 请求；Alt+P 暂停日志带 `derive` 统计（`vectors:1, skippedConsent:1`），退出后无 electron 残留。
+
+**派生层未做 / 已知边界**：长段子块向量（方向文档提过，本轮按契约一段一向量）；`chain_link_segment.weight` 暂统一 1.0；同一实体的不同译名只能靠 0.90–0.95 问模型 + alias 合并，样本还少。
+
+个人记忆（另一套系统）仍未开工。

@@ -145,6 +145,60 @@ describe('ensureChainSchema', () => {
         .run()
     ).toThrow()
   })
+
+  it('派生层：向量行带 content_max_id，derived 进度行独立（v0.8）', () => {
+    const database = open()
+    database.prepare('INSERT INTO chain_segment (id, start_ts, end_ts, active_ms, day_key, created_at) VALUES (1, 0, 1000, 1000, ?, 0)').run('2026-10-26')
+    database
+      .prepare('INSERT INTO chain_vector (segment_id, model, dim, vec, text_hash) VALUES (1, ?, 512, ?, ?)')
+      .run('bge-small-zh-v1.5', Buffer.alloc(4), 'abc')
+    const vector = database.prepare('SELECT * FROM chain_vector WHERE segment_id = 1').get() as {
+      content_max_id: number
+    }
+    expect(vector.content_max_id).toBe(0)
+    database
+      .prepare('INSERT INTO chain_derive (segment_id, text_hash, content_max_id, derived_at) VALUES (1, ?, 0, ?)')
+      .run('abc', 123)
+    expect(database.prepare('SELECT * FROM chain_derive WHERE segment_id = 1').get()).toMatchObject({
+      text_hash: 'abc',
+      content_max_id: 0,
+      derived_at: 123
+    })
+  })
+
+  it('v1 老库迁移到 v2：补 chain_derive 表与 chain_vector.content_max_id，老向量不丢', () => {
+    const database = open()
+    // 把库退回 v1 形状：删掉 v2 的表 / 列，写入一条老向量，再把版本账本改成 1
+    database.exec('DROP TABLE chain_derive')
+    database.exec('DROP TABLE chain_vector')
+    database.exec(`CREATE TABLE chain_vector (
+      segment_id INTEGER PRIMARY KEY,
+      model      TEXT    NOT NULL,
+      dim        INTEGER NOT NULL,
+      vec        BLOB    NOT NULL,
+      text_hash  TEXT    NOT NULL
+    )`)
+    database
+      .prepare('INSERT INTO chain_vector (segment_id, model, dim, vec, text_hash) VALUES (7, ?, 2, ?, ?)')
+      .run('bge-small-zh-v1.5', Buffer.from([1, 2, 3, 4]), 'old')
+    database.prepare("UPDATE chain_meta SET value = '1' WHERE key = 'schema_version'").run()
+
+    ensureChainSchema(database)
+
+    const columns = (
+      database.prepare('PRAGMA table_info(chain_vector)').all() as Array<{ name: string }>
+    ).map((column) => column.name)
+    expect(columns).toContain('content_max_id')
+    expect(database.prepare('SELECT content_max_id FROM chain_vector WHERE segment_id = 7').get()).toEqual({
+      content_max_id: 0
+    })
+    expect(
+      database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='chain_derive'").get()
+    ).toBeTruthy()
+    expect(
+      (database.prepare("SELECT value FROM chain_meta WHERE key = 'schema_version'").get() as { value: string }).value
+    ).toBe(String(CHAIN_SCHEMA_VERSION))
+  })
 })
 
 describe('validateSegment', () => {

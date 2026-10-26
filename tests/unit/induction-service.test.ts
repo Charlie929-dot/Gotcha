@@ -230,6 +230,12 @@ describe('induction service · 跑批 / 校验 / 暂停 / 预算', () => {
         },
         completeAssignments: async () => {
           throw new Error('unused: completeAssignments')
+        },
+        completeChainExtract: async () => {
+          throw new Error('unused: completeChainExtract')
+        },
+        completeChainMerge: async () => {
+          throw new Error('unused: completeChainMerge')
         }
       }
       const service = makeService(db, pending)

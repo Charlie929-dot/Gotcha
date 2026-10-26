@@ -35,6 +35,12 @@ import {
   type ChainShotWindow
 } from './chain-shot'
 import { createChainRetention, type ChainRetention, type ImageEncoder } from './chain-retention'
+import {
+  ChainDeriver,
+  type DeriveClientResolution,
+  type DeriveStats
+} from '../chain/derive/runner'
+import type { Embedder } from '../understand/embedding/types'
 
 /** 前台窗口（带 pid / hwnd：段身份对齐要用） */
 export async function readForegroundWindow(): Promise<ChainShotWindow | null> {
@@ -125,6 +131,15 @@ export interface ChainRecordingOptions {
    * 把老证据重编码 / 打进归档容器。不给就完全不动文件（测试 / 假采集路径）。
    */
   retention?: { encode: ImageEncoder }
+  /**
+   * 派生层（v0.8 / D45）：向量 + 标签 / 双链（受出网确认门与每日预算约束）。
+   * 不给就完全不派生；采集与证据照常。
+   */
+  derive?: {
+    resolveClient: () => DeriveClientResolution
+    readConsent: () => boolean
+    loadEmbedder: () => Promise<Embedder | null>
+  }
 }
 
 export interface ChainRecordingStatus {
@@ -133,6 +148,8 @@ export interface ChainRecordingStatus {
   openSegmentId: number | null
   shots: ShotStats | null
   content: ChainContentStats | null
+  /** 派生层统计（没接线时为 null） */
+  derive: DeriveStats | null
 }
 
 export interface ChainRecordingHandle {
@@ -168,6 +185,8 @@ interface ActiveChain {
   content: ChainContentCapture | null
   /** 保留期扫描（D44）；没给编码器时为 null */
   retention: ChainRetention | null
+  /** 派生层（v0.8）；没给配置时为 null */
+  derive: ChainDeriver | null
   /** 关掉读取链（杀 PowerShell 子进程；在途读数由 `content.drain()` 先等） */
   dispose(): Promise<void>
 }
@@ -179,6 +198,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
   let stopping: Promise<void> | null = null
   /** 停掉之后的读数账（`status()` 在暂停后还要能看到刚收口的那一轮） */
   let lastContentStats: ChainContentStats | null = null
+  /** 停掉之后的派生账（同样是「刚结束的那一轮」） */
+  let lastDeriveStats: DeriveStats | null = null
 
   const start = (): void => {
     if (active) return
@@ -220,15 +241,30 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
         })
       : null
 
+    // 派生层（v0.8）：向量本地算，抽取受出网确认门 + 每日预算约束；跟采集生命周期走
+    const derive = options.derive
+      ? new ChainDeriver({
+          db: options.db,
+          now: options.now,
+          log,
+          resolveClient: options.derive.resolveClient,
+          readConsent: options.derive.readConsent,
+          loadEmbedder: options.derive.loadEmbedder
+        })
+      : null
     const runtime = new ChainRuntime({
       db: options.db,
       source,
       takeShot: takeShot ?? undefined,
       now: options.now,
-      sourceInfo: info
+      sourceInfo: info,
+      // 派生层叫醒（v0.8）：收口 / 内容写入都只是「叫醒」，判断在派生执行器里
+      onSegmentClosed: (segmentId) => derive?.notifySegmentClosed(segmentId),
+      onContentWritten: (segmentId) => derive?.notifyContentWritten(segmentId)
     })
     runtime.start()
     holder.runtime = runtime
+    derive?.start()
     // 保留期（D44）：跟采集一起开——这时写连接才存在；暂停 / 退出就停表
     const retention = options.retention
       ? createChainRetention({
@@ -244,6 +280,7 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
       runtime,
       content,
       retention,
+      derive,
       dispose: async () => {
         await contentReader?.dispose()
       }
@@ -252,7 +289,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
       source: info.kind,
       detail: info.detail ?? null,
       shots: takeShot !== null,
-      content: content !== null
+      content: content !== null,
+      derive: derive !== null
     })
   }
 
@@ -263,6 +301,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
     active = null
     stopping = (async () => {
       current.runtime.stop()
+      // 派生层先收手：中止在途请求，结果丢弃（下一轮重试），不拖着退出
+      current.derive?.stop()
       // 保留期扫描先收手：它只处理老文件，不阻塞退出（在途那几张会自己落定）
       current.retention?.stop()
       // 截图先收口：内容车道读的是这些证据，读完再放手
@@ -276,11 +316,13 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
       }
       await current.dispose()
       lastContentStats = current.content?.stats ?? null
+      lastDeriveStats = current.derive?.status() ?? null
       const stats = current.runtime.stats
       log('info', 'chain recording stopped', {
         openSegmentId: stats.openSegmentId,
         shots: stats.shotStats,
-        content: current.content?.stats ?? null
+        content: current.content?.stats ?? null,
+        derive: lastDeriveStats
       })
     })().finally(() => {
       stopping = null
@@ -299,7 +341,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
         source: source?.sourceInfo ?? null,
         openSegmentId: shots?.openSegmentId ?? null,
         shots: shots?.shotStats ?? null,
-        content: current?.content?.stats ?? lastContentStats
+        content: current?.content?.stats ?? lastContentStats,
+        derive: current?.derive?.status() ?? lastDeriveStats
       }
     }
   }

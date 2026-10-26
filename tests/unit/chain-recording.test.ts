@@ -1,15 +1,25 @@
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { SETTINGS_DDL } from '../../src/db/schema'
 import { ensureChainSchema } from '../../src/chain/schema'
-import { getSegmentDetail, querySegments, type ChainDb } from '../../src/chain/store'
+import {
+  closeSegment,
+  getSegmentDetail,
+  insertContent,
+  openSegment,
+  querySegments,
+  type ChainDb
+} from '../../src/chain/store'
 import type { DesktopEventSource, RawDesktopEvent } from '../../src/chain/hook/types'
 import type { ShotStats } from '../../src/chain/recorder'
 import { NativeDesktopSource } from '../../src/chain/hook/native'
+import { LlmAbortError, type LlmClient } from '../../src/understand/cloud/llm-client'
 import {
   createChainRecording,
   loadChainEventSource,
   type ChainContentWiring,
-  type ChainRecordingHandle
+  type ChainRecordingHandle,
+  type ChainRecordingOptions
 } from '../../src/main/chain-recording'
 import type { ChainShotFs, ChainShotWindow } from '../../src/main/chain-shot'
 
@@ -83,6 +93,7 @@ function build(
     source?: DesktopEventSource | null
     window?: () => Promise<ChainShotWindow | null>
     content?: ChainContentWiring
+    derive?: ChainRecordingOptions['derive']
   } = {}
 ) {
   let frameTs = 0
@@ -102,6 +113,7 @@ function build(
     getWindow: options.window ?? (async () => WINDOW),
     isBlacklisted: () => false,
     content: options.content,
+    derive: options.derive,
     log: (_level, _msg, data) => {
       if (data && typeof data.shots === 'object' && data.shots !== null) {
         shots.push(data.shots as ShotStats)
@@ -116,6 +128,7 @@ let db: ChainDb
 
 beforeEach(() => {
   db = new Database(':memory:')
+  db.exec(SETTINGS_DDL)
   ensureChainSchema(db)
 })
 
@@ -338,5 +351,120 @@ describe('内容来源接进采集（D43）', () => {
     expect(handle.status().content).toBeNull()
     const [segment] = querySegments(db)
     expect(getSegmentDetail(db, segment.id)?.contents).toHaveLength(0)
+  })
+})
+
+describe('派生层接进采集（v0.8 / D45）', () => {
+  const embedder = {
+    model: 'fake-embedding-v1',
+    dim: 4,
+    async embed(texts: readonly string[]): Promise<Float32Array[]> {
+      return texts.map(() => new Float32Array([1, 0, 0, 0]))
+    }
+  }
+
+  /** 预置一个已收口、有内容的段（派生扫描的输入） */
+  function seededSegment(): number {
+    const startTs = at(-3_600)
+    const segmentId = openSegment(
+      db,
+      { startTs, pid: 9, exe: 'firefox', app: 'Firefox', hwnd: 90, title: '旧页面' },
+      startTs
+    )
+    closeSegment(db, segmentId, {
+      startTs,
+      endTs: startTs + 60_000,
+      activeMs: 60_000,
+      idleMs: 0,
+      pid: 9,
+      exe: 'firefox',
+      app: 'Firefox',
+      hwnd: 90,
+      titleFirst: '旧页面',
+      titleLast: '旧页面'
+    })
+    insertContent(db, {
+      segmentId,
+      capturedAt: startTs + 1_000,
+      source: 'uia',
+      text: '记忆球 内容'
+    })
+    return segmentId
+  }
+
+  async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
+    const started = Date.now()
+    while (!check()) {
+      if (Date.now() - started > timeoutMs) throw new Error('等待超时')
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
+
+  it('没接派生层：status().derive 是 null', async () => {
+    const source = new FakeSource()
+    const { handle } = build({ source })
+    handle.start()
+    source.emit(foreground(0))
+    await handle.stop()
+    expect(handle.status().derive).toBeNull()
+  })
+
+  it('接了派生层：跟采集一起启动，暂停即停（统计保留）', async () => {
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      derive: {
+        resolveClient: () => ({ ok: false, reason: 'missing-key' }),
+        readConsent: () => false,
+        loadEmbedder: async () => embedder
+      }
+    })
+    handle.start()
+    expect(handle.status().derive?.started).toBe(true)
+    source.emit(foreground(0))
+    await handle.stop()
+    expect(handle.status().derive?.started).toBe(false)
+  })
+
+  it('暂停时中止在途抽取请求', async () => {
+    seededSegment()
+    let extractCalls = 0
+    let aborted = 0
+    const client: LlmClient = {
+      completeJson: async () => {
+        throw new Error('unused: completeJson')
+      },
+      completeNaming: async () => {
+        throw new Error('unused: completeNaming')
+      },
+      completeAssignments: async () => {
+        throw new Error('unused: completeAssignments')
+      },
+      completeChainExtract: (_payload, options) =>
+        new Promise((_resolve, reject) => {
+          extractCalls += 1
+          options?.signal?.addEventListener('abort', () => {
+            aborted += 1
+            reject(new LlmAbortError())
+          })
+        }),
+      completeChainMerge: async () => {
+        throw new Error('unused: completeChainMerge')
+      }
+    }
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      derive: {
+        resolveClient: () => ({ ok: true, client }),
+        readConsent: () => true,
+        loadEmbedder: async () => embedder
+      }
+    })
+    handle.start()
+    await waitFor(() => extractCalls === 1)
+    await handle.stop()
+    expect(aborted).toBe(1)
+    expect(handle.status().derive?.started).toBe(false)
   })
 })

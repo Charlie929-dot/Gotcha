@@ -53,7 +53,7 @@ import {
 } from './theme-online-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
 import type { Embedder } from '../understand/embedding/types'
-import { isModelReady } from '../understand/embedding/session'
+import { createLocalEmbedder, isModelReady } from '../understand/embedding/session'
 import {
   registerGraphIpc,
   type GraphChangedEvent,
@@ -332,6 +332,31 @@ function resolveModelDir(): string {
 function loadGraphEmbedder(): Promise<Embedder | null> {
   if (fakeEmbeddingBundle) return Promise.resolve(fakeEmbeddingBundle.embedder)
   return loadSharedEmbedder(resolveModelDir(), { log: captureLog })
+}
+
+/**
+ * 信息链派生用的本地向量会话：模型与图谱共用一份文件，但 `maxLength = 512`
+ * （段正文比单条 OCR 长；图谱那份是 256、批 1，别混用）。懒加载、进程内只建一次；
+ * 模型缺失只关向量，标签 / 双链照抽（名字只能做精确同名合并）。
+ */
+let chainEmbedder: Promise<Embedder | null> | null = null
+function loadChainEmbedder(): Promise<Embedder | null> {
+  if (fakeEmbeddingBundle) return Promise.resolve(fakeEmbeddingBundle.embedder)
+  if (!chainEmbedder) {
+    chainEmbedder = createLocalEmbedder({
+      modelDir: resolveModelDir(),
+      maxLength: 512,
+      batchSize: 1,
+      intraOpNumThreads: 4
+    }).catch((error: unknown) => {
+      captureLog('warn', 'chain embedder unavailable', {
+        error: error instanceof Error ? error.name : 'unknown'
+      })
+      chainEmbedder = null
+      return null
+    })
+  }
+  return chainEmbedder
 }
 
 /** 回填的 embedder 工厂：只有假向量注入时才显式给（真模型路径自己按 `modelDir` 加载） */
@@ -869,7 +894,16 @@ function ensureChainRecording(): ChainRecordingHandle | null {
       ocrScript: scriptResourcePath('ocr', 'winrt-ocr.ps1')
     },
     // 保留期分层（D44）：老证据重编码 / 打包；参数见 chain/retention.ts 的实测表
-    retention: { encode: encodeRetentionImage }
+    retention: { encode: encodeRetentionImage },
+    // 派生层（v0.8 / D45）：向量本地算；标签 / 双链走同一份出网确认门（D24）与每日预算（D22）
+    derive: {
+      resolveClient,
+      readConsent: () => {
+        const db = connections.queryDb()
+        return db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
+      },
+      loadEmbedder: loadChainEmbedder
+    }
   })
   return chainRecording
 }

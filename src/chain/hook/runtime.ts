@@ -29,6 +29,10 @@ export interface ChainRuntimeOptions {
   adapterOptions?: Partial<AdapterOptions>
   segmenterOptions?: Partial<SegmenterOptions>
   sourceInfo?: SourceInfo
+  /** 段收口后通知（派生层叫醒；v0.8） */
+  onSegmentClosed?: (segmentId: number) => void
+  /** 内容写入后通知（派生层叫醒；v0.8） */
+  onContentWritten?: (segmentId: number) => void
 }
 
 export interface ChainRuntimeStats {
@@ -62,7 +66,13 @@ export class ChainRuntime {
     this.autoPulse = options.autoPulse ?? true
     this.adapter = new DesktopEventAdapter(options.source, { now: this.now, ...options.adapterOptions })
     this.segmenter = new ChainSegmenter(options.segmenterOptions)
-    this.recorder = new ChainRecorder({ db: options.db, now: this.now, takeShot: options.takeShot })
+    this.recorder = new ChainRecorder({
+      db: options.db,
+      now: this.now,
+      takeShot: options.takeShot,
+      onSegmentClosed: options.onSegmentClosed,
+      onContentWritten: options.onContentWritten
+    })
     this.sourceInfo = options.sourceInfo ?? { kind: 'fake' }
   }
 

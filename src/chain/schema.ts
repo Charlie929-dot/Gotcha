@@ -114,14 +114,36 @@ CREATE TABLE IF NOT EXISTS chain_link_segment (
 );
 `
 
-/** 段向量（派生） */
+/**
+ * 段向量（派生）。
+ *
+ * `content_max_id`（v0.8）：建向量时这一段最大的 `chain_content.id`——内容又读回来一条
+ * 就比它大，扫派生队列据此判断「要不要重算」，不必每次把全部正文读出来比指纹。
+ */
 export const CHAIN_VECTOR_DDL = `
 CREATE TABLE IF NOT EXISTS chain_vector (
-  segment_id INTEGER PRIMARY KEY,
-  model      TEXT    NOT NULL,
-  dim        INTEGER NOT NULL,
-  vec        BLOB    NOT NULL,
-  text_hash  TEXT    NOT NULL
+  segment_id     INTEGER PRIMARY KEY,
+  model          TEXT    NOT NULL,
+  dim            INTEGER NOT NULL,
+  vec            BLOB    NOT NULL,
+  text_hash      TEXT    NOT NULL,
+  content_max_id INTEGER NOT NULL DEFAULT 0
+);
+`
+
+/**
+ * 派生进度（v0.8，派生层自己的记账，不属于契约 §2 的证据表）。
+ *
+ * 一行 = 「这一段**这个指纹**的正文已经送过模型抽标签 / 双链」。
+ * 没有它就无法区分「还没抽」与「抽了但什么都没抽出来」——只靠 `chain_tag` 有没有行会
+ * 把「空结果」当成待办，每轮重抽一次白烧 token。派生层可全删重建，这张表也一样。
+ */
+export const CHAIN_DERIVE_DDL = `
+CREATE TABLE IF NOT EXISTS chain_derive (
+  segment_id     INTEGER PRIMARY KEY,
+  text_hash      TEXT    NOT NULL,
+  content_max_id INTEGER NOT NULL DEFAULT 0,
+  derived_at     INTEGER NOT NULL
 );
 `
 
@@ -146,7 +168,8 @@ export const CHAIN_SCHEMA_DDLS: readonly string[] = [
   CHAIN_TAG_DDL,
   CHAIN_LINK_DDL,
   CHAIN_LINK_SEGMENT_DDL,
-  CHAIN_VECTOR_DDL
+  CHAIN_VECTOR_DDL,
+  CHAIN_DERIVE_DDL
 ]
 
 export const CHAIN_TABLES = [
@@ -157,7 +180,8 @@ export const CHAIN_TABLES = [
   'chain_tag',
   'chain_link',
   'chain_link_segment',
-  'chain_vector'
+  'chain_vector',
+  'chain_derive'
 ] as const
 
 export type ChainTable = (typeof CHAIN_TABLES)[number]
@@ -176,11 +200,24 @@ CREATE TABLE IF NOT EXISTS chain_meta (
  * 信息链自己的结构版本。**改任何 chain_ DDL 都要同时**：
  * ① 把这里 +1；② 在 `CHAIN_MIGRATIONS` 里补「旧版本 → 新版本」那一步（老库靠它补列 / 重建）。
  * 忘了的后果是静默：老库缺列，插入直接报 `no column named`（gotchas 记过这条）。
+ *
+ * 版本史：1 = v0.5 接线时的八张表；2 = 派生层（`chain_derive` + `chain_vector.content_max_id`）。
  */
-export const CHAIN_SCHEMA_VERSION = 1
+export const CHAIN_SCHEMA_VERSION = 2
 
 /** 版本 → 迁移步骤。`CHAIN_MIGRATIONS[n]` 负责把 v(n-1) 的库改成 v(n) */
-export const CHAIN_MIGRATIONS: Record<number, (db: ChainSchemaDb) => void> = {}
+export const CHAIN_MIGRATIONS: Record<number, (db: ChainSchemaDb) => void> = {
+  /**
+   * v1 → v2：补派生层的列与表。
+   *
+   * `ensureChainSchema` 先跑一遍 `CREATE TABLE IF NOT EXISTS`（`chain_derive` 会被建出来），
+   * 所以这里只需把老 `chain_vector` 缺的列补上——SQLite 的 `ALTER TABLE ... ADD COLUMN`
+   * 不能带 `IF NOT EXISTS`，只能靠版本号保证只跑一次。
+   */
+  2: (db) => {
+    db.exec('ALTER TABLE chain_vector ADD COLUMN content_max_id INTEGER NOT NULL DEFAULT 0')
+  }
+}
 
 /** 建表 / 版本记账需要的最小 db 形状（只用到 exec / prepare） */
 export interface ExecutableDb {
@@ -318,4 +355,22 @@ export interface ChainContentRow {
   text: string
   chars: number
   hash: string
+}
+
+/** 段向量行（派生；`vec` 是 Float32Array 的原始字节，小端） */
+export interface ChainVectorRow {
+  segment_id: number
+  model: string
+  dim: number
+  vec: Buffer
+  text_hash: string
+  content_max_id: number
+}
+
+/** 派生进度行（派生层记账，可全删重建） */
+export interface ChainDeriveRow {
+  segment_id: number
+  text_hash: string
+  content_max_id: number
+  derived_at: number
 }

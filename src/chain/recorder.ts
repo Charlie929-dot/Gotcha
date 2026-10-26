@@ -66,6 +66,10 @@ export interface ChainRecorderOptions {
   takeShot?: ShotTaker
   /** 同一段内与上一条指纹相同的内容是否丢弃（默认丢，省字节） */
   dedupeContent?: boolean
+  /** 段收口后通知（v0.8 派生层：叫醒派生执行器；抛错不影响采集） */
+  onSegmentClosed?: (segmentId: number) => void
+  /** 内容写进库后通知（派生层据此知道水位变了；抛错不影响采集） */
+  onContentWritten?: (segmentId: number) => void
 }
 
 export type ShotTaker = (request: ShotRequest) => ShotResult | null | Promise<ShotResult | null>
@@ -114,6 +118,8 @@ export class ChainRecorder {
   private readonly now: () => number
   private readonly takeShot?: ShotTaker
   private readonly dedupeContent: boolean
+  private readonly onSegmentClosed?: (segmentId: number) => void
+  private readonly onContentWritten?: (segmentId: number) => void
   /** 当前开着的段 id（段机保证同一时刻最多一段） */
   private openSegmentId: number | null = null
   /** 异步采图串行队列：保证落库顺序 = 事件顺序 */
@@ -126,6 +132,8 @@ export class ChainRecorder {
     this.now = options.now
     this.takeShot = options.takeShot
     this.dedupeContent = options.dedupeContent ?? true
+    this.onSegmentClosed = options.onSegmentClosed
+    this.onContentWritten = options.onContentWritten
   }
 
   get currentSegmentId(): number | null {
@@ -176,9 +184,16 @@ export class ChainRecorder {
             outcome.orphans += 1
             break
           }
-          closeSegment(this.db, this.openSegmentId, action.segment)
+          const closedId = this.openSegmentId
+          closeSegment(this.db, closedId, action.segment)
           this.openSegmentId = null
           outcome.closed += 1
+          // 派生层叫醒（v0.8）：失败不能影响采集
+          try {
+            this.onSegmentClosed?.(closedId)
+          } catch {
+            // 通知失败只是派生晚一点，不改变「段已收口」这个事实
+          }
           break
         }
         case 'idle-start':
@@ -275,6 +290,7 @@ export class ChainRecorder {
     if (payload.text.trim() === '') return false
     if (!this.dedupeContent) {
       insertContent(this.db, { segmentId, capturedAt, source: payload.source, text: payload.text })
+      this.notifyContent(segmentId)
       return true
     }
     const last = this.db
@@ -283,6 +299,16 @@ export class ChainRecorder {
     const hash = contentHash(payload.text)
     if (last && last.hash === hash) return false
     insertContent(this.db, { segmentId, capturedAt, source: payload.source, text: payload.text, hash })
+    this.notifyContent(segmentId)
     return true
+  }
+
+  /** 派生层叫醒（v0.8）：抛错不影响内容已落库这个事实 */
+  private notifyContent(segmentId: number): void {
+    try {
+      this.onContentWritten?.(segmentId)
+    } catch {
+      // 派生晚一点，不影响采集
+    }
   }
 }

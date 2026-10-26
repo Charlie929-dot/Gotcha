@@ -7,6 +7,8 @@
  */
 
 import type {
+  ChainExtractPayload,
+  ChainMergePayload,
   CloudPayload,
   ThemeAssignmentPayload,
   ThemeNamingPayload
@@ -52,6 +54,16 @@ export interface LlmClient {
   /** 模糊归属确认（P2 在线路径；S4）：时刻 + 候选主题 → { assignments } */
   completeAssignments(
     payload: ThemeAssignmentPayload,
+    options?: LlmCompleteOptions
+  ): Promise<LlmJsonResult>
+  /** 信息链派生（v0.8 / D45）：段正文 → { tags, links } */
+  completeChainExtract(
+    payload: ChainExtractPayload,
+    options?: LlmCompleteOptions
+  ): Promise<LlmJsonResult>
+  /** 信息链派生（v0.8 / D45）：模糊带「候选名 / 已有名」对 → { same: boolean[] } */
+  completeChainMerge(
+    payload: ChainMergePayload,
     options?: LlmCompleteOptions
   ): Promise<LlmJsonResult>
 }
@@ -117,6 +129,9 @@ export class FakeLlmClient implements LlmClient {
   /** P2 在线路径的两次调用单独留痕，避免和批量归纳的断言混在一起 */
   readonly namingRequests: ThemeNamingPayload[] = []
   readonly assignmentRequests: ThemeAssignmentPayload[] = []
+  /** 信息链派生（v0.8 / D45）的两次调用单独留痕 */
+  readonly chainExtractRequests: ChainExtractPayload[] = []
+  readonly chainMergeRequests: ChainMergePayload[] = []
   /** 每次调用的选项（signal / repairHint 等），供暂停 / 修复重试断言 */
   readonly optionCalls: LlmCompleteOptions[] = []
   private readonly replies: FakeLlmReply[]
@@ -169,6 +184,22 @@ export class FakeLlmClient implements LlmClient {
     options: LlmCompleteOptions = {}
   ): Promise<LlmJsonResult> {
     this.assignmentRequests.push(payload)
+    return this.take(options)
+  }
+
+  async completeChainExtract(
+    payload: ChainExtractPayload,
+    options: LlmCompleteOptions = {}
+  ): Promise<LlmJsonResult> {
+    this.chainExtractRequests.push(payload)
+    return this.take(options)
+  }
+
+  async completeChainMerge(
+    payload: ChainMergePayload,
+    options: LlmCompleteOptions = {}
+  ): Promise<LlmJsonResult> {
+    this.chainMergeRequests.push(payload)
     return this.take(options)
   }
 }

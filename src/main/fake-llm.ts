@@ -7,6 +7,8 @@
  */
 
 import type {
+  ChainExtractPayload,
+  ChainMergePayload,
   CloudPayload,
   ThemeAssignmentPayload,
   ThemeNamingPayload
@@ -144,6 +146,51 @@ export function createDeterministicFakeLlm(options: { delayMs?: number } = {}): 
       return {
         json: { assignments },
         usage: { promptTokens: 120 + payload.moments.length * 10, completionTokens: 8 + assignments.length * 4 }
+      }
+    },
+
+    /** 信息链派生：每段给一个确定性的标签 / 双链名字（带段 id，避免跨段意外合并） */
+    async completeChainExtract(
+      payload: ChainExtractPayload,
+      callOptions: LlmCompleteOptions = {}
+    ): Promise<LlmJsonResult> {
+      counters.requests += 1
+      try {
+        if (delayMs > 0 || callOptions.signal) {
+          await abortableDelay(delayMs, callOptions.signal)
+        }
+      } catch (error) {
+        if (error instanceof LlmAbortError) counters.aborted += 1
+        throw error
+      }
+      const first = payload.segments[0]
+      const segmentId = first?.segmentId ?? 0
+      return {
+        json: {
+          tags: [truncate(`模拟主题 ${segmentId}`, 24)],
+          links: [truncate(`模拟概念 ${segmentId}`, 40)]
+        },
+        usage: { promptTokens: 80 + payload.segments.length * 20, completionTokens: 10 }
+      }
+    },
+
+    /** 信息链派生：模糊带一律判「同一个」（确定性，E2E 断言合并路径） */
+    async completeChainMerge(
+      payload: ChainMergePayload,
+      callOptions: LlmCompleteOptions = {}
+    ): Promise<LlmJsonResult> {
+      counters.requests += 1
+      try {
+        if (delayMs > 0 || callOptions.signal) {
+          await abortableDelay(delayMs, callOptions.signal)
+        }
+      } catch (error) {
+        if (error instanceof LlmAbortError) counters.aborted += 1
+        throw error
+      }
+      return {
+        json: { same: payload.pairs.map(() => true) },
+        usage: { promptTokens: 40 + payload.pairs.length * 10, completionTokens: 4 }
       }
     }
   }

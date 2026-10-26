@@ -2,10 +2,12 @@
 
 > `AGENTS.md` 的外链细节，按需读。
 
-## 工具与闸门
+## 工具与测试节奏
 
 - 工具（M1 定稿）：`vitest` 单元/集成 + `Playwright` 做 Electron E2E。
-- 硬闸门：`npm test` 全绿 + `npm run typecheck` 通过，才能提交（M1 建立后生效）。
+- **只跑一处**：每次提交前跑一次 `npm test` + `npm run typecheck`；**开 PR、合并前不再重复跑**（分支是 squash 合并的，main 上的结果就是这一次）。
+- 结果如实报：命令 + 通过 / 失败摘要写进交付说明。失败不伪装成通过、不改验收标准、不静默降级。
+- 只有改了代码才跑（`src/` / `tests/` / `scripts/`）；只改文档等非代码文件免跑。
 
 ## 用例纪律
 
@@ -17,7 +19,7 @@
 - **图谱 E2E**：假采集 + 假 LLM 跑「确认出网 → 立即归纳 → sigma 画布出现节点（`#node-count` 的 `data-nodes` + `window.__gotchaGraphView.count()`）→ 来源可溯 → 点击节点侧栏成员事件 →「在时间线中查看」定位到节点日期 → 设置抽屉保存 → 暂停零请求」（`tests/e2e/graph.spec.ts`）。画布交互不按像素点击：`__gotchaGraphView.select(id)` 走与 `clickNode` 相同的 `openNode` 路径。
 - **隐私用例**：脱敏管道有 golden 用例（密钥/token/证件号/手机/卡号/邮箱/IP/URL 参数）；黑名单进程命中整帧丢弃要有断言。
 - 不许注释用例、加跳过标记、放宽断言来「变绿」。
-- **空用例不构成验证**：`npm test` 零断言（或 `expect(true)` 类凑数）通过不算过闸门；任何阶段首次过闸门至少含 1 条真实行为断言。
+- **空用例不构成验证**：`npm test` 零断言（或 `expect(true)` 类凑数）通过不算通过；任何阶段首次过闸门至少含 1 条真实行为断言。
 - 若维护用例总数：新增/删除用例必须同步计数。
 
 ## 验收

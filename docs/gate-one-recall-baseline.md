@@ -108,7 +108,7 @@ npm run recall-baseline -- .tmp/recall-baseline.json --json
 填完把汇总数字（不含题目原文）回写到：
 
 - `docs/m2-graph-redesign.md` §14「仍需补」一行；
-- `docs/agent/workflow.md` §8 的 M2 行 / 当日条目。
+- `docs/agent/progress.md` 的 M2 行 / 当日条目。
 
 ## 8. 与其它验收的关系
 

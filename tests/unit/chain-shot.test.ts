@@ -319,6 +319,15 @@ describe('证据落定后的旁路（内容来源 D43）', () => {
 })
 
 describe('证据图落盘口径（v0.11：渲染端直接出 JPEG）', () => {
+  it('口径是平铺字段（曾经写成嵌套 target，tsc 放行、真机继续按 2× 放大）', () => {
+    expect(EVIDENCE_CAPTURE_OPTIONS).toEqual({
+      upscale: 1,
+      maxWidth: 1_920,
+      format: 'jpeg',
+      withOcrImage: true
+    })
+  })
+
   it('屏幕流给的是 JPEG：落盘就是 .jpg，主进程不做解码 / 重编码', async () => {
     const fs = fakeFs(4_321)
     const jpgPath = `C:/userData/tmp-chain/frame-${at(1)}.jpg`

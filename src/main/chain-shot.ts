@@ -24,6 +24,7 @@
 import { mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { WindowBounds } from '../capture/window-meta'
+import type { CaptureOptions } from '../capture/screen-stream'
 import { EVIDENCE_MAX_WIDTH } from '../capture/ocr-scaling'
 import type { CaptureTargetOptions } from '../capture/ocr-scaling'
 import type { ShotRequest, ShotResult, ShotTaker } from '../chain/recorder'
@@ -51,8 +52,11 @@ export interface ChainShotFrame {
 export interface ChainShotScreen {
   /**
    * 抓一帧。第四个参数是**抓帧口径**：证据图传
-   * `{ target: { upscale: 1, maxWidth: 1920 }, format: 'jpeg', withOcrImage: true }`
+   * `{ upscale: 1, maxWidth: 1920, format: 'jpeg', withOcrImage: true }`
    * ——不复制 OCR 那条 2× 主图路径，同时另出一张 2× PNG 给 OCR 兜底。
+   *
+   * 字段必须与 `ScreenCapture.capture()` 的 `CaptureOptions` **同形**（平铺，不是嵌套 `target`）：
+   * 两边方法参数是双变的，嵌套写漏了 TS 也不会报错，只会在真机上继续按 2× 放大。
    */
   capture(
     bounds: WindowBounds,
@@ -62,14 +66,14 @@ export interface ChainShotScreen {
   ): Promise<ChainShotFrame>
 }
 
-export interface ChainShotCaptureOptions {
-  /** 主图尺寸口径（默认 = OCR 的 2× / 封顶 3840） */
-  target?: CaptureTargetOptions
-  /** 主图编码格式（默认 png；证据图 jpeg） */
-  format?: 'png' | 'jpeg'
-  /** 是否另出一张 2× PNG 给 OCR（证据图这条要） */
-  withOcrImage?: boolean
-}
+/**
+ * 抓帧口径直接复用屏幕流的 `CaptureOptions`（**类型别名，不另写一份**）。
+ *
+ * 教训：这里曾经自己写了一份 `{ target: ... }` 嵌套形状，而 `ScreenCapture.capture()` 收的是
+ * 平铺的 `{ upscale, maxWidth }`；两边方法参数是双变的，tsc 不报错，真机就继续按 2× 抓了一整轮。
+ * 只留一个来源，谁也不许再手抄。
+ */
+export type ChainShotCaptureOptions = CaptureOptions
 
 /**
  * 证据截图的抓帧口径：主图**不放大**、超宽缩到 1920（D44 的 warm 档宽度），**渲染端直接出 JPEG**；
@@ -86,7 +90,7 @@ export const EVIDENCE_CAPTURE_TARGET: CaptureTargetOptions = {
 
 /** 证据图的抓帧口径（尺寸 + 格式 + OCR 副图），一次说全 */
 export const EVIDENCE_CAPTURE_OPTIONS: ChainShotCaptureOptions = {
-  target: EVIDENCE_CAPTURE_TARGET,
+  ...EVIDENCE_CAPTURE_TARGET,
   format: 'jpeg',
   withOcrImage: true
 }

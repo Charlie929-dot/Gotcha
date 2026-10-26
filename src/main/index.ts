@@ -70,6 +70,11 @@ import {
   type CaptureSession
 } from './capture-controller'
 import { resolveCapture } from './args'
+import {
+  createChainRecording,
+  loadChainEventSource,
+  type ChainRecordingHandle
+} from './chain-recording'
 import { claimSingleInstance } from './single-instance'
 import { BALL_STATE_FILE } from './ball-state'
 import { createBallShell, type BallShell } from './ball'
@@ -158,6 +163,11 @@ let momentRuntime: MomentRuntime | null = null
 /** 在线归属（M2 P2 · S6）：新时刻 → 主题 / 命名 / 模糊确认；本地模型就绪时接管新数据 */
 let themeOnlineRuntime: ThemeOnlineRuntime | null = null
 let disposeGraphIpc: (() => void) | null = null
+/**
+ * 信息链接线（D42）：跟采集开关同一条命。启动时加载原生事件源（失败就降级成不采集），
+ * 采集 running 时开、stopping 时收口并等在途截图落库。
+ */
+let chainRecording: ChainRecordingHandle | null = null
 let startupCountdown: StartupResumeCountdown | null = null
 /** 倒计时到点后的 starting 阶段，Alt+P 可把自动恢复接管为显式开启 */
 let startupResumeClaimedExplicitly = false
@@ -647,6 +657,14 @@ app.on('before-quit', (event) => {
     } catch (error) {
       console.warn(`[gotcha] 退出时停止采集失败：${String(error)}`)
     }
+    // 信息链：停源 + 收口最后一段 + 等在途截图落库（截图是异步抓的，不等就会丢最后一张）
+    try {
+      const stopping = chainRecording?.stop()
+      if (stopping) await withTimeout(stopping, 2_000, '信息链收口超时（2s）')
+      chainRecording = null
+    } catch (error) {
+      console.warn(`[gotcha] 退出时信息链收口失败：${String(error)}`)
+    }
     connections.closeAll()
     trayShell?.dispose()
     if (fakeCapture || fakeLlm || fakeEmbedding) globalThis.__gotchaTest = undefined
@@ -778,6 +796,37 @@ function createSession(): Promise<CaptureSession> {
   })
 }
 
+/**
+ * 信息链接线（D42）。三条口径：
+ * 1. **跟采集总开关同一处**：不另做开关，隐私红线只有一处（Alt+P / 托盘 / `--capture`）。
+ * 2. **原生源加载不出来就不采集**：如实记 warn，不建表、不假装在记（D41 降级纪律）。
+ * 3. **假采集路径不碰真实钩子**：E2E 用假采集，这里直接不接线（否则测试会装全局钩子）。
+ */
+function ensureChainRecording(): ChainRecordingHandle | null {
+  if (chainRecording) return chainRecording
+  if (fakeCapture) return null
+  let db: Db
+  try {
+    db = connections.ensureWritable().db
+  } catch (error) {
+    captureLog('warn', 'chain recording skipped: write db unavailable', { error: String(error) })
+    return null
+  }
+  const source = loadChainEventSource({
+    repoRoot: app.getAppPath(),
+    resourcesPath: app.isPackaged ? process.resourcesPath : undefined,
+    log: captureLog
+  })
+  chainRecording = createChainRecording({
+    db,
+    source,
+    screen: screenCapture ?? undefined,
+    userDataDir: app.getPath('userData'),
+    log: captureLog
+  })
+  return chainRecording
+}
+
 const controller = new CaptureController({
   createSession: fakeCapture
     ? async () => {
@@ -798,9 +847,13 @@ const controller = new CaptureController({
       if (status === 'running') {
         ensureMomentRuntime()?.start()
         ensureThemeOnlineRuntime()?.start()
+        // 信息链跟着采集开：新方向的事件源（D42）
+        ensureChainRecording()?.start()
       } else if (status === 'paused' || status === 'stopping') {
         momentRuntime?.stop()
         themeOnlineRuntime?.pause()
+        // 收口开着的段并等在途截图落库（不 await：状态回调是同步的，退出流程会再确认一次）
+        void chainRecording?.stop()
       }
     }
     if (!shuttingDown) pushGraphSnapshot()

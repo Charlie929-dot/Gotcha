@@ -37,6 +37,8 @@ export interface DesktopEventSource {
    * 它**分辨不出**是键盘还是鼠标——所以适配层还要结合「这段时间有没有收到鼠标事件」来判断（见 `adapter.ts`）。
    */
   lastInputTickMs(): number
+  /** 可选自述：这条源到底跑的哪条路（写进日志，便于确认没有静默降级） */
+  readonly sourceInfo?: SourceInfo
 }
 
 /** 传输实现的自述信息（写进日志与状态栏，便于确认当前跑的是哪条路） */

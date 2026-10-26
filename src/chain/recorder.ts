@@ -6,6 +6,11 @@
  *
  * 采图由调用方注入（`takeShot`）：测试里给假的，真实实现接采集管线。
  * 采图返回 `null` 表示这张没拍到——不写行、计入 `droppedShots`，绝不编造元数据。
+ *
+ * **采图可以是异步的**（v0.5：真实截图要等屏幕流抓一帧，几十到几百毫秒）：
+ * 返回 Promise 时先记账（`queuedShots`），按提交顺序串行落库，落定结果进
+ * `shotStats`；退出前必须 `drain()`，否则在途那张会丢。异步那张即使晚到，
+ * `ts` 用的仍是触发事件的时刻（证据时刻不因抓图慢而漂）。
  */
 import type { ChainEventKind, ChainContentSource, ChainShotSource } from './schema'
 import type { ChainAction } from './segmenter'
@@ -57,10 +62,20 @@ export interface ChainRecorderOptions {
   db: ChainDb
   /** 时钟（落 `created_at` 用） */
   now: () => number
-  /** 采图；不给就只记事件、不落截图 */
-  takeShot?: (request: ShotRequest) => ShotResult | null
+  /** 采图；不给就只记事件、不落截图。可以返回 Promise（真实抓帧就是异步的） */
+  takeShot?: ShotTaker
   /** 同一段内与上一条指纹相同的内容是否丢弃（默认丢，省字节） */
   dedupeContent?: boolean
+}
+
+export type ShotTaker = (request: ShotRequest) => ShotResult | null | Promise<ShotResult | null>
+
+/** 异步采图的落定账：在途 / 已落行 / 没拍到 / 写库失败 */
+export interface ShotStats {
+  pending: number
+  inserted: number
+  dropped: number
+  failed: number
 }
 
 export interface RecorderOutcome {
@@ -71,21 +86,40 @@ export interface RecorderOutcome {
   contents: number
   /** 采图回调返回 null（没拍到 / 没接采图）的张数 */
   droppedShots: number
+  /** 异步采图排进队列、还没落定的张数（结果看 `shotStats`） */
+  queuedShots: number
   /** 段收口前没有开着的段等异常情况，正常应为 0 */
   orphans: number
 }
 
 function emptyOutcome(): RecorderOutcome {
-  return { opened: 0, closed: 0, events: 0, shots: 0, contents: 0, droppedShots: 0, orphans: 0 }
+  return {
+    opened: 0,
+    closed: 0,
+    events: 0,
+    shots: 0,
+    contents: 0,
+    droppedShots: 0,
+    queuedShots: 0,
+    orphans: 0
+  }
+}
+
+function isThenable(value: unknown): value is Promise<ShotResult | null> {
+  return typeof (value as { then?: unknown } | null)?.then === 'function'
 }
 
 export class ChainRecorder {
   private readonly db: ChainDb
   private readonly now: () => number
-  private readonly takeShot?: (request: ShotRequest) => ShotResult | null
+  private readonly takeShot?: ShotTaker
   private readonly dedupeContent: boolean
   /** 当前开着的段 id（段机保证同一时刻最多一段） */
   private openSegmentId: number | null = null
+  /** 异步采图串行队列：保证落库顺序 = 事件顺序 */
+  private shotChain: Promise<void> = Promise.resolve()
+  private pendingShots = 0
+  private readonly settled: Omit<ShotStats, 'pending'> = { inserted: 0, dropped: 0, failed: 0 }
 
   constructor(options: ChainRecorderOptions) {
     this.db = options.db
@@ -134,6 +168,7 @@ export class ChainRecorder {
           })
           if (written === 'shot') outcome.shots += 1
           else if (written === 'dropped') outcome.droppedShots += 1
+          else if (written === 'queued') outcome.queuedShots += 1
           break
         }
         case 'segment-closed': {
@@ -162,10 +197,58 @@ export class ChainRecorder {
     return written
   }
 
-  private capture(request: ShotRequest): 'shot' | 'dropped' | 'none' {
+  /** 异步采图的落定账（在途 / 已落行 / 没拍到 / 写库失败） */
+  get shotStats(): ShotStats {
+    return { pending: this.pendingShots, ...this.settled }
+  }
+
+  /**
+   * 等所有在途采图落定。退出 / 暂停采集前必须调用，否则最后那张会随进程一起丢。
+   * 队列在等待期间可能又长出新任务，所以等到「队列引用不再变化」为止。
+   */
+  async drain(): Promise<void> {
+    let chain = this.shotChain
+    for (;;) {
+      await chain
+      if (chain === this.shotChain) return
+      chain = this.shotChain
+    }
+  }
+
+  private capture(request: ShotRequest): 'shot' | 'dropped' | 'none' | 'queued' {
     if (!this.takeShot) return 'none'
-    const result = this.takeShot(request)
+    let result: ShotResult | null | Promise<ShotResult | null>
+    try {
+      result = this.takeShot(request)
+    } catch {
+      // 同步抛错等同于「这张没拍到」：不写行、不编造元数据
+      return 'dropped'
+    }
+    if (isThenable(result)) {
+      this.pendingShots += 1
+      this.shotChain = this.shotChain.then(async () => {
+        try {
+          const resolved = await result
+          if (!resolved) {
+            this.settled.dropped += 1
+            return
+          }
+          this.insert(request, resolved)
+          this.settled.inserted += 1
+        } catch {
+          this.settled.failed += 1
+        } finally {
+          this.pendingShots -= 1
+        }
+      })
+      return 'queued'
+    }
     if (!result) return 'dropped'
+    this.insert(request, result)
+    return 'shot'
+  }
+
+  private insert(request: ShotRequest, result: ShotResult): void {
     insertShot(this.db, {
       segmentId: request.segmentId,
       eventId: request.eventId,
@@ -177,7 +260,6 @@ export class ChainRecorder {
       source: request.source
     })
     if (result.content) this.writeContent(request.segmentId, request.at, result.content)
-    return 'shot'
   }
 
   private writeContent(segmentId: number, capturedAt: number, payload: ContentPayload): boolean {

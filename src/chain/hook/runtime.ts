@@ -2,8 +2,8 @@
  * 信息链 · 运行时（把事件源、段机、记录器接成一条链）
  *
  * 这是「采集真的跑起来」的唯一入口：`start()` 建表 + 崩溃收尾 + 订阅原始事件 + 起心跳；
- * `stop()` 反向收口（把手势、开着的段都交代清楚）。**它不接 UI、不写设置**，
- * 接进 `src/main/` 是单独一步（等系统钩子定型）。
+ * `stop()` 反向收口（把手势、开着的段都交代清楚），随后 `await drain()` 等在途截图落库。
+ * **它不接 UI、不写设置**，接进 `src/main/` 的是 `main/chain-recording.ts`。
  *
  * 心跳必须存在：段机判空闲（60s 无输入）与打字停顿（3s）都靠 `tick` 推进，
  * 没有事件的时候没人喂，它就不会知道人已经走了。
@@ -12,15 +12,15 @@ import type { ChainDb } from '../store'
 import { ensureChainSchema } from '../schema'
 import { finalizeAbandonedSegments } from '../store'
 import { ChainSegmenter, type ChainAction, type ChainInput, type SegmenterOptions } from '../segmenter'
-import { ChainRecorder, type RecorderOutcome, type ShotResult, type ShotRequest } from '../recorder'
+import { ChainRecorder, type RecorderOutcome, type ShotTaker, type ShotStats } from '../recorder'
 import { DesktopEventAdapter, type AdapterOptions } from './adapter'
 import type { DesktopEventSource, RawDesktopEvent, SourceInfo } from './types'
 
 export interface ChainRuntimeOptions {
   db: ChainDb
   source: DesktopEventSource
-  /** 采图回调；不给就只记事件（不落截图） */
-  takeShot?: (request: ShotRequest) => ShotResult | null
+  /** 采图回调；不给就只记事件（不落截图）。可以返回 Promise（真实抓帧是异步的） */
+  takeShot?: ShotTaker
   now?: () => number
   /** 心跳间隔，默认 1s；与适配层的 tickIntervalMs 对齐 */
   pulseMs?: number
@@ -36,6 +36,7 @@ export interface ChainRuntimeStats {
   openSegmentId: number | null
   idle: boolean
   lastOutcome: RecorderOutcome | null
+  shotStats: ShotStats
 }
 
 export class ChainRuntime {
@@ -97,12 +98,21 @@ export class ChainRuntime {
     this.feedInputs(this.adapter.pulse(now))
   }
 
+  /**
+   * 等所有在途采图落定。`stop()` 是同步的（关源、收口段），
+   * 退出前要记得 `await drain()`，否则最后那张截图会丢。
+   */
+  drain(): Promise<void> {
+    return this.recorder.drain()
+  }
+
   get stats(): ChainRuntimeStats {
     return {
       started: this.running,
       openSegmentId: this.recorder.currentSegmentId,
       idle: this.segmenter.isIdle,
-      lastOutcome: this.lastOutcome
+      lastOutcome: this.lastOutcome,
+      shotStats: this.recorder.shotStats
     }
   }
 

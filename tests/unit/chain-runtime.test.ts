@@ -173,6 +173,39 @@ describe('一路跑下来的会话', () => {
   })
 })
 
+describe('异步截图（真实抓帧）', () => {
+  it('drain 等在途截图落库，事件本身立刻可见', async () => {
+    const source = new FakeSource()
+    const runtime = new ChainRuntime({
+      db,
+      source,
+      now: () => clock,
+      autoPulse: false,
+      takeShot: async (request) => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 2))
+        return { shot: { path: `/tmp/${request.at}.png`, width: 8, height: 6, bytes: 42 } }
+      }
+    })
+    runtime.start()
+    source.emit(foreground(0, '文章 A', 100))
+    clock = at(5)
+    source.emit(click(5))
+
+    // 抓帧在路上：事件已经落行，截图还没有
+    const openId = runtime.stats.openSegmentId
+    expect(openId).not.toBeNull()
+    expect(runtime.stats.shotStats).toEqual({ pending: 2, inserted: 0, dropped: 0, failed: 0 })
+    expect(getSegmentDetail(db, openId!)?.events.map((row) => row.kind)).toEqual(['enter', 'click_left'])
+
+    await runtime.drain()
+    expect(runtime.stats.shotStats).toEqual({ pending: 0, inserted: 2, dropped: 0, failed: 0 })
+    expect(getSegmentDetail(db, openId!)?.shots.map((row) => row.bytes)).toEqual([42, 42])
+
+    clock = at(10)
+    runtime.stop()
+  })
+})
+
 describe('传输自述', () => {
   it('默认标成假源，可显式覆盖', () => {
     const { runtime } = build()

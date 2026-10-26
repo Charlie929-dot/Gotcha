@@ -19,11 +19,18 @@ interface Rect {
 interface GrabRequest {
   crop: Rect
   target: { width: number; height: number }
+  /** 主图编码格式：默认 png（旧管线 / OCR）；证据图传 jpeg（采集即编码，q85） */
+  format?: 'png' | 'jpeg'
+  /** 第二张图：给 OCR 的 2× PNG（只有证据图这条会要，省得主进程重现编码） */
+  ocrTarget?: { width: number; height: number }
   diff: { width: number; height: number }
 }
 
 interface GrabResponse {
-  png: Uint8Array
+  /** 主图字节（按 `format` 编码） */
+  image: Uint8Array
+  /** 第二张：OCR 用的 2× PNG（请求里没给 `ocrTarget` 就没有） */
+  ocrPng?: Uint8Array
   diff: Uint8Array
   width: number
   height: number
@@ -118,7 +125,7 @@ async function grab(request: GrabRequest): Promise<GrabResponse> {
   if (!el || video?.videoWidth === 0 || !liveTrack(el)) {
     throw new Error('屏幕捕获流未就绪')
   }
-  const { crop, target, diff } = request
+  const { crop, target, diff, format = 'png', ocrTarget } = request
   if (!isFiniteRect(crop) || crop.width <= 0 || crop.height <= 0) {
     throw new RangeError('截取区域非法')
   }
@@ -134,14 +141,39 @@ async function grab(request: GrabRequest): Promise<GrabResponse> {
   ) {
     throw new RangeError('输出尺寸非法')
   }
+  if (
+    ocrTarget &&
+    (!Number.isInteger(ocrTarget.width) ||
+      !Number.isInteger(ocrTarget.height) ||
+      ocrTarget.width <= 0 ||
+      ocrTarget.height <= 0)
+  ) {
+    throw new RangeError('OCR 输出尺寸非法')
+  }
 
   const main = draw(el, crop, target.width, target.height)
-  const blob = await main.canvas.convertToBlob({ type: 'image/png' })
-  const png = new Uint8Array(await blob.arrayBuffer())
+  const blob = await main.canvas.convertToBlob(
+    format === 'jpeg' ? { type: 'image/jpeg', quality: 0.85 } : { type: 'image/png' }
+  )
+  const image = new Uint8Array(await blob.arrayBuffer())
   const small = draw(el, crop, diff.width, diff.height)
   const data = small.getImageData(0, 0, diff.width, diff.height).data
 
-  return { png, diff: new Uint8Array(data), width: target.width, height: target.height }
+  let ocrPng: Uint8Array | undefined
+  if (ocrTarget) {
+    // 证据图这条：同一帧再画一张 2× PNG 给 OCR，主进程只写文件、不做像素工作
+    const ocrCanvas = draw(el, crop, ocrTarget.width, ocrTarget.height)
+    const ocrBlob = await ocrCanvas.canvas.convertToBlob({ type: 'image/png' })
+    ocrPng = new Uint8Array(await ocrBlob.arrayBuffer())
+  }
+
+  return {
+    image,
+    ocrPng,
+    diff: new Uint8Array(data),
+    width: target.width,
+    height: target.height
+  }
 }
 
 window.__gotchaCapture = { start, grab, stop }

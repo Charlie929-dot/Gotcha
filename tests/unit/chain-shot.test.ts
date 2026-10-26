@@ -7,10 +7,11 @@ import type { ShotRequest } from '../../src/chain/recorder'
 import {
   chainShotFileName,
   createChainShotSource,
+  EVIDENCE_CAPTURE_OPTIONS,
   sameWindow,
+  SLOW_SHOT_MS,
+  type ChainShotCaptureOptions,
   type ChainShotCommitted,
-  type ChainShotEncodeInput,
-  type ChainShotEncoder,
   type ChainShotFs,
   type ChainShotWindow
 } from '../../src/main/chain-shot'
@@ -85,13 +86,19 @@ function build(overrides: {
   /** 前台窗口的依次返回值（模拟抓帧期间切窗口）：用完后一直返回最后一个 */
   windows?: Array<ChainShotWindow | null>
   blacklisted?: boolean
-  capture?: () => Promise<{ imagePath: string; width: number; height: number }>
+  capture?: () => Promise<{ imagePath: string; width: number; height: number; ocrPath?: string }>
   fs?: ChainShotFs
   committed?: ChainShotCommitted[]
   onShot?: (committed: ChainShotCommitted) => void
-  encode?: ChainShotEncoder
+  log?: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => void
+  now?: () => number
 } = {}) {
-  const captured: Array<{ bounds: unknown; tempDir: string; ts: number }> = []
+  const captured: Array<{
+    bounds: unknown
+    tempDir: string
+    ts: number
+    options?: ChainShotCaptureOptions
+  }> = []
   const sequence = overrides.windows ?? null
   let step = 0
   const source = createChainShotSource({
@@ -99,8 +106,8 @@ function build(overrides: {
     shotsDir: 'C:/userData/chain-shots',
     tempDir: 'C:/userData/tmp-chain',
     screen: {
-      capture: async (bounds, tempDir, ts) => {
-        captured.push({ bounds, tempDir, ts })
+      capture: async (bounds, tempDir, ts, options) => {
+        captured.push({ bounds, tempDir, ts, options })
         if (overrides.capture) return await overrides.capture()
         return { imagePath: `C:/userData/tmp-chain/frame-${ts}.png`, width: 1_000, height: 800 }
       }
@@ -114,7 +121,8 @@ function build(overrides: {
       return overrides.window === undefined ? WINDOW : overrides.window
     },
     isBlacklisted: () => overrides.blacklisted === true,
-    encode: overrides.encode,
+    log: overrides.log,
+    now: overrides.now,
     onShot: overrides.onShot ?? (overrides.committed ? (committed) => overrides.committed!.push(committed) : undefined),
     fs: overrides.fs ?? fakeFs()
   })
@@ -131,6 +139,8 @@ describe('事件触发现抓一帧', () => {
 
     expect(captured).toHaveLength(1)
     expect(captured[0]).toMatchObject({ bounds: WINDOW.bounds, tempDir: 'C:/userData/tmp-chain', ts: at(1) })
+    // 证据图走「不放大 + JPEG + 附带 OCR 副图」的口径，不复制 OCR 那条 2× 主图路径
+    expect(captured[0].options).toEqual(EVIDENCE_CAPTURE_OPTIONS)
     expect(result?.shot).toEqual({
       path: expectedPath,
       width: 1_000,
@@ -141,6 +151,41 @@ describe('事件触发现抓一帧', () => {
     expect(fs.moves).toEqual([[`C:/userData/tmp-chain/frame-${at(1)}.png`, expectedPath]])
     expect(expectedPath).toContain('2026-10-26')
     expect(expectedPath).toContain('s1-e7-')
+  })
+
+  it('单张从抓帧到落盘超过 300ms 记一条 warn（回看采集是否拖慢机器）', async () => {
+    const logs: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = []
+    let clock = 1_000
+    const { source } = build({
+      log: (level, msg, data) => logs.push({ level, msg, data }),
+      now: () => clock,
+      capture: async () => {
+        clock += SLOW_SHOT_MS + 50
+        return { imagePath: `C:/userData/tmp-chain/frame-${at(1)}.png`, width: 1_920, height: 1_080 }
+      }
+    })
+
+    expect((await source(request(1)))?.shot.width).toBe(1_920)
+    const slow = logs.filter((entry) => entry.msg === 'chain shot slow')
+    expect(slow).toHaveLength(1)
+    expect(slow[0].level).toBe('warn')
+    expect(slow[0].data).toMatchObject({ segmentId, eventId: 7, ms: SLOW_SHOT_MS + 50 })
+  })
+
+  it('正常速度不记慢日志（日志只在超阈值时出现，不刷屏）', async () => {
+    const logs: Array<{ level: string; msg: string }> = []
+    let clock = 5_000
+    const { source } = build({
+      log: (level, msg) => logs.push({ level, msg }),
+      now: () => clock,
+      capture: async () => {
+        clock += 40
+        return { imagePath: `C:/userData/tmp-chain/frame-${at(1)}.png`, width: 1_000, height: 800 }
+      }
+    })
+
+    await source(request(1))
+    expect(logs.filter((entry) => entry.msg === 'chain shot slow')).toHaveLength(0)
   })
 
   it('前台已经切走：不拍，返回 null（错证据比没证据更糟）', async () => {
@@ -273,47 +318,70 @@ describe('证据落定后的旁路（内容来源 D43）', () => {
   })
 })
 
-describe('采集即编码（D44）', () => {
-  it('给了编码器：落盘的是编码后的 JPEG，屏幕流的原 PNG 删掉', async () => {
-    const fs = fakeFs(4_321)
-    const pngPath = `C:/userData/tmp-chain/frame-${at(1)}.png`
-    const jpgPath = `C:/userData/tmp-chain/frame-${at(1)}.jpg`
-    const calls: ChainShotEncodeInput[] = []
-    const encode: ChainShotEncoder = (input) => {
-      calls.push(input)
-      return { imagePath: jpgPath, width: 900, height: 700 }
-    }
-
-    const result = await build({ fs, encode }).source(request(1))
-
-    expect(calls).toEqual([{ imagePath: pngPath, tempDir: 'C:/userData/tmp-chain', at: at(1) }])
-    const expectedPath = join('C:/userData/chain-shots', chainShotFileName(request(1), 'jpg'))
-    expect(result?.shot).toEqual({ path: expectedPath, width: 900, height: 700, bytes: 4_321 })
-    expect(fs.moves).toEqual([[jpgPath, expectedPath]])
-    expect(fs.removed).toEqual([pngPath])
+describe('证据图落盘口径（v0.11：渲染端直接出 JPEG）', () => {
+  it('口径是平铺字段（曾经写成嵌套 target，tsc 放行、真机继续按 2× 放大）', () => {
+    expect(EVIDENCE_CAPTURE_OPTIONS).toEqual({
+      upscale: 1,
+      maxWidth: 1_920,
+      format: 'jpeg',
+      withOcrImage: true
+    })
   })
 
-  it('编码失败：回退原 PNG，证据不丢', async () => {
-    const fs = fakeFs()
-    const pngPath = `C:/userData/tmp-chain/frame-${at(1)}.png`
-    const encode: ChainShotEncoder = () => {
-      throw new Error('解码失败')
-    }
+  it('屏幕流给的是 JPEG：落盘就是 .jpg，主进程不做解码 / 重编码', async () => {
+    const fs = fakeFs(4_321)
+    const jpgPath = `C:/userData/tmp-chain/frame-${at(1)}.jpg`
+    const result = await build({
+      fs,
+      capture: async () => ({ imagePath: jpgPath, width: 1_920, height: 1_021 })
+    }).source(request(1))
 
-    const result = await build({ fs, encode }).source(request(1))
-
-    const expectedPath = join('C:/userData/chain-shots', chainShotFileName(request(1), 'png'))
-    expect(result?.shot.path).toBe(expectedPath)
-    expect(fs.moves).toEqual([[pngPath, expectedPath]])
-    // 没编码成功就没有可删的临时帧
+    const expectedPath = join('C:/userData/chain-shots', chainShotFileName(request(1), 'jpg'))
+    expect(result?.shot).toEqual({ path: expectedPath, width: 1_920, height: 1_021, bytes: 4_321 })
+    expect(fs.moves).toEqual([[jpgPath, expectedPath]])
     expect(fs.removed).toEqual([])
   })
 
-  it('没给编码器：还是 PNG（单测 / 老行为不变）', async () => {
+  it('屏幕流给 PNG（降级路径）：落盘仍是 .png', async () => {
     const fs = fakeFs()
     const result = await build({ fs }).source(request(1))
     expect(result?.shot.path).toBe(join('C:/userData/chain-shots', chainShotFileName(request(1))))
     expect(result?.shot.path?.endsWith('.png')).toBe(true)
+  })
+
+  it('OCR 副图路径透传给内容车道（读完由车道删，不在抓帧里删）', async () => {
+    const committed: ChainShotCommitted[] = []
+    const ocrPath = `C:/userData/tmp-chain/ocr-${at(1)}.png`
+    const fs = fakeFs()
+    const result = await build({
+      fs,
+      committed,
+      capture: async () => ({
+        imagePath: `C:/userData/tmp-chain/frame-${at(1)}.jpg`,
+        width: 1_920,
+        height: 1_021,
+        ocrPath
+      })
+    }).source(request(1))
+
+    expect(committed[0].ocrPath).toBe(ocrPath)
+    expect(committed[0].framePath).toBe(result?.shot.path)
+    // 抓帧不删副图（内容车道还没读），只搬走证据图
+    expect(fs.removed).toEqual([])
+  })
+
+  it('丢掉那一帧：OCR 副图一起删，不留孤儿临时文件', async () => {
+    const fs = fakeFs()
+    const jpgPath = `C:/userData/tmp-chain/frame-${at(1)}.jpg`
+    const ocrPath = `C:/userData/tmp-chain/ocr-${at(1)}.png`
+    const { source } = build({
+      fs,
+      windows: [WINDOW, { ...WINDOW, hwnd: 12_345, pid: 999 }],
+      capture: async () => ({ imagePath: jpgPath, width: 1_920, height: 1_021, ocrPath })
+    })
+
+    expect(await source(request(1))).toBeNull()
+    expect(fs.removed).toEqual([jpgPath, ocrPath])
   })
 })
 

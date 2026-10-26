@@ -148,7 +148,7 @@ describe('一路跑下来的会话', () => {
     expect(segment.end_ts).toBe(at(60))
   })
 
-  it('打字：tick 前进且无鼠标 → 键盘活动 → 停顿 3s 补一张', () => {
+  it('打字：tick 前进且无鼠标 → 键盘活动 → 停顿 3s 补一条 typing 事件（不截图）', () => {
     const { source, runtime, run, shots } = build(true)
     runtime.start()
     source.emit(foreground(0))
@@ -168,8 +168,9 @@ describe('一路跑下来的会话', () => {
     const [segment] = querySegments(db)
     const detail = getSegmentDetail(db, segment.id)
     expect(detail?.events.map((row) => row.kind)).toEqual(['enter', 'typing'])
-    expect(detail?.shots.map((row) => row.source)).toEqual(['enter', 'typing'])
-    expect(shots.length).toBe(2)
+    // v0.11：打字自己停顿不截图——证据只在点击 / 滚轮 / 打字被打断时产生
+    expect(detail?.shots.map((row) => row.source)).toEqual(['enter'])
+    expect(shots.length).toBe(1)
   })
 })
 

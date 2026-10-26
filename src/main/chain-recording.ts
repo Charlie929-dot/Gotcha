@@ -28,7 +28,6 @@ import {
 } from './chain-content'
 import {
   createChainShotSource,
-  type ChainShotEncoder,
   type ChainShotFs,
   type ChainShotLog,
   type ChainShotScreen,
@@ -122,8 +121,6 @@ export interface ChainRecordingOptions {
   getWindow?: () => Promise<ChainShotWindow | null>
   /** 文件操作注入点（单测用假的，生产用 fs） */
   fs?: ChainShotFs
-  /** 采集即编码（D44：生产注入 nativeImage；不给就落原 PNG） */
-  encode?: ChainShotEncoder
   /** 内容来源（D43）；不给就只记事件与截图，不读文本 */
   content?: ChainContentWiring
   /**
@@ -232,8 +229,6 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
           screen: options.screen,
           getWindow: options.getWindow ?? readForegroundWindow,
           isBlacklisted: options.isBlacklisted ?? ((executable) => defaultBlacklist(executable)),
-          // 采集即编码（D44）：PNG → JPEG q85，失败回退原 PNG
-          encode: options.encode,
           // 旁路：证据落定 → 内容车道（节流 / 串行都在车道里，不阻塞抓帧）
           onShot: (committed) => content?.onShot(committed),
           log,

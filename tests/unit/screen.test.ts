@@ -101,6 +101,31 @@ describe('computeCaptureGeometry', () => {
     expect(geometry.crop).toEqual({ x: 100, y: 80, width: 1375, height: 1000 })
   })
 
+  it('证据图口径（upscale 1 + 封顶 1920）：裁剪区不变，输出不放大', () => {
+    const geometry = computeCaptureGeometry(
+      { x: 100, y: 80, width: 1375, height: 1000 },
+      primary,
+      { width: 1920, height: 1080 },
+      undefined,
+      { upscale: 1, maxWidth: 1920 }
+    )
+    // 裁剪区与 OCR 口径一致；只有输出尺寸不同（1359 宽 < 1920，所以保持原生 1359×992）
+    expect(geometry.crop).toEqual({ x: 108, y: 80, width: 1359, height: 992 })
+    expect(geometry.target).toEqual({ width: 1359, height: 992 })
+  })
+
+  it('证据图口径下超宽窗口缩到 1920（不放大）', () => {
+    const geometry = computeCaptureGeometry(
+      { x: -9, y: -9, width: 1938, height: 1038 },
+      primary,
+      { width: 1920, height: 1080 },
+      undefined,
+      { upscale: 1, maxWidth: 1920 }
+    )
+    expect(geometry.crop).toEqual({ x: 0, y: 0, width: 1920, height: 1021 })
+    expect(geometry.target).toEqual({ width: 1920, height: 1021 })
+  })
+
   it('窗口几乎整块在屏幕外时抛错（不回退整帧，避免把整屏送进 OCR）', () => {
     expect(() =>
       computeCaptureGeometry({ x: 1916, y: 1076, width: 10, height: 10 }, primary, {

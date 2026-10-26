@@ -6,10 +6,15 @@
  * - 空闲 = `idleMs`（默认 60s）没有任何输入 → 停采，只留空闲标记；
  * - 走开又回来（同一窗口、`mergeIdleCapMs` 内）→ 接续成同一段，空闲不计入占用时长；
  * - 标题抖动：`titleFlapMs`（默认 3s）内变回原值就不切段；
- * - 采集只由事件驱动：入场 / 点击 / 滚轮 / 移动后暂停；
- * - 键盘：任何输入都重置「打字停顿」计时，停顿满 `typingSettleMs`（默认 3s）补采一张。
+ * - **采集（截图）只由三类时刻驱动**（契约 v0.11，2026-10-27 拍板）：
+ *   ① 左 / 右键**从 ≥`captureCooldownMs` 的静默里**发起 → 立刻拍；
+ *   ② 打字被点击 / 滚轮**打断** → 立刻拍（保住刚敲进去的内容）；
+ *   ③ 滚轮手势停下 `wheelCaptureDelayMs`（2s）→ 拍滚动结果；
+ *   鼠标移动永不拍；打字自己停顿不拍。
+ * - 键盘：任何输入都重置「打字停顿」计时，停顿满 `typingSettleMs`（默认 3s）补一条 typing **事件**
+ *   （只是锚点，不截图）。
  *
- * 动作契约：**事件一律上报**（它是段内的时间锚点，不是可选项），冷却只决定
+ * 动作契约：**事件一律上报**（它是段内的时间锚点，不是可选项），触发规则只决定
  * `capture` 为不为真（要不要顺手截一张）。这样「切过来 1 秒内点了一下」不会连锚点都丢。
  *
  * `activity` 输入表示「系统有输入但拿不到是什么」（键盘），来自 `GetLastInputInfo`——
@@ -24,10 +29,12 @@ export interface SegmenterOptions {
   mergeIdleCapMs: number
   /** 标题抖动抑制窗口 */
   titleFlapMs: number
-  /** 打字停顿多久补采一张 */
+  /** 打字停顿多久补一条 typing 事件（不截图） */
   typingSettleMs: number
-  /** 两次截图的最小间隔 */
+  /** 两张截图的最小间隔；也是「点击要从多久的静默里发起才算一次采集」 */
   captureCooldownMs: number
+  /** 滚轮手势停下多久拍一张（滚动结果） */
+  wheelCaptureDelayMs: number
   /** 指针停下多久算「移动后暂停」 */
   movePauseMs: number
   /** 停下前至少移动多少像素 */
@@ -40,6 +47,7 @@ export const DEFAULT_SEGMENTER_OPTIONS: SegmenterOptions = {
   titleFlapMs: 3_000,
   typingSettleMs: 3_000,
   captureCooldownMs: 2_000,
+  wheelCaptureDelayMs: 2_000,
   movePauseMs: 400,
   movePauseDistPx: 40
 }
@@ -120,6 +128,10 @@ export class ChainSegmenter {
   private idleFrom: number | null = null
   private idleClosed: { from: number; to: number } | null = null
   private typingDueAt: number | null = null
+  /** 是否处在「打字中」：最近一次输入是键盘、还没被鼠标打断 */
+  private typingActive = false
+  /** 滚轮手势：停下 `wheelCaptureDelayMs` 后才作为「滚动结果」上报并截图 */
+  private pendingWheel: { fromTs: number; lastTs: number; delta: number; x: number; y: number } | null = null
   private pendingTitle: { from: string; to: string; at: number } | null = null
   private lastMove: { ts: number; x: number; y: number; moved: number } | null = null
 
@@ -140,34 +152,69 @@ export class ChainSegmenter {
   feed(input: ChainInput): ChainAction[] {
     if (input.kind === 'tick') return this.advance(input.ts)
 
+    const previousInputTs = this.lastInputTs
     const actions = this.advance(input.ts)
     this.resumeFromIdle(input.ts, actions)
 
     this.lastInputTs = input.ts
     // 只有「键盘活动」才启动打字停顿计时：焦点切换、点击、滚轮各自有采集路径，
-    // 把它们也算进来会凭空多出一张「停顿补采」
+    // 把它们也算进来会凭空多出一条「停顿」事件
     if (input.kind === 'activity') this.typingDueAt = input.ts + this.options.typingSettleMs
     if (this.open) this.open.lastInputTs = input.ts
 
     switch (input.kind) {
       case 'focus':
+        actions.push(...this.flushWheel(false))
+        this.typingActive = false
         actions.push(...this.onFocus(input))
         break
-      case 'click':
-      case 'wheel': {
+      case 'click': {
+        actions.push(...this.flushWheel(false))
         actions.push(...this.settleMovePause(input.ts))
-        const event =
-          input.kind === 'click'
-            ? this.recordEvent(input.ts, clickKind(input.button), Math.round(input.x), Math.round(input.y))
-            : this.recordEvent(input.ts, 'wheel', Math.round(input.x), Math.round(input.y), input.delta)
+        // 采集口径（契约 v0.11）：打断打字 → 立刻拍（保住刚敲进去的内容）；
+        // 否则这一下点击必须从 ≥ cooldown 的静默里发起——连续点击不产生图。
+        const capture =
+          this.canCapture(input.ts) &&
+          (this.typingActive || input.ts - previousInputTs >= this.options.captureCooldownMs)
+        this.typingActive = false
+        const event = this.recordEvent(
+          input.ts,
+          clickKind(input.button),
+          Math.round(input.x),
+          Math.round(input.y),
+          null,
+          capture
+        )
         if (event) actions.push(event)
+        break
+      }
+      case 'wheel': {
+        // 滚轮不立刻拍：等手势停下 wheelCaptureDelayMs，拍的是「滚动结果」
+        const wheel = this.pendingWheel
+        this.pendingWheel = wheel
+          ? {
+              fromTs: wheel.fromTs,
+              lastTs: input.ts,
+              delta: wheel.delta + input.delta,
+              x: Math.round(input.x),
+              y: Math.round(input.y)
+            }
+          : {
+              fromTs: input.ts,
+              lastTs: input.ts,
+              delta: input.delta,
+              x: Math.round(input.x),
+              y: Math.round(input.y)
+            }
+        this.typingActive = false
         break
       }
       case 'move':
         this.trackMove(input)
         break
       case 'activity':
-        // 键盘：只重置计时，等停顿满 typingSettleMs 再拍一张
+        // 键盘：只重置计时；打字本身不截图，等被鼠标打断或停顿（只补事件）
+        this.typingActive = true
         break
     }
     return actions
@@ -176,6 +223,7 @@ export class ChainSegmenter {
   /** 停止采集：把开着的段收口 */
   flush(now: number): ChainAction[] {
     const actions = this.advance(now)
+    actions.push(...this.flushWheel(false))
     if (this.pendingTitle) actions.push(...this.commitTitleSplit())
     if (this.open) {
       const endTs = this.idleFrom ?? now
@@ -196,13 +244,15 @@ export class ChainSegmenter {
     }
 
     if (this.typingDueAt !== null && now >= this.typingDueAt) {
-      // 停顿点若正好撞上截图冷却，就等到冷却结束再拍——「停顿满 3s 一定有一张」比守时更重要
-      const due = Math.max(this.typingDueAt, this.lastCaptureTs + this.options.captureCooldownMs)
-      if (now >= due) {
-        const event = this.recordEvent(due, 'typing')
-        if (event) actions.push(event)
-        this.typingDueAt = null
-      }
+      // typing 只是锚点事件（「这段打过字」），**不截图**：截图只由点击 / 滚轮 / 打断触发
+      const event = this.recordEvent(this.typingDueAt, 'typing')
+      if (event) actions.push(event)
+      this.typingDueAt = null
+    }
+
+    // 滚轮手势停下 wheelCaptureDelayMs：这时才上报 wheel 事件并拍「滚动结果」
+    if (this.pendingWheel && now - this.pendingWheel.lastTs >= this.options.wheelCaptureDelayMs) {
+      actions.push(...this.flushWheel(this.canCapture(now), now))
     }
 
     actions.push(...this.settleMovePause(now))
@@ -242,8 +292,33 @@ export class ChainSegmenter {
     if (now - move.ts < this.options.movePauseMs) return []
     this.lastMove = null
     if (move.moved < this.options.movePauseDistPx) return []
+    // 移动后暂停只是锚点事件：**鼠标移动永不截图**（契约 v0.11）
     const event = this.recordEvent(move.ts + this.options.movePauseMs, 'move_pause', Math.round(move.x), Math.round(move.y))
     return event ? [event] : []
+  }
+
+  /** 把挂起的滚轮手势交出去；`capture` 由调用方按「滚动结果」口径决定 */
+  private flushWheel(capture: boolean, captureAt?: number): ChainAction[] {
+    const wheel = this.pendingWheel
+    if (!wheel) return []
+    this.pendingWheel = null
+    if (!this.open) return []
+    if (capture) this.lastCaptureTs = captureAt ?? wheel.lastTs
+    return [
+      {
+        type: 'event',
+        at: wheel.lastTs,
+        kind: 'wheel',
+        x: wheel.x,
+        y: wheel.y,
+        delta: wheel.delta,
+        capture
+      }
+    ]
+  }
+
+  private canCapture(at: number): boolean {
+    return at - this.lastCaptureTs >= this.options.captureCooldownMs
   }
 
   private trackMove(input: Extract<ChainInput, { kind: 'move' }>): void {
@@ -318,7 +393,8 @@ export class ChainSegmenter {
   }
 
   private pushEnter(ts: number, actions: ChainAction[]): void {
-    const event = this.recordEvent(ts, 'enter')
+    // 入场帧：每段一张，但仍守最小间隔（瞬时段连发时不至于一口气拍一串）
+    const event = this.recordEvent(ts, 'enter', null, null, null, this.canCapture(ts))
     if (event) actions.push(event)
   }
 
@@ -377,6 +453,8 @@ export class ChainSegmenter {
     this.open = null
     this.lastMove = null
     this.typingDueAt = null
+    this.typingActive = false
+    this.pendingWheel = null
     return { type: 'segment-closed', segment: draft, reason }
   }
 
@@ -411,10 +489,10 @@ export class ChainSegmenter {
     kind: ChainEventKind,
     x: number | null = null,
     y: number | null = null,
-    delta: number | null = null
+    delta: number | null = null,
+    capture = false
   ): ChainAction | null {
     if (!this.open) return null
-    const capture = at - this.lastCaptureTs >= this.options.captureCooldownMs
     if (capture) this.lastCaptureTs = at
     return { type: 'event', at, kind, x, y, delta, capture }
   }

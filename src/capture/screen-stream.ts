@@ -15,6 +15,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isCaptureFrameRequest } from './display-media'
 import { dHash, rgbaToGray } from './frame-diff'
+import { captureTargetSize, type CaptureTargetOptions } from './ocr-scaling'
 import {
   computeCaptureGeometry,
   DIFF_HEIGHT,
@@ -39,10 +40,19 @@ interface StreamInfo {
 }
 
 interface GrabResult {
-  png: Uint8Array
+  image: Uint8Array
+  ocrPng?: Uint8Array
   diff: Uint8Array
   width: number
   height: number
+}
+
+/** 一组抓帧参数：尺寸口径 + 编码格式 + 是否另出一张 OCR 用 PNG（信息链证据图用） */
+export interface CaptureOptions extends CaptureTargetOptions {
+  /** 主图格式，默认 png */
+  format?: 'png' | 'jpeg'
+  /** 同时出一张 2× PNG 给 OCR（证据图这条链路；旧管线不需要） */
+  withOcrImage?: boolean
 }
 
 export interface ScreenCaptureOptions {
@@ -116,27 +126,48 @@ export class ScreenCapture {
     await this.ensureStream(toDisplayInfo(screen.getPrimaryDisplay()))
   }
 
-  /** 抓当前前台窗口区域；失败抛错由管线计 capture_errors */
-  async capture(bounds: WindowBounds, tempDir: string, ts: number): Promise<CapturedFrame> {
+  /**
+   * 抓当前前台窗口区域；失败抛错由管线计 capture_errors。
+   *
+   * `options` 决定三件事（默认全走旧口径，旧管线行为不变）：
+   * - 尺寸：不传 = OCR 的 2× / 封顶 3840；证据图传 `{ upscale: 1, maxWidth: 1920 }`；
+   * - 格式：默认 PNG；证据图传 `format: 'jpeg'`——采集即编码，主进程只写字节、不解码不重编码；
+   * - `withOcrImage`：同一帧再出一张 2× PNG 给 OCR（UIA 文本不足时兜底用，卡内删除）。
+   */
+  async capture(
+    bounds: WindowBounds,
+    tempDir: string,
+    ts: number,
+    options: CaptureOptions = {}
+  ): Promise<CapturedFrame> {
     const display = this.displayFor(bounds)
+    const target: CaptureTargetOptions = { upscale: options.upscale, maxWidth: options.maxWidth }
     let info = await this.ensureStream(display)
-    let geometry = computeCaptureGeometry(bounds, display, info)
+    let geometry = computeCaptureGeometry(bounds, display, info, undefined, target)
     let result: GrabResult
     try {
-      result = await this.grab(geometry)
+      result = await this.grab(geometry, options)
     } catch {
       // 流可能已结束（锁屏 / 显示切换）：丢弃流状态后重建一次
       this.stream = null
       info = await this.ensureStream(display)
-      geometry = computeCaptureGeometry(bounds, display, info)
-      result = await this.grab(geometry)
+      geometry = computeCaptureGeometry(bounds, display, info, undefined, target)
+      result = await this.grab(geometry, options)
     }
 
-    const imagePath = join(tempDir, `frame-${ts}.png`)
-    writeFileSync(imagePath, Buffer.from(result.png))
+    const ext = options.format === 'jpeg' ? 'jpg' : 'png'
+    const imagePath = join(tempDir, `frame-${ts}.${ext}`)
+    writeFileSync(imagePath, Buffer.from(result.image))
+
+    let ocrPath: string | undefined
+    if (result.ocrPng) {
+      ocrPath = join(tempDir, `ocr-${ts}.png`)
+      writeFileSync(ocrPath, Buffer.from(result.ocrPng))
+    }
+
     const gray = rgbaToGray(new Uint8Array(result.diff), DIFF_WIDTH, DIFF_HEIGHT)
     const diffHash = dHash(gray, DIFF_WIDTH, DIFF_HEIGHT)
-    return { imagePath, width: result.width, height: result.height, diffHash }
+    return { imagePath, width: result.width, height: result.height, diffHash, ocrPath }
   }
 
   dispose(): void {
@@ -249,10 +280,16 @@ export class ScreenCapture {
     }
   }
 
-  private async grab(geometry: CaptureGeometry): Promise<GrabResult> {
+  private async grab(geometry: CaptureGeometry, options: CaptureOptions = {}): Promise<GrabResult> {
+    // OCR 那张按旧口径（2×）单独算：证据图本身不放大，OCR 仍要 2× 的字号
+    const ocrTarget = options.withOcrImage
+      ? captureTargetSize(geometry.crop.width, geometry.crop.height)
+      : undefined
     const payload = JSON.stringify({
       crop: geometry.crop,
       target: geometry.target,
+      format: options.format ?? 'png',
+      ocrTarget,
       diff: { width: DIFF_WIDTH, height: DIFF_HEIGHT }
     })
     return await this.callRenderer<GrabResult>(

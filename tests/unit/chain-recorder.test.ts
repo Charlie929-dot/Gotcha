@@ -136,7 +136,7 @@ describe('假事件源跑通整条链', () => {
     expect(requests[1]).toMatchObject({ source: 'event', kind: 'click_left', x: 100, y: 200 })
   })
 
-  it('打字会话：连续输入只在停顿后拍一张，且带 typing 事件', () => {
+  it('打字会话：连续输入只补一条 typing 事件，不截图（v0.11：打字只在被打断时拍）', () => {
     const requests: ShotRequest[] = []
     const { feed, flush } = wire(fakeShot(requests))
     const typing = Array.from({ length: 20 }, (_, index) => activity(1 + index * 0.5))
@@ -146,9 +146,10 @@ describe('假事件源跑通整条链', () => {
     const [segment] = querySegments(db)
     const detail = getSegmentDetail(db, segment.id)
     expect(detail?.events.map((row) => row.kind)).toEqual(['enter', 'typing'])
-    expect(detail?.shots.map((row) => row.source)).toEqual(['enter', 'typing'])
-    expect(requests.map((request) => request.kind)).toEqual(['enter', 'typing'])
-    // 最后一次输入在 10.5s，停顿满 3s 才拍
+    // 打字自己停顿不产生证据图：只有入场帧
+    expect(detail?.shots.map((row) => row.source)).toEqual(['enter'])
+    expect(requests.map((request) => request.kind)).toEqual(['enter'])
+    // 最后一次输入在 10.5s，停顿满 3s 补事件
     expect(detail?.events[1].ts).toBe(at(13.5))
   })
 

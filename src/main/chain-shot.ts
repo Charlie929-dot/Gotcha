@@ -14,6 +14,9 @@
  *    `chain-shots/`；留在 tmp 会被启动清理当垃圾删掉（F06）。丢掉的那帧顺手删掉。
  * 4. **不编造**：抓不到 / 校验不过就 `null`，由记录器计入 `droppedShots`，不写半张截图行。
  *
+ * 抓帧尺寸走 `EVIDENCE_CAPTURE_TARGET`（不放大、封顶 1920）：证据图不喂 OCR，
+ * 复制 OCR 那条 2× 放大路径会让「抓帧 → 落盘」成本翻 4 倍以上（2026-10-27 真机卡顿主因之一）。
+ *
  * 抓帧是异步的（几十到几百毫秒），并且**这里自己串行**：同一时刻只允许一次抓帧，
  * 免得两个事件同时向屏幕流要画面、也免得 temp 文件名撞车。调用方（记录器）负责
  * 按事件顺序把结果落库。
@@ -21,6 +24,9 @@
 import { mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { WindowBounds } from '../capture/window-meta'
+import type { CaptureOptions } from '../capture/screen-stream'
+import { EVIDENCE_MAX_WIDTH } from '../capture/ocr-scaling'
+import type { CaptureTargetOptions } from '../capture/ocr-scaling'
 import type { ShotRequest, ShotResult, ShotTaker } from '../chain/recorder'
 import { dayKeyOf, type ChainDb } from '../chain/store'
 
@@ -39,11 +45,58 @@ export interface ChainShotFrame {
   imagePath: string
   width: number
   height: number
+  /** 另出的 OCR 用 2× PNG（临时目录；内容车道读它，读完删） */
+  ocrPath?: string
 }
 
 export interface ChainShotScreen {
-  capture(bounds: WindowBounds, tempDir: string, ts: number): Promise<ChainShotFrame>
+  /**
+   * 抓一帧。第四个参数是**抓帧口径**：证据图传
+   * `{ upscale: 1, maxWidth: 1920, format: 'jpeg', withOcrImage: true }`
+   * ——不复制 OCR 那条 2× 主图路径，同时另出一张 2× PNG 给 OCR 兜底。
+   *
+   * 字段必须与 `ScreenCapture.capture()` 的 `CaptureOptions` **同形**（平铺，不是嵌套 `target`）：
+   * 两边方法参数是双变的，嵌套写漏了 TS 也不会报错，只会在真机上继续按 2× 放大。
+   */
+  capture(
+    bounds: WindowBounds,
+    tempDir: string,
+    ts: number,
+    options?: ChainShotCaptureOptions
+  ): Promise<ChainShotFrame>
 }
+
+/**
+ * 抓帧口径直接复用屏幕流的 `CaptureOptions`（**类型别名，不另写一份**）。
+ *
+ * 教训：这里曾经自己写了一份 `{ target: ... }` 嵌套形状，而 `ScreenCapture.capture()` 收的是
+ * 平铺的 `{ upscale, maxWidth }`；两边方法参数是双变的，tsc 不报错，真机就继续按 2× 抓了一整轮。
+ * 只留一个来源，谁也不许再手抄。
+ */
+export type ChainShotCaptureOptions = CaptureOptions
+
+/**
+ * 证据截图的抓帧口径：主图**不放大**、超宽缩到 1920（D44 的 warm 档宽度），**渲染端直接出 JPEG**；
+ * 另外带一张 2× PNG 专给内容车道的 OCR 兜底（UIA 文本不足时用）。
+ *
+ * 为什么要拆成两份：证据图给人和 AI 看，1920 足够；OCR 靠字号，2× 才认得出字（D43 / D44 实测）。
+ * 以前是「2× PNG 落盘 → 主进程解码 → 缩到 1920 → 重编码 JPEG」，一张 500ms 全压在主线程上
+ * （真机 2026-10-27：鼠标按住拖动时一顿一顿）；现在渲染进程一次画两张，主进程只写字节。
+ */
+export const EVIDENCE_CAPTURE_TARGET: CaptureTargetOptions = {
+  upscale: 1,
+  maxWidth: EVIDENCE_MAX_WIDTH
+}
+
+/** 证据图的抓帧口径（尺寸 + 格式 + OCR 副图），一次说全 */
+export const EVIDENCE_CAPTURE_OPTIONS: ChainShotCaptureOptions = {
+  ...EVIDENCE_CAPTURE_TARGET,
+  format: 'jpeg',
+  withOcrImage: true
+}
+
+/** 单张证据从抓帧到落盘超过这个时长就记一条 warn（体感边界，不是硬指标） */
+export const SLOW_SHOT_MS = 300
 
 /** 文件操作的注入点（单测用假的，生产用 fs） */
 export interface ChainShotFs {
@@ -69,34 +122,11 @@ export interface ChainShotCommitted {
   /** 段身份对应窗口的句柄（UIA 按句柄读这扇窗） */
   hwnd: number
   executable: string
-  /** 证据图落定的路径（OCR 兜底读它） */
+  /** 证据图落定的路径（长期保存的那份） */
   framePath: string
+  /** 给 OCR 的 2× PNG（临时目录；内容车道读完就删，缺它就是没有） */
+  ocrPath?: string
 }
-
-/**
- * 采集即编码（D44）：屏幕流抓到的是 PNG（离屏窗口裁好、放大 2× 后写的），
- * 这里交给宿主编码成 JPEG 再落盘。
- *
- * 为什么在采集时就编码而不是等 7 天后重编码：证据图是 486 KB–6.4 MB 一张，
- * 触发密度实测 100–426 次/小时，不压的话一天就几百 MB。`decode` 失败时抛错，
- * 调用方会**回退到原 PNG**（证据比省字节重要）。
- */
-export interface ChainShotEncodeInput {
-  /** 屏幕流写下的临时帧（PNG） */
-  imagePath: string
-  /** 临时目录（编码结果写这里，随后被 rename 进证据目录） */
-  tempDir: string
-  /** 触发时刻 */
-  at: number
-}
-
-export interface ChainShotEncodedFrame {
-  imagePath: string
-  width: number
-  height: number
-}
-
-export type ChainShotEncoder = (input: ChainShotEncodeInput) => ChainShotEncodedFrame
 
 export interface ChainShotOptions {
   db: ChainDb
@@ -107,8 +137,6 @@ export interface ChainShotOptions {
   screen: ChainShotScreen
   getWindow: () => Promise<ChainShotWindow | null>
   isBlacklisted?: (executable: string) => boolean
-  /** 采集即编码（生产注入 `nativeImage`；不给就落原 PNG） */
-  encode?: ChainShotEncoder
   /**
    * 证据落定后的旁路回调（内容来源用）。**不 await**：读取慢（UIA 0.8–4s）不能拖慢抓帧队列；
    * 抛错也只记日志，不影响这张截图是否算数。
@@ -116,6 +144,8 @@ export interface ChainShotOptions {
   onShot?: (committed: ChainShotCommitted) => void
   log?: ChainShotLog
   fs?: ChainShotFs
+  /** 时钟（单测注入；默认 `Date.now`），只用于慢抓帧告警 */
+  now?: () => number
 }
 
 /** 段的窗口身份（从库里读，不用段机内存副本——落库的那行才是证据） */
@@ -149,6 +179,7 @@ export function chainShotFileName(request: ShotRequest, ext: 'png' | 'jpg' = 'pn
 
 export function createChainShotSource(options: ChainShotOptions): ShotTaker {
   const fs = options.fs ?? { mkdirSync, renameSync, statSync, rmSync }
+  const now = options.now ?? (() => Date.now())
   let dirsReady = false
   /** 抓帧串行队列：屏幕流同时只服务一次截图 */
   let queue: Promise<unknown> = Promise.resolve()
@@ -194,7 +225,13 @@ export function createChainShotSource(options: ChainShotOptions): ShotTaker {
 
     ensureDirs()
     try {
-      const frame = await options.screen.capture(window.bounds, options.tempDir, request.at)
+      const startedAt = now()
+      const frame = await options.screen.capture(
+        window.bounds,
+        options.tempDir,
+        request.at,
+        EVIDENCE_CAPTURE_OPTIONS
+      )
 
       // 抓帧要 100–300ms：拍的是「这扇窗所在的屏幕区域」，这期间前台换了就等于拍到了别人的画面。
       // 真机实测踩到过一次（段是 DSH，存下来的却是 Firefox），所以抓完必须再确认一次。
@@ -207,6 +244,7 @@ export function createChainShotSource(options: ChainShotOptions): ShotTaker {
       if (!after || !sameWindow(segment, after)) {
         try {
           fs.rmSync(frame.imagePath, { force: true })
+          if (frame.ocrPath) fs.rmSync(frame.ocrPath, { force: true })
         } catch {
           // 删不掉就留着，启动清理会扫 tmp-chain
         }
@@ -218,44 +256,16 @@ export function createChainShotSource(options: ChainShotOptions): ShotTaker {
         return null
       }
 
-      // 采集即编码（D44）：放在身份复核**之后**——编码要 ~100ms，先复核再编码，
-      // 不至于把「复核 → 落盘」的窗口又拉长。编码失败就落原 PNG，不丢证据。
-      let finalFrame = frame
-      let ext: 'png' | 'jpg' = 'png'
-      if (options.encode) {
-        try {
-          const encoded = options.encode({
-            imagePath: frame.imagePath,
-            tempDir: options.tempDir,
-            at: request.at
-          })
-          if (encoded.imagePath !== frame.imagePath) {
-            finalFrame = encoded
-            ext = 'jpg'
-          }
-        } catch (error) {
-          options.log?.('warn', 'chain shot encode failed: keep original PNG', {
-            segmentId: request.segmentId,
-            error: String(error)
-          })
-        }
-      }
-
+      // 证据图已经在渲染端编码好（JPEG q85 + 可选 2× PNG 给 OCR），主进程只做 I/O：
+      // 以前这里还要 nativeImage 解码 + 缩图 + 重编码，一张 300–500ms 全压在主线程上。
+      const ext: 'png' | 'jpg' = frame.imagePath.toLowerCase().endsWith('.jpg') ? 'jpg' : 'png'
       const target = join(options.shotsDir, chainShotFileName(request, ext))
       fs.mkdirSync(join(options.shotsDir, dayKeyOf(request.at)), { recursive: true })
-      fs.renameSync(finalFrame.imagePath, target)
-      // 编码成功时屏幕流的临时 PNG 还留着，删掉免得 tmp-chain 越积越多
-      if (finalFrame.imagePath !== frame.imagePath) {
-        try {
-          fs.rmSync(frame.imagePath, { force: true })
-        } catch {
-          // 删不掉就留着，启动清理会扫 tmp-chain
-        }
-      }
+      fs.renameSync(frame.imagePath, target)
       const shot = {
         path: target,
-        width: finalFrame.width,
-        height: finalFrame.height,
+        width: frame.width,
+        height: frame.height,
         bytes: fs.statSync(target).size
       }
       // 旁路：内容来源（D43）。放在证据落定之后、不 await——读取慢不能拖慢抓帧队列；
@@ -268,11 +278,24 @@ export function createChainShotSource(options: ChainShotOptions): ShotTaker {
             at: request.at,
             hwnd: window.hwnd,
             executable: window.executable,
-            framePath: target
+            framePath: target,
+            ocrPath: frame.ocrPath
           })
         } catch (error) {
           options.log?.('warn', 'chain shot: content hook failed', { error: String(error) })
         }
+      }
+      // 慢抓帧留痕：这条日志是「采集是否拖慢机器」的唯一观测点（不是硬指标，只用来回看）
+      const elapsed = now() - startedAt
+      if (elapsed >= SLOW_SHOT_MS) {
+        options.log?.('warn', 'chain shot slow', {
+          segmentId: request.segmentId,
+          eventId: request.eventId,
+          ms: elapsed,
+          width: shot.width,
+          height: shot.height,
+          bytes: shot.bytes
+        })
       }
       return {
         shot,

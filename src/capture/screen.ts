@@ -6,7 +6,7 @@
  * 裁剪区域，并按 OCR 策略算 2× 目标尺寸。
  */
 
-import { ocrTargetSize } from './ocr-scaling'
+import { captureTargetSize, type CaptureTargetOptions } from './ocr-scaling'
 
 /** dHash 输入尺寸（90x80，便于整数降到 9x8） */
 export const DIFF_WIDTH = 90
@@ -35,12 +35,14 @@ export interface Rect {
 
 export interface CapturedFrame {
   imagePath: string
-  /** OCR 图宽（放大 2×，上限 MAX_OCR_WIDTH） */
+  /** 主图宽（旧管线 = OCR 的 2× / 上限 3840；证据图 = 原生像素 / 上限 1920） */
   width: number
-  /** OCR 图高 */
+  /** 主图高 */
   height: number
   /** 90x80 灰度图的 dHash 指纹；尺寸必须用 DIFF_WIDTH/DIFF_HEIGHT 算 */
   diffHash: bigint
+  /** 另出的 OCR 用 2× PNG（只有证据图这条带；旧管线没有） */
+  ocrPath?: string
 }
 
 /** 与 Electron Display 同形，便于单测注入 */
@@ -128,12 +130,16 @@ function intersectWithVideo(rect: Rect, videoWidth: number, videoHeight: number)
  * 裁剪区只覆盖「可见窗口」：先按 `WINDOW_FRAME_INSET` 去掉 DWM 不可见边框，
  * 再与视频求交。窗口几乎整块在屏幕外（或尺寸过小）时**抛错跳过本帧**，
  * 不回退整帧——回退整帧会把整屏内容送进 OCR（隐私 + 噪声双重问题）。
+ *
+ * `target` 决定输出尺寸：不传就是 OCR 口径（2× 放大、封顶 3840）；信息链证据图传
+ * `{ upscale: 1, maxWidth: 1920 }`，不放大、超宽的窗直接缩到 1920（见 `chain-shot.ts`）。
  */
 export function computeCaptureGeometry(
   bounds: Rect,
   display: DisplayInfo,
   video: { width: number; height: number },
-  inset: number = WINDOW_FRAME_INSET
+  inset: number = WINDOW_FRAME_INSET,
+  target?: CaptureTargetOptions
 ): CaptureGeometry {
   if (video.width <= 0 || video.height <= 0) {
     throw new RangeError(`视频尺寸非法: ${video.width}x${video.height}`)
@@ -160,6 +166,6 @@ export function computeCaptureGeometry(
       `窗口可见区域不在屏幕内或过小（${Math.round(relative.x)},${Math.round(relative.y)} ${Math.round(relative.width)}x${Math.round(relative.height)}）`
     )
   }
-  const target = ocrTargetSize(crop.width, crop.height)
-  return { crop, target }
+  const targetSize = captureTargetSize(crop.width, crop.height, target)
+  return { crop, target: targetSize }
 }

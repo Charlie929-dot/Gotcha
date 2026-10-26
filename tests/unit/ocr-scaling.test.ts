@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_OCR_WIDTH, OCR_UPSCALE, ocrTargetSize } from '../../src/capture/ocr-scaling'
+import {
+  captureTargetSize,
+  EVIDENCE_MAX_WIDTH,
+  MAX_OCR_WIDTH,
+  OCR_UPSCALE,
+  ocrTargetSize
+} from '../../src/capture/ocr-scaling'
 
 describe('OCR 输入尺寸策略', () => {
   it('放大 2 倍并等比保持宽高', () => {
@@ -33,5 +39,41 @@ describe('OCR 输入尺寸策略', () => {
       expect(size.width).toBeGreaterThan(0)
       expect(size.height).toBeGreaterThan(0)
     }
+  })
+})
+
+describe('证据截图尺寸策略（不喂 OCR，不放大）', () => {
+  it('upscale 1 = 原生像素，不放大', () => {
+    expect(captureTargetSize(1152, 592, { upscale: 1, maxWidth: EVIDENCE_MAX_WIDTH })).toEqual({
+      width: 1152,
+      height: 592
+    })
+  })
+
+  it('超过上限时缩到 1920 并保持比例', () => {
+    expect(captureTargetSize(2560, 1440, { upscale: 1, maxWidth: EVIDENCE_MAX_WIDTH })).toEqual({
+      width: 1920,
+      height: 1080
+    })
+  })
+
+  it('默认参数与 ocrTargetSize 完全一致（旧路径不受影响）', () => {
+    for (const [w, h] of [
+      [1152, 592],
+      [1920, 1080],
+      [4000, 2000],
+      [1023, 1023]
+    ]) {
+      expect(captureTargetSize(w, h)).toEqual(ocrTargetSize(w, h))
+    }
+  })
+
+  it('非法参数回落到默认值（不放大到 0，也不缩到 0）', () => {
+    expect(captureTargetSize(1000, 500, { upscale: 0, maxWidth: 0 })).toEqual(
+      ocrTargetSize(1000, 500)
+    )
+    expect(captureTargetSize(1000, 500, { upscale: Number.NaN, maxWidth: -1 })).toEqual(
+      ocrTargetSize(1000, 500)
+    )
   })
 })

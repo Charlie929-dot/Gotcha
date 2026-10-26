@@ -60,6 +60,19 @@ export type ChainShotLog = (
   data?: Record<string, unknown>
 ) => void
 
+/** 一张证据落定后交给内容来源的形状（D43：抓帧时顺带读文本） */
+export interface ChainShotCommitted {
+  segmentId: number
+  eventId: number
+  /** 触发事件时刻（内容行也用它当 `captured_at`） */
+  at: number
+  /** 段身份对应窗口的句柄（UIA 按句柄读这扇窗） */
+  hwnd: number
+  executable: string
+  /** 证据图落定的路径（OCR 兜底读它） */
+  framePath: string
+}
+
 export interface ChainShotOptions {
   db: ChainDb
   /** 证据截图目录（`<userData>/chain-shots`） */
@@ -69,6 +82,11 @@ export interface ChainShotOptions {
   screen: ChainShotScreen
   getWindow: () => Promise<ChainShotWindow | null>
   isBlacklisted?: (executable: string) => boolean
+  /**
+   * 证据落定后的旁路回调（内容来源用）。**不 await**：读取慢（UIA 0.8–4s）不能拖慢抓帧队列；
+   * 抛错也只记日志，不影响这张截图是否算数。
+   */
+  onShot?: (committed: ChainShotCommitted) => void
   log?: ChainShotLog
   fs?: ChainShotFs
 }
@@ -176,13 +194,30 @@ export function createChainShotSource(options: ChainShotOptions): ShotTaker {
       const target = join(options.shotsDir, chainShotFileName(request))
       fs.mkdirSync(join(options.shotsDir, dayKeyOf(request.at)), { recursive: true })
       fs.renameSync(frame.imagePath, target)
+      const shot = {
+        path: target,
+        width: frame.width,
+        height: frame.height,
+        bytes: fs.statSync(target).size
+      }
+      // 旁路：内容来源（D43）。放在证据落定之后、不 await——读取慢不能拖慢抓帧队列；
+      // 钩子自己抛错也只影响内容，不该让这张已经拍对的证据作废。
+      if (options.onShot) {
+        try {
+          options.onShot({
+            segmentId: request.segmentId,
+            eventId: request.eventId,
+            at: request.at,
+            hwnd: window.hwnd,
+            executable: window.executable,
+            framePath: target
+          })
+        } catch (error) {
+          options.log?.('warn', 'chain shot: content hook failed', { error: String(error) })
+        }
+      }
       return {
-        shot: {
-          path: target,
-          width: frame.width,
-          height: frame.height,
-          bytes: fs.statSync(target).size
-        },
+        shot,
         content: null
       }
     } catch (error) {

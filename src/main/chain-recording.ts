@@ -1,13 +1,14 @@
 /**
- * 信息链 · 接进应用启动（D42）
+ * 信息链 · 接进应用启动（D42 / D43）
  *
- * 把三样东西装到一起：**原生事件源**（`native/chain-hook`，加载失败就降级成「不采集」）、
- * **事件触发现抓一帧**（`chain-shot.ts`）、**运行时**（`chain/hook/runtime.ts`）。
+ * 把这几样东西装到一起：**原生事件源**（`native/chain-hook`，加载失败就降级成「不采集」）、
+ * **事件触发现抓一帧**（`chain-shot.ts`）、**内容来源**（UIA 优先、OCR 兜底，`chain-content.ts`）、
+ * **运行时**（`chain/hook/runtime.ts`）。
  * 生命周期跟采集总开关走（`CaptureController` 的 running / stopping），不单独开一套开关：
  * 隐私红线只有一处（Alt+P / 托盘 / `--capture`），多一个开关就多一种「以为关了其实在记」。
  *
  * 这个文件依赖 Electron 之外的宿主能力（active-win / 屏幕流由调用方注入），
- * 因此可以在 Node 里单测；`index.ts` 只负责传真实的屏幕流与路径。
+ * 因此可以在 Node 里单测；`index.ts` 只负责传真实的屏幕流、脚本路径与路径。
  */
 import { activeWindow } from 'active-win'
 import { join } from 'node:path'
@@ -17,6 +18,14 @@ import { ChainRuntime } from '../chain/hook/runtime'
 import { loadNativeBinding, nativeCandidates, NativeDesktopSource } from '../chain/hook/native'
 import type { DesktopEventSource, SourceInfo } from '../chain/hook/types'
 import type { ShotStats, ShotTaker } from '../chain/recorder'
+import {
+  createChainContentCapture,
+  createChainContentReader,
+  type ChainContentCapture,
+  type ChainContentReader,
+  type ChainContentReaderOptions,
+  type ChainContentStats
+} from './chain-content'
 import {
   createChainShotSource,
   type ChainShotFs,
@@ -76,6 +85,17 @@ export function loadChainEventSource(options: ChainSourceOptions): DesktopEventS
 }
 
 /* ------------------------------------------------------------------ */
+/* 内容来源装配（D43）                                                 */
+/* ------------------------------------------------------------------ */
+
+export interface ChainContentWiring extends ChainContentReaderOptions {
+  /** 同段两次读数的最小间隔（默认 15s；换段后第一次必读） */
+  minIntervalMs?: number
+  /** 单测注入：整条读取链（绕过真实 PowerShell / OCR） */
+  createReader?: () => ChainContentReader
+}
+
+/* ------------------------------------------------------------------ */
 /* 采集装配                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -94,6 +114,8 @@ export interface ChainRecordingOptions {
   getWindow?: () => Promise<ChainShotWindow | null>
   /** 文件操作注入点（单测用假的，生产用 fs） */
   fs?: ChainShotFs
+  /** 内容来源（D43）；不给就只记事件与截图，不读文本 */
+  content?: ChainContentWiring
 }
 
 export interface ChainRecordingStatus {
@@ -101,75 +123,137 @@ export interface ChainRecordingStatus {
   source: SourceInfo | null
   openSegmentId: number | null
   shots: ShotStats | null
+  content: ChainContentStats | null
 }
 
 export interface ChainRecordingHandle {
   start(): void
-  /** 停源 + 收口开着的段 + 等在途截图落库；重复调用安全 */
+  /** 停源 + 收口开着的段 + 等在途截图 / 内容落库；重复调用安全 */
   stop(): Promise<void>
   status(): ChainRecordingStatus
 }
 
-/**
- * 装配一条「采集真的在跑」的信息链。
- *
- * 注意：`stop()` 是异步的（要等在途截图）。**退出流程必须 await 它**，
- * 否则最后那张截图会丢（`ChainRuntime.stop()` 只负责关源与收口）。
- */
+/** 内容车道收口的等待上限：退出流程只给信息链 2s，超时就如实记 warn（内容丢几条不阻塞退出） */
+const CONTENT_DRAIN_TIMEOUT_MS = 2_000
+
+/** 等 `task` 最多 `ms`；返回是否等到（超时 / 抛错都算没等到），绝不 reject */
+function withinDeadline(task: Promise<void>, ms: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms)
+    timer.unref?.()
+    void task.then(
+      () => {
+        clearTimeout(timer)
+        resolve(true)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(false)
+      }
+    )
+  })
+}
+
+interface ActiveChain {
+  runtime: ChainRuntime
+  content: ChainContentCapture | null
+  /** 关掉读取链（杀 PowerShell 子进程；在途读数由 `content.drain()` 先等） */
+  dispose(): Promise<void>
+}
+
 export function createChainRecording(options: ChainRecordingOptions): ChainRecordingHandle {
   const log: ChainShotLog = options.log ?? (() => {})
   const source = options.source
-  let runtime: ChainRuntime | null = null
+  let active: ActiveChain | null = null
   let stopping: Promise<void> | null = null
-
-  const takeShot: ShotTaker | null = options.screen
-    ? createChainShotSource({
-        db: options.db,
-        shotsDir: join(options.userDataDir, 'chain-shots'),
-        tempDir: join(options.userDataDir, 'tmp-chain'),
-        screen: options.screen,
-        getWindow: options.getWindow ?? readForegroundWindow,
-        isBlacklisted: options.isBlacklisted ?? ((executable) => defaultBlacklist(executable)),
-        log,
-        fs: options.fs
-      })
-    : null
+  /** 停掉之后的读数账（`status()` 在暂停后还要能看到刚收口的那一轮） */
+  let lastContentStats: ChainContentStats | null = null
 
   const start = (): void => {
-    if (runtime) return
+    if (active) return
     if (!source) {
       log('warn', 'chain recording skipped: no event source')
       return
     }
     const info: SourceInfo = source.sourceInfo ?? { kind: 'fake' }
-    const next = new ChainRuntime({
+
+    // 内容车道读回来时按段 id 补写；持有一个可变引用，收口期间仍能写完在途的那几条
+    const holder: { runtime: ChainRuntime | null } = { runtime: null }
+    let content: ChainContentCapture | null = null
+    let contentReader: ChainContentReader | null = null
+    if (options.content) {
+      contentReader = options.content.createReader?.() ?? createChainContentReader({ ...options.content, log })
+      content = createChainContentCapture({
+        reader: contentReader,
+        now: options.now,
+        minIntervalMs: options.content.minIntervalMs,
+        log,
+        onContent: (segmentId, at, payload) => holder.runtime?.recordContentFor(segmentId, at, payload) ?? false
+      })
+    }
+
+    const takeShot: ShotTaker | null = options.screen
+      ? createChainShotSource({
+          db: options.db,
+          shotsDir: join(options.userDataDir, 'chain-shots'),
+          tempDir: join(options.userDataDir, 'tmp-chain'),
+          screen: options.screen,
+          getWindow: options.getWindow ?? readForegroundWindow,
+          isBlacklisted: options.isBlacklisted ?? ((executable) => defaultBlacklist(executable)),
+          // 旁路：证据落定 → 内容车道（节流 / 串行都在车道里，不阻塞抓帧）
+          onShot: (committed) => content?.onShot(committed),
+          log,
+          fs: options.fs
+        })
+      : null
+
+    const runtime = new ChainRuntime({
       db: options.db,
       source,
       takeShot: takeShot ?? undefined,
       now: options.now,
       sourceInfo: info
     })
-    next.start()
-    runtime = next
+    runtime.start()
+    holder.runtime = runtime
+    active = {
+      runtime,
+      content,
+      dispose: async () => {
+        await contentReader?.dispose()
+      }
+    }
     log('info', 'chain recording started', {
       source: info.kind,
       detail: info.detail ?? null,
-      shots: takeShot !== null
+      shots: takeShot !== null,
+      content: content !== null
     })
   }
 
   const stop = (): Promise<void> => {
     if (stopping) return stopping
-    const current = runtime
+    const current = active
     if (!current) return Promise.resolve()
-    runtime = null
+    active = null
     stopping = (async () => {
-      current.stop()
-      await current.drain()
-      const stats = current.stats
+      current.runtime.stop()
+      // 截图先收口：内容车道读的是这些证据，读完再放手
+      await current.runtime.drain()
+      if (current.content) {
+        current.content.close()
+        const drained = await withinDeadline(current.content.drain(), CONTENT_DRAIN_TIMEOUT_MS)
+        if (!drained) {
+          log('warn', 'chain content drain timed out', { ...current.content.stats })
+        }
+      }
+      await current.dispose()
+      lastContentStats = current.content?.stats ?? null
+      const stats = current.runtime.stats
       log('info', 'chain recording stopped', {
         openSegmentId: stats.openSegmentId,
-        shots: stats.shotStats
+        shots: stats.shotStats,
+        content: current.content?.stats ?? null
       })
     })().finally(() => {
       stopping = null
@@ -181,13 +265,14 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
     start,
     stop,
     status: () => {
-      const current = runtime
-      const shots = current?.stats
+      const current = active
+      const shots = current?.runtime.stats
       return {
-        started: current?.stats.started ?? false,
+        started: shots?.started ?? false,
         source: source?.sourceInfo ?? null,
         openSegmentId: shots?.openSegmentId ?? null,
-        shots: shots?.shotStats ?? null
+        shots: shots?.shotStats ?? null,
+        content: current?.content?.stats ?? lastContentStats
       }
     }
   }

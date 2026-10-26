@@ -8,6 +8,7 @@ import {
   chainShotFileName,
   createChainShotSource,
   sameWindow,
+  type ChainShotCommitted,
   type ChainShotFs,
   type ChainShotWindow
 } from '../../src/main/chain-shot'
@@ -84,6 +85,8 @@ function build(overrides: {
   blacklisted?: boolean
   capture?: () => Promise<{ imagePath: string; width: number; height: number }>
   fs?: ChainShotFs
+  committed?: ChainShotCommitted[]
+  onShot?: (committed: ChainShotCommitted) => void
 } = {}) {
   const captured: Array<{ bounds: unknown; tempDir: string; ts: number }> = []
   const sequence = overrides.windows ?? null
@@ -108,6 +111,7 @@ function build(overrides: {
       return overrides.window === undefined ? WINDOW : overrides.window
     },
     isBlacklisted: () => overrides.blacklisted === true,
+    onShot: overrides.onShot ?? (overrides.committed ? (committed) => overrides.committed!.push(committed) : undefined),
     fs: overrides.fs ?? fakeFs()
   })
   return { source, captured }
@@ -212,6 +216,56 @@ describe('事件触发现抓一帧', () => {
     })
     await Promise.all([source(request(1)), source(request(2))])
     expect(maxInFlight).toBe(1)
+  })
+})
+
+describe('证据落定后的旁路（内容来源 D43）', () => {
+  it('落进证据目录后回调一次：带上段 / 事件 / 句柄 / 落定的图', async () => {
+    const committed: ChainShotCommitted[] = []
+    const { source } = build({ committed })
+
+    await source(request(3))
+
+    const expectedPath = join('C:/userData/chain-shots', chainShotFileName(request(3)))
+    expect(committed).toEqual([
+      {
+        segmentId,
+        eventId: 7,
+        at: at(3),
+        hwnd: WINDOW.hwnd,
+        executable: WINDOW.executable,
+        framePath: expectedPath
+      }
+    ])
+  })
+
+  it('没拍成的不回调（身份不对 / 黑名单 / 抓帧失败都一样）', async () => {
+    const committed: ChainShotCommitted[] = []
+    const { source: changed } = build({ windows: [WINDOW, { ...WINDOW, hwnd: 12_345 }], committed })
+    expect(await changed(request(1))).toBeNull()
+
+    const { source: blocked } = build({ blacklisted: true, committed })
+    expect(await blocked(request(1))).toBeNull()
+
+    const { source: broken } = build({
+      committed,
+      capture: async () => {
+        throw new Error('屏幕流断了')
+      }
+    })
+    expect(await broken(request(1))).toBeNull()
+
+    expect(committed).toHaveLength(0)
+  })
+
+  it('旁路抛错不影响这张证据算数（内容坏了不该毁掉截图）', async () => {
+    const { source } = build({
+      onShot: () => {
+        throw new Error('内容车道挂了')
+      }
+    })
+    const result = await source(request(1))
+    expect(result?.shot.path).toBe(join('C:/userData/chain-shots', chainShotFileName(request(1))))
   })
 })
 

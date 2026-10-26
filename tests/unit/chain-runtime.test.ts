@@ -219,3 +219,16 @@ describe('传输自述', () => {
     expect(native.sourceInfo.detail).toBe('chain-hook 0.1.0')
   })
 })
+
+describe('内容补写（按段 id）', () => {
+  it('收口之后仍能按段 id 补写内容（读取比抓帧慢）', () => {
+    const { source, runtime } = build()
+    runtime.start()
+    source.emit(foreground(0))
+    clock = at(10)
+    runtime.stop()
+    const [segment] = querySegments(db)
+    expect(runtime.recordContentFor(segment.id, at(5), { source: 'uia', text: '晚到的正文' })).toBe(true)
+    expect(getSegmentDetail(db, segment.id)?.contents.map((row) => row.text)).toEqual(['晚到的正文'])
+  })
+})

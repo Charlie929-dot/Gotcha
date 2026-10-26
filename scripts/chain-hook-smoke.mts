@@ -38,6 +38,7 @@ interface Binding {
   stop(): void
   lastInputTickMs(): number
   version?: string
+  status?: () => Record<string, unknown>
 }
 
 const binding = requireFromHere(modulePath) as Binding
@@ -60,10 +61,14 @@ binding.start((raw) => {
 })
 
 const tickStart = binding.lastInputTickMs()
+console.log(`start() 之后的状态：${JSON.stringify(binding.status?.() ?? {})}`)
 let elapsed = 0
 const timer = setInterval(() => {
   elapsed += 1
-  console.log(`… ${elapsed}s  事件 ${total} 条，tick 前进 ${binding.lastInputTickMs() - tickStart}ms`)
+  console.log(
+    `… ${elapsed}s  事件 ${total} 条，tick 前进 ${binding.lastInputTickMs() - tickStart}ms，` +
+      `计数 ${JSON.stringify(binding.status?.() ?? {})}`
+  )
 }, 1000)
 
 setTimeout(() => {

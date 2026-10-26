@@ -75,6 +75,8 @@ import {
   loadChainEventSource,
   type ChainRecordingHandle
 } from './chain-recording'
+import { DEFAULT_RETENTION, type RetentionEncoding } from '../chain/retention'
+import type { EncodedImage } from './chain-retention'
 import { claimSingleInstance } from './single-instance'
 import { BALL_STATE_FILE } from './ball-state'
 import { createBallShell, type BallShell } from './ball'
@@ -802,6 +804,37 @@ function createSession(): Promise<CaptureSession> {
 }
 
 /**
+ * 采集即编码（D44）：屏幕流给的 PNG（窗口裁好、为 OCR 放大 2×）→ JPEG q85 原分辨率。
+ * 实测 6.4× 省字节、OCR 还能读出 99.6% 的字（`chain/retention.ts` 的标定表）。
+ * 解码失败就抛错，抓帧侧会回退到原 PNG——不为了省字节丢证据。
+ */
+function encodeChainShotJpeg(input: { imagePath: string; tempDir: string; at: number }): {
+  imagePath: string
+  width: number
+  height: number
+} {
+  const image = nativeImage.createFromPath(input.imagePath)
+  if (image.isEmpty()) throw new Error('采集帧解码失败')
+  const size = image.getSize()
+  const target = join(input.tempDir, `frame-${input.at}.jpg`)
+  writeFileSync(target, image.toJPEG(DEFAULT_RETENTION.hot.quality))
+  return { imagePath: target, width: size.width, height: size.height }
+}
+
+/** 保留期重编码（D44）：同一个 nativeImage 编码器，按档位缩放 + 质量 */
+function encodeRetentionImage(input: Buffer, encoding: RetentionEncoding): EncodedImage {
+  const image = nativeImage.createFromBuffer(input)
+  if (image.isEmpty()) throw new Error('证据图解码失败')
+  const size = image.getSize()
+  const scaled =
+    encoding.maxWidth !== null && size.width > encoding.maxWidth
+      ? image.resize({ width: encoding.maxWidth, quality: 'good' })
+      : image
+  const finalSize = scaled.getSize()
+  return { bytes: scaled.toJPEG(encoding.quality), width: finalSize.width, height: finalSize.height }
+}
+
+/**
  * 信息链接线（D42）。三条口径：
  * 1. **跟采集总开关同一处**：不另做开关，隐私红线只有一处（Alt+P / 托盘 / `--capture`）。
  * 2. **原生源加载不出来就不采集**：如实记 warn，不建表、不假装在记（D41 降级纪律）。
@@ -828,11 +861,15 @@ function ensureChainRecording(): ChainRecordingHandle | null {
     screen: screenCapture ?? undefined,
     userDataDir: app.getPath('userData'),
     log: captureLog,
+    // 采集即编码（D44）：证据图落盘就是 JPEG q85，不是 1.5 MB 的 PNG
+    encode: encodeChainShotJpeg,
     // 内容来源（D43）：UIA 优先、OCR 兜底。脚本缺失 / 工作器起不来都会降级成「留空」，不会崩
     content: {
       uiaScript: scriptResourcePath('chain', 'uia-text.ps1'),
       ocrScript: scriptResourcePath('ocr', 'winrt-ocr.ps1')
-    }
+    },
+    // 保留期分层（D44）：老证据重编码 / 打包；参数见 chain/retention.ts 的实测表
+    retention: { encode: encodeRetentionImage }
   })
   return chainRecording
 }

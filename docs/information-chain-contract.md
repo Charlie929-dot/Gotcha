@@ -1,11 +1,12 @@
-# 信息链契约 v0.6（提案，待拍板）
+# 信息链契约 v0.7（提案，待拍板）
 
 > 状态：**提案**。拍板后本文件成为 `src/chain/` 的实现依据。
+> v0.7（2026-10-26）：**保留期分层落地**（D44）。四层参数用 **9 张真机证据图标定**（不是拍脑袋）：hot = 采集即编码 **JPEG q85 原分辨率**（均值 232 KB，比原 PNG 省 6.4×，OCR 字符保留 99.6%）；warm = 宽 ≤1920 q85；cold = 宽 ≤1440 q80 + 打进当天容器；archive = 宽 ≤1280 q75 + 打进当天容器。**缩小宽度比降 JPEG 质量更伤可读性**（原分辨率 q85→q60 相似度只掉 0.03；1920→1280 从 0.84 掉到 0.60），所以分层主要靠宽度。cold / archive 进 `<day>-<tier>.cgar` 自描述容器（`path` 置空、`container` 指向它，解出来与打包前逐字节相同）。§2.3 / §3 第 6 条 / §5.0.2 / §5.1 / §6 同步。
 > v0.6（2026-10-26）：**内容来源落地**（D43）。段内文本 = **抓帧落定后异步读一次**（不占抓帧队列）、**同段 15s 节流**、**UIA 优先（< 200 字符转 OCR）**、OCR 读**该次抓帧的那张图**；UIA 走**长驻 PowerShell worker**（3s 超时杀进程、4000 元素 / 100k 字符上限、`IsPassword` 不取）；内容按**段 id** 写回（读回来时段可能已收口）。§2.4 / §5.0 第 12 条 / §6 同步。
 > v0.5（2026-10-26）：**接进应用启动 + 真实截图落地**（D42）。截图来源定为「**事件触发时现抓一帧**」（否决「复用采集管线 ≤2s 旧帧」：证据会错位），并因此补三条纪律：**抓帧前后各校验一次窗口身份**、**原生层启动补报一次当前前台**（钩子只报变化，不补就永远没有段）、**采图回调允许异步**（记录器串行落库 + `drain()` 等在途）。§2.3 / §5.0 / §6 同步。
 > v0.4（2026-10-26）：存储与查询层落地（`src/chain/store.ts` / `src/chain/recorder.ts`），据此定下三处实现细节：**段行两期落定**（§2.1）、**`typing` 事件与截图来源**（§2.2 / §2.3）、**每张截图都挂在锚点事件上**。§5.2 的键盘规则已落定并写进代码（停顿 3s 补采）。
 > v0.3（2026-10-26）：§5 六项全部落定（空闲即停采、视频不采、内容变化率整项砍掉、保留策略按重编码三级）。
-> 依据：D38（方向：冻结旧时刻—主题管线）、D39（段与空闲语义）、D40（段行两期落定）、D41（传输方式）、D42（接线与截图来源）、D43（内容来源与时机）、探针实测（`docs/chain-probe.md`）。
+> 依据：D38（方向：冻结旧时刻—主题管线）、D39（段与空闲语义）、D40（段行两期落定）、D41（传输方式）、D42（接线与截图来源）、D43（内容来源与时机）、D44（保留期分层与采集即编码）、探针实测（`docs/chain-probe.md`）。
 > 概念出处：`docs/information-chain-direction.md`（窗口球 / 双链球 / 事件点 / 证据截图）。
 > 这份契约只回答「数据长什么样、什么不许变」，不回答「怎么采集」（钩子方案另议）。
 
@@ -107,14 +108,14 @@ CREATE TABLE chain_shot (
 - 「只写一次，不覆盖」；截图是「AI 命中后回来核验」的最终证据。
 - **来源（v0.5，D42）**：事件到了**现抓一帧**（不用采集管线 ≤2s 的旧帧）；抓帧是异步的，`ts` 仍是触发事件的时刻——证据时刻不因抓图慢而漂。
 - **抓帧前后各校验一次窗口身份**（v0.5）：`pid + hwnd` 与段不一致就丢弃这一帧。拍的是「这扇窗所在的屏幕区域」，抓帧要 100–300ms；这期间前台被别的窗口盖住，拍到的就是别人的画面（真机实测踩到过）。**错证据比没证据更糟**，所以宁可丢。
-- **文件位置**：`<userData>/chain-shots/<YYYY-MM-DD>/s<段>-e<事件>-<ts>.png`；临时帧写 `<userData>/tmp-chain/`（与旧管线的 `tmp/` 分开，免得被启动清理误删）。
-- **当前格式是 PNG**（v0.5 已知偏差）：§5.1 写的是 hot 层 WebP，但 Electron `nativeImage` 没有 WebP 编码，接编码器前先存原图 PNG（体积大但无损）。
+- **文件位置**：`<userData>/chain-shots/<YYYY-MM-DD>/s<段>-e<事件>-<ts>.jpg`；临时帧写 `<userData>/tmp-chain/`（与旧管线的 `tmp/` 分开，免得被启动清理误删）。cold / archive 的图在 `<userData>/chain-shots/archive/<日期>-<层>.cgar` 容器里，行里 `path` 置空、`container` 指向容器。
+- **格式是 JPEG**（v0.7，D44）：采集即编码 **q85 原分辨率**（`nativeImage.toJPEG`）。屏幕流给的 PNG 是窗口裁剪后又**放大 2×** 的（为了 OCR 字号），重编码成 q85 JPEG 后均值 232 KB（原 PNG 均值 1.48 MB，6.4×），OCR 字符保留 99.6%。**WebP 仍没有编码器**（Electron `nativeImage` 只支持 PNG / JPEG；不为此加依赖），契约 §5.1 原写的「hot = WebP」按实测改成 JPEG q85——如实记为偏差，不是静默降级。
 - 入场帧：段开始时默认截一张，`source='enter'`。
 - `typing`：键盘停顿补采的帧，`source='typing'`（v0.4 新增，对应 §5.2）。
 - **每张截图都挂在触发它的那个事件上**（v0.4）：入场帧挂 `enter` 事件，打字帧挂 `typing` 事件。这样「点开一张图 → 看它在段里的位置」没有例外分支；`event_id` 为空只作为防御态存在。
 - `sensitive=1` 的段不存图（对齐 D10 / D19）。
 - 分级保留见 §5：任何归档都必须保留 `shot.id → 事件 / 段` 的映射，解出后能回到原来那一刻。
-- 过期只删文件、置空 `path`，**行与 id 永不删**（对齐 D32 的「剪载荷不剪 id」）。
+- **过期不删行**：保留期只重编码 / 打包，改 `tier` / `container` / `path` / `bytes` / `width` / `height`（v0.7，D44），`id` 与挂载关系永不删（对齐 D32 的「剪载荷不剪 id」）。
 
 ### 2.4 内容 `chain_content`
 
@@ -164,7 +165,7 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 | 3 | 每个事件的 `segment_id` 存在，且 `ts` 落在该段的 `[start_ts, end_ts]` 内 |
 | 4 | 每张截图必然挂在一个存在的段上；`event_id` 非空时必须属于同一个段 |
 | 5 | 每条内容必须有 `source`，且 `chars = text.length` |
-| 6 | 事件 / 截图 / 内容只有 INSERT；**段的收口字段（`end_ts` / `active_ms` / `idle_ms` / `title_last` / `closed`）由收口时唯一一次 UPDATE 落定**（D40）；其余更新仅限「置空载荷字段」 |
+| 6 | 事件 / 截图 / 内容只有 INSERT；**段的收口字段（`end_ts` / `active_ms` / `idle_ms` / `title_last` / `closed`）由收口时唯一一次 UPDATE 落定**（D40）；其余更新仅限两类：**保留期**改截图的 `tier` / `container` / `path` / `bytes` / `width` / `height`（v0.7，D44），以及**剪载荷**（置空字段，行不删） |
 | 7 | 派生层可以随时全删重建，重建后检索结果不劣化 |
 | 8 | 旧 `events` / `moments` / `themes` 不被新代码写入 |
 | 9 | 截图进入任何归档层后，`shot.id` 与其事件 / 段的映射仍可解出，解压后能回到原来那一刻 |
@@ -203,16 +204,29 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 | - | - | - | - |
 | 12 | 内容来源（UIA / OCR）与采集时机 | **抓帧落定后异步读数 + 同段 15s 节流**（不占抓帧队列）；**UIA < 200 字符转 OCR**（OCR 读该次抓帧的图，不额外截图）；UIA = 长驻 PowerShell worker（3s 超时杀进程、4000 元素 / 100k 字符上限、`IsPassword` 不取、`Edit` 补 `ValuePattern`）；内容按**段 id** 写回（段可能已收口），`captured_at` 用触发事件时刻 | ✅ 已定（D43） |
 
-### 5.1 保留策略落地参数
+### 5.0.2 v0.7 追加（写保留期分层时定）
 
-| 层级 | 时间 | 动作 | 验收 |
+| # | 事项 | 结论 | 状态 |
 | - | - | - | - |
-| hot | 0–7 天 | 原图（WebP） | 原分辨率可读 |
-| warm | 7–30 天 | 重编码到较小尺寸（宽度上限 ~1280） | 仍可辨认文字区域，体积显著下降（首轮实测后回填比例） |
-| cold | 1–6 月 | 再压一档 + 打包成归档容器 | 解出后可达 warm 质量 |
-| archive | >6 月 | 高压缩归档，按需解出 | 解出后仍能定位到那一刻 |
+| 13 | 保留期四层的编码参数与实现口径 | **采集即编码**：hot = JPEG q85 原分辨率（省 6.4×，OCR 字符 99.6%）；warm = 宽 ≤1920 q85；cold = 宽 ≤1440 q80 + 容器；archive = 宽 ≤1280 q75 + 容器。**分层主要靠宽度**（缩宽比降质量更伤可读性，见 §5.1 实测）。执行器跟着采集开（暂停 / 退出即停表，下次开采集补做）：开采集跑一轮、之后每 6h 一轮；**先写新、再改行（事务）、最后删旧**，崩了最坏多留一个文件；每张让出一拍（`setImmediate`），单轮上限 2000 张。cold / archive 进自描述容器 `<日期>-<层>.cgar`（索引在尾部，解出来与打包前逐字节相同），同一天同层的旧容器在没人引用后删掉 | ✅ 已定（D44） |
 
-初次实测前不写死压缩参数；实现时用真实库样本量一次体积与可读性，再回填本表。
+### 5.1 保留策略落地参数（v0.7：实测标定，不是估的）
+
+**标定方法（2026-10-26）**：9 张真机证据图（`npm run dev:capture` 在 DSH / Obsidian / RustDesk 上跑出来，3206–3840 宽、486 KB–6.4 MB），用生产同款编码器（Electron `nativeImage`）重编码，再用 WinRT OCR 比对「重编码后还能读出原图多少字」。
+
+| 层级 | 时间 | 动作 | 实测均值 | 相对原图 | OCR 字符保留 / 相似度 | 验收 |
+| - | - | - | - | - | - | - |
+| hot | 0–7 天 | **JPEG q85，原分辨率**（采集时就编码） | 232 KB | 6.4× | 99.6% / 0.959 | 全分辨率、字可读 |
+| warm | 7–30 天 | JPEG q85，宽 ≤1920 | 107 KB | 13.8× | 95.2% / 0.840 | 仍可辨认文字区域 |
+| cold | 1–6 月 | JPEG q80，宽 ≤1440，打包进当天容器 | 63 KB | 23.5× | 88.5% / 0.717 | 解出后可达 warm 的 3/4 宽度 |
+| archive | >6 月 | JPEG q75，宽 ≤1280，打包进当天容器 | 47 KB | 31.5× | 77.0% / 0.600 | 解出后仍能定位到那一刻 |
+
+**两条实测结论（改参数前先看）**：
+
+1. **降 JPEG 质量几乎不掉字**（原分辨率 q85 → q60，相似度 0.959 → 0.924），**缩小宽度掉得多**（1920 → 1280，相似度 0.840 → 0.600）。分层要省字节就压宽度，质量只做微调；别按直觉把 warm 压到 1280。
+2. 本机屏幕 1920×1080 @125%，采集管线为了 OCR 把窗口裁剪**放大 2×** 再存，所以 3840 宽的证据图里一半是插值；**宽 1920 恰好是屏幕原生分辨率**（人真正看到的像素）。
+
+容器开销：每条索引约 90 字节（相对 JPEG 可忽略）；**同一批数据重复打包得到同一份字节**（条目按 `shotId` 排序）。参数改动要重跑这套标定并回填本表。
 
 ## 5.2 纯键盘输入：采集规则（✅ 已定，写进 `segmenter.ts`）
 
@@ -238,7 +252,7 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 
 > 窗口段 → 事件 → 截图 → 内容 → 能按时间与应用查出段，并从段反查到截图与内容原文。
 
-**状态（v0.6）**：真实事件源已接进应用启动；截图是**事件触发现抓**的真实帧；段内文本由**UIA 优先、OCR 兜底**在抓帧后异步读入。整条「段 → 事件 → 截图 → 内容 → 反查」在真机上跑通；还差派生层（保留期分层、双链、标签、向量）。
+**状态（v0.7）**：真实事件源已接进应用启动；截图是**事件触发现抓**的真实帧；段内文本由**UIA 优先、OCR 兜底**在抓帧后异步读入；证据图**采集即编码 JPEG**，并按 **hot / warm / cold / archive** 四层重编码 / 打包（参数见 §5.1 实测表）。整条「段 → 事件 → 截图 → 内容 → 反查」在真机上跑通；派生层还差双链、标签、向量。
 
 | 环节 | 落地 | 证据 |
 | - | - | - |
@@ -254,9 +268,18 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 | **事件触发现抓一帧**（身份校验 ×2、黑名单、按日归档） | `src/main/chain-shot.ts` | `tests/unit/chain-shot.test.ts` |
 | **接进应用启动**（原生源加载 + 运行时装配 + 跟随采集开关 + 退出收口） | `src/main/chain-recording.ts`、`src/main/index.ts` | `tests/unit/chain-recording.test.ts`；**真机**：`npm run dev:capture` + `GOTCHA_USER_DATA=.tmp/...`，起来即有段与入场截图，Alt+P 暂停后 `chain recording stopped {"pending":0}` |
 | **内容来源**（UIA 优先 + OCR 兜底、抓帧后异步读、15s 节流、按段 id 写回） | `src/chain/content/`（worker / uia / reader）、`src/main/chain-content.ts`、`resources/chain/uia-text.ps1` | `tests/unit/chain-content-{worker,reader,capture}.test.ts`（7 / 11 / 9 条）；**真机**：见下「内容来源验证」 |
+| **保留期分层 + 采集即编码**（四层参数实测、重编码、归档容器、按天打包、幂等） | `src/chain/retention.ts`（计划）、`src/chain/archive.ts`（容器）、`src/main/chain-retention.ts`（执行器）、`src/main/chain-shot.ts`（采集即编码注入） | `tests/unit/chain-retention.test.ts`（13）、`tests/unit/chain-archive.test.ts`（8）、`tests/unit/chain-retention-sweep.test.ts`（9）、`tests/unit/chain-shot.test.ts`（编码 3 条）；**真机**：见下「保留期验证」 |
 
 **真机验证记录（2026-10-26，D42）**：`--capture` 起应用 → 立即建段（启动补报当前前台）→ 入场帧拍下当期窗口（目视核对是 Firefox 的搜索页）→ 打字停顿 / 点击各补一帧 → 真实 Alt+P 暂停后 13 个段全部 `closed=1`、`pending=0`、0 张孤儿截图。**已知噪音**：IME（`textinputhost`）、shell「任务切换」窗口、可见区域 0×0 的窗口会成为瞬时段，截图按身份 / 可见性被丢弃（计入 `droppedShots`）；要不要把它们排除成段**还没拍板**。
 
 **内容来源验证（2026-10-26，D43，真机）**：`npm run dev:capture` + `GOTCHA_USER_DATA=.tmp/chain-content-run`，真实 SendInput 点击（不先改前台焦点）→ Alt+P 暂停。落库：**4 段全部 `closed=1`、9 张截图（1 张身份校验丢弃）、6 条内容**。内容侧：DSH 段 UIA **21 410 字符 / 401 元素 / 391ms** → 1 条 `uia` 行；Obsidian UIA 只有 **20 字符（2 元素）** → OCR 兜底 **397 / 640 / 393 / 460 字符** 4 条 `ocr` 行（同一段按 15s 节流，分别在 +17s / +24s 再读）；RustDesk UIA **0 元素** → OCR 301 字符。日志：`chain recording stopped {"shots":{"pending":0,"inserted":9,"dropped":1,"failed":0},"content":{"queued":6,"throttled":3,"inserted":6,"duplicates":0,"empty":0,"failed":0}}`——**节流生效（3 次跳过）**、两条路径都真跑通。**已知偏差**：① Chromium / Electron 首轮 UIA 树常偏薄（同窗口实测一次 13 元素、随后 330 元素；本机 DSH 这次一次就 401 元素），首读可能落到 OCR，这是兜底存在的理由；② **OCR 每次识别结果略有差异**（397 / 640 / 393 / 460 字符来自同一页），所以「指纹去重」对 OCR 几乎不触发，`duplicates` 长期会是 0 附近——不违规，但意味着同一页反复 OCR 会重复占字节，属后续优化项（不是本轮验收条件）。
 
-双链、标签、向量、个人记忆、保留期分层都排它后面。
+**保留期验证（2026-10-26，D44，真机）**：拿今天真机跑出来的 9 张证据图做**副本**（不改原库），把年龄改成 hot / warm / cold / archive 四档，用生产同款 `nativeImage` 编码器跑真实 `createChainRetention`：
+
+- **13.6 MB → 1.2 MB（11.4×）**；第一轮 `encoded 5 / packed 4 / failed 0 / containers 2`，第二轮 **0 动作**（幂等）；
+- 分层全对：hot 1 张（原 PNG → JPEG q85，681 KB）、warm 4 张（67 / 95 / 89 / 84 KB）、cold 2 张（39 / 55 KB，同一容器）、archive 2 张（各 29 KB，同一容器）；归档行 `path=null`、源文件已删、行指向的文件都存在；
+- 归档里解出一张：**1280×681 可解码**，OCR 223 → 164 字符（相似度 0.571，符合 archive「能定位到那一刻」的定位，不是逐字可读）。
+
+**采集即编码真机验证（2026-10-26）**：`npm run dev:capture` + `GOTCHA_USER_DATA=.tmp/chain-retention-live` + 真实 SendInput 点击 → 3 张证据全部落成 **`.jpg`（各 698 KB）**，`chain_shot.bytes` 与磁盘一致；内容侧 2 条 `uia`（20 267 / 20 493 字符）照常写入；日志无 error / warn（保留期在启动时跑过一轮，库里没有老数据所以 0 动作）。
+
+双链、标签、向量、个人记忆都排它后面。

@@ -390,13 +390,90 @@ export function listEvents(db: ChainDb, segmentId: number): ChainEventRow[] {
     .all(segmentId) as ChainEventRow[]
 }
 
+const SHOT_COLUMNS = `id, segment_id, event_id, ts, path, width, height, bytes, source, tier, container`
+
 export function listShots(db: ChainDb, segmentId: number): ChainShotRow[] {
   return db
-    .prepare(
-      `SELECT id, segment_id, event_id, ts, path, width, height, bytes, source, tier, container
-         FROM chain_shot WHERE segment_id = ? ORDER BY ts ASC, id ASC`
-    )
+    .prepare(`SELECT ${SHOT_COLUMNS} FROM chain_shot WHERE segment_id = ? ORDER BY ts ASC, id ASC`)
     .all(segmentId) as ChainShotRow[]
+}
+
+/**
+ * 保留期扫描：比 `beforeTs` 老的截图，外加**还停留在 hot 层的 PNG**（采集编码改 JPEG
+ * 之前写下的老行，年龄再轻也要归一化——否则 hot 里永远混着两种格式）。
+ */
+export function selectShotsForRetention(db: ChainDb, beforeTs: number): ChainShotRow[] {
+  return db
+    .prepare(
+      `SELECT ${SHOT_COLUMNS} FROM chain_shot
+        WHERE ts < @beforeTs OR (tier = 'hot' AND path LIKE '%.png')
+        ORDER BY ts ASC, id ASC`
+    )
+    .all({ beforeTs }) as ChainShotRow[]
+}
+
+/** 已经在某个归档容器里的截图（升级 cold → archive 时要连它们一起重建） */
+export function listShotsInContainer(db: ChainDb, container: string): ChainShotRow[] {
+  return db
+    .prepare(`SELECT ${SHOT_COLUMNS} FROM chain_shot WHERE container = ? ORDER BY ts ASC, id ASC`)
+    .all(container) as ChainShotRow[]
+}
+
+/** 保留期对一行的更新（唯一允许改 `tier` / `container` / `path` / `bytes` / `width` / `height` 的入口） */
+export interface ShotRetentionUpdate {
+  id: number
+  tier: ChainShotTier
+  path: string | null
+  container: string | null
+  width: number | null
+  height: number | null
+  bytes: number | null
+}
+
+/**
+ * 批量的保留期更新（一个事务）。
+ *
+ * 状态一致性由这里把关（契约 §3 第 6 条的保留期例外）：
+ * hot / warm 必须在原文件上（`path` 非空、`container` 为空）；
+ * cold / archive 必须在容器里（`container` 非空、`path` 置空）。写不进去就抛错，不修补。
+ */
+export function updateShotRetention(db: ChainDb, updates: readonly ShotRetentionUpdate[]): void {
+  if (updates.length === 0) return
+  for (const update of updates) {
+    assertKind(update.tier, CHAIN_SHOT_TIERS, '截图层级')
+    const archived = update.tier === 'cold' || update.tier === 'archive'
+    if (archived && (update.container === null || update.path !== null)) {
+      throw new Error(`截图 ${update.id} 在 ${update.tier} 层必须只有容器路径、没有文件路径`)
+    }
+    if (!archived && (update.container !== null || update.path === null)) {
+      throw new Error(`截图 ${update.id} 在 ${update.tier} 层必须有文件路径、不能挂容器`)
+    }
+    if (update.bytes !== null && (!Number.isInteger(update.bytes) || update.bytes < 0)) {
+      throw new Error(`截图 ${update.id} 的字节数非法：${String(update.bytes)}`)
+    }
+  }
+
+  const statement = db.prepare(
+    `UPDATE chain_shot
+        SET tier = @tier, path = @path, container = @container,
+            width = @width, height = @height, bytes = @bytes
+      WHERE id = @id`
+  )
+  const run = db.transaction((rows: ShotRetentionUpdate[]) => {
+    for (const update of rows) {
+      const result = statement.run({
+        id: update.id,
+        tier: update.tier,
+        path: update.path,
+        container: update.container,
+        width: update.width,
+        height: update.height,
+        bytes: update.bytes
+      })
+      if (result.changes !== 1) throw new Error(`截图 ${update.id} 不存在，保留期更新失败`)
+    }
+  })
+  run(updates as ShotRetentionUpdate[])
 }
 
 export function listContents(db: ChainDb, segmentId: number): ChainContentRow[] {

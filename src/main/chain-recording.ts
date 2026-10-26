@@ -28,11 +28,13 @@ import {
 } from './chain-content'
 import {
   createChainShotSource,
+  type ChainShotEncoder,
   type ChainShotFs,
   type ChainShotLog,
   type ChainShotScreen,
   type ChainShotWindow
 } from './chain-shot'
+import { createChainRetention, type ChainRetention, type ImageEncoder } from './chain-retention'
 
 /** 前台窗口（带 pid / hwnd：段身份对齐要用） */
 export async function readForegroundWindow(): Promise<ChainShotWindow | null> {
@@ -114,8 +116,15 @@ export interface ChainRecordingOptions {
   getWindow?: () => Promise<ChainShotWindow | null>
   /** 文件操作注入点（单测用假的，生产用 fs） */
   fs?: ChainShotFs
+  /** 采集即编码（D44：生产注入 nativeImage；不给就落原 PNG） */
+  encode?: ChainShotEncoder
   /** 内容来源（D43）；不给就只记事件与截图，不读文本 */
   content?: ChainContentWiring
+  /**
+   * 保留期分层（D44）。给编码器才会做：开采集时跑一轮（之后每 6h 一轮），
+   * 把老证据重编码 / 打进归档容器。不给就完全不动文件（测试 / 假采集路径）。
+   */
+  retention?: { encode: ImageEncoder }
 }
 
 export interface ChainRecordingStatus {
@@ -157,6 +166,8 @@ function withinDeadline(task: Promise<void>, ms: number): Promise<boolean> {
 interface ActiveChain {
   runtime: ChainRuntime
   content: ChainContentCapture | null
+  /** 保留期扫描（D44）；没给编码器时为 null */
+  retention: ChainRetention | null
   /** 关掉读取链（杀 PowerShell 子进程；在途读数由 `content.drain()` 先等） */
   dispose(): Promise<void>
 }
@@ -200,6 +211,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
           screen: options.screen,
           getWindow: options.getWindow ?? readForegroundWindow,
           isBlacklisted: options.isBlacklisted ?? ((executable) => defaultBlacklist(executable)),
+          // 采集即编码（D44）：PNG → JPEG q85，失败回退原 PNG
+          encode: options.encode,
           // 旁路：证据落定 → 内容车道（节流 / 串行都在车道里，不阻塞抓帧）
           onShot: (committed) => content?.onShot(committed),
           log,
@@ -216,9 +229,21 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
     })
     runtime.start()
     holder.runtime = runtime
+    // 保留期（D44）：跟采集一起开——这时写连接才存在；暂停 / 退出就停表
+    const retention = options.retention
+      ? createChainRetention({
+          db: options.db,
+          shotsDir: join(options.userDataDir, 'chain-shots'),
+          encode: options.retention.encode,
+          now: options.now,
+          log
+        })
+      : null
+    retention?.start()
     active = {
       runtime,
       content,
+      retention,
       dispose: async () => {
         await contentReader?.dispose()
       }
@@ -238,6 +263,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
     active = null
     stopping = (async () => {
       current.runtime.stop()
+      // 保留期扫描先收手：它只处理老文件，不阻塞退出（在途那几张会自己落定）
+      current.retention?.stop()
       // 截图先收口：内容车道读的是这些证据，读完再放手
       await current.runtime.drain()
       if (current.content) {

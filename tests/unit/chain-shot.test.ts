@@ -9,6 +9,8 @@ import {
   createChainShotSource,
   sameWindow,
   type ChainShotCommitted,
+  type ChainShotEncodeInput,
+  type ChainShotEncoder,
   type ChainShotFs,
   type ChainShotWindow
 } from '../../src/main/chain-shot'
@@ -87,6 +89,7 @@ function build(overrides: {
   fs?: ChainShotFs
   committed?: ChainShotCommitted[]
   onShot?: (committed: ChainShotCommitted) => void
+  encode?: ChainShotEncoder
 } = {}) {
   const captured: Array<{ bounds: unknown; tempDir: string; ts: number }> = []
   const sequence = overrides.windows ?? null
@@ -111,6 +114,7 @@ function build(overrides: {
       return overrides.window === undefined ? WINDOW : overrides.window
     },
     isBlacklisted: () => overrides.blacklisted === true,
+    encode: overrides.encode,
     onShot: overrides.onShot ?? (overrides.committed ? (committed) => overrides.committed!.push(committed) : undefined),
     fs: overrides.fs ?? fakeFs()
   })
@@ -266,6 +270,50 @@ describe('证据落定后的旁路（内容来源 D43）', () => {
     })
     const result = await source(request(1))
     expect(result?.shot.path).toBe(join('C:/userData/chain-shots', chainShotFileName(request(1))))
+  })
+})
+
+describe('采集即编码（D44）', () => {
+  it('给了编码器：落盘的是编码后的 JPEG，屏幕流的原 PNG 删掉', async () => {
+    const fs = fakeFs(4_321)
+    const pngPath = `C:/userData/tmp-chain/frame-${at(1)}.png`
+    const jpgPath = `C:/userData/tmp-chain/frame-${at(1)}.jpg`
+    const calls: ChainShotEncodeInput[] = []
+    const encode: ChainShotEncoder = (input) => {
+      calls.push(input)
+      return { imagePath: jpgPath, width: 900, height: 700 }
+    }
+
+    const result = await build({ fs, encode }).source(request(1))
+
+    expect(calls).toEqual([{ imagePath: pngPath, tempDir: 'C:/userData/tmp-chain', at: at(1) }])
+    const expectedPath = join('C:/userData/chain-shots', chainShotFileName(request(1), 'jpg'))
+    expect(result?.shot).toEqual({ path: expectedPath, width: 900, height: 700, bytes: 4_321 })
+    expect(fs.moves).toEqual([[jpgPath, expectedPath]])
+    expect(fs.removed).toEqual([pngPath])
+  })
+
+  it('编码失败：回退原 PNG，证据不丢', async () => {
+    const fs = fakeFs()
+    const pngPath = `C:/userData/tmp-chain/frame-${at(1)}.png`
+    const encode: ChainShotEncoder = () => {
+      throw new Error('解码失败')
+    }
+
+    const result = await build({ fs, encode }).source(request(1))
+
+    const expectedPath = join('C:/userData/chain-shots', chainShotFileName(request(1), 'png'))
+    expect(result?.shot.path).toBe(expectedPath)
+    expect(fs.moves).toEqual([[pngPath, expectedPath]])
+    // 没编码成功就没有可删的临时帧
+    expect(fs.removed).toEqual([])
+  })
+
+  it('没给编码器：还是 PNG（单测 / 老行为不变）', async () => {
+    const fs = fakeFs()
+    const result = await build({ fs }).source(request(1))
+    expect(result?.shot.path).toBe(join('C:/userData/chain-shots', chainShotFileName(request(1))))
+    expect(result?.shot.path?.endsWith('.png')).toBe(true)
   })
 })
 

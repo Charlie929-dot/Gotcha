@@ -73,6 +73,31 @@ export interface ChainShotCommitted {
   framePath: string
 }
 
+/**
+ * 采集即编码（D44）：屏幕流抓到的是 PNG（离屏窗口裁好、放大 2× 后写的），
+ * 这里交给宿主编码成 JPEG 再落盘。
+ *
+ * 为什么在采集时就编码而不是等 7 天后重编码：证据图是 486 KB–6.4 MB 一张，
+ * 触发密度实测 100–426 次/小时，不压的话一天就几百 MB。`decode` 失败时抛错，
+ * 调用方会**回退到原 PNG**（证据比省字节重要）。
+ */
+export interface ChainShotEncodeInput {
+  /** 屏幕流写下的临时帧（PNG） */
+  imagePath: string
+  /** 临时目录（编码结果写这里，随后被 rename 进证据目录） */
+  tempDir: string
+  /** 触发时刻 */
+  at: number
+}
+
+export interface ChainShotEncodedFrame {
+  imagePath: string
+  width: number
+  height: number
+}
+
+export type ChainShotEncoder = (input: ChainShotEncodeInput) => ChainShotEncodedFrame
+
 export interface ChainShotOptions {
   db: ChainDb
   /** 证据截图目录（`<userData>/chain-shots`） */
@@ -82,6 +107,8 @@ export interface ChainShotOptions {
   screen: ChainShotScreen
   getWindow: () => Promise<ChainShotWindow | null>
   isBlacklisted?: (executable: string) => boolean
+  /** 采集即编码（生产注入 `nativeImage`；不给就落原 PNG） */
+  encode?: ChainShotEncoder
   /**
    * 证据落定后的旁路回调（内容来源用）。**不 await**：读取慢（UIA 0.8–4s）不能拖慢抓帧队列；
    * 抛错也只记日志，不影响这张截图是否算数。
@@ -116,8 +143,8 @@ export function sameWindow(segment: SegmentWindow, window: ChainShotWindow): boo
 }
 
 /** 证据文件名：按段开始那天归档，段 / 事件 id 都在名字里，反查不用查库 */
-export function chainShotFileName(request: ShotRequest): string {
-  return join(dayKeyOf(request.at), `s${request.segmentId}-e${request.eventId}-${request.at}.png`)
+export function chainShotFileName(request: ShotRequest, ext: 'png' | 'jpg' = 'png'): string {
+  return join(dayKeyOf(request.at), `s${request.segmentId}-e${request.eventId}-${request.at}.${ext}`)
 }
 
 export function createChainShotSource(options: ChainShotOptions): ShotTaker {
@@ -191,13 +218,44 @@ export function createChainShotSource(options: ChainShotOptions): ShotTaker {
         return null
       }
 
-      const target = join(options.shotsDir, chainShotFileName(request))
+      // 采集即编码（D44）：放在身份复核**之后**——编码要 ~100ms，先复核再编码，
+      // 不至于把「复核 → 落盘」的窗口又拉长。编码失败就落原 PNG，不丢证据。
+      let finalFrame = frame
+      let ext: 'png' | 'jpg' = 'png'
+      if (options.encode) {
+        try {
+          const encoded = options.encode({
+            imagePath: frame.imagePath,
+            tempDir: options.tempDir,
+            at: request.at
+          })
+          if (encoded.imagePath !== frame.imagePath) {
+            finalFrame = encoded
+            ext = 'jpg'
+          }
+        } catch (error) {
+          options.log?.('warn', 'chain shot encode failed: keep original PNG', {
+            segmentId: request.segmentId,
+            error: String(error)
+          })
+        }
+      }
+
+      const target = join(options.shotsDir, chainShotFileName(request, ext))
       fs.mkdirSync(join(options.shotsDir, dayKeyOf(request.at)), { recursive: true })
-      fs.renameSync(frame.imagePath, target)
+      fs.renameSync(finalFrame.imagePath, target)
+      // 编码成功时屏幕流的临时 PNG 还留着，删掉免得 tmp-chain 越积越多
+      if (finalFrame.imagePath !== frame.imagePath) {
+        try {
+          fs.rmSync(frame.imagePath, { force: true })
+        } catch {
+          // 删不掉就留着，启动清理会扫 tmp-chain
+        }
+      }
       const shot = {
         path: target,
-        width: frame.width,
-        height: frame.height,
+        width: finalFrame.width,
+        height: finalFrame.height,
         bytes: fs.statSync(target).size
       }
       // 旁路：内容来源（D43）。放在证据落定之后、不 await——读取慢不能拖慢抓帧队列；

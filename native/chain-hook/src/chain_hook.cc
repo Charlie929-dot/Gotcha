@@ -60,6 +60,17 @@ HWINEVENTHOOK g_winEvent = nullptr;
 HANDLE g_readyEvent = nullptr;
 std::atomic<bool> g_running{false};
 
+// 安装结果：装不上必须让 JS 知道，不能静默变成「跑起来了但一条事件都没有」
+bool g_mouseHookOk = false;
+bool g_winEventOk = false;
+DWORD g_installError = 0;
+
+// 诊断计数：钩子被调了几次、投递成功几次、失败几次（区分「没回调」和「回调了但没到 JS」）
+std::atomic<long> g_mouseCalls{0};
+std::atomic<long> g_foregroundCalls{0};
+std::atomic<long> g_emitOk{0};
+std::atomic<long> g_emitFail{0};
+
 // 移动抽稀状态（钩子线程独占，不必加锁）
 POINT g_lastMovePoint = {0, 0};
 bool g_hasLastMove = false;
@@ -151,13 +162,12 @@ std::string FileDescriptionOf(const std::wstring& path) {
   wchar_t* description = nullptr;
   UINT descriptionSize = 0;
   if (!VerQueryValueW(buffer.data(), key, reinterpret_cast<LPVOID*>(&description), &descriptionSize) ||
-      descriptionSize == 0) {
+      descriptionSize == 0 || description == nullptr) {
     return {};
   }
-  // VerQueryValue 给的是字节数（含结尾的 \0），字符数要除以 2 再减掉结尾
-  size_t chars = static_cast<size_t>(descriptionSize) / sizeof(wchar_t);
-  if (chars > 0) chars -= 1;
-  return ToUtf8(std::wstring(description, chars));
+  // 别用 descriptionSize 算长度：对字符串值它到底是字节还是字符，文档与实测不一致
+  // （记事本这里给的是 4，即「3 字符 + 结尾」，按字节算会截成「记」）。直接用 NUL 结尾。
+  return ToUtf8(std::wstring(description));
 }
 
 /** 应用显示名：FileDescription 优先，回退到 exe 名；两者都没有就空（JS 侧记 null） */
@@ -192,13 +202,17 @@ const char* KindName(EventKind kind) {
 
 void Emit(EventPayload* payload) {
   if (g_tsfn == nullptr || !g_running.load()) {
+    g_emitFail.fetch_add(1);
     delete payload;
     return;
   }
   // 队列满了就丢这条（采集是尽力而为；宁可少一条事件，也不能阻塞钩子线程）
   if (napi_call_threadsafe_function(g_tsfn, payload, napi_tsfn_nonblocking) != napi_ok) {
+    g_emitFail.fetch_add(1);
     delete payload;
+    return;
   }
+  g_emitOk.fetch_add(1);
 }
 
 void SetNumber(napi_env env, napi_value object, const char* key, double value) {
@@ -282,6 +296,7 @@ void EmitForeground(HWND hwnd) {
 }
 
 void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject, LONG idChild, DWORD, DWORD) {
+  g_foregroundCalls.fetch_add(1);
   if (event != EVENT_SYSTEM_FOREGROUND) return;
   if (hwnd == nullptr) return;
   // 前台事件应当只报窗口本身；其它对象的事件直接忽略
@@ -290,6 +305,7 @@ void CALLBACK WinEventProc(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG idObject,
 }
 
 LRESULT CALLBACK MouseProc(int code, WPARAM message, LPARAM data) {
+  g_mouseCalls.fetch_add(1);
   if (code == HC_ACTION) {
     auto* info = reinterpret_cast<MSLLHOOKSTRUCT*>(data);
     if (info != nullptr) {
@@ -357,7 +373,17 @@ void ThreadMain() {
   // 不跳过本进程：用户切到自己（记忆球）的窗口也是一段真实的占用
   g_winEvent = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, WinEventProc, 0, 0,
                                WINEVENT_OUTOFCONTEXT);
-  g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, GetModuleHandleW(nullptr), 0);
+  g_winEventOk = g_winEvent != nullptr;
+  if (!g_winEventOk) g_installError = GetLastError();
+
+  // 低级鼠标钩子的钩子过程在本 DLL（.node）里，hMod 必须是**本模块**的句柄。
+  // 传 GetModuleHandle(nullptr) 拿到的是宿主 exe（node.exe），系统在 exe 里找不到过程 → 安装失败。
+  HMODULE selfModule = nullptr;
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCWSTR>(&MouseProc), &selfModule);
+  g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, selfModule, 0);
+  g_mouseHookOk = g_mouseHook != nullptr;
+  if (!g_mouseHookOk && g_installError == 0) g_installError = GetLastError();
 
   SetEvent(g_readyEvent);
 
@@ -426,10 +452,23 @@ napi_value Start(napi_env env, napi_callback_info info) {
   }
 
   g_readyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  g_installError = 0;
+  g_mouseHookOk = false;
+  g_winEventOk = false;
   g_running.store(true);
   g_thread = std::thread(ThreadMain);
   if (g_readyEvent != nullptr) {
     WaitForSingleObject(g_readyEvent, 5000);
+  }
+
+  // 装不上就等于「永远没有事件」，必须当场报错，别让它看起来像是跑着的
+  if (!g_mouseHookOk && !g_winEventOk) {
+    StopInternal();
+    char message[256];
+    snprintf(message, sizeof(message), "钩子安装失败（Win32 错误码 %lu）：鼠标与前台窗口都没装上",
+             static_cast<unsigned long>(g_installError));
+    napi_throw_error(env, nullptr, message);
+    return nullptr;
   }
   return nullptr;
 }
@@ -437,6 +476,27 @@ napi_value Start(napi_env env, napi_callback_info info) {
 napi_value Stop(napi_env /*env*/, napi_callback_info /*info*/) {
   StopInternal();
   return nullptr;
+}
+
+/** 诊断用：当前钩子状态（`start()` 之后看它是否真装上了） */
+napi_value Status(napi_env env, napi_callback_info /*info*/) {
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_value flag;
+  napi_get_boolean(env, g_mouseHookOk, &flag);
+  napi_set_named_property(env, result, "mouseHook", flag);
+  napi_get_boolean(env, g_winEventOk, &flag);
+  napi_set_named_property(env, result, "foregroundHook", flag);
+  napi_value running;
+  napi_get_boolean(env, g_running.load(), &running);
+  napi_set_named_property(env, result, "running", running);
+  SetNumber(env, result, "lastError", static_cast<double>(g_installError));
+  SetNumber(env, result, "threadId", static_cast<double>(g_threadId));
+  SetNumber(env, result, "mouseCalls", static_cast<double>(g_mouseCalls.load()));
+  SetNumber(env, result, "foregroundCalls", static_cast<double>(g_foregroundCalls.load()));
+  SetNumber(env, result, "emitOk", static_cast<double>(g_emitOk.load()));
+  SetNumber(env, result, "emitFail", static_cast<double>(g_emitFail.load()));
+  return result;
 }
 
 napi_value LastInputTickMs(napi_env env, napi_callback_info /*info*/) {
@@ -454,6 +514,7 @@ napi_value Init(napi_env env, napi_value exports) {
       {"start", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"stop", nullptr, Stop, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"lastInputTickMs", nullptr, LastInputTickMs, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"status", nullptr, Status, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
 

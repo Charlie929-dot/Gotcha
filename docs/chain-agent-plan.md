@@ -119,5 +119,5 @@ Foam 内核是独立 Lit 组件（`src/renderer/foam/foam-graph.ts`，vendored�
 ## 8. 与决策体系的关系
 
 - S1 落地时 mint **D48**（问答代理最小版；§0.1 安全退场一并入册）；S3 接线时更新 **D20**（球点击默认开画布）。
-- 本方案承接旧实施提案仍在册的决策（D31–D35），继承其「找回一等入口」排序与 Evidence or silence 底线；旧指导方案 / 实施提案是否归档由拍板人另行确认，`docs/agent/decisions.md` 在案条目不因归档改动。
+- 本方案承接旧实施提案仍在册的决策（D31–D35），继承其「找回一等入口」排序与 Evidence or silence 底线；旧指导方案 / 实施提案等 7 份方案已归档至 `docs/archive/`（2026-10-27，原路径各留一行占位指向归档副本），`docs/agent/decisions.md` 在案条目不因归档改动。
 - 各阶段交付后 `docs/agent/progress.md` 照常记流水；契约 v0.9 不因本方案改动。

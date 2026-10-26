@@ -14,6 +14,9 @@
  *    `chain-shots/`；留在 tmp 会被启动清理当垃圾删掉（F06）。丢掉的那帧顺手删掉。
  * 4. **不编造**：抓不到 / 校验不过就 `null`，由记录器计入 `droppedShots`，不写半张截图行。
  *
+ * 抓帧尺寸走 `EVIDENCE_CAPTURE_TARGET`（不放大、封顶 1920）：证据图不喂 OCR，
+ * 复制 OCR 那条 2× 放大路径会让「抓帧 → 落盘」成本翻 4 倍以上（2026-10-27 真机卡顿主因之一）。
+ *
  * 抓帧是异步的（几十到几百毫秒），并且**这里自己串行**：同一时刻只允许一次抓帧，
  * 免得两个事件同时向屏幕流要画面、也免得 temp 文件名撞车。调用方（记录器）负责
  * 按事件顺序把结果落库。
@@ -21,6 +24,8 @@
 import { mkdirSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import type { WindowBounds } from '../capture/window-meta'
+import { EVIDENCE_MAX_WIDTH } from '../capture/ocr-scaling'
+import type { CaptureTargetOptions } from '../capture/ocr-scaling'
 import type { ShotRequest, ShotResult, ShotTaker } from '../chain/recorder'
 import { dayKeyOf, type ChainDb } from '../chain/store'
 
@@ -42,8 +47,31 @@ export interface ChainShotFrame {
 }
 
 export interface ChainShotScreen {
-  capture(bounds: WindowBounds, tempDir: string, ts: number): Promise<ChainShotFrame>
+  /**
+   * 抓一帧。第四个参数是**输出尺寸口径**（`ocr-scaling.ts`）：证据图传
+   * `{ upscale: 1, maxWidth: 1920 }`，不复制 OCR 那条 2× 放大路径。
+   */
+  capture(
+    bounds: WindowBounds,
+    tempDir: string,
+    ts: number,
+    target?: CaptureTargetOptions
+  ): Promise<ChainShotFrame>
 }
+
+/**
+ * 证据截图的抓帧口径：**不放大**，超宽窗口缩到 1920（D44 的 warm 档宽度）。
+ *
+ * 证据图不喂 OCR，2× 放大只会让渲染进程多画 4 倍像素、主进程再解码 4 倍大的 PNG 缩回 1920；
+ * 真机 2026-10-27 实测这条 2× 路径是「采集开着时鼠标隔几秒一顿」的主因之一。
+ */
+export const EVIDENCE_CAPTURE_TARGET: CaptureTargetOptions = {
+  upscale: 1,
+  maxWidth: EVIDENCE_MAX_WIDTH
+}
+
+/** 单张证据从抓帧到落盘超过这个时长就记一条 warn（体感边界，不是硬指标） */
+export const SLOW_SHOT_MS = 300
 
 /** 文件操作的注入点（单测用假的，生产用 fs） */
 export interface ChainShotFs {
@@ -116,6 +144,8 @@ export interface ChainShotOptions {
   onShot?: (committed: ChainShotCommitted) => void
   log?: ChainShotLog
   fs?: ChainShotFs
+  /** 时钟（单测注入；默认 `Date.now`），只用于慢抓帧告警 */
+  now?: () => number
 }
 
 /** 段的窗口身份（从库里读，不用段机内存副本——落库的那行才是证据） */
@@ -149,6 +179,7 @@ export function chainShotFileName(request: ShotRequest, ext: 'png' | 'jpg' = 'pn
 
 export function createChainShotSource(options: ChainShotOptions): ShotTaker {
   const fs = options.fs ?? { mkdirSync, renameSync, statSync, rmSync }
+  const now = options.now ?? (() => Date.now())
   let dirsReady = false
   /** 抓帧串行队列：屏幕流同时只服务一次截图 */
   let queue: Promise<unknown> = Promise.resolve()
@@ -194,7 +225,13 @@ export function createChainShotSource(options: ChainShotOptions): ShotTaker {
 
     ensureDirs()
     try {
-      const frame = await options.screen.capture(window.bounds, options.tempDir, request.at)
+      const startedAt = now()
+      const frame = await options.screen.capture(
+        window.bounds,
+        options.tempDir,
+        request.at,
+        EVIDENCE_CAPTURE_TARGET
+      )
 
       // 抓帧要 100–300ms：拍的是「这扇窗所在的屏幕区域」，这期间前台换了就等于拍到了别人的画面。
       // 真机实测踩到过一次（段是 DSH，存下来的却是 Firefox），所以抓完必须再确认一次。
@@ -273,6 +310,18 @@ export function createChainShotSource(options: ChainShotOptions): ShotTaker {
         } catch (error) {
           options.log?.('warn', 'chain shot: content hook failed', { error: String(error) })
         }
+      }
+      // 慢抓帧留痕：这条日志是「采集是否拖慢机器」的唯一观测点（不是硬指标，只用来回看）
+      const elapsed = now() - startedAt
+      if (elapsed >= SLOW_SHOT_MS) {
+        options.log?.('warn', 'chain shot slow', {
+          segmentId: request.segmentId,
+          eventId: request.eventId,
+          ms: elapsed,
+          width: shot.width,
+          height: shot.height,
+          bytes: shot.bytes
+        })
       }
       return {
         shot,

@@ -832,6 +832,9 @@ function createSession(): Promise<CaptureSession> {
  * 采集即编码（D44）：屏幕流给的 PNG（窗口裁好、为 OCR 放大 2×）→ JPEG q85 原分辨率。
  * 实测 6.4× 省字节、OCR 还能读出 99.6% 的字（`chain/retention.ts` 的标定表）。
  * 解码失败就抛错，抓帧侧会回退到原 PNG——不为了省字节丢证据。
+ *
+ * 证据截图的 PNG 已经是 `upscale: 1, maxWidth: 1920`（`chain-shot.ts` 的
+ * `EVIDENCE_CAPTURE_TARGET`）：这里不再面对放大后的 5120 宽大图，解码量小一个量级。
  */
 function encodeChainShotJpeg(input: { imagePath: string; tempDir: string; at: number }): {
   imagePath: string

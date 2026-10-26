@@ -15,6 +15,7 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isCaptureFrameRequest } from './display-media'
 import { dHash, rgbaToGray } from './frame-diff'
+import type { CaptureTargetOptions } from './ocr-scaling'
 import {
   computeCaptureGeometry,
   DIFF_HEIGHT,
@@ -116,11 +117,21 @@ export class ScreenCapture {
     await this.ensureStream(toDisplayInfo(screen.getPrimaryDisplay()))
   }
 
-  /** 抓当前前台窗口区域；失败抛错由管线计 capture_errors */
-  async capture(bounds: WindowBounds, tempDir: string, ts: number): Promise<CapturedFrame> {
+  /**
+   * 抓当前前台窗口区域；失败抛错由管线计 capture_errors。
+   *
+   * `target` 决定输出尺寸：不传 = OCR 口径（2× 放大、封顶 3840）；信息链证据图传
+   * `{ upscale: 1, maxWidth: 1920 }`——证据图不喂 OCR，放大只多花几倍像素与编码时间。
+   */
+  async capture(
+    bounds: WindowBounds,
+    tempDir: string,
+    ts: number,
+    target?: CaptureTargetOptions
+  ): Promise<CapturedFrame> {
     const display = this.displayFor(bounds)
     let info = await this.ensureStream(display)
-    let geometry = computeCaptureGeometry(bounds, display, info)
+    let geometry = computeCaptureGeometry(bounds, display, info, undefined, target)
     let result: GrabResult
     try {
       result = await this.grab(geometry)
@@ -128,7 +139,7 @@ export class ScreenCapture {
       // 流可能已结束（锁屏 / 显示切换）：丢弃流状态后重建一次
       this.stream = null
       info = await this.ensureStream(display)
-      geometry = computeCaptureGeometry(bounds, display, info)
+      geometry = computeCaptureGeometry(bounds, display, info, undefined, target)
       result = await this.grab(geometry)
     }
 

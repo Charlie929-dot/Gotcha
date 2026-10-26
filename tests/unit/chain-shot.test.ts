@@ -8,6 +8,7 @@ import {
   chainShotFileName,
   createChainShotSource,
   sameWindow,
+  SLOW_SHOT_MS,
   type ChainShotCommitted,
   type ChainShotEncodeInput,
   type ChainShotEncoder,
@@ -90,8 +91,15 @@ function build(overrides: {
   committed?: ChainShotCommitted[]
   onShot?: (committed: ChainShotCommitted) => void
   encode?: ChainShotEncoder
+  log?: (level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>) => void
+  now?: () => number
 } = {}) {
-  const captured: Array<{ bounds: unknown; tempDir: string; ts: number }> = []
+  const captured: Array<{
+    bounds: unknown
+    tempDir: string
+    ts: number
+    target?: { upscale?: number; maxWidth?: number }
+  }> = []
   const sequence = overrides.windows ?? null
   let step = 0
   const source = createChainShotSource({
@@ -99,8 +107,8 @@ function build(overrides: {
     shotsDir: 'C:/userData/chain-shots',
     tempDir: 'C:/userData/tmp-chain',
     screen: {
-      capture: async (bounds, tempDir, ts) => {
-        captured.push({ bounds, tempDir, ts })
+      capture: async (bounds, tempDir, ts, target) => {
+        captured.push({ bounds, tempDir, ts, target })
         if (overrides.capture) return await overrides.capture()
         return { imagePath: `C:/userData/tmp-chain/frame-${ts}.png`, width: 1_000, height: 800 }
       }
@@ -115,6 +123,8 @@ function build(overrides: {
     },
     isBlacklisted: () => overrides.blacklisted === true,
     encode: overrides.encode,
+    log: overrides.log,
+    now: overrides.now,
     onShot: overrides.onShot ?? (overrides.committed ? (committed) => overrides.committed!.push(committed) : undefined),
     fs: overrides.fs ?? fakeFs()
   })
@@ -131,6 +141,8 @@ describe('事件触发现抓一帧', () => {
 
     expect(captured).toHaveLength(1)
     expect(captured[0]).toMatchObject({ bounds: WINDOW.bounds, tempDir: 'C:/userData/tmp-chain', ts: at(1) })
+    // 证据图走「不放大、封顶 1920」的口径，不复制 OCR 那条 2× 路径
+    expect(captured[0].target).toEqual({ upscale: 1, maxWidth: 1920 })
     expect(result?.shot).toEqual({
       path: expectedPath,
       width: 1_000,
@@ -141,6 +153,41 @@ describe('事件触发现抓一帧', () => {
     expect(fs.moves).toEqual([[`C:/userData/tmp-chain/frame-${at(1)}.png`, expectedPath]])
     expect(expectedPath).toContain('2026-10-26')
     expect(expectedPath).toContain('s1-e7-')
+  })
+
+  it('单张从抓帧到落盘超过 300ms 记一条 warn（回看采集是否拖慢机器）', async () => {
+    const logs: Array<{ level: string; msg: string; data?: Record<string, unknown> }> = []
+    let clock = 1_000
+    const { source } = build({
+      log: (level, msg, data) => logs.push({ level, msg, data }),
+      now: () => clock,
+      capture: async () => {
+        clock += SLOW_SHOT_MS + 50
+        return { imagePath: `C:/userData/tmp-chain/frame-${at(1)}.png`, width: 1_920, height: 1_080 }
+      }
+    })
+
+    expect((await source(request(1)))?.shot.width).toBe(1_920)
+    const slow = logs.filter((entry) => entry.msg === 'chain shot slow')
+    expect(slow).toHaveLength(1)
+    expect(slow[0].level).toBe('warn')
+    expect(slow[0].data).toMatchObject({ segmentId, eventId: 7, ms: SLOW_SHOT_MS + 50 })
+  })
+
+  it('正常速度不记慢日志（日志只在超阈值时出现，不刷屏）', async () => {
+    const logs: Array<{ level: string; msg: string }> = []
+    let clock = 5_000
+    const { source } = build({
+      log: (level, msg) => logs.push({ level, msg }),
+      now: () => clock,
+      capture: async () => {
+        clock += 40
+        return { imagePath: `C:/userData/tmp-chain/frame-${at(1)}.png`, width: 1_000, height: 800 }
+      }
+    })
+
+    await source(request(1))
+    expect(logs.filter((entry) => entry.msg === 'chain shot slow')).toHaveLength(0)
   })
 
   it('前台已经切走：不拍，返回 null（错证据比没证据更糟）', async () => {

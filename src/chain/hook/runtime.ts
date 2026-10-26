@@ -12,7 +12,7 @@ import type { ChainDb } from '../store'
 import { ensureChainSchema } from '../schema'
 import { finalizeAbandonedSegments } from '../store'
 import { ChainSegmenter, type ChainAction, type ChainInput, type SegmenterOptions } from '../segmenter'
-import { ChainRecorder, type RecorderOutcome, type ShotTaker, type ShotStats } from '../recorder'
+import { ChainRecorder, type ContentPayload, type RecorderOutcome, type ShotTaker, type ShotStats } from '../recorder'
 import { DesktopEventAdapter, type AdapterOptions } from './adapter'
 import type { DesktopEventSource, RawDesktopEvent, SourceInfo } from './types'
 
@@ -104,6 +104,14 @@ export class ChainRuntime {
    */
   drain(): Promise<void> {
     return this.recorder.drain()
+  }
+
+  /**
+   * 内容车道读回来时补写（v0.6）：按段 id 写回，段可能已经收口。
+   * 内容读取比抓帧慢，所以它不能等「当前开着的段」——那可能已经是下一扇窗了。
+   */
+  recordContentFor(segmentId: number, capturedAt: number, payload: ContentPayload): boolean {
+    return this.recorder.recordContentFor(segmentId, capturedAt, payload)
   }
 
   get stats(): ChainRuntimeStats {

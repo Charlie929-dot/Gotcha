@@ -197,6 +197,15 @@ export class ChainRecorder {
     return written
   }
 
+  /**
+   * 按段 id 补写一条内容（v0.6：内容读取比抓帧慢，读回来时段可能已经收口）。
+   * 写回**触发那一刻的那一段**，不写进当前开着的段——内容属于它被读的那扇窗的时刻，
+   * 不属于「后来切过去的那扇窗」。时刻早于段开始 / 晚于段结束会抛错（由调用方计入失败）。
+   */
+  recordContentFor(segmentId: number, capturedAt: number, payload: ContentPayload): boolean {
+    return this.writeContent(segmentId, capturedAt, payload)
+  }
+
   /** 异步采图的落定账（在途 / 已落行 / 没拍到 / 写库失败） */
   get shotStats(): ShotStats {
     return { pending: this.pendingShots, ...this.settled }

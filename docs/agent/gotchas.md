@@ -131,6 +131,12 @@
 | 用桌面自动化工具验证信息链会污染段 | 2026-10-26 用 `bring_to_front` / 带 `delivery_mode:foreground` 的点击验证：每次都会先 `SetForegroundWindow` 再恢复，于是 shell 的 explorer「任务切换」窗口与 `textinputhost`（Windows 输入体验）反复成为前台 → 库里冒出一堆 5–700ms 的瞬时段，看起来像链在乱切段 | 真机验证用**真实 SendInput**（`SetCursorPos` + `mouse_event`，不要先改前台焦点，见 `.tmp` 里的临时脚本做法），并且知道这些瞬时段是**自动化副作用**。产品侧是否过滤「IME / 任务切换 / 可见区域 0×0」的窗口**还没拍板**（D42 第 ⑥ 条） |
 | `keybd_event` 发 `Alt+P` 不触发 Electron `globalShortcut` | 2026-10-26：只给虚拟键码（`keybd_event(0x12, 0, ...)`）时热键没反应，日志里看不到暂停；补上 `MapVirtualKey` 算出的扫描码后正常暂停（`chain recording stopped {"pending":0,...}`） | 合成热键要同时给 vk 与 scan code，并且按下 / 抬起成对（别残留修饰键）。验证暂停语义时用它，别拿「点了没反应」当功能坏了 |
 | 信息链截图与旧采集管线共用同一份屏幕流 | 2026-10-26：`ScreenCapture` 是进程级单例，旧管线 `dispose()` 会销毁隐藏窗口；链的现抓帧在暂停边界上（`stopping` → drain）可能撞上流已释放，表现为 `chain shot failed` | 抓帧失败按「没拍到」计入 `droppedShots`，不写行、不编造；暂停时最多丢掉在途那一张（`drain()` 只保证已经抓到的落库）。要彻底消除就等「屏幕流生命周期独立于旧管线」那一步 |
+| UIA 读文本必须**超时杀子进程**，不能只拒请求 | 2026-10-26：UIA 在巨树 / 卡死窗口上会永久挂住（探针实测 firefox 近 8 千元素 2–4s，个别窗口 10s 不完）。只 `reject` 在途请求、不杀子进程时，卡住的那次调用永远占着 stdout，后续每次请求都排队等死——表现为「内容来源整体坏掉」（读不到、也不报错） | `PowerShellJsonWorker` 单次请求超时（UIA 用 3s）后**先 kill 子进程**再进 5s 重启冷却；判据是「读数一直没回来且日志里没有 `content:` 行」。别把超时调大来「解决」——那只是把卡死推迟到下一张证据 |
+| Chromium / Electron 的首轮 UIA 树常偏薄 | 2026-10-26：同一 DSH 窗口一次读到 13 元素 / 34 字符，紧接着再读 330 元素 / 17k 字符；Firefox（原生 XUL）首读就 100k 字符。按 200 字符阈值判定时，首读会落到 OCR 兜底 | 这是兜底存在的理由，不是 UIA 坏了（见上一条「依赖可访问性开关」）。别因此加「重试一次 UIA」的规则：15s 节流后下一轮自然会读到全量；首帧的证据图本来就在，OCR 兜底是正路 |
+| UIA 里输入框的正文在 `ValuePattern`，不在 `Name` | 2026-10-26：只缓存 `Name` 时 Edit 控件读出来是空串（聊天框 / 地址栏 / 搜索框全丢），而正文明明在屏幕上 | 对 `ControlType == Edit` 的元素单独 `GetCurrentPattern(ValuePattern)` 取值（每个 Edit 一次 RPC，只在 Edit 上做，不要全树做）；`IsPassword` 的元素先跳过再取，一个字符都不取 |
+| 内容读取不能塞进抓帧的串行队列 | 2026-10-26：抓帧冷却 2s、UIA 单次 0.8–4s。若在同一个串行队列里读文本，一次巨树读取会让后面每张证据都晚 1–4s；晚到的帧在前台切走后会被身份校验丢掉——**内容把证据拖垮了** | 分车道：`chain-shot` 落定后只 `onShot(committed)` 通知（不 await），内容在 `main/chain-content.ts` 自己的串行车道里读。证据优先，内容随后；`drain()` 时两条车道都要等 |
+| 内容写回要按**段 id**，不能写进「当前开着的段」 | 2026-10-26：UIA / OCR 读回来要 1s+，这期间用户可能已经切走、段已收口或换了新段；按「当前段」写会把 A 窗口的正文塞进 B 的段里 | `ChainRecorder.recordContentFor(segmentId, capturedAt, payload)`：写回**触发那一刻**那一段，`capturedAt` 用触发事件时刻（落在段区间内，存储层校验能过）。读回时目标段已收口是正常情况，不是错误；写进别的段才是错 |
+| OCR 的指纹去重几乎永远不触发 | 2026-10-26 真机：同一页（Obsidian）四次 OCR 分别 397 / 640 / 393 / 460 字符——WinRT OCR 每次断行 / 错字都不同，`contentHash`（去空白后的 sha256）因此很少撞上，`duplicates` 长期接近 0，同一页面反复 OCR 会重复占字节（本轮 6 条内容里 5 条 OCR 全都落行） | 这不是 bug，是 OCR 的固有噪声：别把 `duplicates≈0` 当「去重坏了」，也别拿它反推「内容在变」。要真去重得在 OCR 侧做模糊相似（或先用 UIA 做正文比对）；属后续优化项，本轮验收不含。UIA 路径的指纹去重是有效的（正文没变就不落行） |
 
 ## 规则
 

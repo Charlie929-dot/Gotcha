@@ -241,6 +241,37 @@ describe('假事件源跑通整条链', () => {
     )
   })
 
+  it('按段 id 补写：读回时段已收口也写得进去，且写回原段不串到当前段', () => {
+    const { feed, flush, recorder } = wire(fakeShot())
+    feed([focus(0, 1, 'A'), click(5)])
+    flush(10)
+    const [first] = querySegments(db)
+
+    // 阅读慢：读回来时已经切到下一段（B 开着）
+    feed([focus(20, 2, 'B')])
+    const open = recorder.currentSegmentId
+    expect(open).not.toBe(first.id)
+
+    expect(
+      recorder.recordContentFor(first.id, at(5), { source: 'uia', text: 'A 的正文' })
+    ).toBe(true)
+
+    // 入场帧自带的那条内容还在，新读到的追加在后面
+    expect(getSegmentDetail(db, first.id)?.contents.map((row) => row.text)).toContain('A 的正文')
+    // 读回来的是 A 的内容，不许塞进当前开着的 B
+    expect(getSegmentDetail(db, open!)?.contents.map((row) => row.text)).not.toContain('A 的正文')
+  })
+
+  it('按段 id 补写：时刻落在段区间外会抛错（由调用方记失败，不悄悄写脏行）', () => {
+    const { feed, flush, recorder } = wire(fakeShot())
+    feed([focus(0, 1, 'A')])
+    flush(10)
+    const [segment] = querySegments(db)
+    expect(() =>
+      recorder.recordContentFor(segment.id, at(99), { source: 'uia', text: '未来的正文' })
+    ).toThrow('晚于段结束')
+  })
+
   it('段收口后能接着开下一段，事件不串段', () => {
     const { feed, flush } = wire(fakeShot())
     feed([focus(0, 1, 'A'), click(5)])

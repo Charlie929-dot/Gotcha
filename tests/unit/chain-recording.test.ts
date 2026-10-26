@@ -8,6 +8,7 @@ import { NativeDesktopSource } from '../../src/chain/hook/native'
 import {
   createChainRecording,
   loadChainEventSource,
+  type ChainContentWiring,
   type ChainRecordingHandle
 } from '../../src/main/chain-recording'
 import type { ChainShotFs, ChainShotWindow } from '../../src/main/chain-shot'
@@ -77,7 +78,13 @@ function fakeFs(size = 4_096): ChainShotFs & { moves: Array<[string, string]> } 
   }
 }
 
-function build(options: { source?: DesktopEventSource | null; window?: () => Promise<ChainShotWindow | null> } = {}) {
+function build(
+  options: {
+    source?: DesktopEventSource | null
+    window?: () => Promise<ChainShotWindow | null>
+    content?: ChainContentWiring
+  } = {}
+) {
   let frameTs = 0
   const shots: ShotStats[] = []
   const handle = createChainRecording({
@@ -94,6 +101,7 @@ function build(options: { source?: DesktopEventSource | null; window?: () => Pro
     now: () => at(60),
     getWindow: options.window ?? (async () => WINDOW),
     isBlacklisted: () => false,
+    content: options.content,
     log: (_level, _msg, data) => {
       if (data && typeof data.shots === 'object' && data.shots !== null) {
         shots.push(data.shots as ShotStats)
@@ -216,5 +224,119 @@ describe('信息链接进采集开关', () => {
     const { handle }: { handle: ChainRecordingHandle } = build()
     expect(handle.status().shots).toBeNull()
     expect(handle.status().source).toMatchObject({ kind: 'fake' })
+  })
+})
+
+describe('内容来源接进采集（D43）', () => {
+  it('证据落定后读文本并写进 chain_content；16s 内同段第二张被节流', async () => {
+    const reads: Array<{ hwnd: number; executable: string; framePath: string | null }> = []
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      content: {
+        createReader: () => ({
+          read: async (input) => {
+            reads.push(input)
+            return { source: 'uia', text: '正文 A' }
+          },
+          dispose: async () => {}
+        })
+      }
+    })
+    handle.start()
+    source.emit(foreground(0))
+    source.emit(click(5))
+    await handle.stop()
+
+    // 时钟固定在 at(60)：第一张入场帧读了，点击帧落在 15s 节流窗口内
+    expect(reads).toHaveLength(1)
+    expect(reads[0]).toMatchObject({ hwnd: WINDOW.hwnd, executable: WINDOW.executable })
+    expect(reads[0]?.framePath).toContain('chain-shots')
+
+    const [segment] = querySegments(db)
+    const contents = getSegmentDetail(db, segment.id)?.contents ?? []
+    expect(contents).toHaveLength(1)
+    expect(contents[0]).toMatchObject({ source: 'uia', text: '正文 A', captured_at: at(0) })
+    expect(handle.status().content).toMatchObject({ queued: 1, inserted: 1, throttled: 1 })
+  })
+
+  it('关掉节流后每张证据都读；正文没变只落一行（指纹去重）', async () => {
+    let calls = 0
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      content: {
+        minIntervalMs: 0,
+        createReader: () => ({
+          read: async () => {
+            calls += 1
+            return { source: 'uia', text: '同一段里没变的正文' }
+          },
+          dispose: async () => {}
+        })
+      }
+    })
+    handle.start()
+    source.emit(foreground(0))
+    source.emit(click(5))
+    await handle.stop()
+
+    expect(calls).toBe(2)
+    const [segment] = querySegments(db)
+    expect(getSegmentDetail(db, segment.id)?.contents).toHaveLength(1)
+    expect(handle.status().content).toMatchObject({ queued: 2, inserted: 1, duplicates: 1 })
+  })
+
+  it('读不回来：不写内容行，截图照记', async () => {
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      content: {
+        createReader: () => ({
+          read: async () => null,
+          dispose: async () => {}
+        })
+      }
+    })
+    handle.start()
+    source.emit(foreground(0))
+    source.emit(click(5))
+    await handle.stop()
+
+    const [segment] = querySegments(db)
+    expect(getSegmentDetail(db, segment.id)?.contents).toHaveLength(0)
+    expect(getSegmentDetail(db, segment.id)?.shots).toHaveLength(2)
+    expect(handle.status().content).toMatchObject({ empty: 1 })
+  })
+
+  it('stop 会关掉读取链（PowerShell 子进程不留在后台）', async () => {
+    let disposed = 0
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      content: {
+        createReader: () => ({
+          read: async () => ({ source: 'uia', text: '正文' }),
+          dispose: async () => {
+            disposed += 1
+          }
+        })
+      }
+    })
+    handle.start()
+    source.emit(foreground(0))
+    await handle.stop()
+    expect(disposed).toBe(1)
+  })
+
+  it('不给内容来源：内容列是 null，不读也不写', async () => {
+    const source = new FakeSource()
+    const { handle } = build({ source })
+    handle.start()
+    source.emit(foreground(0))
+    await handle.stop()
+    expect(handle.status().content).toBeNull()
+    const [segment] = querySegments(db)
+    expect(getSegmentDetail(db, segment.id)?.contents).toHaveLength(0)
   })
 })

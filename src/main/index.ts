@@ -764,15 +764,20 @@ function registerTimelineIpc(): void {
   })
 }
 
+/** PowerShell 脚本资源路径（打包后在 `resources/<dir>`，开发态在仓库 `resources/<dir>`） */
+function scriptResourcePath(dir: string, file: string): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, dir, file)
+    : join(app.getAppPath(), 'resources', dir, file)
+}
+
 /** 采集会话装配（仅 --capture / GOTCHA_CAPTURE=1 或显式开启时进入；默认暂停时连库都不开） */
 function createSession(): Promise<CaptureSession> {
   ensureLog()
   const userDataDir = app.getPath('userData')
   const devServerUrl = process.env['ELECTRON_RENDERER_URL']
   const captureHtmlPath = join(__dirname, '../renderer/capture.html')
-  const ocrScript = app.isPackaged
-    ? join(process.resourcesPath, 'ocr', 'winrt-ocr.ps1')
-    : join(app.getAppPath(), 'resources', 'ocr', 'winrt-ocr.ps1')
+  const ocrScript = scriptResourcePath('ocr', 'winrt-ocr.ps1')
 
   return createCaptureSession({
     userDataDir,
@@ -822,7 +827,12 @@ function ensureChainRecording(): ChainRecordingHandle | null {
     source,
     screen: screenCapture ?? undefined,
     userDataDir: app.getPath('userData'),
-    log: captureLog
+    log: captureLog,
+    // 内容来源（D43）：UIA 优先、OCR 兜底。脚本缺失 / 工作器起不来都会降级成「留空」，不会崩
+    content: {
+      uiaScript: scriptResourcePath('chain', 'uia-text.ps1'),
+      ocrScript: scriptResourcePath('ocr', 'winrt-ocr.ps1')
+    }
   })
   return chainRecording
 }

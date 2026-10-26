@@ -2,7 +2,7 @@
 
 > **项目**：常驻 Windows 桌面边缘的记忆球——记录屏幕使用，沉淀成可探索的记忆，找东西时提示「这个你之前见过」。自用；不做密钥管理、云同步、多端、通用截图工具（策划案 §四、§十）。
 > **阶段**：M1a ✅ M1b ✅；M2「时刻—主题」图谱管线 🧊 冻结（D38）；现做「信息链 + 独立个人记忆」。里程碑与交付流水看 `docs/agent/progress.md`，与 git 实况冲突时以 git 为准。
-> **事实源**：新方向看 `docs/information-chain-direction.md`（概念）与 `docs/information-chain-contract.md`（v0.9，表结构与不变量）；采集 / 隐私 / 出云 / 悬浮球看 `记忆球-产品策划案.md`、`记忆球-产品技术方案.md`（其中「时刻—主题 / 图谱 / 分层归纳」已冻结，冲突先问拍板人）。
+> **事实源**：新方向看 `docs/information-chain-direction.md`（概念）与 `docs/information-chain-contract.md`（v0.9，表结构与不变量）；消费端（问记忆 / 画布）看 `docs/chain-agent-plan.md`（S1–S5 实施方案）；采集 / 隐私 / 出云 / 悬浮球看 `记忆球-产品策划案.md`、`记忆球-产品技术方案.md`（其中「时刻—主题 / 图谱 / 分层归纳」已冻结，冲突先问拍板人）。
 
 ## 开工门（最优先，违反就是 bug）
 

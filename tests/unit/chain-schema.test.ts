@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
+  CHAIN_META_TABLE,
+  CHAIN_SCHEMA_VERSION,
   CHAIN_TABLES,
   ensureChainSchema,
   type ChainSegmentRow,
@@ -48,13 +50,48 @@ function segment(overrides: Partial<ChainSegmentRow> = {}): ChainSegmentRow {
 }
 
 describe('ensureChainSchema', () => {
-  it('建出八张表，且重复执行幂等', () => {
+  it('建出契约的八张表 + 版本记账表，且重复执行幂等', () => {
     const database = open()
     ensureChainSchema(database)
     const names = database
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'chain_%' ORDER BY name")
       .all() as Array<{ name: string }>
-    expect(names.map((row) => row.name)).toEqual([...CHAIN_TABLES].sort())
+    expect(names.map((row) => row.name)).toEqual([...CHAIN_TABLES, CHAIN_META_TABLE].sort())
+  })
+
+  it('新建库把自己的结构版本记成当前版本（幂等，不覆盖成 0）', () => {
+    const database = open()
+    ensureChainSchema(database)
+    const version = () =>
+      (
+        database.prepare("SELECT value FROM chain_meta WHERE key = 'schema_version'").get() as {
+          value: string
+        }
+      ).value
+    expect(version()).toBe(String(CHAIN_SCHEMA_VERSION))
+    ensureChainSchema(database)
+    expect(version()).toBe(String(CHAIN_SCHEMA_VERSION))
+  })
+
+  it('库的结构版本高于程序：拒绝启动，不让旧程序往新库里写', () => {
+    const database = open()
+    database
+      .prepare("UPDATE chain_meta SET value = ? WHERE key = 'schema_version'")
+      .run(String(CHAIN_SCHEMA_VERSION + 1))
+    expect(() => ensureChainSchema(database)).toThrow(/高于本程序支持/)
+  })
+
+  it('版本落后但没写迁移步骤：抛错而不是假装迁移成功', () => {
+    const database = open()
+    // 1 → 0 是假想的老库：当前没有 v1 迁移步骤，必须响错
+    database.prepare("UPDATE chain_meta SET value = '0' WHERE key = 'schema_version'").run()
+    expect(() => ensureChainSchema(database)).toThrow(/缺少 chain v0 → v1 的迁移步骤/)
+  })
+
+  it('版本账本内容非法：响错', () => {
+    const database = open()
+    database.prepare("UPDATE chain_meta SET value = 'abc' WHERE key = 'schema_version'").run()
+    expect(() => ensureChainSchema(database)).toThrow(/schema_version 非法/)
   })
 
   it('不碰旧表：只建 chain_ 前缀', () => {

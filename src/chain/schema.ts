@@ -1,9 +1,11 @@
 /**
- * 信息链 · 表结构（`docs/information-chain-contract.md` v0.3）
+ * 信息链 · 表结构（`docs/information-chain-contract.md` v0.5）
  *
  * 只建新表（`chain_` 前缀），不动旧表，不迁移旧数据（D38）。
- * 所有 DDL 带 IF NOT EXISTS，重复执行幂等；本模块不接入应用启动流程，
- * 由调用方显式执行 `ensureChainSchema(db)`（第一版只被单测调用）。
+ * 所有 DDL 带 IF NOT EXISTS，重复执行幂等；**已接进应用启动**（`main/chain-recording.ts`），
+ * 所以从这里开始「改 DDL 必须带迁移」：`CREATE TABLE IF NOT EXISTS` 不会给老库补列 / 改 CHECK
+ * （gotchas「改 chain_*.DDL 不会改到已有库」），因此另有 `chain_meta.schema_version` 记账 +
+ * `CHAIN_MIGRATIONS` 迁移表（见文件末尾）。
  *
  * 证据层（段 / 事件 / 截图）只 INSERT；派生层（标签 / 双链 / 向量）可全删重建。
  *
@@ -160,18 +162,83 @@ export const CHAIN_TABLES = [
 
 export type ChainTable = (typeof CHAIN_TABLES)[number]
 
-/** 建表的最小 db 形状（只用到 exec，便于单测注入） */
+/** 版本记账表（不属于契约 §2 的数据表，只存 `schema_version`） */
+export const CHAIN_META_TABLE = 'chain_meta'
+
+export const CHAIN_META_DDL = `
+CREATE TABLE IF NOT EXISTS chain_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`
+
+/**
+ * 信息链自己的结构版本。**改任何 chain_ DDL 都要同时**：
+ * ① 把这里 +1；② 在 `CHAIN_MIGRATIONS` 里补「旧版本 → 新版本」那一步（老库靠它补列 / 重建）。
+ * 忘了的后果是静默：老库缺列，插入直接报 `no column named`（gotchas 记过这条）。
+ */
+export const CHAIN_SCHEMA_VERSION = 1
+
+/** 版本 → 迁移步骤。`CHAIN_MIGRATIONS[n]` 负责把 v(n-1) 的库改成 v(n) */
+export const CHAIN_MIGRATIONS: Record<number, (db: ChainSchemaDb) => void> = {}
+
+/** 建表 / 版本记账需要的最小 db 形状（只用到 exec / prepare） */
 export interface ExecutableDb {
   exec(sql: string): unknown
 }
 
+export interface ChainSchemaDb extends ExecutableDb {
+  prepare(sql: string): {
+    get(...params: unknown[]): unknown
+    run(...params: unknown[]): unknown
+  }
+}
+
+const SCHEMA_VERSION_KEY = 'schema_version'
+
 /**
- * 幂等建表。**不触碰旧表、不写数据、不改 schema_version**——
- * 版本管理等接线应用启动时再统一处理（见契约 §4）。
+ * 幂等建表 + 版本记账。**不触碰旧表、不写业务数据**（只用 `chain_meta` 记自己的版本）。
+ *
+ * - 新建库（没有记账行）：DDL 已经把结构建成当前版本，直接记成 `CHAIN_SCHEMA_VERSION`；
+ * - 已有记账行：低于当前版本就按 `CHAIN_MIGRATIONS` 逐步迁移，再做一次幂等建表；
+ * - 高于当前版本：拒绝启动（别让旧程序往新结构的库里写）。
  */
-export function ensureChainSchema(db: ExecutableDb): void {
+export function ensureChainSchema(db: ChainSchemaDb): void {
   for (const ddl of CHAIN_SCHEMA_DDLS) db.exec(ddl)
   for (const ddl of CHAIN_INDEX_DDLS) db.exec(ddl)
+  db.exec(CHAIN_META_DDL)
+
+  const row = db.prepare('SELECT value FROM chain_meta WHERE key = ?').get(SCHEMA_VERSION_KEY) as
+    | { value: string }
+    | undefined
+  if (!row) {
+    db.prepare('INSERT INTO chain_meta (key, value) VALUES (?, ?)').run(
+      SCHEMA_VERSION_KEY,
+      String(CHAIN_SCHEMA_VERSION)
+    )
+    return
+  }
+
+  const current = Number(row.value)
+  if (!Number.isInteger(current) || current < 0) {
+    throw new Error(`chain_meta.schema_version 非法：${row.value}`)
+  }
+  if (current > CHAIN_SCHEMA_VERSION) {
+    throw new Error(
+      `信息链表结构版本 ${current} 高于本程序支持的 ${CHAIN_SCHEMA_VERSION}，请升级应用后再启动`
+    )
+  }
+  for (let version = current; version < CHAIN_SCHEMA_VERSION; version += 1) {
+    const migrate = CHAIN_MIGRATIONS[version + 1]
+    if (!migrate) throw new Error(`缺少 chain v${version} → v${version + 1} 的迁移步骤`)
+    migrate(db)
+  }
+  if (current !== CHAIN_SCHEMA_VERSION) {
+    db.prepare('UPDATE chain_meta SET value = ? WHERE key = ?').run(
+      String(CHAIN_SCHEMA_VERSION),
+      SCHEMA_VERSION_KEY
+    )
+  }
 }
 
 /** 事件类型（与 DDL 的 CHECK 一致） */

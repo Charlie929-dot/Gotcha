@@ -385,6 +385,11 @@ void ThreadMain() {
   g_mouseHookOk = g_mouseHook != nullptr;
   if (!g_mouseHookOk && g_installError == 0) g_installError = GetLastError();
 
+  // 启动即报一次当前前台：钩子只报「变化」，不补这一条的话，用户不切窗口就永远没有段
+  // （真机验证时踩到：应用起来后一直停在 Firefox，库里一个段都没有）。
+  HWND initial = GetForegroundWindow();
+  if (initial != nullptr) EmitForeground(initial);
+
   SetEvent(g_readyEvent);
 
   while (g_running.load()) {

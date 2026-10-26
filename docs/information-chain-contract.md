@@ -1,9 +1,10 @@
-# 信息链契约 v0.4（提案，待拍板）
+# 信息链契约 v0.5（提案，待拍板）
 
 > 状态：**提案**。拍板后本文件成为 `src/chain/` 的实现依据。
-> v0.4（2026-10-26）：存储与查询层落地（`src/chain/store.ts` / `src/chain/recorder.ts`），据此定下三处实现细节：**段行两期落定**（§2.1）、**`typing` 事件与截图来源**（§2.2 / §2.3）、**每张截图都挂在锚点事件上**。§5.2 的键盘规则已落定并写进代码（停顿 3s 补采）。系统钩子仍未接入。
+> v0.5（2026-10-26）：**接进应用启动 + 真实截图落地**（D42）。截图来源定为「**事件触发时现抓一帧**」（否决「复用采集管线 ≤2s 旧帧」：证据会错位），并因此补三条纪律：**抓帧前后各校验一次窗口身份**、**原生层启动补报一次当前前台**（钩子只报变化，不补就永远没有段）、**采图回调允许异步**（记录器串行落库 + `drain()` 等在途）。§2.3 / §5.0 / §6 同步。
+> v0.4（2026-10-26）：存储与查询层落地（`src/chain/store.ts` / `src/chain/recorder.ts`），据此定下三处实现细节：**段行两期落定**（§2.1）、**`typing` 事件与截图来源**（§2.2 / §2.3）、**每张截图都挂在锚点事件上**。§5.2 的键盘规则已落定并写进代码（停顿 3s 补采）。
 > v0.3（2026-10-26）：§5 六项全部落定（空闲即停采、视频不采、内容变化率整项砍掉、保留策略按重编码三级）。
-> 依据：D38（方向：冻结旧时刻—主题管线）、D39（段与空闲语义）、D40（段行两期落定）、探针实测（`docs/chain-probe.md`）。
+> 依据：D38（方向：冻结旧时刻—主题管线）、D39（段与空闲语义）、D40（段行两期落定）、D41（传输方式）、D42（接线与截图来源）、探针实测（`docs/chain-probe.md`）。
 > 概念出处：`docs/information-chain-direction.md`（窗口球 / 双链球 / 事件点 / 证据截图）。
 > 这份契约只回答「数据长什么样、什么不许变」，不回答「怎么采集」（钩子方案另议）。
 
@@ -102,7 +103,11 @@ CREATE TABLE chain_shot (
 );
 ```
 
-- **只写一次，不覆盖**；截图是「AI 命中后回来核验」的最终证据。
+- 「只写一次，不覆盖」；截图是「AI 命中后回来核验」的最终证据。
+- **来源（v0.5，D42）**：事件到了**现抓一帧**（不用采集管线 ≤2s 的旧帧）；抓帧是异步的，`ts` 仍是触发事件的时刻——证据时刻不因抓图慢而漂。
+- **抓帧前后各校验一次窗口身份**（v0.5）：`pid + hwnd` 与段不一致就丢弃这一帧。拍的是「这扇窗所在的屏幕区域」，抓帧要 100–300ms；这期间前台被别的窗口盖住，拍到的就是别人的画面（真机实测踩到过）。**错证据比没证据更糟**，所以宁可丢。
+- **文件位置**：`<userData>/chain-shots/<YYYY-MM-DD>/s<段>-e<事件>-<ts>.png`；临时帧写 `<userData>/tmp-chain/`（与旧管线的 `tmp/` 分开，免得被启动清理误删）。
+- **当前格式是 PNG**（v0.5 已知偏差）：§5.1 写的是 hot 层 WebP，但 Electron `nativeImage` 没有 WebP 编码，接编码器前先存原图 PNG（体积大但无损）。
 - 入场帧：段开始时默认截一张，`source='enter'`。
 - `typing`：键盘停顿补采的帧，`source='typing'`（v0.4 新增，对应 §5.2）。
 - **每张截图都挂在触发它的那个事件上**（v0.4）：入场帧挂 `enter` 事件，打字帧挂 `typing` 事件。这样「点开一张图 → 看它在段里的位置」没有例外分支；`event_id` 为空只作为防御态存在。
@@ -179,6 +184,8 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 | 7 | 段行什么时候落库 | **开段即插（`closed=0`），收口一次 UPDATE 落定**（§2.1.1）。子行立刻有 `segment_id`；段再长也不用缓冲在内存里；崩溃时最多丢「未收口那段的结束时刻」，不丢整段 | ✅ 已定（D40） |
 | 8 | 截图冷却会不会丢事件 | **不丢**：事件一律落行，冷却只决定要不要顺手截图。锚点是证据，冷却只是省力 | ✅ 已定 |
 | 9 | 打字停顿算什么 | 一条 `typing` 事件 + 一张 `source='typing'` 截图；不引入键盘钩子 | ✅ 已定（§5.2 落定） |
+| 10 | 截图从哪来 | **事件触发时现抓一帧**（A 不截图 / B 复用 ≤2s 旧帧 均否决）；抓帧前后各校验一次窗口身份，不一致丢弃；采图回调允许返回 Promise，记录器串行落库、`drain()` 等在途 | ✅ 已定（D42） |
+| 11 | 启动时的第一段 | 原生 `start()` **补报一次当前前台**：钩子只报「变化」，不补这一条，用户不切窗口就永远没有段（真机验证时库里是空的） | ✅ 已定（D42） |
 
 ### 5.1 保留策略落地参数
 
@@ -215,19 +222,22 @@ CREATE TABLE chain_vector     (segment_id INTEGER PRIMARY KEY, model TEXT, dim I
 
 > 窗口段 → 事件 → 截图 → 内容 → 能按时间与应用查出段，并从段反查到截图与内容原文。
 
-**状态（v0.4）**：真实事件源（原生钩子）已能跑，整条链只差「接进应用启动」与「真实截图 / 文本来源」——那两件还没做。
+**状态（v0.5）**：真实事件源已接进应用启动，截图是**事件触发现抓**的真实帧。整条「段 → 事件 → 截图 → 反查」在真机上跑通；还差**内容来源（UIA / OCR 文本）**与派生层（保留期分层、双链、向量）。
 
 | 环节 | 落地 | 证据 |
 | - | - | - |
 | 表结构 | `src/chain/schema.ts` | `tests/unit/chain-schema.test.ts` |
 | 写入（段 / 事件 / 截图 / 内容） | `src/chain/store.ts` | `tests/unit/chain-store.test.ts` |
-| 动作 → 表（记录器） | `src/chain/recorder.ts` | `tests/unit/chain-recorder.test.ts` |
+| 动作 → 表（记录器，含异步采图串行落库 + `drain()`） | `src/chain/recorder.ts` | `tests/unit/chain-recorder.test.ts` |
 | 采集策略（段机） | `src/chain/segmenter.ts` | `tests/unit/chain-segmenter.test.ts` |
 | 查询（按时间 / 应用 / 日期、段反查、按正文搜、当日汇总） | `src/chain/store.ts` | 同上 |
-| **传输层接口**（`DesktopEventSource`：原始事件 + `lastInputTickMs`） | `src/chain/hook/types.ts` | — |
+| **传输层接口**（`DesktopEventSource`：原始事件 + `lastInputTickMs` + 可选 `sourceInfo`） | `src/chain/hook/types.ts` | — |
 | **适配层**（滚轮手势合并、键盘 `activity` 判定、心跳 tick） | `src/chain/hook/adapter.ts` | `tests/unit/chain-hook-adapter.test.ts` |
-| **运行时**（建表 → 崩溃收尾 → 订阅 → 心跳 → 收口） | `src/chain/hook/runtime.ts` | `tests/unit/chain-runtime.test.ts` |
-| **系统钩子（真实事件源）** | `native/chain-hook/`（N-API addon，`WH_MOUSE_LL` + `SetWinEventHook`，D41）+ `src/chain/hook/native.ts`（加载与降级） | `npm run build:native`（`scripts/build-native.mjs`）、`npm run chain-hook-smoke`；**Node 24 与 Electron 45 均实测收到事件** |
-| 接进应用启动（把 `ChainRuntime` 接到 `src/main/`） | **未做** | — |
+| **运行时**（建表 → 崩溃收尾 → 订阅 → 心跳 → 收口 → `drain()`） | `src/chain/hook/runtime.ts` | `tests/unit/chain-runtime.test.ts` |
+| **系统钩子（真实事件源）** | `native/chain-hook/`（N-API addon，`WH_MOUSE_LL` + `SetWinEventHook`，D41）+ `src/chain/hook/native.ts`（加载与降级） | `npm run build:native`、`npm run chain-hook-smoke`；**Node 24 与 Electron 45 均实测收到事件** |
+| **事件触发现抓一帧**（身份校验 ×2、黑名单、按日归档） | `src/main/chain-shot.ts` | `tests/unit/chain-shot.test.ts` |
+| **接进应用启动**（原生源加载 + 运行时装配 + 跟随采集开关 + 退出收口） | `src/main/chain-recording.ts`、`src/main/index.ts` | `tests/unit/chain-recording.test.ts`；**真机**：`npm run dev:capture` + `GOTCHA_USER_DATA=.tmp/...`，起来即有段与入场截图，Alt+P 暂停后 `chain recording stopped {"pending":0}` |
 
-双链、标签、向量、个人记忆都排它后面。
+**真机验证记录（2026-10-26，D42）**：`--capture` 起应用 → 立即建段（启动补报当前前台）→ 入场帧拍下当期窗口（目视核对是 Firefox 的搜索页）→ 打字停顿 / 点击各补一帧 → 真实 Alt+P 暂停后 13 个段全部 `closed=1`、`pending=0`、0 张孤儿截图。**已知噪音**：IME（`textinputhost`）、shell「任务切换」窗口、可见区域 0×0 的窗口会成为瞬时段，截图按身份 / 可见性被丢弃（计入 `droppedShots`）；要不要把它们排除成段**还没拍板**。
+
+双链、标签、向量、个人记忆、UIA/OCR 文本来源、保留期分层都排它后面。

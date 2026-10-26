@@ -201,6 +201,13 @@ describe('InductionRuntime：供应商状态与暂停取消', () => {
       },
       completeAssignments: async () => {
         throw new Error('unused: completeAssignments')
+      },
+      // 信息链派生（v0.8）在本用例里不会发生
+      completeChainExtract: async () => {
+        throw new Error('unused: completeChainExtract')
+      },
+      completeChainMerge: async () => {
+        throw new Error('unused: completeChainMerge')
       }
     }
     const runtime = runtimeFor(db, () => ({ ok: true, client }))

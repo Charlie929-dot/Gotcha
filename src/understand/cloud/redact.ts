@@ -367,3 +367,153 @@ export function buildThemeAssignmentPayload(
     noCandidateMomentIds
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * 信息链派生层（v0.8 / D45）：段正文 → 抽标签 / 双链
+ *
+ * 与上面三条载荷同一纪律：文本一律过 `redactSensitive`，命中密码类规则整段剔掉
+ * （`blockedSegmentIds` / `blocked`），有片段被替换就记 `redacted*` 并在日志里计数。
+ * 段正文由 `src/chain/derive/text.ts` 先去重 / 截断——这里再做一次上限兜底，
+ * 防止调用方忘了传上限把整篇 2 万字送出去。
+ * ------------------------------------------------------------------ */
+
+/** 双链合并提问里的一对名字（`kind` 只用来提示模型，不参与判定） */
+export type ChainPairKind = 'link' | 'tag'
+
+/** 一段正文的送云视图 */
+export interface CloudChainSegment {
+  readonly segmentId: number
+  readonly app: string
+  readonly title: string
+  readonly text: string
+  readonly truncated: boolean
+}
+
+declare const chainExtractBrand: unique symbol
+
+/** 抽取载荷（只能由 `buildChainExtractPayload()` 产生） */
+export interface ChainExtractPayload {
+  readonly segments: readonly CloudChainSegment[]
+  readonly [chainExtractBrand]: true
+}
+
+export interface RedactableChainSegment {
+  segmentId: number
+  app: string
+  title: string
+  /** 已去重 / 已截断的正文（链上 `buildDeriveText()` 的产物） */
+  text: string
+  /** 是否已在上游按上限截断（告诉模型「这不是全文」） */
+  truncated?: boolean
+}
+
+export interface ChainExtractBuildResult {
+  payload: ChainExtractPayload
+  /** 脱敏后仍命中敏感规则、整段不出云的段 id */
+  blockedSegmentIds: number[]
+  /** 有片段被替换为 `[已脱敏]` 的段 id */
+  redactedSegmentIds: number[]
+}
+
+export interface ChainBuildOptions {
+  /** 正文兜底上限（字符）；默认 6000，与 `chain/derive/text.ts` 的上限一致 */
+  textMaxChars?: number
+  appMaxChars?: number
+  titleMaxChars?: number
+}
+
+export function buildChainExtractPayload(
+  segments: readonly RedactableChainSegment[],
+  options: ChainBuildOptions = {}
+): ChainExtractBuildResult {
+  const limits = {
+    textMaxChars: options.textMaxChars ?? 6_000,
+    appMaxChars: options.appMaxChars ?? LLM_DEFAULTS.appMaxChars,
+    titleMaxChars: options.titleMaxChars ?? LLM_DEFAULTS.titleMaxChars
+  }
+  const payloadSegments: CloudChainSegment[] = []
+  const blockedSegmentIds: number[] = []
+  const redactedSegmentIds: number[] = []
+
+  for (const segment of segments) {
+    const texts = redactEventTexts(
+      { app: segment.app, title: segment.title, ocr: segment.text },
+      {
+        appMaxChars: limits.appMaxChars,
+        titleMaxChars: limits.titleMaxChars,
+        ocrMaxChars: limits.textMaxChars
+      }
+    )
+    if (texts.blocked) {
+      blockedSegmentIds.push(segment.segmentId)
+      continue
+    }
+    if (texts.redacted) redactedSegmentIds.push(segment.segmentId)
+    payloadSegments.push({
+      segmentId: segment.segmentId,
+      app: texts.app,
+      title: texts.title,
+      text: texts.ocr,
+      truncated: segment.truncated ?? false
+    })
+  }
+
+  return {
+    payload: { segments: payloadSegments } as unknown as ChainExtractPayload,
+    blockedSegmentIds,
+    redactedSegmentIds
+  }
+}
+
+/** 合并提问的一对名字（`index` 指回调用方的候选下标，便于把答复对回原候选） */
+export interface CloudChainPair {
+  readonly index: number
+  readonly candidate: string
+  readonly existing: string
+  readonly kind: ChainPairKind
+}
+
+export interface RedactableChainPair {
+  candidate: string
+  existing: string
+  kind: ChainPairKind
+}
+
+declare const chainMergeBrand: unique symbol
+
+/** 模糊带合并载荷（只能由 `buildChainMergePayload()` 产生） */
+export interface ChainMergePayload {
+  readonly pairs: readonly CloudChainPair[]
+  readonly [chainMergeBrand]: true
+}
+
+export interface ChainMergeBuildResult {
+  payload: ChainMergePayload
+  /** 被敏感规则挡下、不能发出去的对（下标是输入数组的下标） */
+  blocked: number[]
+}
+
+export function buildChainMergePayload(
+  pairs: readonly RedactableChainPair[]
+): ChainMergeBuildResult {
+  const views: CloudChainPair[] = []
+  const blocked: number[] = []
+  pairs.forEach((pair, index) => {
+    const candidate = redactSensitive(normalize(pair.candidate))
+    const existing = redactSensitive(normalize(pair.existing))
+    if (candidate.blocked || existing.blocked) {
+      blocked.push(index)
+      return
+    }
+    views.push({
+      index,
+      candidate: candidate.text.slice(0, 40),
+      existing: existing.text.slice(0, 40),
+      kind: pair.kind
+    })
+  })
+  return {
+    payload: { pairs: views } as unknown as ChainMergePayload,
+    blocked
+  }
+}

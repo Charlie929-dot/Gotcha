@@ -432,3 +432,51 @@ describe('异步采图（真实抓帧要等屏幕流）', () => {
     expect(getSegmentDetail(db, recorder.currentSegmentId!)?.shots).toHaveLength(0)
   })
 })
+
+describe('派生层叫醒（v0.8）', () => {
+  it('段收口与内容写入都回调（段 id 对得上）', () => {
+    const closed: number[] = []
+    const contents: number[] = []
+    const segmenter = new ChainSegmenter()
+    const recorder = new ChainRecorder({
+      db,
+      now: () => at(0),
+      takeShot: fakeShot(),
+      onSegmentClosed: (segmentId) => closed.push(segmentId),
+      onContentWritten: (segmentId) => contents.push(segmentId)
+    })
+    const feed = (inputs: ChainInput[]) => inputs.forEach((input) => recorder.apply(segmenter.feed(input)))
+    feed([focus(0, 1, 'A')])
+    feed([click(2)])
+    feed([focus(10, 2, 'B')])
+
+    const [first] = querySegments(db)
+    expect(first.id).toBe(1)
+    // 切到第二扇窗时入场帧也带内容 → 第二段同样收到「内容写入」通知
+    expect(contents).toEqual([1, 2])
+    expect(closed).toEqual([1])
+  })
+
+  it('回调抛错不影响采集（段照样收口、内容照样落库）', () => {
+    const segmenter = new ChainSegmenter()
+    const recorder = new ChainRecorder({
+      db,
+      now: () => at(0),
+      takeShot: fakeShot(),
+      onSegmentClosed: () => {
+        throw new Error('派生执行器不在')
+      },
+      onContentWritten: () => {
+        throw new Error('派生执行器不在')
+      }
+    })
+    const feed = (inputs: ChainInput[]) => inputs.forEach((input) => recorder.apply(segmenter.feed(input)))
+    feed([focus(0, 1, 'A')])
+    feed([click(2)])
+    feed([focus(10, 2, 'B')])
+
+    const segments = querySegments(db)
+    expect(segments.map((segment) => segment.closed)).toEqual([1])
+    expect(getSegmentDetail(db, segments[0].id)?.contents).toHaveLength(1)
+  })
+})

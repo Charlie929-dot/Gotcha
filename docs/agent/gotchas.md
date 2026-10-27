@@ -158,6 +158,7 @@
 | 「前台窗口」不等于「你在操作的窗」，别拿它当段身份 | 2026-10-27 实测（60 秒 / 541 次采样）：`GetForegroundWindow` 与 `GetGUIThreadInfo(hwndFocus)` **541/541 一致**，说明读数没错；但与**光标下的窗**有 22 次不一致（人停手时光标停在任务栏、人却在终端打字），且前台窗不可见出现过 1 次。更早的坑：火绒升级器 0×0 隐藏窗抢前台 52 秒，把 46 条真实操作记到它头上 | 段身份认「动作目标」：点击 / 滚轮用**事件坐标**做 `WindowFromPoint`（它天然跳过隐藏窗）→ `GetAncestor(GA_ROOT)` 取根窗；**不要**用光标当前位置（停手时会误判）、**不要**只用前台（可被抢）。桌面外壳类名（`Shell_TrayWnd` / `Progman` / `WorkerW`）要排除，否则点一下任务栏就切一段。另：跨线程读焦点只能用 `GetGUIThreadInfo`，`GetFocus()` 只对调用线程有效 |
 | 标题抖动切段会把段收回「标题变化那一刻」→ 子行越界抛错 | 2026-10-27 真机弹窗栈：`Error: 段 237 的结束时间 … 早于它的子行 …`（早 2.126 秒）← `closeSegment` ← `ChainRecorder.apply` ← `ChainRuntime.pulse`。3 秒确认窗里用户一直在点，那些事件已按更晚时刻落库；`commitTitleSplit` 仍把旧段结束时间设成 `pending.at`，存储层校验「子行不得晚于段结束」直接抛，异常在定时器里 → Electron 弹出 `Error` 窗（抢前台 14.6 秒，还变成了一段） | 段机记 `lastChildTs`（`recordEvent` **和** `flushWheel` 两条路径都要更新——滚轮不走 `recordEvent`，漏了它仍会越界），切段边界取 `max(标题变化时刻, lastChildTs)`。另加 `installCrashLogging()` 把 `uncaughtException` / `unhandledRejection` 写进 `main.log`（不弹窗），否则栈只存在于截图里 |
 | 把「新段起点」设成切换时刻时，任何挂起期产生的锚点都会早于段起点 | 2026-10-27 做焦点确认窗（v0.14）时撞到：挂起 1.5 秒里若还跟踪鼠标移动，`move_pause` 的 ts 会落在切换时刻**之后**、确认时刻之前，等新段从切换时刻开出来，这条子行就早于段起点（与标题抖动那条镜像） | 挂起期**不跟踪移动**（清 `lastMove`）、不补 typing 锚点；确认窗里到达的动作（点击 / 滚轮 / 打字）要先**确认切段**再 `recordEvent`，顺序反了事件会落进旧段或变孤儿 |
+| `activity`（`GetLastInputInfo`）不能当「人在这个窗口」的证据 | 2026-10-27 真机：焦点确认窗上线后仍留了一个 977ms 的 cmd 闪段——用户按 Alt-Tab 时按键本身触发 `activity`，段机就把刚被切到的窗口当成「在打字」，1.5s 的确认窗被绕过 | 键盘只重置打字计时（`typingActive` / `typingDueAt`），**不确认切段**；确认只靠点击 / 滚轮（有坐标，能定位到窗）或停满时间。同理：键盘输入永远无法归因到具体窗口，别拿它做身份判据 |
 
 ## 规则
 

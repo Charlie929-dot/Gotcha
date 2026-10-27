@@ -355,6 +355,54 @@ describe('焦点抖动确认窗（v0.14：瞬间被抢的焦点不算一段）',
     expect(opened(later)[0].segment.startTs).toBe(at(0))
   })
 
+  it('挂起期间只有键盘活动：不算确认（Alt-Tab 的按键不可信），仍按时间确认', () => {
+    const segmenter = new ChainSegmenter()
+    const early = feedAll(segmenter, [focus(0, 1, 'A'), tick(2), focus(10, 2, 'B'), activity(10.3)])
+    expect(closed(early)).toHaveLength(0)
+    expect(opened(early).map((action) => action.segment.title)).toEqual(['A'])
+    const later = feedAll(segmenter, [tick(12)])
+    expect(opened(later).map((action) => action.segment.title)).toEqual(['B'])
+    expect(opened(later)[0].segment.startTs).toBe(at(10))
+  })
+
+  it('标题抖动没到期就切走：不另起空段，新标题记在旧段上', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [
+      focus(0, 1, 'A'),
+      tick(2),
+      focus(10, 1, 'A — 加载中'),
+      // 0.4 秒后人就切走了：标题抖动没活过 3 秒确认窗
+      focus(10.4, 2, 'B'),
+      tick(12)
+    ])
+    // 只有 A → B 一次切段，没有 93ms 那种空段
+    expect(closed(actions)).toHaveLength(1)
+    expect(closed(actions)[0].segment).toMatchObject({
+      titleFirst: 'A',
+      titleLast: 'A — 加载中',
+      endTs: at(10.4)
+    })
+    expect(opened(actions).map((action) => action.segment.title)).toEqual(['A', 'B'])
+  })
+
+  it('标题抖动已经过了确认窗再切走：照旧切（那是真换了件事）', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [
+      focus(0, 1, 'A'),
+      tick(2),
+      focus(10, 1, 'A — 新版'),
+      tick(14), // 过了 3s：标题切段已确认
+      focus(20, 2, 'B'),
+      tick(22)
+    ])
+    expect(closed(actions).map((segment) => segment.segment.titleLast)).toEqual([
+      'A',
+      'A — 新版'
+    ])
+    // 切段后新段是 B（B 还开着）
+    expect(segmenter.openSegment?.titleLast).toBe('B')
+  })
+
   it('停止采集时挂着的切换作废，旧段只记到切换那一刻', () => {
     const segmenter = new ChainSegmenter()
     feedAll(segmenter, [focus(0, 1, 'A'), tick(2), focus(10, 2, 'B')])

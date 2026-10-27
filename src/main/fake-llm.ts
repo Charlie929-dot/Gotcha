@@ -7,6 +7,7 @@
  */
 
 import type {
+  ChainAskPayload,
   ChainExtractPayload,
   ChainMergePayload,
   CloudPayload,
@@ -171,6 +172,35 @@ export function createDeterministicFakeLlm(options: { delayMs?: number } = {}): 
           links: [truncate(`模拟概念 ${segmentId}`, 40)]
         },
         usage: { promptTokens: 80 + payload.segments.length * 20, completionTokens: 10 }
+      }
+    },
+
+    /** 问记忆（S1）：确定性回答，只引用第一段证据（白名单路径可断言） */
+    async completeAsk(
+      payload: ChainAskPayload,
+      callOptions: LlmCompleteOptions = {}
+    ): Promise<LlmJsonResult> {
+      counters.requests += 1
+      try {
+        if (delayMs > 0 || callOptions.signal) {
+          await abortableDelay(delayMs, callOptions.signal)
+        }
+      } catch (error) {
+        if (error instanceof LlmAbortError) counters.aborted += 1
+        throw error
+      }
+      const first = payload.evidence[0]
+      const citations = first
+        ? [{ segmentId: first.segmentId, why: truncate(`模拟依据 ${first.segmentId}`, 40) }]
+        : []
+      return {
+        json: {
+          answer: first
+            ? truncate(`模拟回答：在「${first.title}」里做过相关的事（依据 ${first.segmentId}）`, 200)
+            : '信息链里没找到',
+          citations
+        },
+        usage: { promptTokens: 120 + payload.evidence.length * 30, completionTokens: 20 }
       }
     },
 

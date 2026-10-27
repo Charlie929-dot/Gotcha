@@ -7,6 +7,7 @@
  */
 
 import type {
+  ChainAskPayload,
   ChainExtractPayload,
   ChainMergePayload,
   CloudPayload,
@@ -66,6 +67,11 @@ export interface LlmClient {
     payload: ChainMergePayload,
     options?: LlmCompleteOptions
   ): Promise<LlmJsonResult>
+  /**
+   * 问记忆（S1）：问题 + 命中证据 → `{ answer, citations:[{segmentId, why}] }`。
+   * **可选**：不是每个客户端都要能答问；没有这个能力时由调用方报 `client` 错误，不静默降级。
+   */
+  completeAsk?(payload: ChainAskPayload, options?: LlmCompleteOptions): Promise<LlmJsonResult>
 }
 
 /** 可重试性由子类 / 连接层决定，业务层只按类型判断 */
@@ -132,6 +138,8 @@ export class FakeLlmClient implements LlmClient {
   /** 信息链派生（v0.8 / D45）的两次调用单独留痕 */
   readonly chainExtractRequests: ChainExtractPayload[] = []
   readonly chainMergeRequests: ChainMergePayload[] = []
+  /** 问记忆（S1）的调用留痕 */
+  readonly askRequests: ChainAskPayload[] = []
   /** 每次调用的选项（signal / repairHint 等），供暂停 / 修复重试断言 */
   readonly optionCalls: LlmCompleteOptions[] = []
   private readonly replies: FakeLlmReply[]
@@ -200,6 +208,11 @@ export class FakeLlmClient implements LlmClient {
     options: LlmCompleteOptions = {}
   ): Promise<LlmJsonResult> {
     this.chainMergeRequests.push(payload)
+    return this.take(options)
+  }
+
+  async completeAsk(payload: ChainAskPayload, options: LlmCompleteOptions = {}): Promise<LlmJsonResult> {
+    this.askRequests.push(payload)
     return this.take(options)
   }
 }

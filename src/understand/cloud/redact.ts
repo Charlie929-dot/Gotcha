@@ -517,3 +517,119 @@ export function buildChainMergePayload(
     blocked
   }
 }
+
+/** 问记忆（S1）里的单段证据 */
+export interface CloudChainAskEvidence {
+  readonly segmentId: number
+  readonly app: string
+  readonly title: string
+  readonly startTs: number
+  readonly endTs: number
+  readonly text: string
+  readonly truncated: boolean
+  readonly tags: readonly string[]
+  readonly links: readonly string[]
+}
+
+declare const chainAskBrand: unique symbol
+
+/** 问记忆载荷（只能由 `buildChainAskPayload()` 产生） */
+export interface ChainAskPayload {
+  readonly question: string
+  readonly evidence: readonly CloudChainAskEvidence[]
+  readonly [chainAskBrand]: true
+}
+
+export interface RedactableChainAskEvidence {
+  segmentId: number
+  app: string
+  title: string
+  startTs: number
+  endTs: number
+  /** 命中原文片段（上游已按上限截断） */
+  text: string
+  truncated?: boolean
+  tags?: readonly string[]
+  links?: readonly string[]
+}
+
+export interface ChainAskBuildOptions extends ChainBuildOptions {
+  /** 问题的字符上限；默认 500（问题是用户敲的，不该有长文） */
+  questionMaxChars?: number
+}
+
+export interface ChainAskBuildResult {
+  payload: ChainAskPayload
+  /** 问题本身命中敏感规则：整次不该出云（载荷里 question 为空） */
+  questionBlocked: boolean
+  /** 被敏感规则挡下、整段不出云的段 id */
+  blockedSegmentIds: number[]
+  /** 有片段被替换成 `[已脱敏]` 的段 id */
+  redactedSegmentIds: number[]
+}
+
+const ASK_TAG_MAX_CHARS = 40
+const ASK_TAGS_MAX = 8
+
+/**
+ * 问记忆的送云载荷：问题 + 命中的段（都过同一套脱敏）。
+ * 问题被挡就整次不出云——宁可答「没找到」，也不把敏感问题发出去。
+ */
+export function buildChainAskPayload(
+  question: string,
+  evidence: readonly RedactableChainAskEvidence[],
+  options: ChainAskBuildOptions = {}
+): ChainAskBuildResult {
+  const limits = {
+    textMaxChars: options.textMaxChars ?? 500,
+    appMaxChars: options.appMaxChars ?? LLM_DEFAULTS.appMaxChars,
+    titleMaxChars: options.titleMaxChars ?? LLM_DEFAULTS.titleMaxChars,
+    questionMaxChars: options.questionMaxChars ?? 500
+  }
+
+  const asked = redactEventTexts(
+    { app: '', title: '', ocr: question },
+    { appMaxChars: 0, titleMaxChars: 0, ocrMaxChars: limits.questionMaxChars }
+  )
+  const views: CloudChainAskEvidence[] = []
+  const blockedSegmentIds: number[] = []
+  const redactedSegmentIds: number[] = []
+
+  for (const segment of evidence) {
+    const texts = redactEventTexts(
+      { app: segment.app, title: segment.title, ocr: segment.text },
+      {
+        appMaxChars: limits.appMaxChars,
+        titleMaxChars: limits.titleMaxChars,
+        ocrMaxChars: limits.textMaxChars
+      }
+    )
+    if (texts.blocked) {
+      blockedSegmentIds.push(segment.segmentId)
+      continue
+    }
+    if (texts.redacted) redactedSegmentIds.push(segment.segmentId)
+    views.push({
+      segmentId: segment.segmentId,
+      app: texts.app,
+      title: texts.title,
+      startTs: segment.startTs,
+      endTs: segment.endTs,
+      text: texts.ocr,
+      truncated: segment.truncated ?? false,
+      tags: (segment.tags ?? []).slice(0, ASK_TAGS_MAX).map((tag) => tag.slice(0, ASK_TAG_MAX_CHARS)),
+      links: (segment.links ?? []).slice(0, ASK_TAGS_MAX).map((link) => link.slice(0, ASK_TAG_MAX_CHARS))
+    })
+  }
+
+  return {
+    payload: {
+      question: asked.blocked ? '' : asked.ocr,
+      evidence: views
+    } as unknown as ChainAskPayload,
+    questionBlocked: asked.blocked,
+    blockedSegmentIds,
+    redactedSegmentIds
+  }
+}
+

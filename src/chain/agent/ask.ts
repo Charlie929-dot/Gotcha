@@ -42,8 +42,10 @@ export interface ChainAskOptions {
   resolveClient: () => ChainAskClientResolution
   /** 问题向量（bge 会话）；没接或算不出来就只走关键词 */
   embedQuestion?: (question: string) => Promise<Float32Array | null> | Float32Array | null
-  /** 出云门（D24 一次性确认 + D22 日账）；默认放行。返回 false 就整次不出云 */
+  /** 出云门（D24 一次性确认）；默认放行。返回 false 就整次不出云 */
   canSend?: () => boolean
+  /** 当日 token 预算用完了（D22）：返回 true 就整次不出云，理由报 `budget` */
+  overBudget?: () => boolean
   /** 记账：问一次记一次（复用 `induction.recordUsage`） */
   onUsage?: (usage: LlmUsage) => void
   /** 检索条数上限（契约 §4 取 5~10，默认 8） */
@@ -102,6 +104,9 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
 
   if (options.canSend && !options.canSend()) {
     return { kind: 'error', reason: 'consent', message: '还没确认出云，先不提问', stats }
+  }
+  if (options.overBudget && options.overBudget()) {
+    return { kind: 'error', reason: 'budget', message: '今天的模型额度用完了', stats }
   }
 
   const resolved = options.resolveClient()

@@ -64,6 +64,8 @@ export interface BallShellOptions {
   openTimeline(): void
   /** D20：球点击默认打开图谱；时间线入口保留在菜单 / 图谱工具栏 */
   openGraph(): void
+  /** 问记忆窗口（S3-lite） */
+  openAsk(): void
   toggleCapture(): void
   quit(): void
   log(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>): void
@@ -402,6 +404,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
     if (!ensureSender(event)) return
     const template = buildTrayMenu(options.getStatus(), {
       openGraph: options.openGraph,
+      openAsk: options.openAsk,
       openTimeline: options.openTimeline,
       toggleCapture: options.toggleCapture,
       quit: options.quit

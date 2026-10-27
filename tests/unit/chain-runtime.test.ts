@@ -84,13 +84,15 @@ describe('链路启动', () => {
   it('start 先建表、收口上次遗留的开段，再订阅事件源', () => {
     // 上次崩溃留下的开段
     const stale = openSegment(db, { startTs: at(-60), pid: 9, exe: 'old', app: 'Old', hwnd: 90, title: '旧段' }, at(-60))
-    const { source, runtime } = build()
+    const { source, runtime, run } = build()
     runtime.start()
     expect(source.started).toBe(1)
     expect(runtime.stats.started).toBe(true)
     expect(stale).toBeGreaterThan(0)
     // 遗留段已收口，所以能开新段
     source.emit(foreground(0))
+    // v0.14：焦点要先停满确认窗（1.5s）才算一段
+    run(2)
     expect(runtime.stats.openSegmentId).not.toBeNull()
     runtime.stop()
   })

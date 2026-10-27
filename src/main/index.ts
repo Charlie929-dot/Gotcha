@@ -1,10 +1,11 @@
 import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage } from 'electron'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { extname, join } from 'node:path'
 import Database from 'better-sqlite3'
 import log from 'electron-log/main'
 import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
-import { getSetting } from '../db/settings'
+import { getNumberSetting, getSetting, setSetting } from '../db/settings'
+import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
@@ -44,6 +45,9 @@ import { GRAPH_SETTING_KEYS, readGraphSettings, saveGraphSettings, type GraphSet
 import { createDeterministicFakeLlm } from './fake-llm'
 import { createDeterministicFakeEmbedder, type DeterministicFakeEmbedder } from './fake-embedding'
 import { createGraphWindow } from './graph-window'
+import { createAskWindow } from './ask-window'
+import { askChain } from '../chain/agent/ask'
+import { readSegmentEvidence } from '../chain/agent/evidence'
 import { runGraphBackfill, loadSharedEmbedder } from './graph-backfill-runtime'
 import { createMomentRuntime, type MomentRuntime } from './moment-runtime'
 import {
@@ -60,6 +64,7 @@ import {
   type GraphRecomputeResult,
   type ProviderKeySaveResult
 } from './graph-ipc'
+import { registerAskIpc, type AskConsentView } from './ask-ipc'
 import { listThemeMerges, revertThemeMerge } from '../understand/theme-merge'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
@@ -155,6 +160,8 @@ const screenCapture = fakeCapture
 
 let mainWindow: BrowserWindow | null = null
 let graphWindow: BrowserWindow | null = null
+/** 问记忆窗口（S3-lite） */
+let askWindow: BrowserWindow | null = null
 let ballShell: BallShell | null = null
 let trayShell: TrayShell | null = null
 let hotkeyHandle: HotkeyHandle | null = null
@@ -165,6 +172,7 @@ let momentRuntime: MomentRuntime | null = null
 /** 在线归属（M2 P2 · S6）：新时刻 → 主题 / 命名 / 模糊确认；本地模型就绪时接管新数据 */
 let themeOnlineRuntime: ThemeOnlineRuntime | null = null
 let disposeGraphIpc: (() => void) | null = null
+let disposeAskIpc: (() => void) | null = null
 /**
  * 信息链接线（D42）：跟采集开关同一条命。启动时加载原生事件源（失败就降级成不采集），
  * 采集 running 时开、stopping 时收口并等在途截图落库。
@@ -685,6 +693,43 @@ function openGraph(): void {
   showGraphWindow()
 }
 
+/**
+ * 证据图 → data URL（渲染层是 sandbox，读不了文件）。
+ * 读不到 / 超过 4MB 就返回 null，界面只是少一张图，不影响回答。
+ */
+function readShotDataUrl(path: string): string | null {
+  try {
+    if (statSync(path).size > 4 * 1024 * 1024) return null
+    const mime = extname(path).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg'
+    return `data:${mime};base64,${readFileSync(path).toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
+/** 问记忆窗口（S3-lite）：懒创建、关闭即销毁；打开即视为一次交互 */
+function showAskWindow(): void {  if (!app.isReady()) return
+  if (askWindow && !askWindow.isDestroyed()) {
+    if (askWindow.isMinimized()) askWindow.restore()
+    askWindow.show()
+    askWindow.focus()
+    return
+  }
+  askWindow = createAskWindow({
+    devServerUrl: process.env['ELECTRON_RENDERER_URL'],
+    htmlPath: join(__dirname, '../renderer/ask/ask.html'),
+    preloadPath: join(__dirname, '../preload/ask.js'),
+    onClosed: () => {
+      askWindow = null
+    }
+  })
+}
+
+function openAsk(): void {
+  cancelStartupResume(true)
+  showAskWindow()
+}
+
 app.on('window-all-closed', () => {
   // 球窗口常驻，正常不会触发；仅当球没起来（窗口全关）时按旧行为退出
   if (!quitRequested) app.quit()
@@ -697,6 +742,7 @@ app.on('before-quit', (event) => {
   startupCountdown?.cancel()
   hotkeyHandle?.dispose()
   disposeGraphIpc?.()
+  disposeAskIpc?.()
   inductionRuntime?.dispose()
   inductionRuntime = null
   momentRuntime?.stop()
@@ -1194,6 +1240,74 @@ if (primaryInstance) {
 
     registerTimelineIpc()
 
+    // 问记忆（S3-lite）：只读链库 + 出云确认门（D24）+ 日账（D22）
+    const askConsentView = (): AskConsentView => {
+      const db = connections.queryDb()
+      const consented = db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
+      const resolved = resolveClient()
+      return resolved.ok
+        ? { consented, clientReady: true }
+        : { consented, clientReady: false, clientReason: resolved.reason }
+    }
+    disposeAskIpc = registerAskIpc({
+      getWindow: () => askWindow,
+      ask: async (question) => {
+        const db = connections.queryDb()
+        // A3 红线：没有库（从未采集）就不建库；时间轴上本来也没东西可找
+        if (!db) {
+          return {
+            kind: 'no-evidence',
+            stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
+          }
+        }
+        return askChain(
+          {
+            db,
+            resolveClient,
+            embedQuestion: async (text) => {
+              const embedder = await loadChainEmbedder()
+              if (!embedder) return null
+              const [vector] = await embedder.embed([text])
+              return vector ?? null
+            },
+            canSend: () => getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
+            overBudget: () => {
+              const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
+              if (budget <= 0) return false
+              const usage = readUsage(db, Date.now())
+              return usage.promptTokens + usage.completionTokens >= budget
+            },
+            onUsage: (usage) => {
+              try {
+                // 显式提问是用户动作：允许打开写连接记账（D22 日账）
+                const writable = connections.ensureWritable().db
+                recordUsage(writable, Date.now(), {
+                  calls: 1,
+                  promptTokens: usage.promptTokens,
+                  completionTokens: usage.completionTokens
+                })
+              } catch (error) {
+                captureLog('warn', 'ask usage record failed', { error: String(error) })
+              }
+            },
+            log: (level, message, data) => captureLog(level, message, data)
+          },
+          question
+        )
+      },
+      segment: (segmentId) => {
+        const db = connections.queryDb()
+        return db ? readSegmentEvidence(db, segmentId, { readShot: readShotDataUrl }) : null
+      },
+      consent: askConsentView,
+      setConsent: (consented) => {
+        const writable = connections.ensureWritable().db
+        setSetting(writable, GRAPH_SETTING_KEYS.outboundConsent, consented ? '1' : '0')
+        return askConsentView()
+      },
+      log: (level, message, data) => captureLog(level, message, data)
+    })
+
     disposeGraphIpc = registerGraphIpc({
       getGraphWindow: () => graphWindow,
       queryGraph: (from, to) => {
@@ -1292,6 +1406,7 @@ if (primaryInstance) {
       getStatus: () => controller.status(),
       openTimeline,
       openGraph,
+      openAsk,
       toggleCapture: () => {
         void toggleCapture()
       },
@@ -1305,6 +1420,7 @@ if (primaryInstance) {
     trayShell = installTray(
       {
         openGraph,
+        openAsk,
         openTimeline,
         toggleCapture: () => {
           void toggleCapture()

@@ -231,6 +231,12 @@ button.primary {
   overflow-y: auto;
 }
 
+/* 子块按内容撑开、不参与收缩：否则「证据」块作为滚动容器 min-height 为 0，
+   会被压成一条缝，外层滚到底也看不到它的内容（真机踩到） */
+.result > * {
+  flex: none;
+}
+
 .answer {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -299,7 +305,6 @@ button.primary {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 12px 14px;
-  overflow: auto;
 }
 
 .evidence-head {

@@ -85,6 +85,21 @@ function wire(takeShot?: ShotTaker) {
 }
 
 describe('假事件源跑通整条链', () => {
+  it('标题抖动确认窗里有过点击：切段边界不能早于已落库的子行（真机 2026-10-27 弹过错误窗）', () => {
+    const { feed, flush } = wire(fakeShot())
+    // 同窗改标题（视频页标题一直在变）→ 3 秒确认窗；确认窗里用户又点了一下
+    expect(() => feed([focus(0, 1, 'A'), focus(10, 1, 'B'), click(11), tick(13.5)])).not.toThrow()
+    flush(14)
+
+    const segments = querySegments(db)
+    expect(segments).toHaveLength(2)
+    const [second, first] = segments
+    // 旧段收口在「最后一条子行」那一刻（11s），不是标题变化那一刻（10s）
+    expect(first.end_ts).toBe(at(11))
+    expect(second.start_ts).toBe(at(11))
+    expect(second.title_first).toBe('B')
+  })
+
   it('切窗口 → 每段有入场帧、事件、内容，能按时间反查回来', () => {
     const requests: ShotRequest[] = []
     const { feed, flush } = wire(fakeShot(requests))

@@ -23,10 +23,35 @@ export type RawDesktopEvent =
       title: string
       /** 应用显示名（active-win 的 owner.name），拿不到就给 null */
       app: string | null
+      /**
+       * 下面四个是「这窗能不能当一段」的原始事实（v0.12）。**全部可选**：
+       * 旧版原生模块 / 其它传输实现不报，段机就按「未知」放行，不猜默认值。
+       */
+      /** `IsWindowVisible`：隐藏窗（辅助窗、升级器气泡）为 false */
+      visible?: boolean
+      /** `IsIconic`：最小化的窗为 true */
+      minimized?: boolean
+      /** 窗口矩形与所在显示器矩形的交集面积（px²）；拿不到矩形时不报 */
+      onScreenArea?: number
+      /** 窗口类名（`GetClassNameW`），用来认系统覆盖层（Alt-Tab / 任务视图） */
+      className?: string
     }
   | { type: 'move'; ts: number; x: number; y: number }
   | { type: 'click'; ts: number; x: number; y: number; button: 'left' | 'right' | 'middle' }
   | { type: 'wheel'; ts: number; delta: number; x: number; y: number }
+
+/** 一扇窗口的事实（v0.13）：段身份以「动作目标窗」为准，前台事件只兜底 */
+export interface WindowFacts {
+  pid: number
+  hwnd: number
+  exe: string
+  title: string
+  app: string | null
+  visible?: boolean
+  minimized?: boolean
+  onScreenArea?: number
+  className?: string
+}
 
 export interface DesktopEventSource {
   /** 开始投递原始事件；重复调用应当是安全的（实现自己保证幂等） */
@@ -37,6 +62,12 @@ export interface DesktopEventSource {
    * 它**分辨不出**是键盘还是鼠标——所以适配层还要结合「这段时间有没有收到鼠标事件」来判断（见 `adapter.ts`）。
    */
   lastInputTickMs(): number
+  /**
+   * 可选：这个屏幕点下面是哪扇窗（v0.13）。
+   * 屏幕走的是「点哪算哪」，不靠前台事件——前台被隐藏窗抢走时，这个值仍是你真正点中的那扇窗。
+   * 不实现（假源 / 别的传输方式）就退回纯事件口径。
+   */
+  readWindowAt?(x: number, y: number): WindowFacts | null
   /** 可选自述：这条源到底跑的哪条路（写进日志，便于确认没有静默降级） */
   readonly sourceInfo?: SourceInfo
 }

@@ -41,6 +41,8 @@ export interface ChainRuntimeStats {
   idle: boolean
   lastOutcome: RecorderOutcome | null
   shotStats: ShotStats
+  /** 被丢掉的幽灵前台事件数（v0.12）；真机上稳定大于 0 才说明判据真的在生效 */
+  phantomDropped: number
 }
 
 export class ChainRuntime {
@@ -64,7 +66,13 @@ export class ChainRuntime {
     this.now = options.now ?? (() => Date.now())
     this.pulseMs = options.pulseMs ?? 1_000
     this.autoPulse = options.autoPulse ?? true
-    this.adapter = new DesktopEventAdapter(options.source, { now: this.now, ...options.adapterOptions })
+    this.adapter = new DesktopEventAdapter(options.source, {
+      now: this.now,
+      ...options.adapterOptions,
+      // 点哪算哪（v0.13）：传输层能查「这个点下面是哪扇窗」就用它定段身份，
+      // 查不了（假源 / 别的实现）就只靠前台事件，不猜。
+      resolveWindow: options.adapterOptions?.resolveWindow ?? options.source.readWindowAt?.bind(options.source)
+    })
     this.segmenter = new ChainSegmenter(options.segmenterOptions)
     this.recorder = new ChainRecorder({
       db: options.db,
@@ -130,7 +138,8 @@ export class ChainRuntime {
       openSegmentId: this.recorder.currentSegmentId,
       idle: this.segmenter.isIdle,
       lastOutcome: this.lastOutcome,
-      shotStats: this.recorder.shotStats
+      shotStats: this.recorder.shotStats,
+      phantomDropped: this.segmenter.phantomDropped
     }
   }
 

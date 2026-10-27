@@ -5,6 +5,7 @@ import {
   nativeCandidates,
   NativeDesktopSource,
   normalizeRawEvent,
+  normalizeWindowFacts,
   type NativeBinding
 } from '../../src/chain/hook/native'
 import { DesktopEventAdapter } from '../../src/chain/hook/adapter'
@@ -66,6 +67,71 @@ describe('原生对象的形状校验', () => {
       app: null
     })
   })
+
+  it('窗口事实（v0.12）原样放行；报了但不合格就整条丢掉', () => {
+    expect(
+      normalizeRawEvent({
+        type: 'foreground',
+        ts: 1,
+        pid: 2,
+        hwnd: 3,
+        exe: 'a',
+        visible: false,
+        minimized: true,
+        onScreenArea: 0,
+        className: 'TaskSwitcherWnd'
+      })
+    ).toEqual({
+      type: 'foreground',
+      ts: 1,
+      pid: 2,
+      hwnd: 3,
+      exe: 'a',
+      title: '',
+      app: null,
+      visible: false,
+      minimized: true,
+      onScreenArea: 0,
+      className: 'TaskSwitcherWnd'
+    })
+    expect(normalizeRawEvent({ type: 'foreground', ts: 1, pid: 2, hwnd: 3, exe: 'a', visible: 'no' })).toBeNull()
+    expect(normalizeRawEvent({ type: 'foreground', ts: 1, pid: 2, hwnd: 3, exe: 'a', minimized: 1 })).toBeNull()
+    expect(normalizeRawEvent({ type: 'foreground', ts: 1, pid: 2, hwnd: 3, exe: 'a', onScreenArea: -1 })).toBeNull()
+    expect(normalizeRawEvent({ type: 'foreground', ts: 1, pid: 2, hwnd: 3, exe: 'a', onScreenArea: Number.NaN })).toBeNull()
+    expect(normalizeRawEvent({ type: 'foreground', ts: 1, pid: 2, hwnd: 3, exe: 'a', className: 5 })).toBeNull()
+  })
+
+  it('windowAtPoint 的返回值走同一套校验（v0.13）', () => {
+    expect(
+      normalizeWindowFacts({
+        type: 'window',
+        ts: 1,
+        pid: 7,
+        hwnd: 70,
+        exe: 'firefox',
+        title: 't',
+        app: 'Firefox',
+        visible: true,
+        minimized: false,
+        onScreenArea: 1234,
+        className: 'MozillaWindowClass'
+      })
+    ).toEqual({
+      pid: 7,
+      hwnd: 70,
+      exe: 'firefox',
+      title: 't',
+      app: 'Firefox',
+      visible: true,
+      minimized: false,
+      onScreenArea: 1234,
+      className: 'MozillaWindowClass'
+    })
+    expect(normalizeWindowFacts(null)).toBeNull()
+    expect(normalizeWindowFacts({ pid: 7 })).toBeNull()
+    expect(normalizeWindowFacts({ pid: 7, hwnd: 70, exe: 'x', visible: 'yes' })).toBeNull()
+    expect(normalizeWindowFacts({ pid: 7, hwnd: 70, exe: 'x', onScreenArea: -5 })).toBeNull()
+  })
 })
 
 describe('加载原生模块', () => {
@@ -103,6 +169,30 @@ describe('加载原生模块', () => {
 })
 
 describe('原生事件源', () => {
+  it('查「这个点下面是哪扇窗」：没这个导出就返回 null（旧构建照样能用）', () => {
+    const source = new NativeDesktopSource(fakeBinding())
+    expect(source.readWindowAt(10, 20)).toBeNull()
+  })
+
+  it('查到的窗原样返回；本进程自己的窗不算（悬浮球 / 采集窗口不该成段）', () => {
+    const window = { type: 'window', pid: 4242, hwnd: 42420, exe: 'firefox', title: 't', app: 'Firefox' }
+    const own = { ...window, pid: process.pid }
+    let answer: unknown = window
+    const binding = { ...fakeBinding(), windowAtPoint: () => answer }
+    const source = new NativeDesktopSource(binding)
+    expect(source.readWindowAt(1, 2)).toEqual({
+      pid: 4242,
+      hwnd: 42420,
+      exe: 'firefox',
+      title: 't',
+      app: 'Firefox'
+    })
+    answer = own
+    expect(source.readWindowAt(1, 2)).toBeNull()
+    answer = undefined
+    expect(source.readWindowAt(1, 2)).toBeNull()
+  })
+
   it('把不合格的原生事件丢掉，好的照常转发', () => {
     const binding = fakeBinding()
     const source = new NativeDesktopSource(binding)
@@ -114,6 +204,29 @@ describe('原生事件源', () => {
     binding.callbacks[0]({ type: 'keypress', ts: 6 })
     binding.callbacks[0]({ nonsense: true })
     expect(received).toEqual([{ type: 'click', ts: 5, x: 1, y: 2, button: 'right' }])
+  })
+
+  it('本进程自己的前台窗不算段（悬浮球 / 采集窗 / Electron 错误弹窗）', () => {
+    const binding = fakeBinding()
+    const source = new NativeDesktopSource(binding)
+    const received: RawDesktopEvent[] = []
+    source.start((event) => received.push(event))
+
+    binding.callbacks[0]({
+      type: 'foreground',
+      ts: 1,
+      pid: process.pid,
+      hwnd: 42,
+      exe: 'electron',
+      title: 'Error',
+      app: null
+    })
+    binding.callbacks[0]({ type: 'foreground', ts: 2, pid: 7, hwnd: 70, exe: 'firefox', title: 'A', app: 'Firefox' })
+    expect(received).toEqual([{ type: 'foreground', ts: 2, pid: 7, hwnd: 70, exe: 'firefox', title: 'A', app: 'Firefox' }])
+
+    // 点击 / 移动照常放行（自己的窗在 point 查询里已经挡掉，事件本身不该丢）
+    binding.callbacks[0]({ type: 'click', ts: 3, x: 1, y: 2, button: 'left' })
+    expect(received).toHaveLength(2)
   })
 
   it('tick 与 stop 直通原生层', () => {
@@ -138,6 +251,43 @@ describe('原生事件源', () => {
     binding.callbacks[0]({ type: 'foreground', ts: 100, pid: 7, hwnd: 70, exe: 'firefox', title: 'A', app: 'Firefox' })
     expect(inputs).toEqual([
       { kind: 'focus', ts: 100, pid: 7, hwnd: 70, exe: 'firefox', title: 'A', app: 'Firefox' }
+    ])
+  })
+
+  it('窗口事实原样透传给段机（适配层不改判、不补默认值）', () => {
+    const binding = fakeBinding()
+    const source = new NativeDesktopSource(binding)
+    const adapter = new DesktopEventAdapter(source, { now: () => 1_000 })
+    const inputs: unknown[] = []
+    source.start((event) => inputs.push(...adapter.handle(event)))
+
+    binding.callbacks[0]({
+      type: 'foreground',
+      ts: 100,
+      pid: 7,
+      hwnd: 70,
+      exe: 'hrupdate',
+      title: '',
+      app: null,
+      visible: false,
+      minimized: true,
+      onScreenArea: 0,
+      className: 'TaskSwitcherWnd'
+    })
+    expect(inputs).toEqual([
+      {
+        kind: 'focus',
+        ts: 100,
+        pid: 7,
+        hwnd: 70,
+        exe: 'hrupdate',
+        title: '',
+        app: null,
+        visible: false,
+        minimized: true,
+        onScreenArea: 0,
+        className: 'TaskSwitcherWnd'
+      }
     ])
   })
 })

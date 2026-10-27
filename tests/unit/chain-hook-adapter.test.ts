@@ -141,3 +141,67 @@ describe('时钟推进', () => {
     expect(DEFAULT_ADAPTER_OPTIONS).toMatchObject({ wheelGestureMs: 500, tickIntervalMs: 1_000 })
   })
 })
+
+describe('点哪算哪（v0.13：段身份跟着你做动作的那扇窗）', () => {
+  const TARGET = {
+    pid: 200,
+    hwnd: 2_000,
+    exe: 'firefox',
+    title: '真实在用的窗',
+    app: 'Firefox',
+    visible: true,
+    minimized: false,
+    onScreenArea: 500_000,
+    className: 'MozillaWindowClass'
+  }
+
+  function buildResolvable(resolve: (x: number, y: number) => typeof TARGET | null = () => TARGET) {
+    const source = new FakeSource()
+    const calls: Array<[number, number]> = []
+    const adapter = new DesktopEventAdapter(source, {
+      now: () => at(0),
+      resolveWindow: (x, y) => {
+        calls.push([x, y])
+        return resolve(x, y)
+      }
+    })
+    return { adapter, calls }
+  }
+
+  it('点击先补一条「被点中的窗」的焦点，再报点击本身', () => {
+    const { adapter, calls } = buildResolvable()
+    expect(adapter.handle(click(5))).toEqual([
+      {
+        kind: 'focus',
+        ts: at(5),
+        pid: 200,
+        hwnd: 2_000,
+        exe: 'firefox',
+        title: '真实在用的窗',
+        app: 'Firefox',
+        visible: true,
+        minimized: false,
+        onScreenArea: 500_000,
+        className: 'MozillaWindowClass'
+      },
+      { kind: 'click', ts: at(5), button: 'left', x: 10, y: 20 }
+    ])
+    // 用点击发生的坐标去查，不是光标当前位置
+    expect(calls).toEqual([[10, 20]])
+  })
+
+  it('滚轮新手势开始时补焦点；同一手势里不重复补', () => {
+    const { adapter, calls } = buildResolvable()
+    expect(adapter.handle(wheel(1, 120))).toHaveLength(1)
+    expect(adapter.handle(wheel(1.1, 120))).toEqual([])
+    expect(calls).toHaveLength(1)
+  })
+
+  it('查询失败（点在空处 / 没这能力）就只报点击，不猜一个窗', () => {
+    const { adapter } = buildResolvable(() => null)
+    expect(adapter.handle(click(5))).toEqual([{ kind: 'click', ts: at(5), button: 'left', x: 10, y: 20 }])
+
+    const plain = new DesktopEventAdapter(new FakeSource(), { now: () => at(0) })
+    expect(plain.handle(click(5))).toEqual([{ kind: 'click', ts: at(5), button: 'left', x: 10, y: 20 }])
+  })
+})

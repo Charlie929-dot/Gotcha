@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ensureChainSchema } from '../../src/chain/schema'
 import { getSegmentDetail, openSegment, querySegments, type ChainDb } from '../../src/chain/store'
 import { ChainRuntime } from '../../src/chain/hook/runtime'
-import type { DesktopEventSource, RawDesktopEvent } from '../../src/chain/hook/types'
+import type { DesktopEventSource, RawDesktopEvent, WindowFacts } from '../../src/chain/hook/types'
 
 const T0 = new Date(2026, 9, 26, 12, 0, 0, 0).getTime()
 const at = (seconds: number): number => T0 + seconds * 1000
@@ -13,6 +13,8 @@ class FakeSource implements DesktopEventSource {
   handler: ((event: RawDesktopEvent) => void) | null = null
   started = 0
   stopped = 0
+  /** 「这个点下面是哪扇窗」（v0.13）；null 表示查不到 */
+  windowAt: WindowFacts | null = null
   start(onEvent: (event: RawDesktopEvent) => void): void {
     this.handler = onEvent
     this.started += 1
@@ -23,6 +25,9 @@ class FakeSource implements DesktopEventSource {
   }
   lastInputTickMs(): number {
     return this.tick
+  }
+  readWindowAt(): WindowFacts | null {
+    return this.windowAt
   }
   emit(event: RawDesktopEvent): void {
     this.handler?.(event)
@@ -101,6 +106,51 @@ describe('链路启动', () => {
     expect(runtime.stats.openSegmentId).toBeNull()
     const [segment] = querySegments(db)
     expect(segment).toMatchObject({ start_ts: at(0), end_ts: at(30), active_ms: 30_000, closed: 1 })
+  })
+
+  it('幽灵前台窗被丢掉，计数进 stats（v0.12 真机核对用）', () => {
+    const { source, runtime } = build()
+    runtime.start()
+    source.emit(foreground(0, 'A'))
+    source.emit({
+      type: 'foreground',
+      ts: at(5),
+      pid: 900,
+      hwnd: 9000,
+      exe: 'hrupdate',
+      title: '',
+      app: null,
+      visible: false,
+      onScreenArea: 0
+    })
+    expect(runtime.stats.phantomDropped).toBe(1)
+    expect(runtime.stats.openSegmentId).not.toBeNull()
+    // 段还是原来那段，没被幽灵窗切走
+    source.emit(click(6))
+    clock = at(10)
+    runtime.stop()
+    const segments = querySegments(db)
+    expect(segments).toHaveLength(1)
+    expect(segments[0].exe).toBe('app100')
+  })
+
+  it('点哪算哪：前台没报切换，点进另一个窗也会切段（v0.13）', () => {
+    const { source, runtime } = build()
+    runtime.start()
+    source.emit(foreground(0, 'A', 100))
+    // 关键：全程没有新的前台事件（模拟钩子漏事件 / 前台被隐藏窗抢走）
+    source.windowAt = { pid: 300, hwnd: 3_000, exe: 'app300', title: 'B', app: 'App300' }
+    source.emit(click(5))
+    clock = at(10)
+    runtime.stop()
+
+    // querySegments 是新到旧：先 B 后 A
+    const [segmentB, segmentA] = querySegments(db)
+    expect(segmentA).toMatchObject({ exe: 'app100', start_ts: at(0), end_ts: at(5), closed: 1 })
+    expect(segmentB).toMatchObject({ exe: 'app300', start_ts: at(5), closed: 1 })
+    // 点击记在新段上
+    const detail = getSegmentDetail(db, segmentB.id)
+    expect(detail?.events.map((event) => event.kind)).toContain('click_left')
   })
 
   it('重复 start / 重复 stop 都是安全的', () => {

@@ -34,7 +34,7 @@ constexpr const char* kVersion = "0.1.0";
 /** 指针移动的最小上报距离：低于这个就当没动（钩子 125Hz，全报会把队列和主线程灌满） */
 constexpr int kMoveMinDeltaPx = 4;
 
-enum class EventKind { Foreground, Move, Click, Wheel };
+enum class EventKind { Foreground, Move, Click, Wheel, Window };
 
 struct EventPayload {
   EventKind kind = EventKind::Move;
@@ -45,6 +45,12 @@ struct EventPayload {
   std::string exe;
   std::string title;
   std::string app;
+  // 前台窗「能不能当一段」的原始事实（判据在 TS 段机里，这里只给事实，不下结论）
+  bool visible = false;
+  bool minimized = false;
+  bool hasOnScreenArea = false;
+  long onScreenArea = 0;
+  std::string className;
   // 指针
   int32_t x = 0;
   int32_t y = 0;
@@ -126,6 +132,29 @@ std::string ProcessExeName(DWORD pid) {
   return name;
 }
 
+/**
+ * 窗口矩形与**所在显示器**矩形的交集面积（px²）。拿不到矩形就返回 false。
+ *
+ * 为什么不用主屏：多屏时副屏上的正常窗口会被算成「屏幕外」，一律当辅助窗丢掉。
+ * 这个数字只说事实——「这窗在当前屏幕上占了多少像素」，够不够当一段由 TS 判。
+ */
+bool OnScreenAreaPx(HWND hwnd, long* area) {
+  RECT rect;
+  if (!GetWindowRect(hwnd, &rect)) return false;
+  HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+  if (monitor == nullptr) return false;
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfoW(monitor, &info)) return false;
+  RECT overlap{};
+  if (!IntersectRect(&overlap, &rect, &info.rcMonitor)) {
+    *area = 0;
+    return true;
+  }
+  *area = static_cast<long>(overlap.right - overlap.left) * static_cast<long>(overlap.bottom - overlap.top);
+  return true;
+}
+
 /** 进程 exe 的完整路径（缓存键用）；拿不到返回空 */
 std::wstring ProcessImagePath(DWORD pid) {
   HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -190,6 +219,8 @@ const char* KindName(EventKind kind) {
   switch (kind) {
     case EventKind::Foreground:
       return "foreground";
+    case EventKind::Window:
+      return "window";
     case EventKind::Move:
       return "move";
     case EventKind::Click:
@@ -227,35 +258,54 @@ void SetString(napi_env env, napi_value object, const char* key, const std::stri
   napi_set_named_property(env, object, key, string);
 }
 
+void SetBool(napi_env env, napi_value object, const char* key, bool value) {
+  napi_value boolean;
+  napi_get_boolean(env, value, &boolean);
+  napi_set_named_property(env, object, key, boolean);
+}
+
+/** 把 payload 建成 JS 对象；失败返回 nullptr。前台事件与「点中了哪扇窗」共用同一套字段。 */
+napi_value BuildEventObject(napi_env env, EventPayload* payload) {
+  napi_value event;
+  if (napi_create_object(env, &event) != napi_ok) return nullptr;
+  SetString(env, event, "type", KindName(payload->kind));
+  SetNumber(env, event, "ts", payload->ts);
+  switch (payload->kind) {
+    case EventKind::Foreground:
+    case EventKind::Window:
+      SetNumber(env, event, "pid", payload->pid);
+      SetNumber(env, event, "hwnd", static_cast<double>(payload->hwnd));
+      SetString(env, event, "exe", payload->exe);
+      SetString(env, event, "title", payload->title);
+      SetString(env, event, "app", payload->app);
+      SetString(env, event, "className", payload->className);
+      SetBool(env, event, "visible", payload->visible);
+      SetBool(env, event, "minimized", payload->minimized);
+      // 拿不到窗口矩形就**不报**这个字段（TS 侧按「未知」放行），不拿 0 冒充「屏幕外」
+      if (payload->hasOnScreenArea) SetNumber(env, event, "onScreenArea", static_cast<double>(payload->onScreenArea));
+      break;
+    case EventKind::Move:
+    case EventKind::Click:
+    case EventKind::Wheel:
+      SetNumber(env, event, "x", payload->x);
+      SetNumber(env, event, "y", payload->y);
+      if (payload->kind == EventKind::Click) {
+        SetString(env, event, "button",
+                  payload->button == 1 ? "right" : (payload->button == 2 ? "middle" : "left"));
+      }
+      if (payload->kind == EventKind::Wheel) SetNumber(env, event, "delta", payload->delta);
+      break;
+  }
+  return event;
+}
+
 void CallJs(napi_env env, napi_value js_callback, void* /*context*/, void* data) {
   EventPayload* payload = static_cast<EventPayload*>(data);
   if (payload == nullptr) return;
 
   if (env != nullptr && js_callback != nullptr) {
-    napi_value event;
-    if (napi_create_object(env, &event) == napi_ok) {
-      SetString(env, event, "type", KindName(payload->kind));
-      SetNumber(env, event, "ts", payload->ts);
-      switch (payload->kind) {
-        case EventKind::Foreground:
-          SetNumber(env, event, "pid", payload->pid);
-          SetNumber(env, event, "hwnd", static_cast<double>(payload->hwnd));
-          SetString(env, event, "exe", payload->exe);
-          SetString(env, event, "title", payload->title);
-          SetString(env, event, "app", payload->app);
-          break;
-        case EventKind::Move:
-        case EventKind::Click:
-        case EventKind::Wheel:
-          SetNumber(env, event, "x", payload->x);
-          SetNumber(env, event, "y", payload->y);
-          if (payload->kind == EventKind::Click) {
-            SetString(env, event, "button",
-                      payload->button == 1 ? "right" : (payload->button == 2 ? "middle" : "left"));
-          }
-          if (payload->kind == EventKind::Wheel) SetNumber(env, event, "delta", payload->delta);
-          break;
-      }
+    napi_value event = BuildEventObject(env, payload);
+    if (event != nullptr) {
       napi_value global;
       napi_value undefined;
       napi_get_global(env, &global);
@@ -270,11 +320,11 @@ void CallJs(napi_env env, napi_value js_callback, void* /*context*/, void* data)
 /* 钩子回调                                                            */
 /* ------------------------------------------------------------------ */
 
-void EmitForeground(HWND hwnd) {
-  DWORD pid = 0;
-  GetWindowThreadProcessId(hwnd, &pid);
-  if (pid == 0) return;
-
+/**
+ * 把一扇窗的「身份 + 能不能当一段」的事实填进 payload（前台事件与 windowAtPoint 共用）。
+ * 事实包括：exe / 标题 / 应用名 / 可见 / 最小化 / 与所在显示器的交集面积 / 窗口类名。
+ */
+void FillWindowFacts(HWND hwnd, DWORD pid, EventPayload* payload) {
   std::string exe = ProcessExeName(pid);
   std::wstring title;
   int length = GetWindowTextLengthW(hwnd);
@@ -283,15 +333,34 @@ void EmitForeground(HWND hwnd) {
     int copied = GetWindowTextW(hwnd, title.data(), length + 1);
     title.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
   }
+  payload->exe = exe;
+  payload->title = ToUtf8(title);
+  payload->app = AppNameOf(pid, exe);
+
+  // 真机踩到过火绒升级器的 0×0 隐藏窗抢前台 52s：它拿到前台，用户的点击/打字却全记到它头上。
+  payload->visible = IsWindowVisible(hwnd) != FALSE;
+  payload->minimized = IsIconic(hwnd) != FALSE;
+  long onScreenArea = 0;
+  if (OnScreenAreaPx(hwnd, &onScreenArea)) {
+    payload->hasOnScreenArea = true;
+    payload->onScreenArea = onScreenArea;
+  }
+  wchar_t className[256];
+  int classLength = GetClassNameW(hwnd, className, static_cast<int>(std::size(className)));
+  if (classLength > 0) payload->className = ToUtf8(std::wstring(className, classLength));
+}
+
+void EmitForeground(HWND hwnd) {
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid == 0) return;
 
   auto* payload = new EventPayload();
   payload->kind = EventKind::Foreground;
   payload->ts = NowMs();
   payload->pid = static_cast<int32_t>(pid);
   payload->hwnd = static_cast<int64_t>(reinterpret_cast<intptr_t>(hwnd));
-  payload->exe = exe;
-  payload->title = ToUtf8(title);
-  payload->app = AppNameOf(pid, exe);
+  FillWindowFacts(hwnd, pid, payload);
   Emit(payload);
 }
 
@@ -514,12 +583,51 @@ napi_value LastInputTickMs(napi_env env, napi_callback_info /*info*/) {
   return result;
 }
 
+/**
+ * 这个点下面到底是哪扇窗（同步查询，给「以动作为准」的段身份用）。
+ *
+ * 用 `WindowFromPoint` 而不是「前台窗口」：点击 / 滚轮本来就发给光标下那扇窗，
+ * 前台被升级器之类的隐藏窗抢走时，这个值仍然是用户真正在操作的那扇窗。
+ * `WindowFromPoint` 本身会跳过隐藏 / 禁用的窗；再取根窗，弹层 / 子控件归到主窗。
+ * 查不到（点在空处 / 桌面外壳之外）返回 null。
+ */
+napi_value WindowAtPoint(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value args[2];
+  napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+  if (argc < 2) return nullptr;
+
+  double x = 0;
+  double y = 0;
+  if (napi_get_value_double(env, args[0], &x) != napi_ok) return nullptr;
+  if (napi_get_value_double(env, args[1], &y) != napi_ok) return nullptr;
+
+  POINT point{static_cast<LONG>(x), static_cast<LONG>(y)};
+  HWND hwnd = WindowFromPoint(point);
+  if (hwnd == nullptr) return nullptr;
+  HWND root = GetAncestor(hwnd, GA_ROOT);
+  if (root == nullptr) root = hwnd;
+
+  DWORD pid = 0;
+  GetWindowThreadProcessId(root, &pid);
+  if (pid == 0) return nullptr;
+
+  EventPayload payload;
+  payload.kind = EventKind::Window;
+  payload.ts = NowMs();
+  payload.pid = static_cast<int32_t>(pid);
+  payload.hwnd = static_cast<int64_t>(reinterpret_cast<intptr_t>(root));
+  FillWindowFacts(root, pid, &payload);
+  return BuildEventObject(env, &payload);
+}
+
 napi_value Init(napi_env env, napi_value exports) {
   napi_property_descriptor properties[] = {
       {"start", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"stop", nullptr, Stop, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"lastInputTickMs", nullptr, LastInputTickMs, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"status", nullptr, Status, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"windowAtPoint", nullptr, WindowAtPoint, nullptr, nullptr, nullptr, napi_default, nullptr},
   };
   napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties);
 

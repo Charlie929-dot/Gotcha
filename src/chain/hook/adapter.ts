@@ -10,7 +10,7 @@
  * 3. **时钟推进**：段机判空闲、判打字停顿都要 `tick`。没有事件时也要按时喂，否则人走了它不知道。
  */
 import type { ChainInput } from '../segmenter'
-import type { DesktopEventSource, RawDesktopEvent } from './types'
+import type { DesktopEventSource, RawDesktopEvent, WindowFacts } from './types'
 
 export interface AdapterOptions {
   /** 同一手势内两条滚轮事件的最大间隔；超过就算新手势 */
@@ -18,6 +18,11 @@ export interface AdapterOptions {
   /** 心跳间隔：没有事件也按这个节奏喂 tick */
   tickIntervalMs: number
   now: () => number
+  /**
+   * 屏幕点下面是哪扇窗（v0.13）。给了就在点击 / 滚轮手势开始时补一条 `focus`，
+   * 段身份跟着「你做动作的那扇窗」走；不给就退回纯前台事件口径。
+   */
+  resolveWindow?: (x: number, y: number) => WindowFacts | null
 }
 
 export const DEFAULT_ADAPTER_OPTIONS: AdapterOptions = {
@@ -54,7 +59,7 @@ export class DesktopEventAdapter {
       case 'foreground': {
         const inputs = this.flushWheel()
         this.sawMouse = true
-        inputs.push({
+        const focus: Extract<ChainInput, { kind: 'focus' }> = {
           kind: 'focus',
           ts: raw.ts,
           pid: raw.pid,
@@ -62,12 +67,21 @@ export class DesktopEventAdapter {
           exe: raw.exe,
           title: raw.title,
           app: raw.app
-        })
+        }
+        // 窗口事实原样透传（v0.12）：源不报就不写这个键，段机才能分清「不知道」和「不可见」
+        if (raw.visible !== undefined) focus.visible = raw.visible
+        if (raw.minimized !== undefined) focus.minimized = raw.minimized
+        if (raw.onScreenArea !== undefined) focus.onScreenArea = raw.onScreenArea
+        if (raw.className !== undefined) focus.className = raw.className
+        inputs.push(focus)
         return inputs
       }
       case 'click': {
         const inputs = this.flushWheel()
         this.sawMouse = true
+        // 点哪算哪（v0.13）：先报「被点中的窗」这条焦点，再报点击本身——
+        // 前台被隐藏窗抢走时，段身份仍然跟着你真正在操作的那扇窗走。
+        inputs.push(...this.operatedFocus(raw.ts, raw.x, raw.y))
         inputs.push({ kind: 'click', ts: raw.ts, button: raw.button, x: raw.x, y: raw.y })
         return inputs
       }
@@ -77,6 +91,29 @@ export class DesktopEventAdapter {
       case 'wheel':
         return this.addWheel(raw)
     }
+  }
+
+  /**
+   * 这个点下面那扇窗 → 一条 `focus` 输入。传输层没提供查询（假源 / 别的实现）就返回空，
+   * 上层退回纯前台事件口径，不猜。
+   */
+  private operatedFocus(ts: number, x: number, y: number): ChainInput[] {
+    const window = this.options.resolveWindow?.(x, y)
+    if (!window) return []
+    const focus: Extract<ChainInput, { kind: 'focus' }> = {
+      kind: 'focus',
+      ts,
+      pid: window.pid,
+      hwnd: window.hwnd,
+      exe: window.exe,
+      title: window.title,
+      app: window.app
+    }
+    if (window.visible !== undefined) focus.visible = window.visible
+    if (window.minimized !== undefined) focus.minimized = window.minimized
+    if (window.onScreenArea !== undefined) focus.onScreenArea = window.onScreenArea
+    if (window.className !== undefined) focus.className = window.className
+    return [focus]
   }
 
   /**
@@ -124,6 +161,8 @@ export class DesktopEventAdapter {
     }
     const inputs = this.flushWheel()
     this.pendingWheel = { firstTs: raw.ts, lastTs: raw.ts, delta: raw.delta, x: raw.x, y: raw.y }
+    // 新手势开始的那一刻坐标最新：顺手报「滚动作用在哪扇窗」（v0.13），段身份跟着它走
+    inputs.push(...this.operatedFocus(raw.ts, raw.x, raw.y))
     return inputs
   }
 

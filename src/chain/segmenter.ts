@@ -39,6 +39,13 @@ export interface SegmenterOptions {
   movePauseMs: number
   /** 停下前至少移动多少像素 */
   movePauseDistPx: number
+  /**
+   * 幽灵前台窗的判据（v0.12）：窗口矩形与屏幕的交集小于这个面积（px²）就不当一段。
+   * 0×0 的辅助窗、被最小化到屏幕外的窗都落在这条；32×32 是「小到没有可读内容」的量级。
+   */
+  phantomMinOnScreenPx: number
+  /** 系统覆盖层窗口类名：前台落在它们身上不算切段（Alt-Tab / 任务视图 / 前台交接气泡） */
+  phantomWindowClasses: readonly string[]
 }
 
 export const DEFAULT_SEGMENTER_OPTIONS: SegmenterOptions = {
@@ -49,11 +56,36 @@ export const DEFAULT_SEGMENTER_OPTIONS: SegmenterOptions = {
   captureCooldownMs: 2_000,
   wheelCaptureDelayMs: 2_000,
   movePauseMs: 400,
-  movePauseDistPx: 40
+  movePauseDistPx: 40,
+  phantomMinOnScreenPx: 32 * 32,
+  phantomWindowClasses: [
+    // Win11 的 Alt-Tab / 任务视图 / 焦点交接（UWP 启动时）各有一个覆盖层窗抢前台
+    'TaskSwitcherWnd',
+    'MultitaskingViewFrame',
+    'ForegroundStaging',
+    // 桌面外壳：点一下任务栏 / 桌面不该切出一段（v0.13 起「点哪算哪」，必须排除外壳）
+    'Shell_TrayWnd',
+    'Shell_SecondaryTrayWnd',
+    'Progman',
+    'WorkerW'
+  ]
 }
 
 export type ChainInput =
-  | { kind: 'focus'; ts: number; pid: number; exe: string; title: string; hwnd: number; app?: string | null }
+  | {
+      kind: 'focus'
+      ts: number
+      pid: number
+      exe: string
+      title: string
+      hwnd: number
+      app?: string | null
+      /** 窗口事实（v0.12，可选）：不报就按「未知」放行，见 `isPhantomFocus` */
+      visible?: boolean
+      minimized?: boolean
+      onScreenArea?: number
+      className?: string
+    }
   | { kind: 'click'; ts: number; button: 'left' | 'right' | 'middle'; x: number; y: number }
   | { kind: 'wheel'; ts: number; delta: number; x: number; y: number }
   | { kind: 'move'; ts: number; x: number; y: number }
@@ -134,9 +166,21 @@ export class ChainSegmenter {
   private pendingWheel: { fromTs: number; lastTs: number; delta: number; x: number; y: number } | null = null
   private pendingTitle: { from: string; to: string; at: number } | null = null
   private lastMove: { ts: number; x: number; y: number; moved: number } | null = null
+  /** 被丢掉的幽灵前台事件数（只做观测：真机上它应该稳定大于 0，否则判据没生效） */
+  private phantomFocusDropped = 0
+  /**
+   * 已上报过的最后一条子行时刻（事件 / 滚轮）。
+   * 收口边界不能早于它，否则存储层「子行晚于段结束」校验会抛错。
+   */
+  private lastChildTs = Number.NEGATIVE_INFINITY
 
   constructor(options: Partial<SegmenterOptions> = {}) {
     this.options = { ...DEFAULT_SEGMENTER_OPTIONS, ...options }
+  }
+
+  /** 丢掉过多少次幽灵前台（调试 / 测试 / 诊断用） */
+  get phantomDropped(): number {
+    return this.phantomFocusDropped
   }
 
   /** 当前打开的段（调试 / 测试用） */
@@ -304,6 +348,8 @@ export class ChainSegmenter {
     this.pendingWheel = null
     if (!this.open) return []
     if (capture) this.lastCaptureTs = captureAt ?? wheel.lastTs
+    // 这条事件也进了库：标题抖动的收口边界不能早于它
+    if (wheel.lastTs > this.lastChildTs) this.lastChildTs = wheel.lastTs
     return [
       {
         type: 'event',
@@ -332,8 +378,29 @@ export class ChainSegmenter {
     this.lastMove.ts = input.ts
   }
 
+  /**
+   * 幽灵前台窗（v0.12）：拿到前台、却不是「人在用的那扇窗」。
+   *
+   * 真机踩到过三个来源：火绒升级器的 0×0 隐藏窗（抢前台 52s，用户的 46 条点击 / 打字全记到它头上）、
+   * explorer 的一堆 0×0 辅助窗、被最小化到 (-31992,-32000) 的窗；还有 Alt-Tab 的任务切换覆盖层。
+   * 判据只用事实字段，缺字段一律**不知道**（放行）——宁可多记一段，也不误杀真窗口。
+   */
+  private isPhantomFocus(input: Extract<ChainInput, { kind: 'focus' }>): boolean {
+    if (input.visible === false) return true
+    if (input.minimized === true) return true
+    if (input.onScreenArea !== undefined && input.onScreenArea < this.options.phantomMinOnScreenPx) return true
+    if (input.className !== undefined && this.options.phantomWindowClasses.includes(input.className)) return true
+    return false
+  }
+
   private onFocus(input: Extract<ChainInput, { kind: 'focus' }>): ChainAction[] {
     const actions: ChainAction[] = []
+    // 幽灵窗不配当一段：不切段、不收口、不动标题抖动窗口——它的输入继续算在当前这一段上
+    // （当前没段就什么都不开，时间轴留空总比记错强）。
+    if (this.isPhantomFocus(input)) {
+      this.phantomFocusDropped += 1
+      return actions
+    }
     const justResumed = this.idleClosed !== null && this.idleClosed.to === input.ts
     this.idleClosed = null
 
@@ -398,16 +465,23 @@ export class ChainSegmenter {
     if (event) actions.push(event)
   }
 
-  /** 标题抖动窗口过去了：段在标题变化那一刻收口，新段从那一刻开始 */
+  /**
+   * 标题抖动窗口过去了：段在标题变化那一刻收口，新段从那一刻开始。
+   *
+   * 边界要夹到「已经上报过的最后一条子行」之后：确认窗（`titleFlapMs`）里用户仍然在点，
+   * 那些事件已经按更晚的时刻落库了；再把段收回标题变化那一刻，存储层校验「子行晚于段结束」
+   * 就会抛错（真机 2026-10-27：段 237 的结束时间比子行早 2.126 秒，弹了个 Electron 错误窗）。
+   */
   private commitTitleSplit(): ChainAction[] {
     const pending = this.pendingTitle
     if (!pending || !this.open) return []
     this.pendingTitle = null
     const actions: ChainAction[] = []
     const segment = this.open
-    actions.push(this.closeSegment(pending.at, 'switch'))
+    const boundary = Math.max(pending.at, this.lastChildTs)
+    actions.push(this.closeSegment(boundary, 'switch'))
     this.open = {
-      startTs: pending.at,
+      startTs: boundary,
       lastInputTs: segment.lastInputTs,
       pid: segment.pid,
       exe: segment.exe,
@@ -419,9 +493,9 @@ export class ChainSegmenter {
     }
     actions.push({
       type: 'segment-opened',
-      at: pending.at,
+      at: boundary,
       segment: {
-        startTs: pending.at,
+        startTs: boundary,
         pid: segment.pid,
         exe: segment.exe,
         app: segment.app,
@@ -429,7 +503,7 @@ export class ChainSegmenter {
         title: pending.to
       }
     })
-    this.pushEnter(pending.at, actions)
+    this.pushEnter(boundary, actions)
     return actions
   }
 
@@ -494,6 +568,7 @@ export class ChainSegmenter {
   ): ChainAction | null {
     if (!this.open) return null
     if (capture) this.lastCaptureTs = at
+    if (at > this.lastChildTs) this.lastChildTs = at
     return { type: 'event', at, kind, x, y, delta, capture }
   }
 }

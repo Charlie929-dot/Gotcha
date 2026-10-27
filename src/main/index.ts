@@ -200,6 +200,34 @@ const captureLog: CaptureLog = (level, msg, data) => {
   else log.info(line)
 }
 
+/**
+ * 主进程未捕获异常 / 未处理的 Promise 拒绝：**写进 main.log，不弹 Electron 错误窗**。
+ *
+ * 2026-10-27 真机踩到：一个「段结束早于子行」的校验错在定时器里抛出，Electron 弹了个
+ * 标题 `Error` 的窗——抢前台 14.6 秒、还变成了一段，而日志里什么都没有。有了这条，
+ * 栈会落在 main.log 的 error 行里，事后能查（代价是看不到系统弹窗，日志即证据）。
+ */
+function installCrashLogging(): void {
+  process.on('uncaughtException', (error) => {
+    const detail = error instanceof Error ? { message: error.message, stack: error.stack } : { message: String(error) }
+    try {
+      captureLog('error', 'uncaught exception', detail)
+    } catch {
+      // 日志本身挂了就只能认了，别在异常处理里再抛
+    }
+    console.error('[gotcha] uncaught exception', detail)
+  })
+  process.on('unhandledRejection', (reason) => {
+    const detail = reason instanceof Error ? { message: reason.message, stack: reason.stack } : { message: String(reason) }
+    try {
+      captureLog('error', 'unhandled rejection', detail)
+    } catch {
+      // 同上
+    }
+    console.error('[gotcha] unhandled rejection', detail)
+  })
+}
+
 /** 启动清理上次崩溃 / 删除失败留下的临时帧（F06）：只删 userData/tmp 下的 frame-*.png */
 function cleanTempFramesOnStartup(): void {
   const cleaned = cleanStaleFrames(join(app.getPath('userData'), 'tmp'))
@@ -1149,6 +1177,7 @@ const primaryInstance = claimSingleInstance(app, () => {
 
 if (primaryInstance) {
   app.whenReady().then(async () => {
+    installCrashLogging()
     cleanTempFramesOnStartup()
     const capture = resolveCapture(process.argv, process.env)
     if (capture) {

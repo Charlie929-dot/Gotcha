@@ -43,6 +43,8 @@ export interface ChainRuntimeStats {
   shotStats: ShotStats
   /** 被丢掉的幽灵前台事件数（v0.12）；真机上稳定大于 0 才说明判据真的在生效 */
   phantomDropped: number
+  /** 被焦点确认窗（v0.14）丢掉的闪段数；真机上稳定大于 0 才说明判据真的在生效 */
+  flashDropped: number
 }
 
 export class ChainRuntime {
@@ -139,7 +141,8 @@ export class ChainRuntime {
       idle: this.segmenter.isIdle,
       lastOutcome: this.lastOutcome,
       shotStats: this.recorder.shotStats,
-      phantomDropped: this.segmenter.phantomDropped
+      phantomDropped: this.segmenter.phantomDropped,
+      flashDropped: this.segmenter.flashDropped
     }
   }
 

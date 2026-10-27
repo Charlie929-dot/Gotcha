@@ -6,6 +6,9 @@
  * - 空闲 = `idleMs`（默认 60s）没有任何输入 → 停采，只留空闲标记；
  * - 走开又回来（同一窗口、`mergeIdleCapMs` 内）→ 接续成同一段，空闲不计入占用时长；
  * - 标题抖动：`titleFlapMs`（默认 3s）内变回原值就不切段；
+ * - **焦点抖动确认窗**（`focusFlapMs`，默认 1.5s，v0.14）：焦点切到新窗口先挂起，只有
+ *   该窗口收到动作（点击 / 滚轮 / 打字）或停留满窗口才真正切段；否则当噪声丢掉
+ *   （真机 2026-10-27：今日 295 段里 173 段 <2s，其中 156 段零动作——窗口被瞬间抢个焦点）；
  * - **采集（截图）只由三类时刻驱动**（契约 v0.11，2026-10-27 拍板）：
  *   ① 左 / 右键**从 ≥`captureCooldownMs` 的静默里**发起 → 立刻拍；
  *   ② 打字被点击 / 滚轮**打断** → 立刻拍（保住刚敲进去的内容）；
@@ -29,6 +32,11 @@ export interface SegmenterOptions {
   mergeIdleCapMs: number
   /** 标题抖动抑制窗口 */
   titleFlapMs: number
+  /**
+   * 焦点抖动确认窗（v0.14）：焦点落到新窗口后，这么久之内没收到任何动作、
+   * 也没停住这么久，就当「被瞬间抢焦点」，不建段。
+   */
+  focusFlapMs: number
   /** 打字停顿多久补一条 typing 事件（不截图） */
   typingSettleMs: number
   /** 两张截图的最小间隔；也是「点击要从多久的静默里发起才算一次采集」 */
@@ -52,6 +60,7 @@ export const DEFAULT_SEGMENTER_OPTIONS: SegmenterOptions = {
   idleMs: 60_000,
   mergeIdleCapMs: 30 * 60_000,
   titleFlapMs: 3_000,
+  focusFlapMs: 1_500,
   typingSettleMs: 3_000,
   captureCooldownMs: 2_000,
   wheelCaptureDelayMs: 2_000,
@@ -93,6 +102,8 @@ export type ChainInput =
   | { kind: 'activity'; ts: number }
   /** 时钟推进：只用来判空闲与打字停顿，不产生事件 */
   | { kind: 'tick'; ts: number }
+
+type FocusInput = Extract<ChainInput, { kind: 'focus' }>
 
 /** 开段时已知的信息（段行此时就要落库，子行才能拿到 segment_id） */
 export interface SegmentOpenDraft {
@@ -165,6 +176,13 @@ export class ChainSegmenter {
   /** 滚轮手势：停下 `wheelCaptureDelayMs` 后才作为「滚动结果」上报并截图 */
   private pendingWheel: { fromTs: number; lastTs: number; delta: number; x: number; y: number } | null = null
   private pendingTitle: { from: string; to: string; at: number } | null = null
+  /**
+   * 挂起的焦点切换（v0.14）：切过去的窗口还没证明「人在用它」。
+   * 收到动作即确认，或等满 `focusFlapMs`；期间不切段、不开段、不落事件。
+   */
+  private pendingSwitch: { at: number; to: FocusInput } | null = null
+  /** 被确认窗丢掉的闪段数（观测：真机上它应该稳定大于 0，否则判据没生效） */
+  private flashSegmentsDropped = 0
   private lastMove: { ts: number; x: number; y: number; moved: number } | null = null
   /** 被丢掉的幽灵前台事件数（只做观测：真机上它应该稳定大于 0，否则判据没生效） */
   private phantomFocusDropped = 0
@@ -181,6 +199,11 @@ export class ChainSegmenter {
   /** 丢掉过多少次幽灵前台（调试 / 测试 / 诊断用） */
   get phantomDropped(): number {
     return this.phantomFocusDropped
+  }
+
+  /** 被焦点确认窗丢掉的闪段数（v0.14，观测用） */
+  get flashDropped(): number {
+    return this.flashSegmentsDropped
   }
 
   /** 当前打开的段（调试 / 测试用） */
@@ -213,6 +236,8 @@ export class ChainSegmenter {
         actions.push(...this.onFocus(input))
         break
       case 'click': {
+        // v0.14：切过去的那扇窗收到点击，就等于「人在用它」——先确认切段，事件才落得对
+        actions.push(...this.confirmPendingSwitch(input.ts))
         actions.push(...this.flushWheel(false))
         actions.push(...this.settleMovePause(input.ts))
         // 采集口径（契约 v0.11）：打断打字 → 立刻拍（保住刚敲进去的内容）；
@@ -233,6 +258,7 @@ export class ChainSegmenter {
         break
       }
       case 'wheel': {
+        actions.push(...this.confirmPendingSwitch(input.ts))
         // 滚轮不立刻拍：等手势停下 wheelCaptureDelayMs，拍的是「滚动结果」
         const wheel = this.pendingWheel
         this.pendingWheel = wheel
@@ -257,7 +283,9 @@ export class ChainSegmenter {
         this.trackMove(input)
         break
       case 'activity':
-        // 键盘：只重置计时；打字本身不截图，等被鼠标打断或停顿（只补事件）
+        // 键盘**不**确认切段（真机 14:04 复测的口子）：`activity` 来自 `GetLastInputInfo`，
+        // 分不清「在新窗口里打字」和「Alt-Tab 那几下按键」——977ms 的 cmd 闪段就是这么被认领的。
+        // 键盘只重置打字计时，切段仍由点击 / 滚轮或时间确认。
         this.typingActive = true
         break
     }
@@ -267,10 +295,15 @@ export class ChainSegmenter {
   /** 停止采集：把开着的段收口 */
   flush(now: number): ChainAction[] {
     const actions = this.advance(now)
+    // 还挂着的切换从没被确认过：直接作废，不补段；旧段也只记到切换那一刻
+    const pendingAt = this.pendingSwitch?.at ?? null
+    this.pendingSwitch = null
     actions.push(...this.flushWheel(false))
-    if (this.pendingTitle) actions.push(...this.commitTitleSplit())
+    // 停止时也没活过确认窗的标题抖动不该切成空段（同 settlePendingTitleForSwitch）
+    this.settlePendingTitleForSwitch(now, actions)
     if (this.open) {
-      const endTs = this.idleFrom ?? now
+      const endTs =
+        this.idleFrom ?? (pendingAt === null ? now : Math.max(pendingAt, this.lastChildTs))
       actions.push(this.closeSegment(endTs, 'stop'))
       this.idleFrom = null
     }
@@ -282,6 +315,11 @@ export class ChainSegmenter {
   /** 推进时间：标题抖动、打字停顿、移动后暂停、空闲检测 */
   private advance(now: number): ChainAction[] {
     const actions: ChainAction[] = []
+
+    // 焦点确认窗（v0.14）：挂起的切换停满 focusFlapMs 就落实
+    if (this.pendingSwitch && now - this.pendingSwitch.at >= this.options.focusFlapMs) {
+      actions.push(...this.confirmPendingSwitch(now))
+    }
 
     if (this.pendingTitle && now - this.pendingTitle.at >= this.options.titleFlapMs) {
       actions.push(...this.commitTitleSplit())
@@ -368,6 +406,8 @@ export class ChainSegmenter {
   }
 
   private trackMove(input: Extract<ChainInput, { kind: 'move' }>): void {
+    // 挂起的切换期间不跟踪移动：它的 ts 早于新段起点，落库会违反「子行不早于段开始」
+    if (this.pendingSwitch) return
     if (!this.lastMove) {
       this.lastMove = { ts: input.ts, x: input.x, y: input.y, moved: 0 }
       return
@@ -393,7 +433,7 @@ export class ChainSegmenter {
     return false
   }
 
-  private onFocus(input: Extract<ChainInput, { kind: 'focus' }>): ChainAction[] {
+  private onFocus(input: FocusInput): ChainAction[] {
     const actions: ChainAction[] = []
     // 幽灵窗不配当一段：不切段、不收口、不动标题抖动窗口——它的输入继续算在当前这一段上
     // （当前没段就什么都不开，时间轴留空总比记错强）。
@@ -404,20 +444,40 @@ export class ChainSegmenter {
     const justResumed = this.idleClosed !== null && this.idleClosed.to === input.ts
     this.idleClosed = null
 
+    // 已经挂着一个待确认的切换（v0.14）：先判这次焦点是「回到原地 / 还是这个候选 / 换成第三个窗」
+    const pending = this.pendingSwitch
+    if (pending) {
+      if (this.open && sameWindow(this.open, input)) {
+        // 回到原来那扇窗：刚才那一下就是抢焦点，什么都没发生
+        this.pendingSwitch = null
+        this.flashSegmentsDropped += 1
+      } else if (sameWindow(pending.to, input)) {
+        // 还是同一个候选窗（标题可能变了）：只换候选，计时不动
+        this.pendingSwitch = { at: pending.at, to: input }
+        return actions
+      } else {
+        // 又切到第三个窗：前一个候选从没被用过，作废
+        this.flashSegmentsDropped += 1
+        this.pendingSwitch = { at: input.ts, to: input }
+        return actions
+      }
+    }
+
     if (!this.open) {
-      this.beginSegment(input, input.ts, actions)
+      // 第一段也走确认窗：应用刚起来时的焦点抖动不该落成一段
+      this.deferSwitch(input, input.ts, actions)
       return actions
     }
 
-    const sameWindow = this.open.pid === input.pid && this.open.hwnd === input.hwnd
+    const sameWindowNow = sameWindow(this.open, input)
 
     // 刚结束空闲就回到同一窗口：接续，只是段内多了一个空闲洞
-    if (justResumed && sameWindow && input.title === this.open.title) {
+    if (justResumed && sameWindowNow && input.title === this.open.title) {
       this.pushEnter(input.ts, actions)
       return actions
     }
 
-    if (sameWindow && input.title !== this.open.title) {
+    if (sameWindowNow && input.title !== this.open.title) {
       if (this.pendingTitle) {
         if (input.title === this.pendingTitle.from) {
           this.pendingTitle = null
@@ -430,19 +490,66 @@ export class ChainSegmenter {
       return actions
     }
 
-    if (sameWindow) {
+    if (sameWindowNow) {
       this.pendingTitle = null
       return actions
     }
 
-    if (this.pendingTitle) actions.push(...this.commitTitleSplit())
-    if (this.open) actions.push(this.closeSegment(input.ts, 'switch'))
-    this.beginSegment(input, input.ts, actions)
+    // 换窗口：先挂起，等「动作」或「停满 focusFlapMs」（v0.14）
+    this.deferSwitch(input, input.ts, actions)
     return actions
   }
 
+  /**
+   * 挂起一次焦点切换（v0.14）：**不切段、不开段、不落事件**，等
+   * `confirmPendingSwitch` 被动作触发或被 `advance` 按时间确认。
+   * 挂起前把在途手势清掉——它们属于「刚刚那一下」，不该记到新段里。
+   */
+  private deferSwitch(input: FocusInput, at: number, actions: ChainAction[]): void {
+    // 标题抖动还没到期就切走：标题记到旧段上，不切（见 settlePendingTitleForSwitch）
+    this.settlePendingTitleForSwitch(at, actions)
+    this.lastMove = null
+    this.typingDueAt = null
+    this.typingActive = false
+    this.pendingSwitch = { at, to: input }
+  }
+
+  /**
+   * 确认挂起的切换。边界照标题抖动的教训取 `max(切换时刻, 已落库的最后一条子行)`：
+   * 挂起期间可能已经上报过事件（确认窗里点了鼠标），段结束不能早于它们。
+   */
+  private confirmPendingSwitch(now: number): ChainAction[] {
+    const pending = this.pendingSwitch
+    if (!pending) return []
+    this.pendingSwitch = null
+    const actions: ChainAction[] = []
+    const boundary = Math.max(pending.at, this.lastChildTs)
+    this.settlePendingTitleForSwitch(now, actions)
+    if (this.open) actions.push(this.closeSegment(boundary, 'switch'))
+    this.beginSegment(pending.to, boundary, actions)
+    return actions
+  }
+
+  /**
+   * 切段撞上还没到期的标题抖动：**不另起一段**，把新标题记到旧段的 `title_last` 上。
+   *
+   * 真机 2026-10-27 14:06 复测：B 站标题抖了一下（还没过 3s 确认窗），人随即切走，
+   * 若在这里 `commitTitleSplit()` 就会切出一个 **93ms 的空段**。标题变化没活过确认窗，
+   * 本来就不算「换了一件事」；过了确认窗的（`now` 已超时）才照旧切。
+   */
+  private settlePendingTitleForSwitch(now: number, actions: ChainAction[]): void {
+    const pending = this.pendingTitle
+    if (!pending) return
+    if (now - pending.at >= this.options.titleFlapMs) {
+      actions.push(...this.commitTitleSplit())
+      return
+    }
+    if (this.open) this.open.title = pending.to
+    this.pendingTitle = null
+  }
+
   /** 开段：先上报开段（行要落库），再上报入场事件 */
-  private beginSegment(input: Extract<ChainInput, { kind: 'focus' }>, ts: number, actions: ChainAction[]): void {
+  private beginSegment(input: FocusInput, ts: number, actions: ChainAction[]): void {
     this.open = this.startSegment(input, ts)
     actions.push({
       type: 'segment-opened',
@@ -577,4 +684,12 @@ function clickKind(button: 'left' | 'right' | 'middle'): ChainEventKind {
   if (button === 'right') return 'click_right'
   if (button === 'middle') return 'click_middle'
   return 'click_left'
+}
+
+/** 是不是同一扇窗（段身份 = 动作目标窗，v0.13） */
+function sameWindow(
+  a: { pid: number; hwnd: number },
+  b: { pid: number; hwnd: number }
+): boolean {
+  return a.pid === b.pid && a.hwnd === b.hwnd
 }

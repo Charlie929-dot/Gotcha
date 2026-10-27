@@ -248,7 +248,7 @@ describe('假事件源跑通整条链', () => {
   it('外部补写内容：没有开着的段就丢弃', () => {
     const { feed, flush, recorder } = wire(fakeShot())
     expect(recorder.recordContent({ source: 'manual', text: '段外内容' }, at(1))).toBe(false)
-    feed([focus(0, 1, 'A')])
+    feed([focus(0, 1, 'A'), tick(2)])
     expect(recorder.recordContent({ source: 'manual', text: '段内内容' }, at(2))).toBe(true)
     flush(5)
     const [segment] = querySegments(db)
@@ -264,7 +264,7 @@ describe('假事件源跑通整条链', () => {
     const [first] = querySegments(db)
 
     // 阅读慢：读回来时已经切到下一段（B 开着）
-    feed([focus(20, 2, 'B')])
+    feed([focus(20, 2, 'B'), tick(22)])
     const open = recorder.currentSegmentId
     expect(open).not.toBe(first.id)
 
@@ -464,7 +464,7 @@ describe('派生层叫醒（v0.8）', () => {
     const feed = (inputs: ChainInput[]) => inputs.forEach((input) => recorder.apply(segmenter.feed(input)))
     feed([focus(0, 1, 'A')])
     feed([click(2)])
-    feed([focus(10, 2, 'B')])
+    feed([focus(10, 2, 'B'), tick(12)])
 
     const [first] = querySegments(db)
     expect(first.id).toBe(1)
@@ -489,7 +489,7 @@ describe('派生层叫醒（v0.8）', () => {
     const feed = (inputs: ChainInput[]) => inputs.forEach((input) => recorder.apply(segmenter.feed(input)))
     feed([focus(0, 1, 'A')])
     feed([click(2)])
-    feed([focus(10, 2, 'B')])
+    feed([focus(10, 2, 'B'), tick(12)])
 
     const segments = querySegments(db)
     expect(segments.map((segment) => segment.closed)).toEqual([1])

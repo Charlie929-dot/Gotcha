@@ -44,7 +44,8 @@ function feedAll(segmenter: ChainSegmenter, inputs: ChainInput[]): ChainAction[]
 describe('段的基本切分', () => {
   it('切到别的窗口就关段开新段，并各拍一张入场帧', () => {
     const segmenter = new ChainSegmenter()
-    const actions = feedAll(segmenter, [focus(0, 1, 'A'), focus(30, 2, 'B')])
+    // v0.14：切过去要等确认窗（1.5s）才落实，追加一个 tick
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), focus(30, 2, 'B'), tick(32)])
     const segments = closed(actions)
     expect(segments).toHaveLength(1)
     expect(segments[0].segment).toMatchObject({ startTs: at(0), endTs: at(30), activeMs: 30_000, idleMs: 0 })
@@ -52,6 +53,8 @@ describe('段的基本切分', () => {
     expect(shots(actions).map((action) => action.kind)).toEqual(['enter', 'enter'])
     // 开段要在事件之前上报，子行才能立刻拿到 segment_id
     expect(opened(actions).map((action) => action.segment.title)).toEqual(['A', 'B'])
+    // 新段起点仍是「切过去那一刻」，不是确认时刻
+    expect(opened(actions)[1].segment.startTs).toBe(at(30))
     expect(actions.findIndex((action) => action.type === 'segment-opened')).toBeLessThan(
       actions.findIndex((action) => action.type === 'event')
     )
@@ -127,7 +130,7 @@ describe('空闲与停采', () => {
 
   it('走开后切到别的窗口：旧段收口，新段另起', () => {
     const segmenter = new ChainSegmenter()
-    const actions = feedAll(segmenter, [focus(0, 1, 'A'), tick(61), focus(100, 2, 'B')])
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), tick(61), focus(100, 2, 'B'), tick(102)])
     const segments = closed(actions)
     expect(segments).toHaveLength(1)
     expect(segments[0].reason).toBe('switch')
@@ -251,7 +254,7 @@ describe('幽灵前台窗（v0.12：拿到前台但不是人在用的窗）', ()
 
   it('字段缺失按未知放行（旧原生模块 / 别的传输实现不能因此丢段）', () => {
     const segmenter = new ChainSegmenter()
-    const actions = feedAll(segmenter, [focus(0, 1, 'A'), focus(10, 2, 'B')])
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), tick(2), focus(10, 2, 'B'), tick(12)])
     expect(opened(actions).map((action) => action.segment.title)).toEqual(['A', 'B'])
     expect(closed(actions)).toHaveLength(1)
     expect(segmenter.phantomDropped).toBe(0)
@@ -277,12 +280,163 @@ describe('幽灵前台窗（v0.12：拿到前台但不是人在用的窗）', ()
   })
 })
 
+describe('焦点抖动确认窗（v0.14：瞬间被抢的焦点不算一段）', () => {
+  it('切过去没动作、1.5s 内又切回来：一段都不产生', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [
+      focus(0, 1, 'A'),
+      tick(2),
+      focus(10, 2, 'B'), // 闪一下
+      tick(10.5),
+      focus(11, 1, 'A') // 回到原地
+    ])
+    expect(opened(actions).map((action) => action.segment.title)).toEqual(['A'])
+    expect(closed(actions)).toHaveLength(0)
+    expect(segmenter.openSegment?.titleLast).toBe('A')
+    expect(segmenter.flashDropped).toBe(1)
+  })
+
+  it('停满确认窗就落实，段起点仍是「切过去那一刻」', () => {
+    const segmenter = new ChainSegmenter()
+    // 11.4 还差 0.1s：确认窗没走完，什么都没发生
+    const before = feedAll(segmenter, [focus(0, 1, 'A'), tick(2), focus(10, 2, 'B'), tick(11.4)])
+    expect(closed(before)).toHaveLength(0)
+    const actions = feedAll(segmenter, [tick(11.6)])
+    const segments = closed(actions)
+    expect(segments).toHaveLength(1)
+    expect(segments[0].segment).toMatchObject({ startTs: at(0), endTs: at(10) })
+    expect(opened(actions)[0].segment).toMatchObject({ title: 'B', startTs: at(10) })
+    expect(events(actions).at(-1)).toMatchObject({ kind: 'enter', at: at(10) })
+  })
+
+  it('挂起期间收到点击就立刻确认，点击落进新段', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), tick(2), focus(10, 2, 'B'), click(10.3)])
+    const segments = closed(actions)
+    expect(segments).toHaveLength(1)
+    expect(segments[0].segment.endTs).toBe(at(10))
+    // 顺序必须是：收旧段 → 开新段 → 入场帧 → 这条点击
+    const kinds = actions.map((action) => action.type)
+    expect(kinds).toEqual([
+      'segment-opened',
+      'event',
+      'segment-closed',
+      'segment-opened',
+      'event',
+      'event'
+    ])
+    expect(opened(actions)[1].segment.title).toBe('B')
+    expect(events(actions).at(-1)).toMatchObject({ kind: 'click_left', at: at(10.3) })
+    expect(segmenter.flashDropped).toBe(0)
+  })
+
+  it('A→B→C 连切：只有最后停住的那扇窗成段，中间两个记作闪段', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [
+      focus(0, 1, 'A'),
+      tick(2),
+      focus(10, 2, 'B'),
+      focus(10.4, 3, 'C'),
+      tick(13)
+    ])
+    expect(opened(actions).map((action) => action.segment.title)).toEqual(['A', 'C'])
+    expect(closed(actions)).toHaveLength(1)
+    expect(closed(actions)[0].segment.endTs).toBe(at(10.4))
+    expect(opened(actions)[1].segment.startTs).toBe(at(10.4))
+    expect(segmenter.flashDropped).toBe(1)
+  })
+
+  it('第一段也走确认窗：应用刚起来时的焦点抖动不落段', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), tick(1.4)])
+    expect(opened(actions)).toHaveLength(0)
+    const later = feedAll(segmenter, [tick(1.6)])
+    expect(opened(later).map((action) => action.segment.title)).toEqual(['A'])
+    expect(opened(later)[0].segment.startTs).toBe(at(0))
+  })
+
+  it('挂起期间只有键盘活动：不算确认（Alt-Tab 的按键不可信），仍按时间确认', () => {
+    const segmenter = new ChainSegmenter()
+    const early = feedAll(segmenter, [focus(0, 1, 'A'), tick(2), focus(10, 2, 'B'), activity(10.3)])
+    expect(closed(early)).toHaveLength(0)
+    expect(opened(early).map((action) => action.segment.title)).toEqual(['A'])
+    const later = feedAll(segmenter, [tick(12)])
+    expect(opened(later).map((action) => action.segment.title)).toEqual(['B'])
+    expect(opened(later)[0].segment.startTs).toBe(at(10))
+  })
+
+  it('标题抖动没到期就切走：不另起空段，新标题记在旧段上', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [
+      focus(0, 1, 'A'),
+      tick(2),
+      focus(10, 1, 'A — 加载中'),
+      // 0.4 秒后人就切走了：标题抖动没活过 3 秒确认窗
+      focus(10.4, 2, 'B'),
+      tick(12)
+    ])
+    // 只有 A → B 一次切段，没有 93ms 那种空段
+    expect(closed(actions)).toHaveLength(1)
+    expect(closed(actions)[0].segment).toMatchObject({
+      titleFirst: 'A',
+      titleLast: 'A — 加载中',
+      endTs: at(10.4)
+    })
+    expect(opened(actions).map((action) => action.segment.title)).toEqual(['A', 'B'])
+  })
+
+  it('标题抖动已经过了确认窗再切走：照旧切（那是真换了件事）', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [
+      focus(0, 1, 'A'),
+      tick(2),
+      focus(10, 1, 'A — 新版'),
+      tick(14), // 过了 3s：标题切段已确认
+      focus(20, 2, 'B'),
+      tick(22)
+    ])
+    expect(closed(actions).map((segment) => segment.segment.titleLast)).toEqual([
+      'A',
+      'A — 新版'
+    ])
+    // 切段后新段是 B（B 还开着）
+    expect(segmenter.openSegment?.titleLast).toBe('B')
+  })
+
+  it('停止采集时挂着的切换作废，旧段只记到切换那一刻', () => {
+    const segmenter = new ChainSegmenter()
+    feedAll(segmenter, [focus(0, 1, 'A'), tick(2), focus(10, 2, 'B')])
+    // 1s 时就停：确认窗没走完，B 从来没成段
+    const actions = segmenter.flush(at(11))
+    expect(opened(actions)).toHaveLength(0)
+    const segments = closed(actions)
+    expect(segments).toHaveLength(1)
+    expect(segments[0].segment.endTs).toBe(at(10))
+    expect(segments[0].reason).toBe('stop')
+  })
+
+  it('挂起期间移动不落 move_pause 事件（它的时刻早于新段起点）', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [
+      focus(0, 1, 'A'),
+      tick(2),
+      focus(10, 2, 'B'),
+      move(10.1, 0),
+      move(10.5, 100),
+      tick(12)
+    ])
+    expect(events(actions).filter((event) => event.kind === 'move_pause')).toHaveLength(0)
+    expect(opened(actions)[1].segment.startTs).toBe(at(10))
+  })
+})
+
 describe('默认值', () => {
   it('空闲 60s、接续上限 30 分钟、打字停顿 3s、冷却 2s、滚轮 2s 后拍', () => {
     expect(DEFAULT_SEGMENTER_OPTIONS).toMatchObject({
       idleMs: 60_000,
       mergeIdleCapMs: 30 * 60_000,
       titleFlapMs: 3_000,
+      focusFlapMs: 1_500,
       typingSettleMs: 3_000,
       captureCooldownMs: 2_000,
       wheelCaptureDelayMs: 2_000

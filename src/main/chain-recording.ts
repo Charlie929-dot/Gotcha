@@ -318,6 +318,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
         shots: stats.shotStats,
         // 幽灵前台窗丢了多少次（v0.12）：稳定大于 0 才说明段机判据真的在拦
         phantomDropped: stats.phantomDropped,
+        // 被瞬间抢焦点、没停满确认窗就丢掉的闪段（v0.14），同样只做观测
+        flashDropped: stats.flashDropped,
         content: current.content?.stats ?? null,
         derive: lastDeriveStats
       })

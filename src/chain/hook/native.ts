@@ -201,7 +201,11 @@ export class NativeDesktopSource implements DesktopEventSource {
     this.binding.start((raw) => {
       const event = normalizeRawEvent(raw)
       // 不合格的原生事件直接丢：不进证据链，也不报错刷屏
-      if (event) onEvent(event)
+      if (!event) return
+      // 本进程自己的窗（悬浮球 / 采集窗口 / Electron 的错误弹窗）永远不是一段：
+      // 真机踩到过自己主进程弹的「Error」窗抢前台 14.6 秒，被记成了一段。
+      if (event.type === 'foreground' && event.pid === process.pid) return
+      onEvent(event)
     })
   }
 

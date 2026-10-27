@@ -206,6 +206,29 @@ describe('原生事件源', () => {
     expect(received).toEqual([{ type: 'click', ts: 5, x: 1, y: 2, button: 'right' }])
   })
 
+  it('本进程自己的前台窗不算段（悬浮球 / 采集窗 / Electron 错误弹窗）', () => {
+    const binding = fakeBinding()
+    const source = new NativeDesktopSource(binding)
+    const received: RawDesktopEvent[] = []
+    source.start((event) => received.push(event))
+
+    binding.callbacks[0]({
+      type: 'foreground',
+      ts: 1,
+      pid: process.pid,
+      hwnd: 42,
+      exe: 'electron',
+      title: 'Error',
+      app: null
+    })
+    binding.callbacks[0]({ type: 'foreground', ts: 2, pid: 7, hwnd: 70, exe: 'firefox', title: 'A', app: 'Firefox' })
+    expect(received).toEqual([{ type: 'foreground', ts: 2, pid: 7, hwnd: 70, exe: 'firefox', title: 'A', app: 'Firefox' }])
+
+    // 点击 / 移动照常放行（自己的窗在 point 查询里已经挡掉，事件本身不该丢）
+    binding.callbacks[0]({ type: 'click', ts: 3, x: 1, y: 2, button: 'left' })
+    expect(received).toHaveLength(2)
+  })
+
   it('tick 与 stop 直通原生层', () => {
     const binding = fakeBinding()
     const source = new NativeDesktopSource(binding)

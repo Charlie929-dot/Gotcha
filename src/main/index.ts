@@ -65,6 +65,13 @@ import {
   type ProviderKeySaveResult
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView } from './ask-ipc'
+import {
+  appendAskHistory,
+  ASK_HISTORY_FILE,
+  clearAskHistory,
+  readAskHistory,
+  toHistoryEntry
+} from './ask-history'
 import { listThemeMerges, revertThemeMerge } from '../understand/theme-merge'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
@@ -1241,6 +1248,8 @@ if (primaryInstance) {
     registerTimelineIpc()
 
     // 问记忆（S3-lite）：只读链库 + 出云确认门（D24）+ 日账（D22）
+    // 对话记录：显式提问 / 清空才写盘（A3 口径不变），文件在 userData 下
+    const askHistoryPath = join(app.getPath('userData'), ASK_HISTORY_FILE)
     const askConsentView = (): AskConsentView => {
       const db = connections.queryDb()
       const consented = db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
@@ -1305,6 +1314,11 @@ if (primaryInstance) {
         setSetting(writable, GRAPH_SETTING_KEYS.outboundConsent, consented ? '1' : '0')
         return askConsentView()
       },
+      record: (question, result) => {
+        appendAskHistory(askHistoryPath, toHistoryEntry(question, result, Date.now()))
+      },
+      history: () => readAskHistory(askHistoryPath),
+      clearHistory: () => clearAskHistory(askHistoryPath),
       log: (level, message, data) => captureLog(level, message, data)
     })
 

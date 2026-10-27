@@ -15,6 +15,11 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
   padding: 14px 16px 18px;
@@ -23,7 +28,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 100vh;
+  overflow: hidden;
 }
 
 .bar {
@@ -50,6 +55,107 @@ body {
 
 .status[data-kind='error'] {
   color: var(--error);
+}
+
+.layout {
+  flex: 1;
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+}
+
+.main-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---- 对话记录（左栏） ---- */
+
+.history {
+  width: 244px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.history-search {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.history-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-list li button {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: 8px;
+}
+
+.history-list li button.active {
+  border-color: var(--accent);
+  background: #1d2a3a;
+}
+
+.history-question {
+  font-size: 12.5px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.history-empty {
+  padding: 8px 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.history-clear {
+  flex: none;
+  font-size: 12px;
 }
 
 .consent {
@@ -122,6 +228,7 @@ button.primary {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .answer {
@@ -236,4 +343,10 @@ button.primary {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: 'Cascadia Mono', Consolas, monospace;
+}
+
+@media (max-width: 680px) {
+  .history {
+    width: 178px;
+  }
 }

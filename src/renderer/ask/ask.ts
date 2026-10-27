@@ -1,12 +1,13 @@
 /**
- * 问记忆窗口（S3-lite）
+ * 问记忆窗口（S3-lite + 对话记录）
  *
  * 一次提问 → 一段回答 + 引用段列表；点引用 → 段证据（内容片段 + 截图）。
+ * 左侧是对话记录：按时间列出、关键词搜索、点开还原当时的回答与引用。
  * 没有 UI 框架：直接建 DOM，状态只有「就绪 / 在想 / 出错」三种。
  */
-import type { ChainAskCitation, ChainAskResult } from '../../chain/agent/types'
-import type { ChainAskErrorReason } from '../../chain/agent/types'
+import type { ChainAskCitation, ChainAskErrorReason, ChainAskResult } from '../../chain/agent/types'
 import type { SegmentEvidence } from '../../chain/agent/evidence'
+import type { AskHistoryEntry } from '../../main/ask-history'
 import type { AskApi } from '../ask-preload'
 
 declare global {
@@ -39,6 +40,17 @@ const evidenceTitle = must<HTMLElement>('evidence-title')
 const evidenceMeta = must<HTMLParagraphElement>('evidence-meta')
 const evidenceShots = must<HTMLElement>('evidence-shots')
 const evidenceText = must<HTMLPreElement>('evidence-text')
+const historyList = must<HTMLUListElement>('history-list')
+const historyCount = must<HTMLSpanElement>('history-count')
+const historySearch = must<HTMLInputElement>('history-search')
+const historyClear = must<HTMLButtonElement>('history-clear')
+
+/** 列表一次最多画多少条（永久保留，记录可能很多；搜索用来缩小范围） */
+const HISTORY_RENDER_LIMIT = 200
+
+let entries: AskHistoryEntry[] = []
+let activeId: string | null = null
+let filter = ''
 
 function setStatus(kind: 'idle' | 'busy' | 'error', text: string): void {
   statusEl.dataset.kind = kind
@@ -47,6 +59,12 @@ function setStatus(kind: 'idle' | 'busy' | 'error', text: string): void {
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleString('zh-CN', { hour12: false })
+}
+
+function formatShortTime(ts: number): string {
+  const date = new Date(ts)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 function formatDuration(ms: number): string {
@@ -76,6 +94,11 @@ const ERROR_TEXT: Record<ChainAskErrorReason, string> = {
   'question-blocked': '这句话里有敏感内容（密码类），没有发出去。',
   unparseable: '模型这次答得不成形（结构不对），换个问法再试。',
   failed: '问记忆出错了，细节看日志。'
+}
+
+function errorText(entry: AskHistoryEntry): string {
+  if (entry.reason && entry.reason in ERROR_TEXT) return ERROR_TEXT[entry.reason as ChainAskErrorReason]
+  return entry.message ?? '当时出错了，细节看日志。'
 }
 
 function renderCitations(citations: ChainAskCitation[]): void {
@@ -152,6 +175,99 @@ function renderEvidence(evidence: SegmentEvidence): void {
   evidenceBox.hidden = false
 }
 
+/** 一条记录折成可显示的样子（时间 / 类型 / 引用条数） */
+function entryLabel(entry: AskHistoryEntry): string {
+  if (entry.kind === 'answer') return `回答 · ${entry.citations.length} 段引用`
+  if (entry.kind === 'no-evidence') return '没找到'
+  return '出错'
+}
+
+function matchesFilter(entry: AskHistoryEntry, term: string): boolean {
+  const haystack = [
+    entry.question,
+    entry.answer ?? '',
+    entry.message ?? '',
+    ...entry.citations.flatMap((citation) => [citation.title, citation.app, citation.why])
+  ]
+    .join('\n')
+    .toLowerCase()
+  return haystack.includes(term)
+}
+
+function renderHistoryList(): void {
+  const term = filter.trim().toLowerCase()
+  const matched = term === '' ? entries : entries.filter((entry) => matchesFilter(entry, term))
+  const shown = matched.slice(0, HISTORY_RENDER_LIMIT)
+
+  historyCount.textContent = term === '' ? `共 ${entries.length} 条` : `命中 ${matched.length} 条`
+  historyClear.disabled = entries.length === 0
+
+  historyList.replaceChildren()
+  if (shown.length === 0) {
+    const hint = document.createElement('li')
+    hint.className = 'history-empty'
+    hint.textContent = entries.length === 0 ? '还没有记录。问一个问题就会留在这里。' : '没有匹配的记录。'
+    historyList.append(hint)
+    return
+  }
+
+  for (const entry of shown) {
+    const item = document.createElement('li')
+    const button = document.createElement('button')
+    button.type = 'button'
+    if (entry.id === activeId) button.classList.add('active')
+    const question = document.createElement('span')
+    question.className = 'history-question'
+    question.textContent = entry.question
+    const meta = document.createElement('span')
+    meta.className = 'history-meta'
+    meta.textContent = `${formatShortTime(entry.at)} · ${entryLabel(entry)}`
+    button.append(question, meta)
+    button.addEventListener('click', () => showEntry(entry))
+    item.append(button)
+    historyList.append(item)
+  }
+
+  if (matched.length > shown.length) {
+    const hint = document.createElement('li')
+    hint.className = 'history-empty'
+    hint.textContent = `只显示最近 ${HISTORY_RENDER_LIMIT} 条，用上面的搜索缩小范围。`
+    historyList.append(hint)
+  }
+}
+
+/** 点开一条历史：还原当时的回答 / 没找到 / 出错，引用仍可点开证据 */
+function showEntry(entry: AskHistoryEntry): void {
+  activeId = entry.id
+  questionInput.value = entry.question
+  renderHistoryList()
+  hideAll()
+  if (entry.kind === 'answer') {
+    answerText.textContent = entry.answer ?? ''
+    renderCitations(entry.citations)
+    answerBox.hidden = false
+    setStatus('idle', `${formatShortTime(entry.at)} 的记录 · 引用 ${entry.citations.length} 段`)
+    return
+  }
+  if (entry.kind === 'no-evidence') {
+    showEmpty('信息链里没找到。换个说法，或者把时间范围说具体一点。')
+    setStatus('idle', `${formatShortTime(entry.at)} 的记录 · 当时没找到`)
+    return
+  }
+  showEmpty(errorText(entry))
+  setStatus('idle', `${formatShortTime(entry.at)} 的记录 · 当时出错`)
+}
+
+async function refreshHistory(): Promise<void> {
+  if (!api) return
+  try {
+    entries = await api.history()
+    renderHistoryList()
+  } catch (error) {
+    setStatus('error', `读记录失败：${String(error)}`)
+  }
+}
+
 async function ask(question: string): Promise<void> {
   if (!api) {
     setStatus('error', '窗口没接上主进程（preload 缺失）')
@@ -173,6 +289,12 @@ async function ask(question: string): Promise<void> {
       showEmpty(ERROR_TEXT[result.reason] ?? result.message)
       setStatus('error', ERROR_TEXT[result.reason] ?? '出错了')
     }
+    // 主进程已经把这次提问追加进历史；刷新列表并点亮最新一条
+    await refreshHistory()
+    if (entries.length > 0) {
+      activeId = entries[0].id
+      renderHistoryList()
+    }
   } catch (error) {
     showEmpty(`问记忆出错了：${String(error)}`)
     setStatus('error', '出错了')
@@ -191,6 +313,29 @@ form.addEventListener('submit', (event) => {
     return
   }
   void ask(question)
+})
+
+historySearch.addEventListener('input', () => {
+  filter = historySearch.value
+  renderHistoryList()
+})
+
+historyClear.addEventListener('click', () => {
+  if (!api || entries.length === 0) return
+  if (!window.confirm(`清空全部 ${entries.length} 条对话记录？清空后找不回来。`)) return
+  void api
+    .clearHistory()
+    .then((cleared) => {
+      if (!cleared) {
+        setStatus('error', '清空记录失败，细节看日志')
+        return
+      }
+      entries = []
+      activeId = null
+      renderHistoryList()
+      setStatus('idle', '记录已清空')
+    })
+    .catch((error: unknown) => setStatus('error', `清空记录失败：${String(error)}`))
 })
 
 must<HTMLButtonElement>('consent-allow').addEventListener('click', () => {
@@ -214,10 +359,12 @@ must<HTMLButtonElement>('evidence-close').addEventListener('click', () => {
 
 void (async () => {
   questionInput.focus()
+  renderHistoryList()
   if (!api) {
     setStatus('error', '窗口没接上主进程（preload 缺失）')
     return
   }
+  await refreshHistory()
   try {
     const view = await api.consent()
     if (!view) return

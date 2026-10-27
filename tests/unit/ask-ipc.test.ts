@@ -13,6 +13,7 @@ vi.mock('electron', () => ({
 import { ASK_QUESTION_MAX_CHARS, createAskIpcHandlers, type AskIpcDeps } from '../../src/main/ask-ipc'
 import type { ChainAskResult } from '../../src/chain/agent/types'
 import type { SegmentEvidence } from '../../src/chain/agent/evidence'
+import type { AskHistoryEntry } from '../../src/main/ask-history'
 
 const MAIN_FRAME = {}
 
@@ -32,6 +33,9 @@ function buildDeps(overrides: Partial<AskIpcDeps> = {}): AskIpcDeps {
     segment: () => null,
     consent: () => ({ consented: true, clientReady: true }),
     setConsent: (consented) => ({ consented, clientReady: true }),
+    record: () => {},
+    history: () => [],
+    clearHistory: () => {},
     log: () => {},
     ...overrides
   }
@@ -134,5 +138,94 @@ describe('ask IPC：段证据与出云确认', () => {
       clientReady: true
     })
     expect(setConsent).toHaveBeenCalledWith(false)
+  })
+})
+
+const ENTRY: AskHistoryEntry = {
+  id: 'id-1',
+  at: 1_000,
+  question: '问',
+  kind: 'no-evidence',
+  citations: [],
+  stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 }
+}
+
+describe('ask IPC：对话记录', () => {
+  it('答完落一条记录：answer / no-evidence / error 都记', async () => {
+    const record = vi.fn()
+    const results: ChainAskResult[] = [
+      { kind: 'answer', answer: '答', citations: [], stats: { hits: 1, evidence: 1, cited: 0, questionChars: 1 } },
+      { kind: 'no-evidence', stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 } },
+      { kind: 'error', reason: 'consent', message: '未确认', stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 } }
+    ]
+    for (const result of results) {
+      const deps = buildDeps({ ask: async () => result, record })
+      await handler(deps, 'ask:query')(SENDER_OK as never, '问')
+    }
+    expect(record).toHaveBeenCalledTimes(3)
+    expect(record).toHaveBeenNthCalledWith(1, '问', results[0])
+  })
+
+  it('边界失败（越权 / 空 / 超长 / 抛错）不进历史', async () => {
+    const record = vi.fn()
+    const deps = buildDeps({
+      ask: async () => {
+        throw new Error('断了')
+      },
+      record
+    })
+    const query = handler(deps, 'ask:query')
+    await query({ sender: { id: 9 }, senderFrame: MAIN_FRAME } as never, '问')
+    await query(SENDER_OK as never, '   ')
+    await query(SENDER_OK as never, 'x'.repeat(ASK_QUESTION_MAX_CHARS + 1))
+    await query(SENDER_OK as never, '问')
+    expect(record).not.toHaveBeenCalled()
+  })
+
+  it('记录写失败只记日志，不把回答弄丢', async () => {
+    const logs: string[] = []
+    const result: ChainAskResult = {
+      kind: 'answer',
+      answer: '答',
+      citations: [],
+      stats: { hits: 1, evidence: 1, cited: 0, questionChars: 1 }
+    }
+    const deps = buildDeps({
+      ask: async () => result,
+      record: () => {
+        throw new Error('磁盘满')
+      },
+      log: (_level, message) => logs.push(message)
+    })
+    expect(await handler(deps, 'ask:query')(SENDER_OK as never, '问')).toEqual(result)
+    expect(logs).toEqual(['ask history record failed'])
+  })
+
+  it('历史通道：只认自己窗口的主框架；读失败返回空数组', () => {
+    const deps = buildDeps({ history: () => [ENTRY] })
+    expect(handler(deps, 'ask:history')(SENDER_OK as never)).toEqual([ENTRY])
+    expect(handler(deps, 'ask:history')({ sender: { id: 9 }, senderFrame: MAIN_FRAME } as never)).toEqual([])
+    const broken = buildDeps({
+      history: () => {
+        throw new Error('坏文件')
+      }
+    })
+    expect(handler(broken, 'ask:history')(SENDER_OK as never)).toEqual([])
+  })
+
+  it('清空通道：调 deps.clearHistory；越权 / 写失败返回 false', () => {
+    const clearHistory = vi.fn()
+    const deps = buildDeps({ clearHistory })
+    expect(handler(deps, 'ask:history:clear')(SENDER_OK as never)).toBe(true)
+    expect(clearHistory).toHaveBeenCalledTimes(1)
+    expect(
+      handler(deps, 'ask:history:clear')({ sender: { id: 9 }, senderFrame: MAIN_FRAME } as never)
+    ).toBe(false)
+    const broken = buildDeps({
+      clearHistory: () => {
+        throw new Error('权限')
+      }
+    })
+    expect(handler(broken, 'ask:history:clear')(SENDER_OK as never)).toBe(false)
   })
 })

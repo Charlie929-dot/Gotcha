@@ -12,51 +12,71 @@
       <span id="status" class="status" data-kind="idle">就绪</span>
     </header>
 
-    <aside id="consent" class="consent" hidden>
-      <p>
-        问记忆要把你问的这句话和几段窗口文本（标题 / 命中原文）发给模型。确认一次之后不再打扰。
-      </p>
-      <div class="row">
-        <button id="consent-allow" type="button" class="primary">允许发送</button>
-        <button id="consent-deny" type="button">不出网</button>
-      </div>
-    </aside>
+    <div class="layout">
+      <aside class="history" aria-label="对话记录">
+        <div class="history-head">
+          <strong>对话记录</strong>
+          <span id="history-count" class="muted"></span>
+        </div>
+        <input
+          id="history-search"
+          class="history-search"
+          type="search"
+          placeholder="搜问题 / 回答…"
+          aria-label="搜索对话记录"
+        />
+        <ul id="history-list" class="history-list"></ul>
+        <button id="history-clear" class="history-clear" type="button">清空记录</button>
+      </aside>
 
-    <form id="form" class="ask" autocomplete="off">
-      <input
-        id="question"
-        name="question"
-        type="text"
-        maxlength="500"
-        placeholder="问一件过去做过的事（例如：那个编译错误最后怎么解决的）"
-        aria-label="问题"
-      />
-      <button id="submit" type="submit" class="primary">问</button>
-    </form>
-
-    <main id="result" class="result">
-      <section id="answer-box" class="answer" hidden>
-        <p id="answer" class="answer-text"></p>
-        <h2 class="section-title">引用 <span id="citation-count" class="muted"></span></h2>
-        <ul id="citations" class="citations"></ul>
-      </section>
-
-      <section id="empty" class="empty" hidden>
-        <p id="empty-text"></p>
-      </section>
-
-      <section id="evidence" class="evidence" hidden>
-        <header class="evidence-head">
-          <div>
-            <strong id="evidence-title"></strong>
-            <p id="evidence-meta" class="muted"></p>
+      <div class="main-col">
+        <aside id="consent" class="consent" hidden>
+          <p>
+            问记忆要把你问的这句话和几段窗口文本（标题 / 命中原文）发给模型。确认一次之后不再打扰。
+          </p>
+          <div class="row">
+            <button id="consent-allow" type="button" class="primary">允许发送</button>
+            <button id="consent-deny" type="button">不出网</button>
           </div>
-          <button id="evidence-close" type="button">关闭</button>
-        </header>
-        <div id="evidence-shots" class="shots"></div>
-        <pre id="evidence-text" class="evidence-text"></pre>
-      </section>
-    </main>
+        </aside>
+
+        <form id="form" class="ask" autocomplete="off">
+          <input
+            id="question"
+            name="question"
+            type="text"
+            maxlength="500"
+            placeholder="问一件过去做过的事（例如：那个编译错误最后怎么解决的）"
+            aria-label="问题"
+          />
+          <button id="submit" type="submit" class="primary">问</button>
+        </form>
+
+        <main id="result" class="result">
+          <section id="answer-box" class="answer" hidden>
+            <p id="answer" class="answer-text"></p>
+            <h2 class="section-title">引用 <span id="citation-count" class="muted"></span></h2>
+            <ul id="citations" class="citations"></ul>
+          </section>
+
+          <section id="empty" class="empty" hidden>
+            <p id="empty-text"></p>
+          </section>
+
+          <section id="evidence" class="evidence" hidden>
+            <header class="evidence-head">
+              <div>
+                <strong id="evidence-title"></strong>
+                <p id="evidence-meta" class="muted"></p>
+              </div>
+              <button id="evidence-close" type="button">关闭</button>
+            </header>
+            <div id="evidence-shots" class="shots"></div>
+            <pre id="evidence-text" class="evidence-text"></pre>
+          </section>
+        </main>
+      </div>
+    </div>
 
     <script type="module" src="./ask.ts"></script>
   </body>

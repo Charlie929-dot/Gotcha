@@ -5,14 +5,17 @@
  * 出错变成可读结果（不把异常抛回渲染进程 —— 渲染层白屏比报错更坏）。
  *
  * 通道：
- * - `ask:query`        问题 → `ChainAskResult`（S1 的 `askChain`）
+ * - `ask:query`        问题 → `ChainAskResult`（S1 的 `askChain`），成功后落一条对话记录
  * - `ask:segment`      段 id → 段证据（截图转 data URL 由 deps 注入）
  * - `ask:consent:get`  出云确认门状态
  * - `ask:consent:set`  就地确认 / 撤销
+ * - `ask:history`      全部对话记录（最新在前）
+ * - `ask:history:clear` 清空对话记录
  */
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { ChainAskResult } from '../chain/agent/types'
 import type { SegmentEvidence } from '../chain/agent/evidence'
+import type { AskHistoryEntry } from './ask-history'
 
 export interface AskConsentView {
   /** D24 一次性出网授权 */
@@ -29,6 +32,12 @@ export interface AskIpcDeps {
   segment: (segmentId: number) => SegmentEvidence | null
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
+  /** 成功走完一次提问就落一条历史（失败只记日志，不能影响回答） */
+  record: (question: string, result: ChainAskResult) => void
+  /** 全部历史（最新在前） */
+  history: () => AskHistoryEntry[]
+  /** 清空历史 */
+  clearHistory: () => void
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -74,7 +83,14 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           return failure(`问题太长（上限 ${ASK_QUESTION_MAX_CHARS} 字）`)
         }
         try {
-          return await deps.ask(asked)
+          const result = await deps.ask(asked)
+          // 历史写失败不能让提问失败：记一条 warn 就返回答案
+          try {
+            deps.record(asked, result)
+          } catch (error) {
+            deps.log('warn', 'ask history record failed', { error: String(error) })
+          }
+          return result
         } catch (error) {
           deps.log('error', 'ask:query failed', { error: String(error) })
           return failure('问记忆出错，看日志')
@@ -105,6 +121,31 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask:consent:set failed', { error: String(error) })
           return null
+        }
+      }
+    ],
+    [
+      'ask:history',
+      (event) => {
+        if (!ensureSender(event)) return []
+        try {
+          return deps.history()
+        } catch (error) {
+          deps.log('error', 'ask:history read failed', { error: String(error) })
+          return []
+        }
+      }
+    ],
+    [
+      'ask:history:clear',
+      (event) => {
+        if (!ensureSender(event)) return false
+        try {
+          deps.clearHistory()
+          return true
+        } catch (error) {
+          deps.log('error', 'ask:history:clear failed', { error: String(error) })
+          return false
         }
       }
     ]

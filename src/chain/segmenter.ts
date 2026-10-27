@@ -39,6 +39,13 @@ export interface SegmenterOptions {
   movePauseMs: number
   /** 停下前至少移动多少像素 */
   movePauseDistPx: number
+  /**
+   * 幽灵前台窗的判据（v0.12）：窗口矩形与屏幕的交集小于这个面积（px²）就不当一段。
+   * 0×0 的辅助窗、被最小化到屏幕外的窗都落在这条；32×32 是「小到没有可读内容」的量级。
+   */
+  phantomMinOnScreenPx: number
+  /** 系统覆盖层窗口类名：前台落在它们身上不算切段（Alt-Tab / 任务视图 / 前台交接气泡） */
+  phantomWindowClasses: readonly string[]
 }
 
 export const DEFAULT_SEGMENTER_OPTIONS: SegmenterOptions = {
@@ -49,11 +56,27 @@ export const DEFAULT_SEGMENTER_OPTIONS: SegmenterOptions = {
   captureCooldownMs: 2_000,
   wheelCaptureDelayMs: 2_000,
   movePauseMs: 400,
-  movePauseDistPx: 40
+  movePauseDistPx: 40,
+  phantomMinOnScreenPx: 32 * 32,
+  // Win11 的 Alt-Tab / 任务视图 / 焦点交接（UWP 启动时）各有一个覆盖层窗抢前台
+  phantomWindowClasses: ['TaskSwitcherWnd', 'MultitaskingViewFrame', 'ForegroundStaging']
 }
 
 export type ChainInput =
-  | { kind: 'focus'; ts: number; pid: number; exe: string; title: string; hwnd: number; app?: string | null }
+  | {
+      kind: 'focus'
+      ts: number
+      pid: number
+      exe: string
+      title: string
+      hwnd: number
+      app?: string | null
+      /** 窗口事实（v0.12，可选）：不报就按「未知」放行，见 `isPhantomFocus` */
+      visible?: boolean
+      minimized?: boolean
+      onScreenArea?: number
+      className?: string
+    }
   | { kind: 'click'; ts: number; button: 'left' | 'right' | 'middle'; x: number; y: number }
   | { kind: 'wheel'; ts: number; delta: number; x: number; y: number }
   | { kind: 'move'; ts: number; x: number; y: number }
@@ -134,9 +157,16 @@ export class ChainSegmenter {
   private pendingWheel: { fromTs: number; lastTs: number; delta: number; x: number; y: number } | null = null
   private pendingTitle: { from: string; to: string; at: number } | null = null
   private lastMove: { ts: number; x: number; y: number; moved: number } | null = null
+  /** 被丢掉的幽灵前台事件数（只做观测：真机上它应该稳定大于 0，否则判据没生效） */
+  private phantomFocusDropped = 0
 
   constructor(options: Partial<SegmenterOptions> = {}) {
     this.options = { ...DEFAULT_SEGMENTER_OPTIONS, ...options }
+  }
+
+  /** 丢掉过多少次幽灵前台（调试 / 测试 / 诊断用） */
+  get phantomDropped(): number {
+    return this.phantomFocusDropped
   }
 
   /** 当前打开的段（调试 / 测试用） */
@@ -332,8 +362,29 @@ export class ChainSegmenter {
     this.lastMove.ts = input.ts
   }
 
+  /**
+   * 幽灵前台窗（v0.12）：拿到前台、却不是「人在用的那扇窗」。
+   *
+   * 真机踩到过三个来源：火绒升级器的 0×0 隐藏窗（抢前台 52s，用户的 46 条点击 / 打字全记到它头上）、
+   * explorer 的一堆 0×0 辅助窗、被最小化到 (-31992,-32000) 的窗；还有 Alt-Tab 的任务切换覆盖层。
+   * 判据只用事实字段，缺字段一律**不知道**（放行）——宁可多记一段，也不误杀真窗口。
+   */
+  private isPhantomFocus(input: Extract<ChainInput, { kind: 'focus' }>): boolean {
+    if (input.visible === false) return true
+    if (input.minimized === true) return true
+    if (input.onScreenArea !== undefined && input.onScreenArea < this.options.phantomMinOnScreenPx) return true
+    if (input.className !== undefined && this.options.phantomWindowClasses.includes(input.className)) return true
+    return false
+  }
+
   private onFocus(input: Extract<ChainInput, { kind: 'focus' }>): ChainAction[] {
     const actions: ChainAction[] = []
+    // 幽灵窗不配当一段：不切段、不收口、不动标题抖动窗口——它的输入继续算在当前这一段上
+    // （当前没段就什么都不开，时间轴留空总比记错强）。
+    if (this.isPhantomFocus(input)) {
+      this.phantomFocusDropped += 1
+      return actions
+    }
     const justResumed = this.idleClosed !== null && this.idleClosed.to === input.ts
     this.idleClosed = null
 

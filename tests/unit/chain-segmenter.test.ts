@@ -213,6 +213,69 @@ describe('打字与截图（v0.11：打字只在被打断时拍）', () => {
   })
 })
 
+describe('幽灵前台窗（v0.12：拿到前台但不是人在用的窗）', () => {
+  /** 带窗口事实的焦点；`facts` 不传就是「源没报」，按未知处理 */
+  function focusFacts(
+    seconds: number,
+    pid: number,
+    title: string,
+    facts: Partial<Extract<ChainInput, { kind: 'focus' }>> = {}
+  ): ChainInput {
+    return { kind: 'focus', ts: at(seconds), pid, exe: `app${pid}`, title, hwnd: pid * 10, ...facts }
+  }
+
+  it('隐藏窗不配当一段：不开新段、也不收掉当前段', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), focusFacts(10, 9, '', { visible: false })])
+    expect(opened(actions).map((action) => action.segment.title)).toEqual(['A'])
+    expect(closed(actions)).toHaveLength(0)
+    expect(segmenter.openSegment?.titleLast).toBe('A')
+    expect(segmenter.phantomDropped).toBe(1)
+  })
+
+  it('最小化 / 屏幕外 / 覆盖层类名各算幽灵', () => {
+    const cases: Array<Partial<Extract<ChainInput, { kind: 'focus' }>>> = [
+      { minimized: true },
+      { onScreenArea: 0 },
+      { onScreenArea: 1023 },
+      { className: 'TaskSwitcherWnd' },
+      { className: 'MultitaskingViewFrame' }
+    ]
+    for (const facts of cases) {
+      const segmenter = new ChainSegmenter()
+      feedAll(segmenter, [focus(0, 1, 'A'), focusFacts(10, 9, 'B', facts)])
+      expect(segmenter.openSegment?.titleLast, JSON.stringify(facts)).toBe('A')
+    }
+  })
+
+  it('字段缺失按未知放行（旧原生模块 / 别的传输实现不能因此丢段）', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [focus(0, 1, 'A'), focus(10, 2, 'B')])
+    expect(opened(actions).map((action) => action.segment.title)).toEqual(['A', 'B'])
+    expect(closed(actions)).toHaveLength(1)
+    expect(segmenter.phantomDropped).toBe(0)
+  })
+
+  it('幽灵窗期间的输入仍算在当前段上（不制造空档，也不记到幽灵段）', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [
+      focus(0, 1, 'A'),
+      focusFacts(10, 9, '', { visible: false }),
+      click(12)
+    ])
+    expect(opened(actions)).toHaveLength(1)
+    expect(events(actions).filter((event) => event.kind === 'click_left')).toHaveLength(1)
+    expect(segmenter.openSegment?.titleLast).toBe('A')
+  })
+
+  it('没段的时候来了幽灵焦点：什么都不开', () => {
+    const segmenter = new ChainSegmenter()
+    const actions = feedAll(segmenter, [focusFacts(0, 9, '', { visible: false })])
+    expect(actions).toHaveLength(0)
+    expect(segmenter.openSegment).toBeNull()
+  })
+})
+
 describe('默认值', () => {
   it('空闲 60s、接续上限 30 分钟、打字停顿 3s、冷却 2s、滚轮 2s 后拍', () => {
     expect(DEFAULT_SEGMENTER_OPTIONS).toMatchObject({
@@ -223,5 +286,14 @@ describe('默认值', () => {
       captureCooldownMs: 2_000,
       wheelCaptureDelayMs: 2_000
     })
+  })
+
+  it('幽灵窗判据：可见区阈值 32×32，覆盖层类名认 Alt-Tab / 任务视图', () => {
+    expect(DEFAULT_SEGMENTER_OPTIONS.phantomMinOnScreenPx).toBe(1024)
+    expect(DEFAULT_SEGMENTER_OPTIONS.phantomWindowClasses).toEqual([
+      'TaskSwitcherWnd',
+      'MultitaskingViewFrame',
+      'ForegroundStaging'
+    ])
   })
 })

@@ -94,7 +94,7 @@ export function normalizeRawEvent(raw: unknown): RawDesktopEvent | null {
     if (!isFiniteNumber(value.pid) || !isFiniteNumber(value.hwnd)) return null
     const exe = asString(value.exe)
     if (exe === null) return null
-    return {
+    const event: Extract<RawDesktopEvent, { type: 'foreground' }> = {
       type: 'foreground',
       ts,
       pid: value.pid,
@@ -103,6 +103,25 @@ export function normalizeRawEvent(raw: unknown): RawDesktopEvent | null {
       title: asString(value.title) ?? '',
       app: asString(value.app) || null
     }
+    // 窗口事实（v0.12）：报了就必须合格，不合格整条丢掉；没报就留空（段机按「未知」放行）
+    if (value.visible !== undefined) {
+      if (typeof value.visible !== 'boolean') return null
+      event.visible = value.visible
+    }
+    if (value.minimized !== undefined) {
+      if (typeof value.minimized !== 'boolean') return null
+      event.minimized = value.minimized
+    }
+    if (value.onScreenArea !== undefined) {
+      if (!isFiniteNumber(value.onScreenArea) || value.onScreenArea < 0) return null
+      event.onScreenArea = value.onScreenArea
+    }
+    if (value.className !== undefined) {
+      const className = asString(value.className)
+      if (className === null) return null
+      event.className = className
+    }
+    return event
   }
 
   if (type === 'move') {

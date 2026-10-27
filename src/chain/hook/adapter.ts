@@ -54,7 +54,7 @@ export class DesktopEventAdapter {
       case 'foreground': {
         const inputs = this.flushWheel()
         this.sawMouse = true
-        inputs.push({
+        const focus: Extract<ChainInput, { kind: 'focus' }> = {
           kind: 'focus',
           ts: raw.ts,
           pid: raw.pid,
@@ -62,7 +62,13 @@ export class DesktopEventAdapter {
           exe: raw.exe,
           title: raw.title,
           app: raw.app
-        })
+        }
+        // 窗口事实原样透传（v0.12）：源不报就不写这个键，段机才能分清「不知道」和「不可见」
+        if (raw.visible !== undefined) focus.visible = raw.visible
+        if (raw.minimized !== undefined) focus.minimized = raw.minimized
+        if (raw.onScreenArea !== undefined) focus.onScreenArea = raw.onScreenArea
+        if (raw.className !== undefined) focus.className = raw.className
+        inputs.push(focus)
         return inputs
       }
       case 'click': {

@@ -316,6 +316,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
       log('info', 'chain recording stopped', {
         openSegmentId: stats.openSegmentId,
         shots: stats.shotStats,
+        // 幽灵前台窗丢了多少次（v0.12）：稳定大于 0 才说明段机判据真的在拦
+        phantomDropped: stats.phantomDropped,
         content: current.content?.stats ?? null,
         derive: lastDeriveStats
       })

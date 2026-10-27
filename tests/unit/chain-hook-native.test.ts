@@ -5,6 +5,7 @@ import {
   nativeCandidates,
   NativeDesktopSource,
   normalizeRawEvent,
+  normalizeWindowFacts,
   type NativeBinding
 } from '../../src/chain/hook/native'
 import { DesktopEventAdapter } from '../../src/chain/hook/adapter'
@@ -99,6 +100,38 @@ describe('原生对象的形状校验', () => {
     expect(normalizeRawEvent({ type: 'foreground', ts: 1, pid: 2, hwnd: 3, exe: 'a', onScreenArea: Number.NaN })).toBeNull()
     expect(normalizeRawEvent({ type: 'foreground', ts: 1, pid: 2, hwnd: 3, exe: 'a', className: 5 })).toBeNull()
   })
+
+  it('windowAtPoint 的返回值走同一套校验（v0.13）', () => {
+    expect(
+      normalizeWindowFacts({
+        type: 'window',
+        ts: 1,
+        pid: 7,
+        hwnd: 70,
+        exe: 'firefox',
+        title: 't',
+        app: 'Firefox',
+        visible: true,
+        minimized: false,
+        onScreenArea: 1234,
+        className: 'MozillaWindowClass'
+      })
+    ).toEqual({
+      pid: 7,
+      hwnd: 70,
+      exe: 'firefox',
+      title: 't',
+      app: 'Firefox',
+      visible: true,
+      minimized: false,
+      onScreenArea: 1234,
+      className: 'MozillaWindowClass'
+    })
+    expect(normalizeWindowFacts(null)).toBeNull()
+    expect(normalizeWindowFacts({ pid: 7 })).toBeNull()
+    expect(normalizeWindowFacts({ pid: 7, hwnd: 70, exe: 'x', visible: 'yes' })).toBeNull()
+    expect(normalizeWindowFacts({ pid: 7, hwnd: 70, exe: 'x', onScreenArea: -5 })).toBeNull()
+  })
 })
 
 describe('加载原生模块', () => {
@@ -136,6 +169,30 @@ describe('加载原生模块', () => {
 })
 
 describe('原生事件源', () => {
+  it('查「这个点下面是哪扇窗」：没这个导出就返回 null（旧构建照样能用）', () => {
+    const source = new NativeDesktopSource(fakeBinding())
+    expect(source.readWindowAt(10, 20)).toBeNull()
+  })
+
+  it('查到的窗原样返回；本进程自己的窗不算（悬浮球 / 采集窗口不该成段）', () => {
+    const window = { type: 'window', pid: 4242, hwnd: 42420, exe: 'firefox', title: 't', app: 'Firefox' }
+    const own = { ...window, pid: process.pid }
+    let answer: unknown = window
+    const binding = { ...fakeBinding(), windowAtPoint: () => answer }
+    const source = new NativeDesktopSource(binding)
+    expect(source.readWindowAt(1, 2)).toEqual({
+      pid: 4242,
+      hwnd: 42420,
+      exe: 'firefox',
+      title: 't',
+      app: 'Firefox'
+    })
+    answer = own
+    expect(source.readWindowAt(1, 2)).toBeNull()
+    answer = undefined
+    expect(source.readWindowAt(1, 2)).toBeNull()
+  })
+
   it('把不合格的原生事件丢掉，好的照常转发', () => {
     const binding = fakeBinding()
     const source = new NativeDesktopSource(binding)

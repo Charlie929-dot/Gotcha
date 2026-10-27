@@ -58,8 +58,17 @@ export const DEFAULT_SEGMENTER_OPTIONS: SegmenterOptions = {
   movePauseMs: 400,
   movePauseDistPx: 40,
   phantomMinOnScreenPx: 32 * 32,
-  // Win11 的 Alt-Tab / 任务视图 / 焦点交接（UWP 启动时）各有一个覆盖层窗抢前台
-  phantomWindowClasses: ['TaskSwitcherWnd', 'MultitaskingViewFrame', 'ForegroundStaging']
+  phantomWindowClasses: [
+    // Win11 的 Alt-Tab / 任务视图 / 焦点交接（UWP 启动时）各有一个覆盖层窗抢前台
+    'TaskSwitcherWnd',
+    'MultitaskingViewFrame',
+    'ForegroundStaging',
+    // 桌面外壳：点一下任务栏 / 桌面不该切出一段（v0.13 起「点哪算哪」，必须排除外壳）
+    'Shell_TrayWnd',
+    'Shell_SecondaryTrayWnd',
+    'Progman',
+    'WorkerW'
+  ]
 }
 
 export type ChainInput =

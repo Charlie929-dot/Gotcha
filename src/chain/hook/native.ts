@@ -11,7 +11,7 @@
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import type { DesktopEventSource, RawDesktopEvent, SourceInfo } from './types'
+import type { DesktopEventSource, RawDesktopEvent, SourceInfo, WindowFacts } from './types'
 
 export const NATIVE_MODULE_FILE = 'chain_hook.node'
 
@@ -20,6 +20,8 @@ export interface NativeBinding {
   start(callback: (event: unknown) => void): void
   stop(): void
   lastInputTickMs(): number
+  /** v0.13：屏幕坐标 → 那扇窗的事实（旧构建没有这个导出，按可选处理） */
+  windowAtPoint?(x: number, y: number): unknown
   version?: string
 }
 
@@ -83,6 +85,57 @@ function asString(value: unknown): string | null {
  * 原生对象 → `RawDesktopEvent`。任何一处不合格就返回 null（丢弃这条），
  * 不做「猜一个默认值」的修补。
  */
+/** 窗口事实字段（v0.12 / v0.13）：报了就必须合格，不合格整条丢掉；没报就留空 */
+type OptionalWindowFacts = Pick<WindowFacts, 'visible' | 'minimized' | 'onScreenArea' | 'className'>
+
+function readOptionalWindowFacts(value: Record<string, unknown>): OptionalWindowFacts | null {
+  const facts: OptionalWindowFacts = {}
+  if (value.visible !== undefined) {
+    if (typeof value.visible !== 'boolean') return null
+    facts.visible = value.visible
+  }
+  if (value.minimized !== undefined) {
+    if (typeof value.minimized !== 'boolean') return null
+    facts.minimized = value.minimized
+  }
+  if (value.onScreenArea !== undefined) {
+    if (!isFiniteNumber(value.onScreenArea) || value.onScreenArea < 0) return null
+    facts.onScreenArea = value.onScreenArea
+  }
+  if (value.className !== undefined) {
+    const className = asString(value.className)
+    if (className === null) return null
+    facts.className = className
+  }
+  return facts
+}
+
+/**
+ * 原生 `windowAtPoint(x, y)` 的返回值 → `WindowFacts`（v0.13）。
+ * 查不到（点在空处）原生返回 null，这里也返回 null；形状不对同样返回 null。
+ */
+export function normalizeWindowFacts(raw: unknown): WindowFacts | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const value = raw as Record<string, unknown>
+  if (!isFiniteNumber(value.pid) || !isFiniteNumber(value.hwnd)) return null
+  const exe = asString(value.exe)
+  if (exe === null) return null
+  const facts = readOptionalWindowFacts(value)
+  if (facts === null) return null
+  return {
+    pid: value.pid,
+    hwnd: value.hwnd,
+    exe,
+    title: asString(value.title) ?? '',
+    app: asString(value.app) || null,
+    ...facts
+  }
+}
+
+/**
+ * 原生对象 → `RawDesktopEvent`。任何一处不合格就返回 null（丢弃这条），
+ * 不做「猜一个默认值」的修补。
+ */
 export function normalizeRawEvent(raw: unknown): RawDesktopEvent | null {
   if (typeof raw !== 'object' || raw === null) return null
   const value = raw as Record<string, unknown>
@@ -94,34 +147,18 @@ export function normalizeRawEvent(raw: unknown): RawDesktopEvent | null {
     if (!isFiniteNumber(value.pid) || !isFiniteNumber(value.hwnd)) return null
     const exe = asString(value.exe)
     if (exe === null) return null
-    const event: Extract<RawDesktopEvent, { type: 'foreground' }> = {
+    const facts = readOptionalWindowFacts(value)
+    if (facts === null) return null
+    return {
       type: 'foreground',
       ts,
       pid: value.pid,
       hwnd: value.hwnd,
       exe,
       title: asString(value.title) ?? '',
-      app: asString(value.app) || null
+      app: asString(value.app) || null,
+      ...facts
     }
-    // 窗口事实（v0.12）：报了就必须合格，不合格整条丢掉；没报就留空（段机按「未知」放行）
-    if (value.visible !== undefined) {
-      if (typeof value.visible !== 'boolean') return null
-      event.visible = value.visible
-    }
-    if (value.minimized !== undefined) {
-      if (typeof value.minimized !== 'boolean') return null
-      event.minimized = value.minimized
-    }
-    if (value.onScreenArea !== undefined) {
-      if (!isFiniteNumber(value.onScreenArea) || value.onScreenArea < 0) return null
-      event.onScreenArea = value.onScreenArea
-    }
-    if (value.className !== undefined) {
-      const className = asString(value.className)
-      if (className === null) return null
-      event.className = className
-    }
-    return event
   }
 
   if (type === 'move') {
@@ -174,5 +211,23 @@ export class NativeDesktopSource implements DesktopEventSource {
 
   lastInputTickMs(): number {
     return this.binding.lastInputTickMs()
+  }
+
+  /**
+   * 屏幕点下面那扇窗（v0.13）。旧构建没有这个导出 → 返回 null，上层退回纯事件口径。
+   * 本进程自己的窗（悬浮球 / 采集窗口）不算：它们不该成为一段。
+   */
+  readWindowAt(x: number, y: number): WindowFacts | null {
+    const query = this.binding.windowAtPoint
+    if (typeof query !== 'function') return null
+    let raw: unknown
+    try {
+      raw = query.call(this.binding, x, y)
+    } catch {
+      return null
+    }
+    const facts = normalizeWindowFacts(raw)
+    if (!facts || facts.pid === process.pid) return null
+    return facts
   }
 }

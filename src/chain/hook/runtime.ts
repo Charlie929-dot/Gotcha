@@ -66,7 +66,13 @@ export class ChainRuntime {
     this.now = options.now ?? (() => Date.now())
     this.pulseMs = options.pulseMs ?? 1_000
     this.autoPulse = options.autoPulse ?? true
-    this.adapter = new DesktopEventAdapter(options.source, { now: this.now, ...options.adapterOptions })
+    this.adapter = new DesktopEventAdapter(options.source, {
+      now: this.now,
+      ...options.adapterOptions,
+      // 点哪算哪（v0.13）：传输层能查「这个点下面是哪扇窗」就用它定段身份，
+      // 查不了（假源 / 别的实现）就只靠前台事件，不猜。
+      resolveWindow: options.adapterOptions?.resolveWindow ?? options.source.readWindowAt?.bind(options.source)
+    })
     this.segmenter = new ChainSegmenter(options.segmenterOptions)
     this.recorder = new ChainRecorder({
       db: options.db,

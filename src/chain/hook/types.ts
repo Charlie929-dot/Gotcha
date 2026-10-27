@@ -40,6 +40,19 @@ export type RawDesktopEvent =
   | { type: 'click'; ts: number; x: number; y: number; button: 'left' | 'right' | 'middle' }
   | { type: 'wheel'; ts: number; delta: number; x: number; y: number }
 
+/** 一扇窗口的事实（v0.13）：段身份以「动作目标窗」为准，前台事件只兜底 */
+export interface WindowFacts {
+  pid: number
+  hwnd: number
+  exe: string
+  title: string
+  app: string | null
+  visible?: boolean
+  minimized?: boolean
+  onScreenArea?: number
+  className?: string
+}
+
 export interface DesktopEventSource {
   /** 开始投递原始事件；重复调用应当是安全的（实现自己保证幂等） */
   start(onEvent: (event: RawDesktopEvent) => void): void
@@ -49,6 +62,12 @@ export interface DesktopEventSource {
    * 它**分辨不出**是键盘还是鼠标——所以适配层还要结合「这段时间有没有收到鼠标事件」来判断（见 `adapter.ts`）。
    */
   lastInputTickMs(): number
+  /**
+   * 可选：这个屏幕点下面是哪扇窗（v0.13）。
+   * 屏幕走的是「点哪算哪」，不靠前台事件——前台被隐藏窗抢走时，这个值仍是你真正点中的那扇窗。
+   * 不实现（假源 / 别的传输方式）就退回纯事件口径。
+   */
+  readWindowAt?(x: number, y: number): WindowFacts | null
   /** 可选自述：这条源到底跑的哪条路（写进日志，便于确认没有静默降级） */
   readonly sourceInfo?: SourceInfo
 }

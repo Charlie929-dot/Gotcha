@@ -239,7 +239,8 @@ describe('幽灵前台窗（v0.12：拿到前台但不是人在用的窗）', ()
       { onScreenArea: 0 },
       { onScreenArea: 1023 },
       { className: 'TaskSwitcherWnd' },
-      { className: 'MultitaskingViewFrame' }
+      { className: 'MultitaskingViewFrame' },
+      { className: 'Shell_TrayWnd' }
     ]
     for (const facts of cases) {
       const segmenter = new ChainSegmenter()
@@ -288,12 +289,16 @@ describe('默认值', () => {
     })
   })
 
-  it('幽灵窗判据：可见区阈值 32×32，覆盖层类名认 Alt-Tab / 任务视图', () => {
+  it('幽灵窗判据：可见区阈值 32×32，覆盖层与桌面外壳都不成段', () => {
     expect(DEFAULT_SEGMENTER_OPTIONS.phantomMinOnScreenPx).toBe(1024)
     expect(DEFAULT_SEGMENTER_OPTIONS.phantomWindowClasses).toEqual([
       'TaskSwitcherWnd',
       'MultitaskingViewFrame',
-      'ForegroundStaging'
+      'ForegroundStaging',
+      'Shell_TrayWnd',
+      'Shell_SecondaryTrayWnd',
+      'Progman',
+      'WorkerW'
     ])
   })
 })

@@ -28,11 +28,13 @@ export interface AskConsentView {
   clientReason?: string
 }
 
-/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号 */
+/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区问答附带的截图路径） */
 export interface AskQueryContext {
   conversationId: string
   history: readonly ChainAskTurnContext[]
   signal: AbortSignal
+  /** 选区问答：随这条对话留存的截图（主进程校验后给绝对路径） */
+  imagePath?: string
 }
 
 export interface AskIpcDeps {
@@ -41,8 +43,10 @@ export interface AskIpcDeps {
   segment: (segmentId: number) => SegmentEvidence | null
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
-  /** 成功走完一次提问就落一条历史（失败只记日志，不能影响回答） */
-  record: (question: string, result: ChainAskResult, conversationId: string) => void
+  /** 成功走完一次提问就落一条历史（失败只记日志，不能影响回答）；`imagePath` 只有选区问答才有 */
+  record: (question: string, result: ChainAskResult, conversationId: string, imagePath?: string) => void
+  /** 截图路径 → data URL（渲染层读不了文件）；路径非法 / 读不到返回 null */
+  image?: (path: string) => string | null
   /**
    * 续查：恢复上一次被暂停的循环（`continue-ask`）。
    * `decision=continue` 继续检索；`decision=stop` 按现有结果收尾。
@@ -100,8 +104,11 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
   const ensureSender = createSenderCheck(deps)
   /** 在途提问（同一时刻只跑一次；新提问会中止旧的，避免两次回答交错落进同一会话） */
   let active: AbortController | null = null
-  /** 挂起的「还要继续吗」：resumeId → 原始问题 + 会话（答案没出来前不落历史） */
-  const pendingResume = new Map<string, { question: string; conversationId: string }>()
+  /** 挂起的「还要继续吗」：resumeId → 原始问题 + 会话 + 截图（答案没出来前不落历史） */
+  const pendingResume = new Map<
+    string,
+    { question: string; conversationId: string; imagePath?: string }
+  >()
 
   /**
    * 一次问答收口：暂停（continue-ask）暂时不落历史——用户还没决定、答案还没出来；
@@ -110,7 +117,8 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
   const settle = (
     question: string,
     conversationId: string,
-    result: ChainAskResult
+    result: ChainAskResult,
+    imagePath?: string
   ): ChainAskResult => {
     if (result.kind === 'continue-ask') {
       if (result.resumeId) {
@@ -119,12 +127,14 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           if (oldest === undefined) break
           pendingResume.delete(oldest)
         }
-        pendingResume.set(result.resumeId, { question, conversationId })
+        pendingResume.set(result.resumeId, { question, conversationId, ...(imagePath ? { imagePath } : {}) })
       }
       return result
     }
     try {
-      deps.record(question, result, conversationId)
+      // 不带图时只传三个参数：老测试 / 老调用方的入参形状保持不变
+      if (imagePath) deps.record(question, result, conversationId, imagePath)
+      else deps.record(question, result, conversationId)
     } catch (error) {
       deps.log('warn', 'ask history record failed', { error: String(error) })
     }
@@ -150,6 +160,13 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             ? payload.conversationId
             : `c${Date.now().toString(36)}`
 
+        // 选区问答：截图路径只做形状校验，真正的「在不在 ask-shots 里」由主进程 deps 校验
+        const rawImage = payload.imagePath
+        const imagePath =
+          typeof rawImage === 'string' && rawImage.length > 0 && rawImage.length <= 512
+            ? rawImage
+            : undefined
+
         let history: readonly ChainAskTurnContext[] = []
         try {
           history = deps.conversationHistory?.(conversationId) ?? []
@@ -161,8 +178,13 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         const controller = new AbortController()
         active = controller
         try {
-          const result = await deps.ask(asked, { conversationId, history, signal: controller.signal })
-          return settle(asked, conversationId, result)
+          const result = await deps.ask(asked, {
+            conversationId,
+            history,
+            signal: controller.signal,
+            ...(imagePath ? { imagePath } : {})
+          })
+          return settle(asked, conversationId, result, imagePath)
         } catch (error) {
           deps.log('error', 'ask:query failed', { error: String(error) })
           return failure('问记忆出错，看日志')
@@ -201,9 +223,10 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           const result = await deps.resume(resumeId, decision, {
             conversationId: pending.conversationId,
             history,
-            signal: controller.signal
+            signal: controller.signal,
+            ...(pending.imagePath ? { imagePath: pending.imagePath } : {})
           })
-          return settle(pending.question, pending.conversationId, result)
+          return settle(pending.question, pending.conversationId, result, pending.imagePath)
         } catch (error) {
           deps.log('error', 'ask:resume failed', { error: String(error) })
           return failure('续查出错，看日志')
@@ -234,6 +257,20 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
       }
     ],
     ['ask:consent:get', (event) => (ensureSender(event) ? deps.consent() : null)],
+    [
+      'ask:image',
+      (event, path) => {
+        if (!ensureSender(event)) return null
+        if (typeof path !== 'string' || path.length === 0 || path.length > 512) return null
+        if (!deps.image) return null
+        try {
+          return deps.image(path)
+        } catch (error) {
+          deps.log('warn', 'ask image read failed', { error: String(error) })
+          return null
+        }
+      }
+    ],
     [
       'ask:consent:set',
       (event, input) => {

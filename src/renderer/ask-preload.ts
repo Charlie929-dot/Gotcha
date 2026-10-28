@@ -15,8 +15,9 @@ export interface AskApi {
   /**
    * 问一次记忆。`conversationId` 相同的提问会被当成同一会话的续问——
    * 主进程按它取之前几轮当上下文（不传则主进程现造一个）。
+   * `imagePath` 是选区问答留存的截图（主进程只认 ask-shots 下的文件）。
    */
-  query(question: string, conversationId?: string): Promise<ChainAskResult>
+  query(question: string, conversationId?: string, imagePath?: string): Promise<ChainAskResult>
   /**
    * 「还要继续查吗」的选择：continue = 再给一轮检索预算，stop = 按现有结果收尾。
    * `resumeId` 来自 `continue-ask` 结果；过期 / 重开窗口后失效。
@@ -32,13 +33,18 @@ export interface AskApi {
   history(): Promise<AskHistoryEntry[]>
   /** 清空对话记录 */
   clearHistory(): Promise<boolean>
+  /** 截图路径 → data URL（渲染层读不了文件；读不到返回 null） */
+  image(path: string): Promise<string | null>
+  /** 选区问答的交接单：一条问题 + 一张截图，窗口收到就自动开问 */
+  onPrefill(handler: (payload: { question: string; imagePath: string }) => void): () => void
 }
 
 const api: AskApi = {
-  query: (question, conversationId) =>
+  query: (question, conversationId, imagePath) =>
     ipcRenderer.invoke('ask:query', {
       question,
-      ...(conversationId ? { conversationId } : {})
+      ...(conversationId ? { conversationId } : {}),
+      ...(imagePath ? { imagePath } : {})
     }) as Promise<ChainAskResult>,
   resume: (resumeId, decision) =>
     ipcRenderer.invoke('ask:resume', { resumeId, decision }) as Promise<ChainAskResult>,
@@ -48,7 +54,18 @@ const api: AskApi = {
   setConsent: (consented) =>
     ipcRenderer.invoke('ask:consent:set', { consented }) as Promise<AskConsentView | null>,
   history: () => ipcRenderer.invoke('ask:history') as Promise<AskHistoryEntry[]>,
-  clearHistory: () => ipcRenderer.invoke('ask:history:clear') as Promise<boolean>
+  clearHistory: () => ipcRenderer.invoke('ask:history:clear') as Promise<boolean>,
+  image: (path) => ipcRenderer.invoke('ask:image', path) as Promise<string | null>,
+  onPrefill: (handler) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
+      if (typeof payload !== 'object' || payload === null) return
+      const value = payload as Record<string, unknown>
+      if (typeof value.question !== 'string' || typeof value.imagePath !== 'string') return
+      handler({ question: value.question, imagePath: value.imagePath })
+    }
+    ipcRenderer.on('ask:prefill', listener)
+    return () => ipcRenderer.removeListener('ask:prefill', listener)
+  }
 }
 
 contextBridge.exposeInMainWorld('gotchaAsk', api)

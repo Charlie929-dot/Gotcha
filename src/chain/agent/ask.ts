@@ -94,6 +94,11 @@ export interface ChainAskOptions {
   resume?: { id: string; decision: ChainAskResumeDecision }
   /** 用户点「停止」时中止在途请求 */
   signal?: AbortSignal
+  /**
+   * 选区问答：随本轮问题一起给模型看的截图（data URL）。
+   * 图是用户在界面上自己框的，不进脱敏（拍板 2026-10-28）；出云门照旧在门口判定。
+   */
+  imageDataUrl?: string
   log?: ChainAskLog
 }
 
@@ -238,6 +243,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
           paused.state = state
         },
         ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.imageDataUrl ? { image: { dataUrl: options.imageDataUrl } } : {}),
         ...(options.onUsage ? { onUsage: options.onUsage } : {}),
         log
       },
@@ -329,7 +335,8 @@ async function askOnce(
   let result
   try {
     result = await client.completeAsk(built.payload, {
-      ...(options.signal ? { signal: options.signal } : {})
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.imageDataUrl ? { image: { dataUrl: options.imageDataUrl } } : {})
     })
   } catch (error) {
     if (options.signal?.aborted) {

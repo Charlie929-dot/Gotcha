@@ -270,12 +270,30 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
-function appendUserBubble(text: string): void {
+function appendUserBubble(text: string, imagePath?: string): void {
   const wrap = element('div', 'msg user')
   const bubble = element('div', 'bubble')
   bubble.textContent = text
+  if (imagePath) appendShotThumb(bubble, imagePath)
   wrap.append(bubble)
   threadEl.append(wrap)
+}
+
+/** 选区问答的截图缩略图：路径 → data URL 由主进程读（渲染层读不了文件）；读不到就整张去掉 */
+function appendShotThumb(host: HTMLElement, path: string): void {
+  if (!api) return
+  const image = element('img', 'shot-thumb')
+  image.alt = '随这次提问的截图'
+  image.loading = 'lazy'
+  image.addEventListener('click', () => image.classList.toggle('zoomed'))
+  host.append(image)
+  void api
+    .image(path)
+    .then((url) => {
+      if (url) image.src = url
+      else image.remove()
+    })
+    .catch(() => image.remove())
 }
 
 function citationList(citations: ChainAskCitation[]): HTMLElement {
@@ -319,7 +337,7 @@ function assistantCard(className: string, label: string, at: number, stats: Chai
 }
 
 function renderTurn(entry: AskHistoryEntry): void {
-  appendUserBubble(entry.question)
+  appendUserBubble(entry.question, entry.imagePath)
 
   if (entry.kind === 'answer') {
     const card = assistantCard('answer', '回答', entry.at, entry.stats)
@@ -424,8 +442,8 @@ function renderThread(): void {
 /** 当前线程（用于把用户刚问的一句立刻画出来，不等历史落盘） */
 let currentThreadEntries: AskHistoryEntry[] = []
 
-function appendPending(question: string): void {
-  appendUserBubble(question)
+function appendPending(question: string, imagePath?: string): void {
+  appendUserBubble(question, imagePath)
   const wrap = element('div', 'msg assistant')
   const card = element('div', 'card pending')
   const text = element('p', 'muted')
@@ -606,7 +624,7 @@ function setBusy(next: boolean): void {
   newChatButton.disabled = next
 }
 
-async function ask(question: string): Promise<void> {
+async function ask(question: string, imagePath?: string): Promise<void> {
   if (busy) return
   if (!api) {
     setStatus('error', '窗口没接上主进程（preload 缺失）')
@@ -616,12 +634,12 @@ async function ask(question: string): Promise<void> {
   if (currentThreadEntries.length === 0) threadEl.replaceChildren()
 
   setupBusy()
-  appendPending(question)
+  appendPending(question, imagePath)
   questionInput.value = ''
   const conversationId = activeConversationId
 
   try {
-    const result = await api.query(question, conversationId)
+    const result = await api.query(question, conversationId, imagePath)
     if (result.kind === 'continue-ask') {
       // 这一问还没落历史：保留刚画的问题气泡，只把等待卡换成「还要继续吗」
       renderContinueCard(result)
@@ -751,4 +769,12 @@ void (async () => {
   } catch (error) {
     setStatus('error', `读取状态失败：${String(error)}`)
   }
+  // 选区问答的交接单：新开一条会话、带着截图直接问（不覆盖用户正在看的会话）
+  api?.onPrefill((payload) => {
+    if (busy) return
+    activeConversationId = null
+    currentThreadEntries = []
+    threadEl.replaceChildren()
+    void ask(payload.question, payload.imagePath)
+  })
 })()

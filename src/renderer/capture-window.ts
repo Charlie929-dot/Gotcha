@@ -63,9 +63,18 @@ declare global {
       start(): Promise<{ width: number; height: number }>
       grab(request: GrabRequest): Promise<GrabResponse>
       probe(request: ProbeRequest): Promise<ProbeResponse>
+      /** 整屏一帧（选区问答用：先整屏、主进程再按选区裁剪） */
+      fullFrame(request?: { format?: 'png' | 'jpeg' }): Promise<FullFrameResponse>
       stop(): void
     }
   }
+}
+
+/** 整屏帧响应（尺寸是视频帧的物理像素） */
+interface FullFrameResponse {
+  image: Uint8Array
+  width: number
+  height: number
 }
 
 let video: HTMLVideoElement | null = null
@@ -258,6 +267,23 @@ async function probe(request: ProbeRequest): Promise<ProbeResponse> {
   return { hash: hashOf(small, diff), width: diff.width, height: diff.height }
 }
 
-window.__gotchaCapture = { start, grab, probe, stop }
+/**
+ * 整屏一帧（选区问答）：把当前流按原生尺寸画满，编码成 PNG/JPEG 回主进程。
+ * 与 grab 同一条「等新帧」纪律；主进程拿到后按选区裁剪，裁剪与落盘都在主进程。
+ */
+async function fullFrame(request: { format?: 'png' | 'jpeg' } = {}): Promise<FullFrameResponse> {
+  const el = requireVideo()
+  await waitForFreshFrame(el)
+  const width = el.videoWidth
+  const height = el.videoHeight
+  if (width <= 0 || height <= 0) throw new Error('屏幕捕获流尺寸为 0')
+  const ctx = draw(el, { x: 0, y: 0, width, height }, width, height)
+  const blob = await ctx.canvas.convertToBlob(
+    request.format === 'jpeg' ? { type: 'image/jpeg', quality: 0.9 } : { type: 'image/png' }
+  )
+  return { image: new Uint8Array(await blob.arrayBuffer()), width, height }
+}
+
+window.__gotchaCapture = { start, grab, probe, fullFrame, stop }
 
 export {}

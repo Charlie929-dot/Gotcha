@@ -95,6 +95,8 @@ export interface AskLoopContext {
   history?: readonly ChainAskTurnContext[]
   /** 用户点「停止」时中止在途请求 */
   signal?: AbortSignal
+  /** 选区问答：随本轮问题一起给模型看的截图（data URL；不脱敏，D51 之后的新入口） */
+  image?: { readonly dataUrl: string }
   /** 记账：整次循环结束后一次（含失败路径已消耗的量） */
   onUsage?: (usage: LlmUsage) => void
   /** 从暂停点恢复（`ask.ts` 按检查点回填）；暂停轮的 turns / 白名单 / 计数都在里面 */
@@ -245,7 +247,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     try {
       response = await ctx.client.completeAskLoop(built.payload, {
         allowTools,
-        ...(ctx.signal ? { signal: ctx.signal } : {})
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+        ...(ctx.image ? { image: ctx.image } : {})
       })
     } catch (error) {
       // 用户点「停止」：不算失败，如实回 aborted

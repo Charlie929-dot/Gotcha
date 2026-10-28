@@ -8,6 +8,16 @@ import { getNumberSetting, getSetting, setSetting } from '../db/settings'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
+import { selectionToFrameCrop } from '../capture/full-frame'
+import {
+  isAskShotPath,
+  pruneAskShots,
+  readAskShotDataUrl,
+  saveAskShot
+} from './ask-shot'
+import { cropFrameToPng } from './ask-crop'
+import { openAskPopup } from './ask-popup'
+import { displayUnderCursor, pickRegion } from './region-picker'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
 import {
   CHAIN_FRAME_FILE_PATTERN,
@@ -891,15 +901,33 @@ function readShotDataUrl(path: string): string | null {
   }
 }
 
+/** 选区问答的交接单：一条问题 + 一张已经落盘的截图（问记忆窗口据此自动开问） */
+interface AskPrefill {
+  question: string
+  imagePath: string
+}
+
+/** 窗口还在加载就先等 did-finish-load，否则渲染层收不到这条消息 */
+function sendToAskWindow(window: BrowserWindow, payload: AskPrefill): void {
+  const deliver = (): void => {
+    if (window.isDestroyed()) return
+    window.webContents.send('ask:prefill', payload)
+  }
+  if (window.webContents.isLoading()) window.webContents.once('did-finish-load', deliver)
+  else deliver()
+}
+
 /** 问记忆窗口（S3-lite）：懒创建、关闭即销毁；打开即视为一次交互 */
-function showAskWindow(): void {  if (!app.isReady()) return
+function showAskWindow(prefill?: AskPrefill): void {
+  if (!app.isReady()) return
   if (askWindow && !askWindow.isDestroyed()) {
     if (askWindow.isMinimized()) askWindow.restore()
     askWindow.show()
     askWindow.focus()
+    if (prefill) sendToAskWindow(askWindow, prefill)
     return
   }
-  askWindow = createAskWindow({
+  const window = createAskWindow({
     devServerUrl: process.env['ELECTRON_RENDERER_URL'],
     htmlPath: join(__dirname, '../renderer/ask/ask.html'),
     preloadPath: join(__dirname, '../preload/ask.js'),
@@ -907,11 +935,66 @@ function showAskWindow(): void {  if (!app.isReady()) return
       askWindow = null
     }
   })
+  askWindow = window
+  if (prefill) sendToAskWindow(window, prefill)
 }
 
 function openAsk(): void {
   cancelStartupResume(true)
   showAskWindow()
+}
+
+/** 选区问答在跑：连点球不会叠出两层遮罩 / 两个输入框 */
+let regionBusy = false
+
+/**
+ * 段二：选区问答整条链
+ * 截整屏一帧（复用采集那条常驻流）→ 遮罩选区 → 按选区裁剪 → 留存 → 中下方浮动输入框 → 问记忆。
+ * 任何一步失败都只记 warn：这是辅助入口，不能因为它把球搞挂。
+ */
+async function openRegionAsk(): Promise<void> {
+  if (regionBusy || !screenCapture) return
+  regionBusy = true
+  const userData = app.getPath('userData')
+  try {
+    const display = displayUnderCursor()
+    const frame = await screenCapture.captureDisplay(display.id, { format: 'png' })
+    const imageDataUrl = `data:image/png;base64,${Buffer.from(frame.image).toString('base64')}`
+    const picked = await pickRegion({
+      devServerUrl: process.env['ELECTRON_RENDERER_URL'],
+      htmlPath: join(__dirname, '../renderer/region/index.html'),
+      preloadPath: join(__dirname, '../preload/region.js'),
+      imageDataUrl,
+      display
+    })
+    if (!picked) return
+    const crop = selectionToFrameCrop(
+      picked.rect,
+      { width: display.bounds.width, height: display.bounds.height },
+      { width: frame.width, height: frame.height }
+    )
+    if (!crop) return
+    const png = cropFrameToPng(frame.image, crop)
+    if (!png) return
+    const imagePath = saveAskShot(userData, png, Date.now())
+    const thumb = readAskShotDataUrl(imagePath)
+    if (!thumb) return
+    openAskPopup({
+      devServerUrl: process.env['ELECTRON_RENDERER_URL'],
+      htmlPath: join(__dirname, '../renderer/ask-popup/index.html'),
+      preloadPath: join(__dirname, '../preload/ask-popup.js'),
+      imageDataUrl: thumb,
+      display,
+      onSend: (question) => {
+        cancelStartupResume(true)
+        showAskWindow({ question, imagePath })
+      }
+    })
+  } catch (error) {
+    captureLog('warn', 'region ask failed', { error: String(error) })
+  } finally {
+    regionBusy = false
+  }
 }
 
 app.on('window-all-closed', () => {
@@ -1462,6 +1545,12 @@ if (primaryInstance) {
     installCrashLogging()
     cleanTempFramesOnStartup()
     startTempJanitor()
+    // 选区问答的截图随对话留存 30 天：启动时按年龄清一轮（读不到图的历史条目界面如实降级）
+    try {
+      pruneAskShots(app.getPath('userData'))
+    } catch (error) {
+      captureLog('warn', 'ask shots prune failed', { error: String(error) })
+    }
     const capture = resolveCapture(process.argv, process.env)
     if (capture) {
       try {
@@ -1509,6 +1598,10 @@ if (primaryInstance) {
       // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
       history: context.history,
       signal: context.signal,
+      // 选区问答：截图随本轮问题送给模型。路径只接受 ask-shots 下的文件（用户在界面上自己框的图，不脱敏）
+      ...(context.imagePath && isAskShotPath(app.getPath('userData'), context.imagePath)
+        ? { imageDataUrl: readAskShotDataUrl(context.imagePath) ?? undefined }
+        : {}),
       canSend: () => getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
       overBudget: () => {
         const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
@@ -1569,11 +1662,16 @@ if (primaryInstance) {
         setSetting(writable, GRAPH_SETTING_KEYS.outboundConsent, consented ? '1' : '0')
         return askConsentView()
       },
-      record: (question, result, conversationId) => {
+      record: (question, result, conversationId, imagePath) => {
         appendAskHistory(
           askHistoryPath,
-          toHistoryEntry(question, result, Date.now(), conversationId)
+          toHistoryEntry(question, result, Date.now(), conversationId, imagePath)
         )
+      },
+      // 选区问答：历史里的截图路径 → data URL（渲染层读不了文件；只认 ask-shots 下的文件）
+      image: (path) => {
+        const root = app.getPath('userData')
+        return isAskShotPath(root, path) ? readAskShotDataUrl(path) : null
       },
       conversationHistory: (conversationId) => {
         // 由新到旧取出该会话最近的几轮，翻成「问题 + 上一轮的答复」当上下文。
@@ -1696,6 +1794,9 @@ if (primaryInstance) {
       htmlPath: join(__dirname, '../renderer/ball/ball.html'),
       stateFilePath: join(app.getPath('userData'), BALL_STATE_FILE),
       getStatus: () => controller.status(),
+      openRegionAsk: () => {
+        void openRegionAsk()
+      },
       openAsk,
       toggleCapture: () => {
         void toggleCapture()

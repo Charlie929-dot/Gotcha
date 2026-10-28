@@ -26,6 +26,8 @@ export interface LlmToolCall {
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
+  /** role=user 且带图时附在正文后（wire 层拼成 OpenAI 兼容的内容段数组） */
+  imageUrl?: string
   /** role=assistant 调工具时附带（content 可为空串） */
   toolCalls?: readonly LlmToolCall[]
   /** role=tool 时：对应调用的 id */
@@ -70,6 +72,12 @@ export interface LlmCompleteOptions {
    * 缺省按 `true`（普通工具轮）。
    */
   allowTools?: boolean
+  /**
+   * 选区问答：随本轮问题一起给模型看的截图（`data:image/...;base64,...`）。
+   * **不走脱敏**——这是用户在界面上自己框的图（拍板 2026-10-28），不是从记忆库里翻出来的文本；
+   * 出网确认门（D24）照旧在 `askChain` 门口判定。
+   */
+  image?: { readonly dataUrl: string }
 }
 
 export interface LlmClient {

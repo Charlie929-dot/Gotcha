@@ -61,6 +61,8 @@ export interface BallShellOptions {
   htmlPath: string
   stateFilePath: string
   getStatus(): CaptureStatus
+  /** 选区问答（段二）：左键点球 → 选屏 → 浮动输入框 → 问记忆 */
+  openRegionAsk(): void
   /** 问记忆窗口（S3-lite） */
   openAsk(): void
   toggleCapture(): void
@@ -381,7 +383,8 @@ export function createBallShell(options: BallShellOptions): BallShell {
     const end = (typeof payload === 'object' && payload !== null ? payload : {}) as DragEndPayload
     const moved = end.moved === true
     if (!moved) {
-      // D51：球点击不再打开图谱；段二接「选区问答」（选区 → 浮动框 → 问记忆）
+      // D51：球点击不再打开图谱；段二改为「选区问答」（选区 → 浮动框 → 问记忆）
+      options.openRegionAsk()
       return
     }
     let position: BallPoint

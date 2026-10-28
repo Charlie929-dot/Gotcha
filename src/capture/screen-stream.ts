@@ -287,8 +287,7 @@ export class ScreenCapture {
     return this.sources
   }
 
-  private async sourceForDisplay(displayId: number): Promise<ScreenSource | null> {
-    let sources = await this.listSources()
+  private async sourceForDisplay(displayId: number): Promise<ScreenSource | null> {    let sources = await this.listSources()
     let source = sources.find((item) => item.displayId === displayId)
     if (!source) {
       // 新插拔/分辨率变更后 display_id 可能变化，刷新一次
@@ -297,6 +296,24 @@ export class ScreenCapture {
       source = sources.find((item) => item.displayId === displayId)
     }
     return source ?? sources[0] ?? null
+  }
+
+  /**
+   * 整屏一帧（选区问答用）：把指定显示器的那块流画满、编码后回主进程。
+   * 与 `capture()` 共用同一条常驻流——**绝不另开第二条** `getDisplayMedia`
+   * （性能方案 F2：多一条流就多一份 GPU 解码与内存）。
+   */
+  async captureDisplay(
+    displayId: number,
+    options: { format?: 'png' | 'jpeg' } = {}
+  ): Promise<{ image: Uint8Array; width: number; height: number }> {
+    const displays = screen.getAllDisplays()
+    const display = displays.find((item) => item.id === displayId) ?? screen.getPrimaryDisplay()
+    await this.ensureStream(toDisplayInfo(display))
+    return await this.callRenderer<{ image: Uint8Array; width: number; height: number }>(
+      `window.__gotchaCapture.fullFrame(${JSON.stringify({ format: options.format ?? 'png' })})`,
+      GRAB_TIMEOUT_MS
+    )
   }
 
   private async ensureStream(display: DisplayInfo): Promise<StreamInfo> {

@@ -25,6 +25,8 @@ export interface AskHistoryEntry {
   kind: 'answer' | 'no-evidence' | 'error' | 'clarify'
   answer?: string
   citations: ChainAskCitation[]
+  /** 选区问答：随这条对话留存的截图路径（`<userData>/ask-shots/shot-*.png`；过期清掉后读不到，界面如实降级） */
+  imagePath?: string
   /** `kind=no-evidence` 时模型给的补充说明（查到了什么、为什么不足以回答）；没有就显示固定文案 */
   note?: string
   /** `kind=clarify`：模型反向向用户确认的问题 + 候选 */
@@ -83,6 +85,9 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
   if (!data.citations.every(isCitation)) return null
   if (!isStats(data.stats)) return null
   if (data.kind === 'answer' && typeof data.answer !== 'string') return null
+  if (data.imagePath !== undefined && (typeof data.imagePath !== 'string' || data.imagePath === '')) {
+    return null
+  }
   if (data.answer !== undefined && typeof data.answer !== 'string') return null
   if (data.reason !== undefined && typeof data.reason !== 'string') return null
   if (data.message !== undefined && typeof data.message !== 'string') return null
@@ -101,6 +106,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
     question: data.question,
     kind: data.kind as AskHistoryEntry['kind'],
     ...(typeof data.conversationId === 'string' ? { conversationId: data.conversationId } : {}),
+    ...(typeof data.imagePath === 'string' ? { imagePath: data.imagePath } : {}),
     ...(typeof data.answer === 'string' ? { answer: data.answer } : {}),
     citations: data.citations,
     ...(isClarify(data.clarify) ? { clarify: data.clarify } : {}),
@@ -151,14 +157,16 @@ export function toHistoryEntry(
   question: string,
   result: ChainAskResult,
   at: number,
-  conversationId?: string
+  conversationId?: string,
+  imagePath?: string
 ): AskHistoryEntry {
   const base = {
     id: `${at.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
     at,
     question,
     stats: result.stats,
-    ...(conversationId ? { conversationId } : {})
+    ...(conversationId ? { conversationId } : {}),
+    ...(imagePath ? { imagePath } : {})
   }
   if (result.kind === 'answer') {
     return { ...base, kind: 'answer', answer: result.answer, citations: result.citations }

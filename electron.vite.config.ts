@@ -23,7 +23,10 @@ export default defineConfig({
           index: resolve(__dirname, 'src/renderer/preload.ts'),
           ball: resolve(__dirname, 'src/renderer/ball-preload.ts'),
           graph: resolve(__dirname, 'src/renderer/graph-preload.ts'),
-          ask: resolve(__dirname, 'src/renderer/ask-preload.ts')
+          ask: resolve(__dirname, 'src/renderer/ask-preload.ts'),
+          // 段二：选区遮罩 / 浮动输入框（各自的 preload 与页面一一对应）
+          region: resolve(__dirname, 'src/renderer/region-preload.ts'),
+          'ask-popup': resolve(__dirname, 'src/renderer/ask-popup-preload.ts')
         }
       }
     }
@@ -41,7 +44,10 @@ export default defineConfig({
           // 旧 sigma 按日视图保留开关（工具栏「全局视图 / 经典视图」互切）
           graphClassic: resolve(__dirname, 'src/renderer/graph/graph.html'),
           // 问记忆（S3-lite）：输入框 + 回答栏 + 引用段证据
-          ask: resolve(__dirname, 'src/renderer/ask/ask.html')
+          ask: resolve(__dirname, 'src/renderer/ask/ask.html'),
+          // 段二：选区遮罩 + 中下方浮动输入框
+          region: resolve(__dirname, 'src/renderer/region/index.html'),
+          askPopup: resolve(__dirname, 'src/renderer/ask-popup/index.html')
         }
       }
     }

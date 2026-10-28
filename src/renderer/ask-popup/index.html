@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'self'; script-src 'self'; connect-src 'none'" />
+    <title>问这张截图</title>
+    <link rel="stylesheet" href="./popup.css" />
+  </head>
+  <body>
+    <div class="card" id="card">
+      <div class="bar" id="bar">
+        <span class="dot"></span>
+        <span class="title">问这张截图</span>
+        <span class="spacer"></span>
+        <button class="icon" id="collapse" title="收起">▾</button>
+        <button class="icon" id="cancel" title="关闭">×</button>
+      </div>
+      <div class="body" id="body">
+        <img class="thumb" id="thumb" alt="截图预览" />
+        <div class="editor">
+          <textarea id="input" rows="2" placeholder="直接发送，或补一句想问什么…"></textarea>
+          <div class="actions">
+            <span class="hint">Enter 发送 · Shift+Enter 换行 · Esc 取消</span>
+            <button class="ghost" id="dismiss">取消</button>
+            <button class="primary" id="send">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="./popup.ts"></script>
+  </body>
+</html>

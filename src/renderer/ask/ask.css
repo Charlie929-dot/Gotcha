@@ -242,6 +242,22 @@ body {
   word-break: break-word;
 }
 
+/* 选区问答：随提问气泡的截图缩略图（读不到图时整张由脚本移除） */
+.msg.user .shot-thumb {
+  display: block;
+  margin-top: 8px;
+  max-width: 100%;
+  max-height: 200px;
+  border-radius: 8px;
+  border: 1px solid #35618f;
+  cursor: zoom-in;
+}
+
+.msg.user .shot-thumb.zoomed {
+  max-height: none;
+  cursor: zoom-out;
+}
+
 .msg.assistant {
   justify-content: flex-start;
 }

@@ -9,8 +9,8 @@ body {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  /* 默认就压一层：脚本没跑起来时也保证「整屏蒙一层」，不会透出桌面 */
-  background: rgb(0 0 0 / 45%);
+  /* 暗层交给 canvas 画（只画一层）；这里保持透明，避免 CSS + canvas 叠成两层发灰 */
+  background: transparent;
   cursor: crosshair;
   user-select: none;
   font-family: system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;

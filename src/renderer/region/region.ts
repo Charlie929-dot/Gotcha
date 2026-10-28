@@ -27,7 +27,7 @@ declare global {
   }
 }
 
-const DIM_ALPHA = 0.55
+const DIM_ALPHA = 0.45
 const MIN_SIZE = 8
 
 const api = window.gotchaRegion
@@ -43,6 +43,8 @@ let shot: HTMLImageElement | null = null
 let dragStart: { x: number; y: number } | null = null
 let current: RegionRect | null = null
 let settled = false
+/** 冻结帧状态：只用于在画布上如实说明「为什么没有画面」，不改变「仍可框选」这件事 */
+let shotState: 'loading' | 'ready' | 'no-api' | 'no-image' | 'decode-error' = 'loading'
 
 function dpr(): number {
   return Math.max(1, window.devicePixelRatio || 1)
@@ -67,11 +69,21 @@ function render(): void {
   ctx.fillRect(0, 0, window.innerWidth, window.innerHeight)
 
   if (!shot) {
-    // 冻结帧没拿到也要能用：至少蒙一层 + 告诉用户还能框（画布本身就是暗的）
-    ctx.fillStyle = 'rgb(255 255 255 / 55%)'
-    ctx.font = '14px system-ui, sans-serif'
-    ctx.textAlign = 'center'
-    ctx.fillText('没拿到屏幕截图（仍可框选，但选区不会有画面）', window.innerWidth / 2, 48)
+    // 冻结帧没拿到也要能用：至少蒙一层 + 说清楚是哪一步没成（截图 / 日志都对得上）
+    const hintByState: Record<typeof shotState, string> = {
+      loading: '正在取屏幕画面…',
+      ready: '',
+      'no-api': 'preload 没加载（window.gotchaRegion 缺失）',
+      'no-image': '主进程没给冻结帧（截图失败）',
+      'decode-error': '冻结帧解码失败'
+    }
+    const text = hintByState[shotState]
+    if (text !== '') {
+      ctx.fillStyle = 'rgb(255 255 255 / 70%)'
+      ctx.font = '14px system-ui, sans-serif'
+      ctx.textAlign = 'center'
+      ctx.fillText(`${text}（仍可框选，但选区不会有画面）`, window.innerWidth / 2, 48)
+    }
   }
 
   if (!current) return
@@ -156,24 +168,36 @@ canvas.addEventListener('pointerup', (event) => {
   finish()
 })
 
-/** 主动拉冻结帧（不靠 push，监听早晚都不会丢）；失败就只画暗层 */
+/** 主动拉冻结帧（不靠 push，监听早晚都不会丢）；失败就只画暗层并写明原因 */
 async function loadShot(): Promise<void> {
-  if (!api) return
+  if (!api) {
+    shotState = 'no-api'
+    render()
+    return
+  }
   try {
     const dataUrl = await api.image()
-    if (!dataUrl) return
+    if (!dataUrl || dataUrl.length < 100) {
+      shotState = 'no-image'
+      render()
+      return
+    }
     const image = new Image()
     image.decoding = 'async'
     image.onload = () => {
       shot = image
+      shotState = 'ready'
       render()
     }
     image.onerror = () => {
       // 解码失败：保持暗层，别把整个遮罩搞没
+      shotState = 'decode-error'
+      render()
     }
     image.src = dataUrl
   } catch {
-    // 主进程没给（窗口已关 / IPC 出错）：保持暗层
+    shotState = 'no-image'
+    render()
   }
 }
 

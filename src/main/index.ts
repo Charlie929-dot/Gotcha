@@ -958,8 +958,16 @@ async function openRegionAsk(): Promise<void> {
   const userData = app.getPath('userData')
   try {
     const display = displayUnderCursor()
-    const frame = await screenCapture.captureDisplay(display.id, { format: 'png' })
-    const imageDataUrl = `data:image/png;base64,${Buffer.from(frame.image).toString('base64')}`
+    // 传输用 JPEG（整屏 PNG 动辄 5–8 MB，base64 再过一次 IPC 容易出岔子）；
+    // 裁剪后仍以 PNG 存盘，所以留存的证据图质量不受影响。
+    const frame = await screenCapture.captureDisplay(display.id, { format: 'jpeg' })
+    const imageDataUrl = `data:image/jpeg;base64,${Buffer.from(frame.image).toString('base64')}`
+    captureLog('info', 'region frame captured', {
+      bytes: frame.image.byteLength,
+      width: frame.width,
+      height: frame.height,
+      dataUrlLength: imageDataUrl.length
+    })
     const picked = await pickRegion({
       devServerUrl: process.env['ELECTRON_RENDERER_URL'],
       htmlPath: join(__dirname, '../renderer/region/index.html'),

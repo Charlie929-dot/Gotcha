@@ -24,7 +24,7 @@ export interface PickRegionOptions {
   /** 冻结的整屏截图（data URL）：由渲染层主动来取 */
   imageDataUrl: string
   display: Display
-  log?: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
+  log?: (level: 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
 export interface PickedRegion {
@@ -56,8 +56,6 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
     y: bounds.y,
     width: bounds.width,
     height: bounds.height,
-    // Windows：只有 fullscreen 才盖得住任务栏（普通无边框会被夹到工作区）
-    fullscreen: true,
     frame: false,
     resizable: false,
     movable: false,
@@ -127,10 +125,33 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
     })
 
     win.webContents.once('did-finish-load', () => {
-      // fullscreen 偶尔会在加载过程中被还原成普通窗口：再钉一次边界
-      if (!win.isFullScreen()) win.setFullScreen(true)
+      // 真机踩到：`fullscreen` 在构造时 / show 之前设会被 show() 打回工作区。
+      // 顺序改成 show → 全屏 → 再钉一次 bounds，才是「整屏蒙一层（含任务栏）」。
       win.show()
+      win.setFullScreen(true)
+      win.setBounds(bounds, false)
+      win.setAlwaysOnTop(true, 'screen-saver')
       win.focus()
+      options.log?.('info', 'region overlay shown', {
+        bounds: win.getBounds(),
+        display: bounds,
+        fullScreen: win.isFullScreen(),
+        imageBytes: options.imageDataUrl.length
+      })
+      // 兜底：show 之后再量一次实际边界，仍小于整屏就再钉一次（Windows 偶尔把全屏窗口打回工作区）
+      setTimeout(() => {
+        if (win.isDestroyed()) return
+        const current = win.getBounds()
+        if (current.width < bounds.width || current.height < bounds.height) {
+          win.setBounds(bounds, false)
+          if (!win.isFullScreen()) win.setFullScreen(true)
+          options.log?.('warn', 'region overlay resized', {
+            from: current,
+            to: win.getBounds(),
+            fullScreen: win.isFullScreen()
+          })
+        }
+      }, 160)
     })
 
     const devServerUrl = options.devServerUrl?.replace(/\/+$/, '')

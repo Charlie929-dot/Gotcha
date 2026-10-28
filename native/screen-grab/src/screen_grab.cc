@@ -571,6 +571,35 @@ napi_value Warmup(napi_env env, napi_callback_info info) {
   return MakeBoolean(env, EnsureCache(monitor, cache, error));
 }
 
+/** HWND 用 BigInt 传：Electron 的 getNativeWindowHandle() 是 8 字节 Buffer，JS 侧读成 BigInt */
+bool ReadHwnd(napi_env env, napi_value value, HWND& window, std::string& error) {
+  napi_valuetype type = napi_undefined;
+  if (napi_typeof(env, value, &type) != napi_ok) {
+    error = "读取 hwnd 失败";
+    return false;
+  }
+  std::uint64_t raw = 0;
+  if (type == napi_bigint) {
+    bool lossless = false;
+    if (napi_get_value_bigint_uint64(env, value, &raw, &lossless) != napi_ok) {
+      error = "hwnd 必须是 BigInt / 数字";
+      return false;
+    }
+  } else if (type == napi_number) {
+    double number = 0;
+    if (napi_get_value_double(env, value, &number) != napi_ok) {
+      error = "hwnd 必须是 BigInt / 数字";
+      return false;
+    }
+    raw = static_cast<std::uint64_t>(number);
+  } else {
+    error = "hwnd 必须是 BigInt / 数字";
+    return false;
+  }
+  window = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(raw));
+  return true;
+}
+
 /**
  * 一次 SetWindowPos(HWND_TOPMOST)：把窗口抬到置顶带最前面，不抢焦点、不改尺寸位置。
  * 返回是否成功；窗口失效返回 false（调用方可以退回 Electron 的 setAlwaysOnTop + moveTop）。
@@ -581,26 +610,9 @@ napi_value SetTopmost(napi_env env, napi_callback_info info) {
   if (napi_get_cb_info(env, info, &argc, args, nullptr, nullptr) != napi_ok || argc < 1) {
     return Throw(env, "setTopmost(hwnd) 需要一个参数");
   }
-  napi_valuetype type = napi_undefined;
-  if (napi_typeof(env, args[0], &type) != napi_ok) return Throw(env, "读取 hwnd 失败");
-
-  std::uint64_t raw = 0;
-  if (type == napi_bigint) {
-    bool lossless = false;
-    if (napi_get_value_bigint_uint64(env, args[0], &raw, &lossless) != napi_ok) {
-      return Throw(env, "setTopmost 的 hwnd 必须是 BigInt / 数字");
-    }
-  } else if (type == napi_number) {
-    double number = 0;
-    if (napi_get_value_double(env, args[0], &number) != napi_ok) {
-      return Throw(env, "setTopmost 的 hwnd 必须是 BigInt / 数字");
-    }
-    raw = static_cast<std::uint64_t>(number);
-  } else {
-    return Throw(env, "setTopmost 的 hwnd 必须是 BigInt / 数字");
-  }
-
-  HWND window = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(raw));
+  HWND window = nullptr;
+  std::string error;
+  if (!ReadHwnd(env, args[0], window, error)) return Throw(env, error);
   if (window == nullptr || !::IsWindow(window)) return MakeBoolean(env, false);
   BOOL ok = ::SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);

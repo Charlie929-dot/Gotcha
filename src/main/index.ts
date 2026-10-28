@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage, screen } from 'electron'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import Database from 'better-sqlite3'
@@ -18,6 +18,14 @@ import {
 import { cropFrameToPng } from './ask-crop'
 import { openAskPopup } from './ask-popup'
 import { displayUnderCursor, pickRegion } from './region-picker'
+import {
+  frameMatchesDisplay,
+  getScreenGrab,
+  loadScreenGrabOnce,
+  parseGrabbedFrame,
+  REGION_GRAB_TIMEOUT_MS,
+  type ScreenGrabBinding
+} from './screen-grab'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
 import {
   CHAIN_FRAME_FILE_PATTERN,
@@ -947,9 +955,83 @@ function openAsk(): void {
 /** 选区问答在跑：连点球不会叠出两层遮罩 / 两个输入框 */
 let regionBusy = false
 
+interface RegionFrame {
+  image: Uint8Array
+  width: number
+  height: number
+  source: 'wgc' | 'stream'
+}
+
+/**
+ * 选区问答要的那一帧：优先系统级 WGC（一帧即建即拆，不碰常驻流），
+ * 没编译 / 抓失败 / 尺寸对不上就退回 Chromium 屏幕流；两边都失败返回 null。
+ *
+ * 为什么优先 WGC：它是系统合成器直接给帧（Windows 自带截图用的同一条路），
+ * 不用先起隐藏窗口的录屏流，暂停采集时也能拍。退回的那条路是旧实现，保留作兜底。
+ */
+async function captureRegionFrame(display: Electron.Display): Promise<RegionFrame | null> {
+  const grab = fakeCapture ? null : getScreenGrab()
+  if (grab) {
+    const started = Date.now()
+    try {
+      // WGC / MonitorFromPoint 只认物理像素：DIP 先换算，跨屏 125% 才不会拍到隔壁
+      const point = screen.dipToScreenPoint({
+        x: display.bounds.x + display.bounds.width / 2,
+        y: display.bounds.y + display.bounds.height / 2
+      })
+      const frame = parseGrabbedFrame(grab.grabMonitor(point.x, point.y, REGION_GRAB_TIMEOUT_MS))
+      if (frame && frameMatchesDisplay(frame, display)) {
+        captureLog('info', 'region frame captured', {
+          source: 'wgc',
+          ms: Date.now() - started,
+          width: frame.width,
+          height: frame.height,
+          bytes: frame.jpeg.byteLength,
+          borderSuppressed: frame.borderSuppressed
+        })
+        return { image: frame.jpeg, width: frame.width, height: frame.height, source: 'wgc' }
+      }
+      captureLog('warn', 'region native frame unusable', {
+        frame: frame ? { width: frame.width, height: frame.height } : null,
+        display: { width: display.bounds.width, height: display.bounds.height },
+        scaleFactor: display.scaleFactor
+      })
+    } catch (error) {
+      captureLog('warn', 'region native grab failed', { error: String(error) })
+    }
+  }
+  if (!screenCapture) return null
+  const started = Date.now()
+  const frame = await screenCapture.captureDisplay(display.id, { format: 'jpeg' })
+  captureLog('info', 'region frame captured', {
+    source: 'stream',
+    ms: Date.now() - started,
+    width: frame.width,
+    height: frame.height,
+    bytes: frame.image.byteLength
+  })
+  return { image: frame.image, width: frame.width, height: frame.height, source: 'stream' }
+}
+
+/** 空闲时预热原生抓帧（只建设备 / item，不读像素）：首次 D3D 初始化 ~250ms，别让第一次点球等它 */
+function warmupScreenGrab(grab: ScreenGrabBinding): void {
+  try {
+    const display = screen.getPrimaryDisplay()
+    const point = screen.dipToScreenPoint({
+      x: display.bounds.x + display.bounds.width / 2,
+      y: display.bounds.y + display.bounds.height / 2
+    })
+    const ready = grab.warmup(point.x, point.y)
+    captureLog(ready ? 'info' : 'warn', 'screen grab warmed', { ready })
+  } catch (error) {
+    captureLog('warn', 'screen grab warmup failed', { error: String(error) })
+  }
+}
+
 /**
  * 段二：选区问答整条链
- * 截整屏一帧（复用采集那条常驻流）→ 遮罩选区 → 按选区裁剪 → 留存 → 中下方浮动输入框 → 问记忆。
+ * 截整屏一帧（系统级 WGC，失败退回采集那条常驻流）→ 遮罩选区 → 按选区裁剪 → 留存 →
+ * 中下方浮动输入框 → 问记忆。
  * 任何一步失败都只记 warn：这是辅助入口，不能因为它把球搞挂。
  */
 async function openRegionAsk(): Promise<void> {
@@ -960,12 +1042,8 @@ async function openRegionAsk(): Promise<void> {
     const display = displayUnderCursor()
     // 先把当前屏抓一帧当「裁图源」；遮罩本身是透明叠在活屏上的（不铺这张图），
     // 所以裁出来的就是用户框选那一刻之前的那一帧。JPEG 只是省内存，裁完仍存 PNG。
-    const frame = await screenCapture.captureDisplay(display.id, { format: 'jpeg' })
-    captureLog('info', 'region frame captured', {
-      bytes: frame.image.byteLength,
-      width: frame.width,
-      height: frame.height
-    })
+    const frame = await captureRegionFrame(display)
+    if (!frame) return
     const picked = await pickRegion({
       devServerUrl: process.env['ELECTRON_RENDERER_URL'],
       htmlPath: join(__dirname, '../renderer/region/index.html'),
@@ -1571,6 +1649,20 @@ if (primaryInstance) {
     }
 
     registerTimelineIpc()
+
+    // 选区截图的系统级抓帧（Windows.Graphics.Capture）：只加载一次；没编译就退回屏幕流。
+    // 预热放在 1.5s 后，别和启动抢主线程。
+    if (!fakeCapture) {
+      const screenGrab = loadScreenGrabOnce(
+        app.getAppPath(),
+        app.isPackaged ? process.resourcesPath : undefined
+      )
+      if (screenGrab) {
+        setTimeout(() => warmupScreenGrab(screenGrab), 1500)
+      } else {
+        captureLog('warn', 'screen grab native module missing (region ask falls back to stream)')
+      }
+    }
 
     // 问记忆（S3-lite）：只读链库 + 出云确认门（D24）+ 日账（D22）
     // 对话记录：显式提问 / 清空才写盘（A3 口径不变），文件在 userData 下

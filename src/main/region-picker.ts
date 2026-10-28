@@ -7,14 +7,17 @@
  *
  * Windows 上的真机结论：
  * 1. `resizable: false` 的无边框窗口会被系统按工作区钳制——盖不住任务栏；改成可 resize + show 后 setBounds。
- * 2. `setFullScreen(true)` / `setKiosk(true)` 都会被系统打回，真正有效的是 `setAlwaysOnTop('screen-saver')` + `moveTop()`，
+ * 2. `setFullScreen(true)` / `setKiosk(true)` 都会被系统打回，真正有效的是置顶 + 定尺寸，
  *    且必须在 setBounds 之后（否则被 SetWindowPos 降级）。
- * 3. 任务栏也是置顶层：被点一下就跑到我们上面（Esc 失效）。所以每 300ms 重申一次置顶，blur 时立刻拉回。
+ * 3. 任务栏也是置顶层：被点一下就跑到我们上面（Esc 失效）。所以 blur 时立刻拉回一次。
+ *    **置顶用原生一次 `SetWindowPos(HWND_TOPMOST)`**（`screen_grab.setTopmost`），不再 300ms 轮询；
+ *    没编译原生模块时退回 Electron 的 `setAlwaysOnTop + moveTop`。
  */
 
 import { BrowserWindow, ipcMain, screen } from 'electron'
 import type { Display } from 'electron'
 import type { ScreenRect } from '../capture/full-frame'
+import { getScreenGrab } from './screen-grab'
 
 export interface PickRegionOptions {
   devServerUrl?: string
@@ -30,10 +33,18 @@ export interface PickedRegion {
   displayId: number
 }
 
-/** 置顶重申间隔：任务栏 / 其它置顶窗被激活后，最多 300ms 拉回来 */
-const TOPMOST_REASSERT_MS = 300
-
 let picking = false
+
+/** HWND → BigInt（原生 setTopmost 用）；拿不到就是 null，自动退回 Electron 置顶 */
+function nativeHandle(win: BrowserWindow): bigint | null {
+  try {
+    const handle = win.getNativeWindowHandle()
+    if (handle.byteLength < 8) return null
+    return handle.readBigUInt64LE()
+  } catch {
+    return null
+  }
+}
 
 function isRect(value: unknown): value is ScreenRect {
   if (typeof value !== 'object' || value === null) return false
@@ -85,35 +96,49 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
     options.log?.('error', 'region page failed to load', { code, description })
   })
 
-  /** 盖满整屏 + 置于任务栏之上：顺序不能反（先定尺寸，再置顶） */
-  const coverScreen = (reason: string): void => {
+  const grab = getScreenGrab()
+  const hwnd = nativeHandle(win)
+
+  /**
+   * 盖满整屏 + 置于任务栏之上：顺序不能反（先定尺寸，再置顶）。
+   * 置顶走原生一次 `SetWindowPos(HWND_TOPMOST)`（不抢焦点、不动尺寸）；没有原生模块才退回 Electron。
+   */
+  const coverScreen = (reason: 'initial' | 'blur'): void => {
     if (win.isDestroyed()) return
     win.setBounds(bounds, false)
-    win.setAlwaysOnTop(true, 'screen-saver')
-    win.moveTop()
-    if (reason === 'initial' || reason === 'blur') {
-      const actual = win.getBounds()
-      const covered =
-        actual.width >= bounds.width &&
-        actual.height >= bounds.height &&
-        actual.x <= bounds.x &&
-        actual.y <= bounds.y
-      options.log?.(covered ? 'info' : 'warn', 'region overlay coverage', {
-        reason,
-        actual,
-        display: bounds,
-        covered
-      })
+    let nativeRaised = false
+    if (grab && hwnd !== null) {
+      try {
+        nativeRaised = grab.setTopmost(hwnd)
+      } catch {
+        nativeRaised = false
+      }
     }
+    if (!nativeRaised) {
+      win.setAlwaysOnTop(true, 'screen-saver')
+      win.moveTop()
+    }
+
+    const actual = win.getBounds()
+    const covered =
+      actual.width >= bounds.width &&
+      actual.height >= bounds.height &&
+      actual.x <= bounds.x &&
+      actual.y <= bounds.y
+    options.log?.(covered ? 'info' : 'warn', 'region overlay coverage', {
+      reason,
+      actual,
+      display: bounds,
+      covered,
+      topmost: nativeRaised ? 'native' : 'electron'
+    })
   }
 
   const result = await new Promise<PickedRegion | null>((resolve) => {
     let settled = false
-    let timer: NodeJS.Timeout | null = null
     const finish = (value: PickedRegion | null): void => {
       if (settled) return
       settled = true
-      if (timer) clearInterval(timer)
       resolve(value)
       if (!win.isDestroyed()) win.close()
     }
@@ -136,7 +161,6 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
     ipcMain.on('region:cancel', onCancel)
 
     win.once('closed', () => {
-      if (timer) clearInterval(timer)
       ipcMain.removeHandler('region:confirm')
       ipcMain.removeListener('region:cancel', onCancel)
       finish(null)
@@ -146,7 +170,6 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
       win.show()
       coverScreen('initial')
       win.focus()
-      timer = setInterval(() => coverScreen('tick'), TOPMOST_REASSERT_MS)
     })
 
     // 点任务栏 = 焦点被抢：立刻拉回最前，Esc 才有用

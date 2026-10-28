@@ -137,80 +137,138 @@ console.log(`[build:native] Node 头文件：${sdk.include}`)
 /* 3. 编译                                                          */
 /* ---------------------------------------------------------------- */
 
-const moduleDir = join(repoRoot, 'native', 'chain-hook')
-const outDir = join(moduleDir, 'build', 'Release')
-const objDir = join(moduleDir, 'build', 'obj')
-mkdirSync(outDir, { recursive: true })
-mkdirSync(objDir, { recursive: true })
-
-const sources = ['src\\chain_hook.cc', 'src\\win_delay_load_hook.cc']
-const defines = [
-  '/DNAPI_VERSION=8',
-  '/DNODE_GYP_MODULE_NAME=chain_hook',
-  '/DUNICODE',
-  '/D_UNICODE',
-  '/DNOMINMAX',
-  '/DWIN32_LEAN_AND_MEAN',
-  '/DNDEBUG'
-].join(' ')
-
 const asSlash = (path) => path.replace(/\\/g, '/')
 
-const script = [
-  '@echo off',
-  `call "${vcvars}" >nul || exit /b 9`,
-  `cd /d "${moduleDir}"`,
-  [
-    'cl /nologo /LD /O2 /MD /EHsc /std:c++17',
-    defines,
-    `/I"${asSlash(sdk.include)}"`,
-    // 结尾用 / 而不是 \：cmd 里 \" 会被当成转义引号
-    `/Fo"${asSlash(objDir)}/"`,
-    `/Fd"${asSlash(objDir)}/chain_hook.pdb"`,
-    sources.join(' '),
-    `/link /DLL /OUT:"${asSlash(join(outDir, 'chain_hook.node'))}"`,
-    // 不指定 IMPLIB 的话 link 会把 .lib/.exp 扔在源码目录里
-    `/IMPLIB:"${asSlash(join(objDir, 'chain_hook.lib'))}"`,
-    `/PDB:"${asSlash(join(objDir, 'chain_hook.pdb'))}"`,
-    `"${asSlash(sdk.nodeLib)}" user32.lib version.lib delayimp.lib`,
-    // 把 node.exe 的符号请求转到宿主进程（node.exe 或 electron.exe）
-    '/DELAYLOAD:node.exe',
-    '/NOLOGO'
-  ].join(' '),
-  'exit /b %ERRORLEVEL%'
-].join('\r\n')
-
-const scriptPath = join(repoRoot, '.tmp', 'build-chain-hook.bat')
-mkdirSync(join(repoRoot, '.tmp'), { recursive: true })
-writeFileSync(scriptPath, `${script}\r\n`, 'utf8')
-
-console.log('[build:native] 编译中…')
-const build = spawnSync('cmd', ['/c', scriptPath], { encoding: 'utf8' })
-const output = `${build.stdout ?? ''}${build.stderr ?? ''}`
-if (build.status !== 0) {
-  console.error(output.trim())
-  console.error(`\n[build:native] 生成的编译脚本在 ${scriptPath}\n`)
-  fail(`编译失败（退出码 ${build.status}）`)
+/**
+ * Windows SDK 的 C++/WinRT 投影头（`screen-grab` 要用 WGC）。
+ * vcvars 只把 `Include\<ver>\um` / `winrt` 放进 INCLUDE，`cppwinrt` 要自己加。
+ */
+function findCppWinRT() {
+  const roots = [process.env['ProgramFiles(x86)'], process.env['ProgramFiles']].filter(Boolean)
+  for (const root of roots) {
+    const sdkInclude = join(root, 'Windows Kits', '10', 'Include')
+    if (!existsSync(sdkInclude)) continue
+    const versions = readdirSync(sdkInclude, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort()
+      .reverse()
+    for (const version of versions) {
+      const candidate = join(sdkInclude, version, 'cppwinrt')
+      if (existsSync(join(candidate, 'winrt', 'base.h'))) return candidate
+    }
+  }
+  return null
 }
-const noisy = output
-  .split(/\r?\n/)
-  .filter((line) => line.trim() && !/^(chain_hook\.cc|win_delay_load_hook\.cc)$/.test(line.trim()))
-if (noisy.length > 0) console.log(noisy.join('\n'))
 
-/* ---------------------------------------------------------------- */
-/* 4. 验证能加载                                                    */
-/* ---------------------------------------------------------------- */
+function buildModule({ name, moduleDir, sources, defines, includes = [], libs, probeScript }) {
+  const outDir = join(moduleDir, 'build', 'Release')
+  const objDir = join(moduleDir, 'build', 'obj')
+  mkdirSync(outDir, { recursive: true })
+  mkdirSync(objDir, { recursive: true })
 
-const artifact = join(outDir, 'chain_hook.node')
-if (!existsSync(artifact)) fail(`编译结束但没找到产物：${artifact}`)
+  const script = [
+    '@echo off',
+    `call "${vcvars}" >nul || exit /b 9`,
+    `cd /d "${moduleDir}"`,
+    [
+      'cl /nologo /LD /O2 /MD /EHsc /std:c++17 /utf-8',
+      defines,
+      `/I"${asSlash(sdk.include)}"`,
+      ...includes.map((dir) => `/I"${asSlash(dir)}"`),
+      // 结尾用 / 而不是 \：cmd 里 \" 会被当成转义引号
+      `/Fo"${asSlash(objDir)}/"`,
+      `/Fd"${asSlash(objDir)}/${name}.pdb"`,
+      sources.join(' '),
+      `/link /DLL /OUT:"${asSlash(join(outDir, `${name}.node`))}"`,
+      // 不指定 IMPLIB 的话 link 会把 .lib/.exp 扔在源码目录里
+      `/IMPLIB:"${asSlash(join(objDir, `${name}.lib`))}"`,
+      `/PDB:"${asSlash(join(objDir, `${name}.pdb`))}"`,
+      `"${asSlash(sdk.nodeLib)}" ${libs.join(' ')}`,
+      // 把 node.exe 的符号请求转到宿主进程（node.exe 或 electron.exe）
+      '/DELAYLOAD:node.exe',
+      '/NOLOGO'
+    ].join(' '),
+    'exit /b %ERRORLEVEL%'
+  ].join('\r\n')
 
-const probe = spawnSync(
-  process.execPath,
-  ['-e', `const m = require(${JSON.stringify(artifact)}); console.log('loaded', m.version, typeof m.start, typeof m.stop, typeof m.lastInputTickMs)`],
-  { encoding: 'utf8' }
-)
-if (probe.status !== 0) fail(`产物加载失败：\n${probe.stdout ?? ''}\n${probe.stderr ?? ''}`)
+  const scriptPath = join(repoRoot, '.tmp', `build-${name.replace(/_/g, '-')}.bat`)
+  mkdirSync(join(repoRoot, '.tmp'), { recursive: true })
+  writeFileSync(scriptPath, `${script}\r\n`, 'utf8')
 
-console.log(`[build:native] 完成：${artifact}`)
-console.log(`[build:native] ${(probe.stdout ?? '').trim()}`)
+  console.log(`[build:native] 编译 ${name}…`)
+  const build = spawnSync('cmd', ['/c', scriptPath], { encoding: 'utf8' })
+  const output = `${build.stdout ?? ''}${build.stderr ?? ''}`
+  if (build.status !== 0) {
+    console.error(output.trim())
+    console.error(`\n[build:native] 生成的编译脚本在 ${scriptPath}\n`)
+    fail(`${name} 编译失败（退出码 ${build.status}）`)
+  }
+  const sourceNames = new Set(sources.map((source) => source.split(/[\\/]/).pop()))
+  const noisy = output
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && !sourceNames.has(line.trim()))
+  if (noisy.length > 0) console.log(noisy.join('\n'))
+
+  const artifact = join(outDir, `${name}.node`)
+  if (!existsSync(artifact)) fail(`${name} 编译结束但没找到产物：${artifact}`)
+
+  const probe = spawnSync(process.execPath, ['-e', probeScript(artifact)], { encoding: 'utf8' })
+  if (probe.status !== 0) fail(`${name} 产物加载失败：\n${probe.stdout ?? ''}\n${probe.stderr ?? ''}`)
+  console.log(`[build:native] ${name} → ${artifact}`)
+  console.log(`[build:native] ${(probe.stdout ?? '').trim()}`)
+  return artifact
+}
+
+const chainHook = buildModule({
+  name: 'chain_hook',
+  moduleDir: join(repoRoot, 'native', 'chain-hook'),
+  sources: ['src\\chain_hook.cc', 'src\\win_delay_load_hook.cc'],
+  defines: [
+    '/DNAPI_VERSION=8',
+    '/DNODE_GYP_MODULE_NAME=chain_hook',
+    '/DUNICODE',
+    '/D_UNICODE',
+    '/DNOMINMAX',
+    '/DWIN32_LEAN_AND_MEAN',
+    '/DNDEBUG'
+  ].join(' '),
+  libs: ['user32.lib', 'version.lib', 'delayimp.lib'],
+  probeScript: (artifact) =>
+    `const m = require(${JSON.stringify(artifact)}); console.log('loaded', m.version, typeof m.start, typeof m.stop, typeof m.lastInputTickMs)`
+})
+
+const cppwinrt = findCppWinRT()
+if (!cppwinrt) {
+  fail(
+    '找不到 Windows SDK 的 cppwinrt 头（`Include\\<ver>\\cppwinrt\\winrt\\base.h`）。\n' +
+      '  装 Windows SDK（VS 安装器里的「Windows SDK」）后重试；screen-grab 依赖它跑 Windows.Graphics.Capture。'
+  )
+}
+
+const screenGrab = buildModule({
+  name: 'screen_grab',
+  moduleDir: join(repoRoot, 'native', 'screen-grab'),
+  // delay-load 钩子与 chain_hook 共用一份：它只做「node.exe → 宿主进程」的重定向
+  sources: ['src\\screen_grab.cc', '..\\chain-hook\\src\\win_delay_load_hook.cc'],
+  defines: [
+    '/DNAPI_VERSION=8',
+    '/DNODE_GYP_MODULE_NAME=screen_grab',
+    '/DUNICODE',
+    '/D_UNICODE',
+    '/DNOMINMAX',
+    '/DWIN32_LEAN_AND_MEAN',
+    '/DNDEBUG',
+    // C++/WinRT 2.0 在 /std:c++17 下会引 <experimental/coroutine>，VS 2026 把它标成错误
+    '/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS'
+  ].join(' '),
+  includes: [cppwinrt],
+  libs: ['user32.lib', 'version.lib', 'delayimp.lib', 'd3d11.lib', 'dxgi.lib', 'windowscodecs.lib', 'ole32.lib', 'uuid.lib', 'windowsapp.lib'],
+  probeScript: (artifact) =>
+    `const m = require(${JSON.stringify(artifact)}); console.log('loaded', m.version, typeof m.grabMonitor, typeof m.setTopmost)`
+})
+
+console.log('[build:native] 完成：')
+console.log(`  ${chainHook}`)
+console.log(`  ${screenGrab}`)
 console.log('[build:native] 下一步可跑：npm run chain-hook-smoke -- 20')

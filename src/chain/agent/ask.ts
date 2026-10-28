@@ -25,7 +25,7 @@ import {
 } from '../query'
 import { getSegmentDetail, type ChainDb } from '../store'
 import type { LlmClient, LlmUsage } from '../../understand/cloud/llm-client'
-import type { AskOutbound, RedactableChainAskEvidence } from './payload'
+import type { AskOutbound, AskRecentSegment, RedactableChainAskEvidence } from './payload'
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
 import type { AskHistorySummary } from './tools'
@@ -83,10 +83,15 @@ export interface ChainAskOptions {
   now?: () => number
   /** 循环用：采集是否在跑（freshness 的 captureRunning） */
   captureRunning?: () => boolean
-  /** 循环用：最近问答记录（ask_history 工具的数据源） */
-  readAskHistory?: () => readonly AskHistorySummary[]
+  /** 循环用：最近问答记录（ask_history 工具的数据源；默认只查本会话，`all` 才跨会话） */
+  readAskHistory?: (scope: 'conversation' | 'all') => readonly AskHistorySummary[]
   /** 同一会话之前的几轮（续问）；不传 = 新对话 */
   history?: readonly ChainAskTurnContext[]
+  /**
+   * 提问前最后一段证据（应用 / 标题 / 时刻）：只当「这个界面 / 刚才那个」的指代线索，
+   * 让新会话也能把指代词落到具体的应用上；不是证据，引用仍要经检索。
+   */
+  recent?: AskRecentSegment
   /**
    * 恢复上一次被暂停的循环（`continue-ask`）：
    * `continue` = 再给一轮工具预算继续查；`stop` = 按现有结果收尾。
@@ -237,6 +242,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.readAskHistory ? { readAskHistory: options.readAskHistory } : {}),
         ...(options.searchBatch ? { searchBatch: options.searchBatch } : {}),
         ...(options.history ? { history: options.history } : {}),
+        ...(options.recent ? { recent: options.recent } : {}),
         ...(pending ? { resume: pending.state } : {}),
         ...(options.resume ? { resumeDecision: options.resume.decision } : {}),
         // 轮数用尽时把状态交回来，由界面问用户「还要继续吗」

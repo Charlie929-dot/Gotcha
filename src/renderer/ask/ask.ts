@@ -41,6 +41,7 @@ const questionInput = must<HTMLInputElement>('question')
 const submitButton = must<HTMLButtonElement>('submit')
 const stopButton = must<HTMLButtonElement>('stop')
 const newChatButton = must<HTMLButtonElement>('new-chat')
+const resumeLastButton = must<HTMLButtonElement>('resume-last')
 const settingsButton = must<HTMLButtonElement>('settings-open')
 const drawerEl = must<HTMLElement>('drawer')
 const statusEl = must<HTMLSpanElement>('status')
@@ -270,6 +271,17 @@ function renderHistoryList(): void {
     hint.textContent = `只显示最近 ${HISTORY_RENDER_LIMIT} 段，用上面的搜索缩小范围。`
     historyList.append(hint)
   }
+
+  updateResumeButton()
+}
+
+/**
+ * 「继续上一段」只在没打开任何会话时出现（D55 ②：窗口打开默认新会话，
+ * 不再静默接上最近一段——否则新问句会带着旧上文，容易串）。
+ */
+function updateResumeButton(): void {
+  const latest = listConversations()[0]
+  resumeLastButton.hidden = !latest || latest.id === activeConversationId
 }
 
 /* ------------------------------------------------------------------ */
@@ -760,6 +772,17 @@ newChatButton.addEventListener('click', () => {
   setStatus('idle', '新对话')
 })
 
+resumeLastButton.addEventListener('click', () => {
+  if (busy) return
+  const latest = listConversations()[0]
+  if (!latest) return
+  activeConversationId = latest.id
+  renderThread()
+  renderHistoryList()
+  setStatus('idle', '继续上一段')
+  questionInput.focus()
+})
+
 historySearch.addEventListener('input', () => {
   filter = historySearch.value
   renderHistoryList()
@@ -863,13 +886,7 @@ void (async () => {
     return
   }
   await refreshHistory()
-  // 打开最近一段对话（没有就留空，等用户开问）
-  const latest = listConversations()[0]
-  if (latest) {
-    activeConversationId = latest.id
-    renderThread()
-    renderHistoryList()
-  }
+  // 默认新会话（D55 ②）：不静默接上最近一段；要接着问就点顶部「继续上一段」或左栏记录
   await refreshConsent()
   // 选区问答的交接单：新开一条会话、带着截图直接问（不覆盖用户正在看的会话）
   api?.onPrefill((payload) => {

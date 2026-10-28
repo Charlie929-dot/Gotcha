@@ -52,6 +52,8 @@ export interface AskHistorySummary {
   at: number
   question: string
   kind: string
+  /** 本会话 / 其他会话（只在 scope=all 时有意义；默认只查本会话） */
+  session?: 'current' | 'other'
 }
 
 /** 模型发起的一次工具调用（客户端已把 JSON 参数解析成对象） */
@@ -69,7 +71,7 @@ export interface AskToolDeps {
   /** 语义检索用的向量（bge 会话；没接或算不出来就只走关键词，不因此失败） */
   embed?: (text: string) => Promise<Float32Array | null> | Float32Array | null
   /** 最近问答记录（ask_history 工具的数据源；没接就当没有历史） */
-  readAskHistory?: () => readonly AskHistorySummary[]
+  readAskHistory?: (scope: 'conversation' | 'all') => readonly AskHistorySummary[]
   /**
    * read_segment 的越权门：只允许展开 search_info 返回过的段（驱动层按引用白名单实现）。
    * 不传 = 一律拒绝，避免模型拿段号扫库。
@@ -175,7 +177,6 @@ interface SearchInfoArgs {
   semantic: string | null
   limit: number
 }
-
 /** 参数归一；完全空查询（没有任何可执行条件）返回 null → 报「参数不合法」 */
 function parseSearchInfoArgs(args: Record<string, unknown>): SearchInfoArgs | null {
   const from = optionalNumber(args.from)
@@ -190,12 +191,14 @@ function parseSearchInfoArgs(args: Record<string, unknown>): SearchInfoArgs | nu
   const app = optionalText(args.app, FILTER_CHARS)
   const tag = optionalText(args.tag, FILTER_CHARS)
   const link = optionalText(args.link, FILTER_CHARS)
+  const order = args.order === 'oldest' ? 'oldest' : args.order === 'newest' ? 'newest' : undefined
   const filter: ChainSearchFilter = {
     ...(from !== undefined ? { from } : {}),
     ...(to !== undefined ? { to } : {}),
     ...(app !== undefined ? { app } : {}),
     ...(tag !== undefined ? { tag } : {}),
-    ...(link !== undefined ? { link } : {})
+    ...(link !== undefined ? { link } : {}),
+    ...(order !== undefined ? { order } : {})
   }
   const hasFilter =
     filter.from !== undefined || filter.to !== undefined ||
@@ -334,9 +337,12 @@ function executeAskHistory(deps: AskToolDeps, args: Record<string, unknown>): As
   const from = optionalNumber(args.from)
   const to = optionalNumber(args.to)
   const limit = clampLimit(args.limit, HISTORY_LIMIT_DEFAULT, HISTORY_LIMIT_MAX)
+  // 默认只查本会话：以前把全库问答按时间倒出来，模型会把别的会话的问题写成「你刚才问的」。
+  // 要跨会话必须显式 scope:"all"（每条带 session，提示词要求分开说）。
+  const scope = args.scope === 'all' ? 'all' : 'conversation'
   // 默认最新在前；问「第一次 / 最早问过什么」时按时间正序，否则永远拿不到最早那条
   const oldestFirst = args.order === 'oldest'
-  const filtered = (deps.readAskHistory?.() ?? [])
+  const filtered = (deps.readAskHistory?.(scope) ?? [])
     .filter((entry) => (from === undefined || entry.at >= from) && (to === undefined || entry.at <= to))
   if (oldestFirst) filtered.sort((a, b) => a.at - b.at)
   // 只给本地可读时刻，**不给毫秒时间戳**：模型拿到数字就会自己换算，真实记录里
@@ -345,7 +351,8 @@ function executeAskHistory(deps: AskToolDeps, args: Record<string, unknown>): As
   const entries = filtered.slice(0, limit).map((entry) => ({
     time: readableTime(entry.at),
     question: entry.question.slice(0, HISTORY_QUESTION_CHARS),
-    kind: entry.kind
+    kind: entry.kind,
+    ...(entry.session !== undefined ? { session: entry.session } : {})
   }))
   return {
     result: { kind: 'ask_history', freshness: currentFreshness(deps), entries },

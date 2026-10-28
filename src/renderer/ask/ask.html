@@ -11,6 +11,7 @@
       <h1>问记忆</h1>
       <span id="status" class="status" data-kind="idle">就绪</span>
       <button id="settings-open" class="ghost" type="button" title="供应商 / 出网确认 / 每日额度">设置</button>
+      <button id="resume-last" class="ghost" type="button" title="接着上一段对话问" hidden>继续上一段</button>
       <button id="new-chat" class="ghost" type="button" title="开一段新对话">＋ 新对话</button>
     </header>
 
@@ -34,8 +35,8 @@
       <div class="main-col">
         <aside id="consent" class="consent" hidden>
           <p>
-            问记忆要把你问的这句话、几段窗口文本（标题 / 命中原文）和这段对话之前的几轮发给模型。
-            确认一次之后不再打扰。
+            问记忆要把你问的这句话、几段窗口文本（标题 / 命中原文）、提问前最后一段窗口的应用与标题，
+            和这段对话之前的几轮发给模型。确认一次之后不再打扰。
           </p>
           <div class="row">
             <button id="consent-allow" type="button" class="primary">允许发送</button>
@@ -97,8 +98,8 @@
             <h3>出网</h3>
             <label class="check"><input id="set-consent" type="checkbox" /> 已确认出网（D24）</label>
             <p class="hint">
-              问记忆会把问题、命中的窗口文本和这段对话之前的几轮发给模型；原始截图与完整正文
-              永不离开本机。
+              问记忆会把问题、命中的窗口文本、提问前最后一段窗口的应用与标题，和这段对话之前的
+              几轮发给模型；原始截图与完整正文永不离开本机。
             </p>
             <label>每日额度（tokens）
               <input id="set-budget" type="number" min="1000" max="100000000" step="1000" />

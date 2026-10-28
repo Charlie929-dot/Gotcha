@@ -1155,6 +1155,7 @@ describe('工具循环 · schema 与执行器一致性', () => {
       'keywords',
       'limit',
       'link',
+      'order',
       'semantic',
       'tag',
       'to'

@@ -499,6 +499,76 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(JSON.stringify(toolResult.entries)).not.toContain(String(at(500)))
   })
 
+  it('ask_history 默认只查本会话；scope=all 时带 session 标记', async () => {
+    const scopes: string[] = []
+    const client = new FakeLlmClient([
+      { toolCalls: [{ name: 'ask_history', arguments: {} }] },
+      { toolCalls: [{ name: 'ask_history', arguments: { scope: 'all' } }] },
+      { json: { answer: '信息链里没找到', citations: [] } }
+    ])
+    const result = await askChain(
+      buildDeps(client, {
+        readAskHistory: (scope) => {
+          scopes.push(scope)
+          return [
+            { at: at(0), question: '本会话的问', kind: 'answer', session: 'current' },
+            { at: at(1), question: '别的会话的问', kind: 'answer', session: 'other' }
+          ]
+        }
+      }),
+      '你刚才问了什么'
+    )
+    expect(result.kind).toBe('no-evidence')
+    expect(scopes).toEqual(['conversation', 'all'])
+    const all = client.askLoopRequests[2].turns[1].toolResult as {
+      entries: Array<{ session?: string }>
+    }
+    expect(all.entries.map((entry) => entry.session)).toEqual(['current', 'other'])
+  })
+
+  it('问「第一次」：app + order:"oldest" 的纯过滤直接命中最早一段', async () => {
+    const early = seed({
+      pid: 1,
+      app: 'DSH NEXT',
+      title: '第一次',
+      from: at(0),
+      to: at(60),
+      text: '继续任务'
+    })
+    seed({ pid: 2, app: 'DSH NEXT', title: '后来', from: at(3600), to: at(3660), text: '继续任务' })
+    const client = new FakeLlmClient([
+      searchCall({ app: 'DSH NEXT', order: 'oldest', limit: 1 }),
+      {
+        json: {
+          answer: '第一次是 09:00 的〈DSH NEXT〉。',
+          citations: [{ segmentId: early, why: '最早一段' }]
+        }
+      }
+    ])
+    const result = await askChain(buildDeps(client), '我第一次打开 DSH 是啥时候')
+    expect(result.kind).toBe('answer')
+    const toolResult = client.askLoopRequests[1].turns[0].toolResult as {
+      hits: Array<{ segmentId: number }>
+      stats: { mode: string }
+    }
+    expect(toolResult.stats.mode).toBe('filter')
+    expect(toolResult.hits.map((hit) => hit.segmentId)).toEqual([early])
+  })
+
+  it('最近一段证据进载荷（指代线索，探针轮就带上）', async () => {
+    const client = new FakeLlmClient([{ json: { answer: '信息链里没找到', citations: [] } }])
+    const result = await askChain(
+      buildDeps(client, { recent: { app: 'DSH NEXT', title: 'DeepSeek Harness', at: at(0) } }),
+      '我第一次打开这个界面是啥时候'
+    )
+    expect(result.kind).toBe('no-evidence')
+    expect(client.askLoopRequests[0].recent).toEqual({
+      app: 'DSH NEXT',
+      title: 'DeepSeek Harness',
+      at: at(0)
+    })
+  })
+
   it('semantic 走注入的 embedder；算不出向量就只剩关键词路', async () => {
     seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: '看文档' })
     const embedded: string[] = []

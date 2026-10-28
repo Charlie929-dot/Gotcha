@@ -73,6 +73,12 @@ export interface ChainSearchFilter {
   link?: string
   /** 默认只看已收口的段 */
   includeOpen?: boolean
+  /**
+   * 排序：默认 `newest`（新的在前）。`oldest` 只作用于**纯过滤**（没有关键词 / 语义）：
+   * 问「第一次 / 最早」时配 app / 时间过滤取最早的那段，不必再靠 from/to 二分逼近。
+   * 关键词 / 语义路仍按相关度排（名次口径不能为了「最早」被推翻）。
+   */
+  order?: 'newest' | 'oldest'
 }
 
 export interface ChainSearchQuery extends ChainSearchFilter {
@@ -717,10 +723,13 @@ export function searchChainSegments(db: ChainDb, query: ChainSearchQuery = {}): 
       keyword: keyword.ranks.get(segmentId) ?? null
     }))
   } else {
-    // 纯过滤：不涉及名次，按开始时间倒序
+    // 纯过滤：不涉及名次，按开始时间排（默认新的在前；`order=oldest` 给「第一次 / 最早」用）
     mode = 'filter'
+    const direction = query.order === 'oldest' ? 'ASC' : 'DESC'
     const rows = db
-      .prepare(`SELECT id, start_ts AS startTs FROM chain_segment s ${filter.where} ORDER BY s.start_ts DESC, s.id DESC LIMIT ?`)
+      .prepare(
+        `SELECT id, start_ts AS startTs FROM chain_segment s ${filter.where} ORDER BY s.start_ts ${direction}, s.id ${direction} LIMIT ?`
+      )
       .all(...filter.params, limit) as Array<{ id: number; startTs: number }>
     ranked = rows.map((row) => ({ segmentId: row.id, score: 0, similarity: null, keyword: null }))
   }

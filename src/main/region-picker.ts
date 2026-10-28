@@ -93,7 +93,11 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
       if (settled) return
       settled = true
       resolve(value)
-      if (!win.isDestroyed()) win.close()
+      if (!win.isDestroyed()) {
+        // 先退出 kiosk 再关，免得系统状态残留（关窗本身也会清，这里是显式兜底）
+        win.setKiosk(false)
+        win.close()
+      }
     }
 
     const onConfirm = (event: Electron.IpcMainInvokeEvent, rect: unknown): boolean => {
@@ -125,33 +129,46 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
     })
 
     win.webContents.once('did-finish-load', () => {
-      // 真机踩到：`fullscreen` 在构造时 / show 之前设会被 show() 打回工作区。
-      // 顺序改成 show → 全屏 → 再钉一次 bounds，才是「整屏蒙一层（含任务栏）」。
+      // 真机踩到：普通无边框窗口 + fullscreen 都盖不住任务栏——任务栏自己也是置顶层，
+      // 谁最后被拉起来谁在上。Windows 上稳定的做法是 kiosk（真·全屏、压住任务栏）+ 置顶，
+      // 再在失焦时把窗口拉回最前（否则点一下任务栏就把 Esc 焦点抢走了）。
       win.show()
-      win.setFullScreen(true)
-      win.setBounds(bounds, false)
+      win.setKiosk(true)
       win.setAlwaysOnTop(true, 'screen-saver')
       win.focus()
+      win.moveTop()
       options.log?.('info', 'region overlay shown', {
         bounds: win.getBounds(),
         display: bounds,
+        kiosk: win.isKiosk(),
         fullScreen: win.isFullScreen(),
         imageBytes: options.imageDataUrl.length
       })
-      // 兜底：show 之后再量一次实际边界，仍小于整屏就再钉一次（Windows 偶尔把全屏窗口打回工作区）
+      // 兜底：系统偶尔把 kiosk 打回窗口化，再钉一次
       setTimeout(() => {
         if (win.isDestroyed()) return
-        const current = win.getBounds()
-        if (current.width < bounds.width || current.height < bounds.height) {
-          win.setBounds(bounds, false)
-          if (!win.isFullScreen()) win.setFullScreen(true)
-          options.log?.('warn', 'region overlay resized', {
-            from: current,
-            to: win.getBounds(),
-            fullScreen: win.isFullScreen()
-          })
-        }
-      }, 160)
+        if (!win.isKiosk()) win.setKiosk(true)
+        win.setAlwaysOnTop(true, 'screen-saver')
+        win.moveTop()
+        options.log?.('info', 'region overlay bounds check', {
+          bounds: win.getBounds(),
+          display: bounds,
+          kiosk: win.isKiosk()
+        })
+      }, 200)
+    })
+
+    // 点任务栏 / 别的窗口 = 焦点被抢：立刻拉回最前，Esc 才有用。
+    // （选区期间本来就该独占，用户唯一的出口是 Esc / 右键 / 选完区域。）
+    win.on('blur', () => {
+      if (win.isDestroyed()) return
+      setTimeout(() => {
+        if (win.isDestroyed()) return
+        if (!win.isKiosk()) win.setKiosk(true)
+        win.setAlwaysOnTop(true, 'screen-saver')
+        win.moveTop()
+        win.focus()
+      }, 30)
     })
 
     const devServerUrl = options.devServerUrl?.replace(/\/+$/, '')

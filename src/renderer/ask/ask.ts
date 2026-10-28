@@ -12,6 +12,7 @@ import {
   NO_EVIDENCE_TEXT,
   type ChainAskCitation,
   type ChainAskErrorReason,
+  type ChainAskRelatedSegment,
   type ChainAskResult,
   type ChainAskResumeDecision,
   type ChainAskStats
@@ -110,11 +111,18 @@ function errorTextOf(reason: string | undefined, message: string | undefined): s
   return message ?? '当时出错了，细节看日志。'
 }
 
+/** 命中口径：`hits` 是各次检索累加，`evidence` 是去重后真正给模型看过的段数 */
+function hitsText(stats: ChainAskStats): string {
+  return stats.evidence > 0 && stats.evidence !== stats.hits
+    ? `命中 ${stats.hits} 段（去重 ${stats.evidence}）`
+    : `命中 ${stats.hits} 段`
+}
+
 function statsText(stats: ChainAskStats): string {
   const parts: string[] = []
   if (stats.turns !== undefined) parts.push(`${stats.turns} 轮`)
-  if (stats.toolCalls !== undefined) parts.push(`${stats.toolCalls} 次检索`)
-  parts.push(`命中 ${stats.hits} 段`)
+  if (stats.toolCalls !== undefined) parts.push(`${stats.toolCalls} 次工具调用`)
+  parts.push(hitsText(stats))
   if (stats.cited > 0) parts.push(`引用 ${stats.cited} 段`)
   return parts.join(' · ')
 }
@@ -130,6 +138,9 @@ function statusOf(result: ChainAskResult): { kind: 'idle' | 'error'; text: strin
     }
   }
   if (result.kind === 'clarify') return { kind: 'idle', text: '想先确认一下再答' }
+  if (result.kind === 'insufficient') {
+    return { kind: 'idle', text: `${hitsText(result.stats)}，但撑不起结论` }
+  }
   if (result.kind === 'continue-ask') {
     return {
       kind: 'idle',
@@ -137,7 +148,7 @@ function statusOf(result: ChainAskResult): { kind: 'idle' | 'error'; text: strin
     }
   }
   if (result.kind === 'no-evidence') {
-    return { kind: 'idle', text: `命中 ${result.stats.hits} 段，但证据不足以回答` }
+    return { kind: 'idle', text: `${hitsText(result.stats)}，但证据不足以回答` }
   }
   return { kind: 'idle', text: `命中 ${result.stats.hits} 段，引用 ${result.citations.length} 段` }
 }
@@ -188,6 +199,7 @@ function listConversations(): ConversationView[] {
 function entryLabel(entry: AskHistoryEntry): string {
   if (entry.kind === 'answer') return `回答 · ${entry.citations.length} 段引用`
   if (entry.kind === 'clarify') return '向你确认'
+  if (entry.kind === 'insufficient') return '查到了，但不够'
   if (entry.kind === 'no-evidence') return '没找到'
   return '出错'
 }
@@ -324,6 +336,35 @@ function citationList(citations: ChainAskCitation[]): HTMLElement {
   return list
 }
 
+/** 检索到、但没进引用的段：给一个可点开的入口，别让「命中了很多」变成一句空话 */
+function relatedList(related: ChainAskRelatedSegment[]): HTMLElement {
+  const list = element('ul', 'citations related')
+  for (const item of related) {
+    const li = element('li')
+    const button = element('button')
+    button.type = 'button'
+    const title = element('span', 'citation-title')
+    title.textContent = item.title || '（无标题窗口）'
+    const meta = element('span', 'citation-meta')
+    meta.textContent = `${item.app || '未知应用'} · ${formatTime(item.at)}`
+    button.append(title, meta)
+    button.addEventListener('click', () => {
+      void showEvidence(item.segmentId)
+    })
+    li.append(button)
+    list.append(li)
+  }
+  return list
+}
+
+/** 相关段小节：有引用时只列引用；没引用时才把「检索到的段」铺开 */
+function appendRelated(card: HTMLElement, related: ChainAskRelatedSegment[] | undefined, hasCitations: boolean): void {
+  if (hasCitations || !related || related.length === 0) return
+  const title = element('h2', 'section-title')
+  title.textContent = `检索到的段（${related.length} 段）`
+  card.append(title, relatedList(related))
+}
+
 function assistantCard(className: string, label: string, at: number, stats: ChainAskStats): HTMLElement {
   const wrap = element('div', 'msg assistant')
   const card = element('div', `card ${className}`)
@@ -352,6 +393,20 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `引用（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    return
+  }
+
+  if (entry.kind === 'insufficient') {
+    const card = assistantCard('insufficient', '查到了，但不够', entry.at, entry.stats)
+    const text = element('p', 'answer-text muted')
+    text.textContent = entry.answer ?? ''
+    card.append(text)
+    if (entry.citations.length > 0) {
+      const title = element('h2', 'section-title')
+      title.textContent = `相关证据（${entry.citations.length} 段）`
+      card.append(title, citationList(entry.citations))
+    }
+    appendRelated(card, entry.related, entry.citations.length > 0)
     return
   }
 
@@ -398,6 +453,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `相关证据（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    appendRelated(card, entry.related, entry.citations.length > 0)
     return
   }
 

@@ -31,6 +31,7 @@ import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
 import type { AskHistorySummary } from './tools'
 import {
   EVIDENCE_TEXT_CHARS,
+  type ChainAskRelatedSegment,
   type ChainAskResult,
   type ChainAskResumeDecision,
   type ChainAskStats,
@@ -359,11 +360,22 @@ async function askOnce(
 
   const parsed = parseChainReply(result.json, meta)
   if (!parsed.ok) {
-    if (parsed.reason === 'no-citations') return { kind: 'no-evidence', stats }
+    if (parsed.reason === 'no-citations') {
+      return { kind: 'no-evidence', related: relatedFrom(meta), stats }
+    }
     return { kind: 'error', reason: 'unparseable', message: parsed.message, stats }
   }
   if (parsed.kind === 'clarify') {
     return { kind: 'clarify', question: parsed.question, options: parsed.options, stats }
+  }
+  if (parsed.kind === 'insufficient') {
+    return {
+      kind: 'insufficient',
+      answer: parsed.answer,
+      citations: parsed.citations,
+      related: relatedFrom(meta),
+      stats
+    }
   }
   if (isNoEvidenceAnswer(parsed.answer) && parsed.citations.length > 0) {
     // 根因 7 的归一在两条路径上一致：按「没找到」收口，但保留说明与引用（别让用户只看到空白）
@@ -374,9 +386,20 @@ async function askOnce(
       kind: 'no-evidence',
       note: parsed.answer,
       citations: parsed.citations,
+      related: relatedFrom(meta),
       stats
     }
   }
 
   return { kind: 'answer', answer: parsed.answer, citations: parsed.citations, stats }
+}
+
+/** 检索到、但没进引用的段（最多 5 条，按证据顺序）——单发路径与循环口径一致 */
+function relatedFrom(meta: ReadonlyMap<number, CitationMeta>): ChainAskRelatedSegment[] {
+  return [...meta.values()].slice(0, 5).map((item) => ({
+    segmentId: item.segmentId,
+    at: item.at,
+    app: item.app,
+    title: item.title
+  }))
 }

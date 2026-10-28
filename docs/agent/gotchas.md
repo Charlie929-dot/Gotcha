@@ -173,6 +173,7 @@
 | 测球右键时「右键没反应」 | 2026-10-28 写验收脚本时踩到：球窗平时是 `WS_EX_TRANSPARENT`（穿透），`WindowFromPoint` 返回的是下层窗口；而且可见的只有半颗球（停靠缩进 32px），鼠标落在窗口矩形里但**不在球圆内**也不会展开 | 先 `SetCursorPos` 到球**可见那半颗**的中心（右停靠：窗口 left+54、top+32），再注入几次相对 `mouse_event(MOVE)`（`SetCursorPos` 本身不产生移动消息，Electron 的 forward 收不到），等 `exstyle` 的 `0x20`（TRANSPARENT）掉掉再右键。PowerShell 是 DPI-unaware，`GetWindowRect` / `SetCursorPos` 用的都是虚拟坐标（1920×1080@125% → 1536×864），别拿物理像素去点 |
 | 球右键菜单按球心垂直居中 → 菜单「横在球旁边」 | 2026-10-28 真机反馈：菜单 158px 高、球只有 64px，按球心居中放会上下各多出约 47px，看起来像一条横带挂在球旁，不像从球上长出来 | 垂直方向改成**贴角**：优先 `y = ball.y`（菜单上沿贴球上沿），`ball.y + menu.height` 超出工作区下沿就翻成 `y = ball.y + ball.height - menu.height`（下沿贴球下沿），最后再夹回工作区；水平方向仍朝屏幕中心那一侧。单测覆盖四角与翻转（`tests/unit/ball-menu-position.test.ts`） |
 | 菜单打开后鼠标移过去，球 600ms 后缩回 | 2026-10-28 真机反馈：菜单是独立窗口，鼠标从球移到菜单会离开球窗 → renderer 收到 `pointerleave` 进宽限 → 主进程游标兜底也认为「指针离开球」→ 球缩回，菜单悬空 | 菜单窗口开合必须报给球壳（`BallMenuOptions.onVisibilityChange` → `BallShell.setMenuOpen`），renderer 状态机加 `menuOpen`：打开期间忽略 `pointerleave` / `grace-expired` / `force-retract`，关闭后指针不在球上就进宽限；主进程 `checkCursor` 在菜单打开时不发强收。**失焦关闭也要报 `false`**，否则球会一直钉在展开态 |
+| 问记忆「命中 40 段」但回答卡只剩固定文案 | 2026-10-29 复盘 10-29 00:17 那轮：`parseChainReply` 在 citations 为空时直接返回 `no-citations`，循环层把整条说明丢掉、返回无 note 的 `no-evidence`，界面只能显示固定句；统计里 40 是各次 `search_info` 的累加、去重后只有 27 | 模型给了说明（没给引用）就保留成 `insufficient`：说明 + 0～3 条相关引用 + 最多 5 条「检索到的段」；只有**一条引用都没给**且本轮确实检索到段时才走这个口子（给了引用却全被白名单剥掉 = 编造，仍按没找到收口）；界面把 `hits` / `evidence` 分开显示，别让「命中很多」和「什么都没说」同时出现（D55 ①） |
 
 ## 规则
 

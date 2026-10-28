@@ -10,7 +10,12 @@
  */
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { ChainAskCitation, ChainAskResult, ChainAskStats } from '../chain/agent/types'
+import type {
+  ChainAskCitation,
+  ChainAskRelatedSegment,
+  ChainAskResult,
+  ChainAskStats
+} from '../chain/agent/types'
 
 export const ASK_HISTORY_FILE = 'ask-history.jsonl'
 
@@ -22,9 +27,15 @@ export interface AskHistoryEntry {
   /** 提问时刻（毫秒） */
   at: number
   question: string
-  kind: 'answer' | 'no-evidence' | 'error' | 'clarify'
+  /**
+   * `insufficient`：查到了相关段、但撑不起结论（2026-10-29 新增）。
+   * 老记录里没有这个值，读的时候按 `KINDS` 跳过即可。
+   */
+  kind: 'answer' | 'no-evidence' | 'insufficient' | 'error' | 'clarify'
   answer?: string
   citations: ChainAskCitation[]
+  /** 检索到、但没进引用的段（`insufficient` / `no-evidence` 才有；只为给界面一个入口） */
+  related?: ChainAskRelatedSegment[]
   /** 选区问答：随这条对话留存的截图路径（`<userData>/ask-shots/shot-*.png`；过期清掉后读不到，界面如实降级） */
   imagePath?: string
   /** `kind=no-evidence` 时模型给的补充说明（查到了什么、为什么不足以回答）；没有就显示固定文案 */
@@ -38,7 +49,13 @@ export interface AskHistoryEntry {
   stats: ChainAskStats
 }
 
-const KINDS = new Set<AskHistoryEntry['kind']>(['answer', 'no-evidence', 'error', 'clarify'])
+const KINDS = new Set<AskHistoryEntry['kind']>([
+  'answer',
+  'no-evidence',
+  'insufficient',
+  'error',
+  'clarify'
+])
 
 function isStats(value: unknown): value is ChainAskStats {
   if (typeof value !== 'object' || value === null) return false
@@ -73,6 +90,20 @@ function isClarify(value: unknown): value is { question: string; options: string
   )
 }
 
+/** 相关段（检索到、没进引用）：只要段身份与标题，字段与引用同形但不带 why */
+function isRelated(value: unknown): value is ChainAskRelatedSegment {
+  if (typeof value !== 'object' || value === null) return false
+  const item = value as Record<string, unknown>
+  return (
+    typeof item.segmentId === 'number' &&
+    Number.isInteger(item.segmentId) &&
+    item.segmentId > 0 &&
+    typeof item.at === 'number' &&
+    typeof item.app === 'string' &&
+    typeof item.title === 'string'
+  )
+}
+
 /** 单行校验：坏行（旧格式 / 手改 / 写了一半）返回 null，读到就跳过、不整份作废 */
 export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
   if (typeof value !== 'object' || value === null) return null
@@ -83,8 +114,13 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
   if (typeof data.kind !== 'string' || !KINDS.has(data.kind as AskHistoryEntry['kind'])) return null
   if (!Array.isArray(data.citations)) return null
   if (!data.citations.every(isCitation)) return null
+  if (data.related !== undefined && (!Array.isArray(data.related) || !data.related.every(isRelated))) {
+    return null
+  }
   if (!isStats(data.stats)) return null
-  if (data.kind === 'answer' && typeof data.answer !== 'string') return null
+  if ((data.kind === 'answer' || data.kind === 'insufficient') && typeof data.answer !== 'string') {
+    return null
+  }
   if (data.imagePath !== undefined && (typeof data.imagePath !== 'string' || data.imagePath === '')) {
     return null
   }
@@ -109,6 +145,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
     ...(typeof data.imagePath === 'string' ? { imagePath: data.imagePath } : {}),
     ...(typeof data.answer === 'string' ? { answer: data.answer } : {}),
     citations: data.citations,
+    ...(Array.isArray(data.related) ? { related: data.related as ChainAskRelatedSegment[] } : {}),
     ...(isClarify(data.clarify) ? { clarify: data.clarify } : {}),
     ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
     ...(typeof data.message === 'string' ? { message: data.message } : {}),
@@ -171,6 +208,15 @@ export function toHistoryEntry(
   if (result.kind === 'answer') {
     return { ...base, kind: 'answer', answer: result.answer, citations: result.citations }
   }
+  if (result.kind === 'insufficient') {
+    return {
+      ...base,
+      kind: 'insufficient',
+      answer: result.answer,
+      citations: result.citations,
+      ...(result.related.length > 0 ? { related: result.related } : {})
+    }
+  }
   if (result.kind === 'clarify') {
     return {
       ...base,
@@ -202,6 +248,7 @@ export function toHistoryEntry(
     ...base,
     kind: 'no-evidence',
     citations: result.citations ?? [],
-    ...(result.note ? { note: result.note } : {})
+    ...(result.note ? { note: result.note } : {}),
+    ...(result.related && result.related.length > 0 ? { related: result.related } : {})
   }
 }

@@ -958,21 +958,18 @@ async function openRegionAsk(): Promise<void> {
   const userData = app.getPath('userData')
   try {
     const display = displayUnderCursor()
-    // 传输用 JPEG（整屏 PNG 动辄 5–8 MB，base64 再过一次 IPC 容易出岔子）；
-    // 裁剪后仍以 PNG 存盘，所以留存的证据图质量不受影响。
+    // 先把当前屏抓一帧当「裁图源」；遮罩本身是透明叠在活屏上的（不铺这张图），
+    // 所以裁出来的就是用户框选那一刻之前的那一帧。JPEG 只是省内存，裁完仍存 PNG。
     const frame = await screenCapture.captureDisplay(display.id, { format: 'jpeg' })
-    const imageDataUrl = `data:image/jpeg;base64,${Buffer.from(frame.image).toString('base64')}`
     captureLog('info', 'region frame captured', {
       bytes: frame.image.byteLength,
       width: frame.width,
-      height: frame.height,
-      dataUrlLength: imageDataUrl.length
+      height: frame.height
     })
     const picked = await pickRegion({
       devServerUrl: process.env['ELECTRON_RENDERER_URL'],
       htmlPath: join(__dirname, '../renderer/region/index.html'),
       preloadPath: join(__dirname, '../preload/region.js'),
-      imageDataUrl,
       display,
       log: (level, message, data) => captureLog(level, message, data)
     })

@@ -1,16 +1,15 @@
 /**
- * 选区遮罩（段二 A）：在**鼠标所在的当前显示器**上蒙一层，拖出矩形。
+ * 选区遮罩（段二 A）：在**鼠标所在的当前显示器**上蒙一层半透明遮罩，拖出矩形。
  *
- * 两个 Windows 上的坑（2026-10-28 真机踩到）：
- * 1. 普通无边框窗口会被系统夹到**工作区**（不含任务栏），`width = display.bounds.height` 也盖不住；
- *    改用 `fullscreen: true` 才是「整屏蒙一层」——任务栏也盖住，和系统截图工具一样。
- * 2. 冻结帧不能靠 `did-finish-load` 时 push：渲染层的监听有可能还没挂上（窗口就只显示一层空画布）。
- *    改成渲染层主动 `invoke('region:image')` 拉一次，谁先谁后都不丢。
+ * 口径（2026-10-28 拍板）：跟系统截图工具一样——**底下是活的屏幕，上面只盖一层半透明遮罩**，
+ * 框选的地方透出真实画面。所以窗口是 transparent，渲染层只画暗层与选区，不铺冻结截图。
+ * （裁图用的那一帧在点球时就抓好了，遮罩本身不参与截图。）
  *
- * 遮罩垫一张冻结截图而不是看桌面：采集流是活的，真透明的遮罩会被一起抓进图里；
- * 冻结帧 + 暗层 = 用户看到的就是裁出来的那一帧。
- *
- * 纪律：只认自己这个窗口的 IPC；一次只允许一个选区流程；取消（Esc / 右键）返回 null。
+ * Windows 上的真机结论：
+ * 1. `resizable: false` 的无边框窗口会被系统按工作区钳制——盖不住任务栏；改成可 resize + show 后 setBounds。
+ * 2. `setFullScreen(true)` / `setKiosk(true)` 都会被系统打回，真正有效的是 `setAlwaysOnTop('screen-saver')` + `moveTop()`，
+ *    且必须在 setBounds 之后（否则被 SetWindowPos 降级）。
+ * 3. 任务栏也是置顶层：被点一下就跑到我们上面（Esc 失效）。所以每 300ms 重申一次置顶，blur 时立刻拉回。
  */
 
 import { BrowserWindow, ipcMain, screen } from 'electron'
@@ -21,8 +20,6 @@ export interface PickRegionOptions {
   devServerUrl?: string
   htmlPath: string
   preloadPath: string
-  /** 冻结的整屏截图（data URL）：由渲染层主动来取 */
-  imageDataUrl: string
   display: Display
   log?: (level: 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
@@ -33,7 +30,9 @@ export interface PickedRegion {
   displayId: number
 }
 
-/** 同时在跑的选区流程：重复触发直接返回 null，不叠窗口 */
+/** 置顶重申间隔：任务栏 / 其它置顶窗被激活后，最多 300ms 拉回来 */
+const TOPMOST_REASSERT_MS = 300
+
 let picking = false
 
 function isRect(value: unknown): value is ScreenRect {
@@ -44,7 +43,6 @@ function isRect(value: unknown): value is ScreenRect {
   )
 }
 
-/** 打开遮罩并等一个结果；取消 / 重复触发都返回 null */
 export async function pickRegion(options: PickRegionOptions): Promise<PickedRegion | null> {
   if (picking) return null
   picking = true
@@ -57,16 +55,18 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
     width: bounds.width,
     height: bounds.height,
     frame: false,
-    resizable: false,
+    // 关键：不能 resizable:false，否则系统把窗口钳到工作区（盖不住任务栏）
+    resizable: true,
     movable: false,
     minimizable: false,
     maximizable: false,
-    fullscreenable: true,
+    fullscreenable: false,
     skipTaskbar: true,
     hasShadow: false,
     alwaysOnTop: true,
     show: false,
-    backgroundColor: '#0b0c10',
+    transparent: true,
+    backgroundColor: '#00000000',
     webPreferences: {
       preload: options.preloadPath,
       contextIsolation: true,
@@ -76,10 +76,8 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
       backgroundThrottling: false
     }
   })
-  win.setAlwaysOnTop(true, 'screen-saver')
   win.setMenuBarVisibility(false)
 
-  // 诊断：preload 挂了 / 页面没加载出来，都写进 main.log（否则界面上只剩一层空画布，没法查）
   win.webContents.on('preload-error', (_event, path, error) => {
     options.log?.('error', 'region preload failed', { path, error: String(error) })
   })
@@ -87,17 +85,37 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
     options.log?.('error', 'region page failed to load', { code, description })
   })
 
+  /** 盖满整屏 + 置于任务栏之上：顺序不能反（先定尺寸，再置顶） */
+  const coverScreen = (reason: string): void => {
+    if (win.isDestroyed()) return
+    win.setBounds(bounds, false)
+    win.setAlwaysOnTop(true, 'screen-saver')
+    win.moveTop()
+    if (reason === 'initial' || reason === 'blur') {
+      const actual = win.getBounds()
+      const covered =
+        actual.width >= bounds.width &&
+        actual.height >= bounds.height &&
+        actual.x <= bounds.x &&
+        actual.y <= bounds.y
+      options.log?.(covered ? 'info' : 'warn', 'region overlay coverage', {
+        reason,
+        actual,
+        display: bounds,
+        covered
+      })
+    }
+  }
+
   const result = await new Promise<PickedRegion | null>((resolve) => {
     let settled = false
+    let timer: NodeJS.Timeout | null = null
     const finish = (value: PickedRegion | null): void => {
       if (settled) return
       settled = true
+      if (timer) clearInterval(timer)
       resolve(value)
-      if (!win.isDestroyed()) {
-        // 先退出 kiosk 再关，免得系统状态残留（关窗本身也会清，这里是显式兜底）
-        win.setKiosk(false)
-        win.close()
-      }
+      if (!win.isDestroyed()) win.close()
     }
 
     const onConfirm = (event: Electron.IpcMainInvokeEvent, rect: unknown): boolean => {
@@ -113,62 +131,32 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
       if (event.sender !== win.webContents) return
       finish(null)
     }
-    // 渲染层主动拉冻结帧：不依赖「主进程 push 时监听已挂好」的时序
-    const onImage = (event: Electron.IpcMainInvokeEvent): string | null =>
-      event.sender === win.webContents ? options.imageDataUrl : null
 
-    ipcMain.handle('region:image', onImage)
     ipcMain.handle('region:confirm', onConfirm)
     ipcMain.on('region:cancel', onCancel)
 
     win.once('closed', () => {
-      ipcMain.removeHandler('region:image')
+      if (timer) clearInterval(timer)
       ipcMain.removeHandler('region:confirm')
       ipcMain.removeListener('region:cancel', onCancel)
       finish(null)
     })
 
     win.webContents.once('did-finish-load', () => {
-      // 真机踩到：普通无边框窗口 + fullscreen 都盖不住任务栏——任务栏自己也是置顶层，
-      // 谁最后被拉起来谁在上。Windows 上稳定的做法是 kiosk（真·全屏、压住任务栏）+ 置顶，
-      // 再在失焦时把窗口拉回最前（否则点一下任务栏就把 Esc 焦点抢走了）。
       win.show()
-      win.setKiosk(true)
-      win.setAlwaysOnTop(true, 'screen-saver')
+      coverScreen('initial')
       win.focus()
-      win.moveTop()
-      options.log?.('info', 'region overlay shown', {
-        bounds: win.getBounds(),
-        display: bounds,
-        kiosk: win.isKiosk(),
-        fullScreen: win.isFullScreen(),
-        imageBytes: options.imageDataUrl.length
-      })
-      // 兜底：系统偶尔把 kiosk 打回窗口化，再钉一次
-      setTimeout(() => {
-        if (win.isDestroyed()) return
-        if (!win.isKiosk()) win.setKiosk(true)
-        win.setAlwaysOnTop(true, 'screen-saver')
-        win.moveTop()
-        options.log?.('info', 'region overlay bounds check', {
-          bounds: win.getBounds(),
-          display: bounds,
-          kiosk: win.isKiosk()
-        })
-      }, 200)
+      timer = setInterval(() => coverScreen('tick'), TOPMOST_REASSERT_MS)
     })
 
-    // 点任务栏 / 别的窗口 = 焦点被抢：立刻拉回最前，Esc 才有用。
-    // （选区期间本来就该独占，用户唯一的出口是 Esc / 右键 / 选完区域。）
+    // 点任务栏 = 焦点被抢：立刻拉回最前，Esc 才有用
     win.on('blur', () => {
       if (win.isDestroyed()) return
       setTimeout(() => {
         if (win.isDestroyed()) return
-        if (!win.isKiosk()) win.setKiosk(true)
-        win.setAlwaysOnTop(true, 'screen-saver')
-        win.moveTop()
+        coverScreen('blur')
         win.focus()
-      }, 30)
+      }, 20)
     })
 
     const devServerUrl = options.devServerUrl?.replace(/\/+$/, '')

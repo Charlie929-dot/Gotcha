@@ -169,6 +169,8 @@
 | WGC 的 `FrameArrived` 回调跨线程碰 D3D 立即上下文 → 进程直接崩 | 2026-10-28 第一版用 `FrameArrived` + 条件变量等帧，真机 Node 里 **0xC0000409 fail-fast**（无 JS 异常，`process` 直接消失） | 不订阅事件：`StartCapture()` 后在**创建 D3D 设备的那条线程**上按 5ms 轮询 `TryGetNextFrame()`（帧池自己攒帧），拷帧 / Map / 编码都在同一线程 |
 | WGC 自带的「正在捕获」边框 | 2026-10-28 本机 Win11 26H2（build 26300）：`GraphicsCaptureSession.IsBorderRequired(false)` 设置成功，抓帧返回值 `borderSuppressed: true`；捕获图里不出现边框（边框画在屏上，不进帧） | 建会话时 try `IsBorderRequired(false)`，失败就接受闪一下并在返回值 / 日志里如实带 `borderSuppressed:false`，不假装关掉了 |
 | 球会不会被 WGC 拍进去（未定论） | 2026-10-28 抽查：球窗口（64 DIP）在 `ball.json` 记的右缘位置、截图像素里没找到球；但**没做「显示 vs 隐藏」对照**，`WDA_EXCLUDEFROMCAPTURE` 在 WGC 下是否生效仍未验证（旧结论只在 `desktopCapturer` 下验过） | 只影响选区截图（用户自己框的区域，球在图边缘最多算杂物）；常驻采集 / 证据图仍走 Chromium 流，不受影响。要结论就抓一次带球 / 藏球两张图做逐像素 diff，再写死 |
+| `Menu.popup()` 在 `focusable:false` 的球窗上点别处不消失 | 2026-10-28 真机：球右键菜单弹出来后，点桌面 / 别的窗口都收不掉，只能点菜单项或按 Esc。球窗实测 `exstyle=0x08280028`（含 `WS_EX_NOACTIVATE`）——原生弹出菜单要靠「所有者窗口在前台」才能靠点击外部收掉，非激活窗口调不起前台 | 别再试图给球窗临时加焦点：改成**独立可聚焦的自绘小窗**（`main/ball-menu.ts`），`blur` 即 `hide()`；点别处会先激活别的窗口 → blur → 关闭。菜单条目仍由 `buildTrayMenu()` 生成，别复制文案 |
+| 测球右键时「右键没反应」 | 2026-10-28 写验收脚本时踩到：球窗平时是 `WS_EX_TRANSPARENT`（穿透），`WindowFromPoint` 返回的是下层窗口；而且可见的只有半颗球（停靠缩进 32px），鼠标落在窗口矩形里但**不在球圆内**也不会展开 | 先 `SetCursorPos` 到球**可见那半颗**的中心（右停靠：窗口 left+54、top+32），再注入几次相对 `mouse_event(MOVE)`（`SetCursorPos` 本身不产生移动消息，Electron 的 forward 收不到），等 `exstyle` 的 `0x20`（TRANSPARENT）掉掉再右键。PowerShell 是 DPI-unaware，`GetWindowRect` / `SetCursorPos` 用的都是虚拟坐标（1920×1080@125% → 1536×864），别拿物理像素去点 |
 
 ## 规则
 

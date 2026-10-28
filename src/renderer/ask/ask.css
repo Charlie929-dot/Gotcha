@@ -9,6 +9,8 @@
   --accent: #6aa9ff;
   --warn: #ffcf6a;
   --error: #ff8a8a;
+  /* 与图谱页同名变量：设置面板的「已保存」提示用 var(--activity) */
+  --activity: #7ddc9a;
   font-family: 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
 }
 
@@ -502,4 +504,266 @@ button.stop {
   .history {
     width: 178px;
   }
+}
+
+/* ---- 设置抽屉（D53：与图谱页共用 createSettingsPanel，样式按问记忆主题重写） ---- */
+
+.drawer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  justify-content: flex-end;
+  background: rgb(0 0 0 / 45%);
+}
+
+.drawer-panel {
+  box-sizing: border-box;
+  width: min(460px, 94vw);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 0;
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+  box-shadow: -18px 0 40px rgb(0 0 0 / 45%);
+  overflow-y: auto;
+}
+
+.drawer-head {
+  position: sticky;
+  top: -14px;
+  margin: -14px -16px 12px;
+  padding: 14px 16px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  z-index: 2;
+}
+
+.drawer-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.drawer-head button {
+  padding: 2px 9px;
+  font-size: 16px;
+  line-height: 1.1;
+}
+
+#settings-form section {
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+  margin-top: 12px;
+}
+
+#settings-form section:first-of-type {
+  border-top: none;
+  margin-top: 0;
+}
+
+#settings-form h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 12px 0 8px;
+}
+
+#settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#settings-form label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+#settings-form input[type='text'],
+#settings-form input[type='number'],
+#settings-form input[type='password'],
+#settings-form select {
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#settings-form input:focus,
+#settings-form select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#settings-form input[type='checkbox'] {
+  accent-color: var(--accent);
+}
+
+.providers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.provider-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.provider-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
+
+#settings-form .provider-row label.provider-line {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 8px;
+  align-items: center;
+  margin: 3px 0;
+  font-size: 12px;
+}
+
+.provider-row input {
+  min-width: 0;
+  width: 100%;
+}
+
+.provider-row button {
+  justify-self: end;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 0 100px;
+}
+
+.provider-actions button {
+  justify-self: start;
+}
+
+.key-status[data-source='env'],
+.key-status[data-source='file'] {
+  color: var(--activity);
+}
+
+.key-status[data-source='unknown'],
+.key-status[data-source='none'] {
+  color: var(--warn);
+}
+
+.provider-advanced {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.combobox-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.combobox-wrap input {
+  padding-right: 28px !important;
+}
+
+.combobox-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 4px 6px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.combobox-toggle:hover {
+  color: var(--text);
+}
+
+.model-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  padding: 4px;
+  overflow-y: auto;
+  background: #1c1c26;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 60%);
+}
+
+.model-option {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.model-option:hover,
+.model-option.selected {
+  color: #fff;
+  background: #2b2b3a;
+}
+
+.hint {
+  margin: 6px 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #77778a;
+}
+
+.form-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 14px;
+  margin-top: 14px;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
 }

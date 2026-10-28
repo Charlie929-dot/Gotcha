@@ -1,7 +1,8 @@
 /**
  * 问记忆窗口 preload（S3-lite）
  *
- * 只暴露问记忆需要的最小 API：提问 / 看段证据 / 出云确认门 / 对话记录。
+ * 只暴露问记忆需要的最小 API：提问 / 看段证据 / 出云确认门 / 对话记录 /
+ * 设置抽屉（D53：供应商 + 密钥 + 出网确认，与图谱窗口同一套主进程实现）。
  * 不暴露 `ipcRenderer` 本体、任意 SQL、文件路径或密钥。
  */
 
@@ -10,6 +11,10 @@ import type { ChainAskResult, ChainAskResumeDecision } from '../chain/agent/type
 import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskConsentView } from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
+import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
+import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
+import type { ApiKeySource } from '../understand/cloud/providers'
+import type { FetchModelsResult } from '../understand/cloud/models'
 
 export interface AskApi {
   /**
@@ -37,6 +42,14 @@ export interface AskApi {
   image(path: string): Promise<string | null>
   /** 选区问答的交接单：一条问题 + 一张截图，窗口收到就自动开问 */
   onPrefill(handler: (payload: { question: string; imagePath: string }) => void): () => void
+  /* ---- D53：设置抽屉（供应商 / 密钥 / 出网确认 / 用量） ---- */
+  settings(): Promise<GraphSettingsView | { error: string }>
+  saveSettings(patch: unknown): Promise<GraphSettingsSaveResult>
+  providerModels(input: ProviderModelsInput): Promise<FetchModelsResult>
+  saveProviderKey(providerId: string, apiKey: string): Promise<ProviderKeySaveResult>
+  providerKeys(): Promise<Record<string, ApiKeySource>>
+  /** 托盘 / 球右键的「设置」：打开窗口就展开抽屉 */
+  onOpenSettings(handler: () => void): () => void
 }
 
 const api: AskApi = {
@@ -56,6 +69,21 @@ const api: AskApi = {
   history: () => ipcRenderer.invoke('ask:history') as Promise<AskHistoryEntry[]>,
   clearHistory: () => ipcRenderer.invoke('ask:history:clear') as Promise<boolean>,
   image: (path) => ipcRenderer.invoke('ask:image', path) as Promise<string | null>,
+  settings: () =>
+    ipcRenderer.invoke('ask:settings:get') as Promise<GraphSettingsView | { error: string }>,
+  saveSettings: (patch) =>
+    ipcRenderer.invoke('ask:settings:save', patch) as Promise<GraphSettingsSaveResult>,
+  providerModels: (input) =>
+    ipcRenderer.invoke('ask:provider:models', input) as Promise<FetchModelsResult>,
+  saveProviderKey: (providerId, apiKey) =>
+    ipcRenderer.invoke('ask:provider:key', { providerId, apiKey }) as Promise<ProviderKeySaveResult>,
+  providerKeys: () =>
+    ipcRenderer.invoke('ask:provider:keys') as Promise<Record<string, ApiKeySource>>,
+  onOpenSettings: (handler) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('ask:open-settings', listener)
+    return () => ipcRenderer.removeListener('ask:open-settings', listener)
+  },
   onPrefill: (handler) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
       if (typeof payload !== 'object' || payload === null) return

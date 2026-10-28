@@ -360,3 +360,113 @@ describe('ask IPC：轮数用尽的续查', () => {
     ).toMatchObject({ kind: 'error', message: '当前版本不支持续查' })
   })
 })
+
+describe('ask IPC：设置抽屉（D53）', () => {
+  it('读设置：越权 / 未接能力都给出可读结果', () => {
+    const read = handler(buildDeps(), 'ask:settings:get')
+    expect(read({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never)).toEqual({
+      error: 'forbidden'
+    })
+    expect(read(SENDER_OK as never)).toEqual({ error: 'unsupported' })
+  })
+
+  it('保存：写库前读旧确认门，成功后调用 onSettingsSaved', () => {
+    const onSettingsSaved = vi.fn()
+    const saved = { outboundConsent: true } as never
+    const saveSettings = vi.fn(() => ({ ok: true as const, settings: saved }))
+    const deps = buildDeps({
+      settings: () => ({ outboundConsent: false }) as never,
+      saveSettings,
+      onSettingsSaved
+    })
+    const save = handler(deps, 'ask:settings:save')
+
+    expect(save({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, {})).toEqual({
+      ok: false,
+      error: 'forbidden'
+    })
+    expect(saveSettings).not.toHaveBeenCalled()
+
+    expect(save(SENDER_OK as never, { outboundConsent: true })).toEqual({ ok: true, settings: saved })
+    expect(saveSettings).toHaveBeenCalledWith({ outboundConsent: true })
+    // 第二个参数必须是**写库前**的值，否则撤销出网授权停不掉调度（D24 漏洞同款）
+    expect(onSettingsSaved).toHaveBeenCalledWith(saved, false)
+  })
+
+  it('保存失败不调副作用；抛错变成可读 error', () => {
+    const onSettingsSaved = vi.fn()
+    const failing = handler(
+      buildDeps({
+        settings: () => ({ outboundConsent: false }) as never,
+        saveSettings: () => ({ ok: false, error: '字段不合法' }),
+        onSettingsSaved
+      }),
+      'ask:settings:save'
+    )
+    expect(failing(SENDER_OK as never, {})).toEqual({ ok: false, error: '字段不合法' })
+    expect(onSettingsSaved).not.toHaveBeenCalled()
+
+    const throwing = handler(
+      buildDeps({
+        settings: () => ({ outboundConsent: false }) as never,
+        saveSettings: () => {
+          throw new Error('db gone')
+        }
+      }),
+      'ask:settings:save'
+    )
+    expect(throwing(SENDER_OK as never, {})).toEqual({ ok: false, error: 'db gone' })
+  })
+
+  it('供应商密钥 / 模型：形状校验 + 越权拒绝', async () => {
+    const saveProviderKey = vi.fn(() => ({ ok: true as const }))
+    const providerKeys = vi.fn(() => ({ p: 'file' as const }))
+    const providerModels = vi.fn(async () => ({ ok: true as const, models: ['m'] }))
+    const deps = buildDeps({ saveProviderKey, providerKeys, providerModels })
+
+    const key = handler(deps, 'ask:provider:key')
+    expect(
+      key({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, {
+        providerId: 'p',
+        apiKey: 'k'
+      })
+    ).toEqual({ ok: false, error: 'forbidden' })
+    expect(key(SENDER_OK as never, { providerId: 'p' })).toEqual({ ok: false, error: '参数不合法' })
+    expect(key(SENDER_OK as never, { providerId: 'p', apiKey: 'sk-1' })).toEqual({ ok: true })
+    expect(saveProviderKey).toHaveBeenCalledWith('p', 'sk-1')
+
+    expect(handler(deps, 'ask:provider:keys')(SENDER_OK as never)).toEqual({ p: 'file' })
+    expect(
+      handler(deps, 'ask:provider:keys')({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never)
+    ).toEqual({})
+
+    const models = handler(deps, 'ask:provider:models')
+    expect(await models(SENDER_OK as never, { providerId: 'p', baseUrl: 'https://api.x' })).toEqual({
+      ok: true,
+      models: ['m']
+    })
+    expect(await models(SENDER_OK as never, { providerId: 'p' })).toEqual({
+      ok: false,
+      error: '参数不合法'
+    })
+  })
+
+  it('没接这些能力时返回可读错误，不抛异常', async () => {
+    const deps = buildDeps()
+    expect(handler(deps, 'ask:settings:save')(SENDER_OK as never, {})).toEqual({
+      ok: false,
+      error: '当前版本不支持保存设置'
+    })
+    expect(handler(deps, 'ask:provider:key')(SENDER_OK as never, { providerId: 'p', apiKey: 'k' })).toEqual({
+      ok: false,
+      error: '当前版本不支持保存密钥'
+    })
+    expect(
+      await handler(deps, 'ask:provider:models')(SENDER_OK as never, {
+        providerId: 'p',
+        baseUrl: 'https://api.x'
+      })
+    ).toEqual({ ok: false, error: '当前版本不支持获取模型' })
+    expect(handler(deps, 'ask:provider:keys')(SENDER_OK as never)).toEqual({})
+  })
+})

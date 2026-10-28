@@ -1,19 +1,25 @@
 /**
- * 设置抽屉（M2 Phase 2 / D21/D22/D24，2026-10-23 增补）
+ * 设置抽屉（M2 Phase 2 / D21/D22/D24，2026-10-23 增补；D53 起由问记忆页共用）
  *
- * - 归纳参数（自动 / 间隔 / 预算 / 退避 / 批量 / 输出上限）；
- * - 供应商：名称 / baseUrl / API Key（直接填写，写后不回显）/ 模型（可「获取模型」）/ 高级变量名；
- *   密钥由主进程写入 userData/.env，settings 表只存 apiKeyEnv 名，永远不存密钥值；
- * - 快捷键两键 + 保存后注册冲突标红；
- * - 出网确认门（D24，可撤销）。
+ * 同一个面板服务两类页面，字段**按页面里实际存在的元素裁剪**：
+ * - 图谱页（经典 / 全局）：归纳参数、视图阈值、供应商、快捷键、出网确认、用量全在；
+ * - 问记忆页（D53 迁移）：只放供应商 + 出网确认 + 用量——没有归纳 / 快捷键输入框，
+ *   保存时就不带这些字段，绝不把别的页面的设置写成空值（这是本文件最要紧的约定）。
  *
- * 所有值都交给主进程校验，这里不做「静默修正」；失败原样显示原因。
+ * 其它纪律沿用旧实现：密钥由主进程写入 userData/.env，settings 只存 apiKeyEnv 名；
+ * 所有值交给主进程校验，这里不做「静默修正」，失败原样显示原因。
  */
 
-import type { GraphSettingsView } from '../../main/graph-settings'
+import type { GraphSettingsSaveResult, GraphSettingsView } from '../../main/graph-settings'
 import type { HotkeyRegisterResult } from '../../main/hotkeys'
+import type {
+  GraphRecomputeResult,
+  ProviderKeySaveResult,
+  ProviderModelsInput
+} from '../../main/graph-ipc'
 import type { LlmProvider } from '../../understand/cloud/providers'
-import type { GraphApi } from '../graph-preload'
+import type { ApiKeySource } from '../../understand/cloud/providers'
+import type { FetchModelsResult } from '../../understand/cloud/models'
 
 export interface SettingsPanel {
   open(): Promise<void>
@@ -27,36 +33,33 @@ export interface SettingsChange {
   thresholds: boolean
 }
 
+/**
+ * 设置面板需要的**最小** API 面（不是整个 GraphApi）。
+ * 图谱 preload 与问记忆 preload 都结构兼容；问记忆没有图谱，所以 recomputeGraph 可选。
+ */
+export interface SettingsApi {
+  settings(): Promise<GraphSettingsView | { error: string }>
+  saveSettings(patch: unknown): Promise<GraphSettingsSaveResult>
+  providerModels(input: ProviderModelsInput): Promise<FetchModelsResult>
+  saveProviderKey(providerId: string, apiKey: string): Promise<ProviderKeySaveResult>
+  providerKeys(): Promise<Record<string, ApiKeySource | string>>
+  hotkeys?(): Promise<HotkeyRegisterResult[]>
+  /** 只有暴露了相似度阈值的页面才会用到 */
+  recomputeGraph?(): Promise<GraphRecomputeResult>
+}
+
 type KeySource = 'env' | 'file' | 'none' | 'unknown'
 
-const ELEMENT_IDS = [
-  'drawer',
-  'settings-close',
-  'settings-form',
-  'set-auto',
-  'set-interval',
-  'set-budget',
-  'set-backoff',
-  'set-batch',
-  'set-max-tokens',
-  'set-consent',
-  'usage',
-  'set-active',
-  'set-providers',
-  'set-add-provider',
-  'set-hotkey-toggle',
-  'set-hotkey-graph',
-  'set-hotkey-status',
-  'settings-msg',
-  'settings-save'
-] as const
-
-type ElementKey = (typeof ELEMENT_IDS)[number]
-
-function byId<T extends HTMLElement = HTMLElement>(root: HTMLElement, id: ElementKey): T {
+/** 必须有：缺了说明页面标记写错，直接报错（比静默半残好） */
+function byId<T extends HTMLElement = HTMLElement>(root: HTMLElement, id: string): T {
   const element = root.querySelector<T>(`#${id}`)
   if (!element) throw new Error(`设置抽屉缺少 #${id}`)
   return element
+}
+
+/** 可选：没有这段界面时整组跳过（问记忆页 / 经典页共用面板靠它） */
+function opt<T extends HTMLElement = HTMLElement>(root: HTMLElement, id: string): T | null {
+  return root.querySelector<T>(`#${id}`)
 }
 
 interface ProviderRow {
@@ -87,49 +90,49 @@ function deriveEnvName(id: string): string {
 
 export function createSettingsPanel(
   root: HTMLElement,
-  api: GraphApi,
+  api: SettingsApi,
   onSaved: (settings: GraphSettingsView, changed: SettingsChange) => void
 ): SettingsPanel {
   const drawer = byId(root, 'drawer')
   const closeButton = byId<HTMLButtonElement>(root, 'settings-close')
   const form = byId<HTMLFormElement>(root, 'settings-form')
-  const autoInput = byId<HTMLInputElement>(root, 'set-auto')
-  /** 在线归属开关（P2 · S6）：两个图谱页都有；缺元素时不发字段 */
-  const onlineInput = root.querySelector<HTMLInputElement>('#set-online')
-  const intervalInput = byId<HTMLInputElement>(root, 'set-interval')
-  const budgetInput = byId<HTMLInputElement>(root, 'set-budget')
-  const backoffInput = byId<HTMLInputElement>(root, 'set-backoff')
-  const batchInput = byId<HTMLInputElement>(root, 'set-batch')
-  const maxTokensInput = byId<HTMLInputElement>(root, 'set-max-tokens')
-  /**
-   * 日格热力满量只在全局图页有输入框（经典按日页共用这个面板，没有「视图」段）。
-   * 这里必须容错：缺元素时既不报错，也不在保存里带这个字段——
-   * 否则从经典页保存会把它写成空值 / 覆盖掉全局页的设置。
-   */
-  const dayHeatInput = root.querySelector<HTMLInputElement>('#set-day-heat')
-  /** 「时刻过多」提示阈值也只在全局图页有（经典页共用面板），同样容错、缺省不发字段 */
-  const scaleHintInput = root.querySelector<HTMLInputElement>('#set-scale-hint')
-  /**
-   * 相似度阈值 / 连线数同样只在全局图页有输入框（P3-b）。三项一起出现：
-   * 缺一个就整组当成「本页没有」，不发送 thresholds——避免经典页保存时把某项写成空值。
-   */
-  const mergeSimInput = root.querySelector<HTMLInputElement>('#set-merge-sim')
-  const edgeSimInput = root.querySelector<HTMLInputElement>('#set-edge-sim')
-  const edgeKInput = root.querySelector<HTMLInputElement>('#set-edge-k')
+  const messageEl = byId(root, 'settings-msg')
+  const saveButton = byId<HTMLButtonElement>(root, 'settings-save')
+
+  /* ---- 归纳（只有图谱页有；问记忆页缺省即整组不读不写） ---- */
+  const autoInput = opt<HTMLInputElement>(root, 'set-auto')
+  const onlineInput = opt<HTMLInputElement>(root, 'set-online')
+  const intervalInput = opt<HTMLInputElement>(root, 'set-interval')
+  const budgetInput = opt<HTMLInputElement>(root, 'set-budget')
+  const backoffInput = opt<HTMLInputElement>(root, 'set-backoff')
+  const batchInput = opt<HTMLInputElement>(root, 'set-batch')
+  const maxTokensInput = opt<HTMLInputElement>(root, 'set-max-tokens')
+  const usageEl = opt(root, 'usage')
+
+  /* ---- 视图（只有全局图页有；三项阈值必须整组出现） ---- */
+  const dayHeatInput = opt<HTMLInputElement>(root, 'set-day-heat')
+  const scaleHintInput = opt<HTMLInputElement>(root, 'set-scale-hint')
+  const mergeSimInput = opt<HTMLInputElement>(root, 'set-merge-sim')
+  const edgeSimInput = opt<HTMLInputElement>(root, 'set-edge-sim')
+  const edgeKInput = opt<HTMLInputElement>(root, 'set-edge-k')
   const thresholdInputs =
     mergeSimInput && edgeSimInput && edgeKInput
       ? { mergeSimInput, edgeSimInput, edgeKInput }
       : null
-  const consentInput = byId<HTMLInputElement>(root, 'set-consent')
-  const usageEl = byId(root, 'usage')
-  const activeSelect = byId<HTMLSelectElement>(root, 'set-active')
-  const providersEl = byId(root, 'set-providers')
-  const addProviderButton = byId<HTMLButtonElement>(root, 'set-add-provider')
-  const hotkeyToggleInput = byId<HTMLInputElement>(root, 'set-hotkey-toggle')
-  const hotkeyGraphInput = byId<HTMLInputElement>(root, 'set-hotkey-graph')
-  const hotkeyStatusEl = byId(root, 'set-hotkey-status')
-  const messageEl = byId(root, 'settings-msg')
-  const saveButton = byId<HTMLButtonElement>(root, 'settings-save')
+
+  /* ---- 供应商（图谱页与问记忆页都有） ---- */
+  const activeSelect = opt<HTMLSelectElement>(root, 'set-active')
+  const providersEl = opt(root, 'set-providers')
+  const addProviderButton = opt<HTMLButtonElement>(root, 'set-add-provider')
+
+  /* ---- 快捷键（只有图谱页有） ---- */
+  const hotkeyToggleInput = opt<HTMLInputElement>(root, 'set-hotkey-toggle')
+  const hotkeyGraphInput = opt<HTMLInputElement>(root, 'set-hotkey-graph')
+  const hotkeyStatusEl = opt(root, 'set-hotkey-status')
+  const hotkeySection = hotkeyToggleInput && hotkeyGraphInput && hotkeyStatusEl ? true : false
+
+  /* ---- 出网确认（两类页面都有） ---- */
+  const consentInput = opt<HTMLInputElement>(root, 'set-consent')
 
   const rows: ProviderRow[] = []
   /** 拉取过的模型清单：按 provider id 缓存，保存后重建行时仍能下拉 */
@@ -177,6 +180,7 @@ export function createSettingsPanel(
 
   /** 阈值变了 -> 让主进程按新阈值重算连线，并给出可读结果（不抛错） */
   async function recomputeAfterThresholdChange(): Promise<string> {
+    if (!api.recomputeGraph) return '已保存'
     try {
       const result = await api.recomputeGraph()
       if (!result.ok) {
@@ -203,6 +207,7 @@ export function createSettingsPanel(
   }
 
   function syncActiveOptions(selected?: string): void {
+    if (!activeSelect) return
     const previous = selected ?? activeSelect.value
     activeSelect.replaceChildren()
     for (const row of rows) {
@@ -306,6 +311,7 @@ export function createSettingsPanel(
   }
 
   function addProviderRow(provider?: LlmProvider): void {
+    if (!providersEl) return
     rowSeq += 1
     const id = provider?.id ?? nextCustomId()
     const rowEl = document.createElement('div')
@@ -443,6 +449,7 @@ export function createSettingsPanel(
   }
 
   function fillProviders(settings: GraphSettingsView): void {
+    if (!providersEl) return
     providersEl.replaceChildren()
     rows.length = 0
     for (const provider of settings.providers) addProviderRow(provider)
@@ -451,7 +458,8 @@ export function createSettingsPanel(
   }
 
   async function refreshKeyStatus(): Promise<void> {
-    let statuses: Record<string, string> = {}
+    if (rows.length === 0) return
+    let statuses: Record<string, ApiKeySource | string> = {}
     let failed = false
     try {
       statuses = await api.providerKeys()
@@ -468,6 +476,7 @@ export function createSettingsPanel(
   }
 
   async function refreshHotkeyStatus(): Promise<void> {
+    if (!hotkeyToggleInput || !hotkeyGraphInput || !hotkeyStatusEl || !api.hotkeys) return
     try {
       const results = await api.hotkeys()
       if (!Array.isArray(results)) return
@@ -498,6 +507,32 @@ export function createSettingsPanel(
     }
   }
 
+  /** 把一份设置回填到本页存在的输入框里（缺什么填什么，缺的组整组跳过） */
+  function fill(settings: GraphSettingsView): void {
+    current = settings
+    if (autoInput) autoInput.checked = settings.auto
+    if (onlineInput) onlineInput.checked = settings.onlineThemes
+    if (intervalInput) intervalInput.value = String(settings.intervalMinutes)
+    if (budgetInput) budgetInput.value = String(settings.budgetTokensPerDay)
+    if (backoffInput) backoffInput.value = settings.retryBackoffMinutes
+    if (batchInput) batchInput.value = String(settings.batchMaxMoments)
+    if (maxTokensInput) maxTokensInput.value = String(settings.maxTokens)
+    if (dayHeatInput) dayHeatInput.value = String(settings.dayHeatMax)
+    if (scaleHintInput) scaleHintInput.value = String(settings.scaleHintMoments)
+    if (thresholdInputs) {
+      thresholdInputs.mergeSimInput.value = String(settings.thresholds.themeMergeSim)
+      thresholdInputs.edgeSimInput.value = String(settings.thresholds.edgeMinSim)
+      thresholdInputs.edgeKInput.value = String(settings.thresholds.edgeTopK)
+    }
+    if (consentInput) consentInput.checked = settings.outboundConsent
+    if (hotkeyToggleInput) hotkeyToggleInput.value = settings.hotkeys.toggleCapture
+    if (hotkeyGraphInput) hotkeyGraphInput.value = settings.hotkeys.openGraph ?? ''
+    if (usageEl) {
+      usageEl.textContent = `今日用量：${settings.usage.calls} 次调用 / 输入 ${settings.usage.promptTokens} tokens / 输出 ${settings.usage.completionTokens} tokens`
+    }
+    fillProviders(settings)
+  }
+
   async function open(): Promise<void> {
     drawer.hidden = false
     setMessage('读取中…')
@@ -507,26 +542,7 @@ export function createSettingsPanel(
         setMessage('读取设置失败：无权限或数据库不可用', 'error')
         return
       }
-      current = settings
-      autoInput.checked = settings.auto
-      if (onlineInput) onlineInput.checked = settings.onlineThemes
-      intervalInput.value = String(settings.intervalMinutes)
-      budgetInput.value = String(settings.budgetTokensPerDay)
-      backoffInput.value = settings.retryBackoffMinutes
-      batchInput.value = String(settings.batchMaxMoments)
-      maxTokensInput.value = String(settings.maxTokens)
-      if (dayHeatInput) dayHeatInput.value = String(settings.dayHeatMax)
-    if (scaleHintInput) scaleHintInput.value = String(settings.scaleHintMoments)
-      if (thresholdInputs) {
-        thresholdInputs.mergeSimInput.value = String(settings.thresholds.themeMergeSim)
-        thresholdInputs.edgeSimInput.value = String(settings.thresholds.edgeMinSim)
-        thresholdInputs.edgeKInput.value = String(settings.thresholds.edgeTopK)
-      }
-      consentInput.checked = settings.outboundConsent
-      hotkeyToggleInput.value = settings.hotkeys.toggleCapture
-      hotkeyGraphInput.value = settings.hotkeys.openGraph ?? ''
-      usageEl.textContent = `今日用量：${settings.usage.calls} 次调用 / 输入 ${settings.usage.promptTokens} tokens / 输出 ${settings.usage.completionTokens} tokens`
-      fillProviders(settings)
+      fill(settings)
       void refreshKeyStatus()
       setMessage('')
       void refreshHotkeyStatus()
@@ -548,7 +564,7 @@ export function createSettingsPanel(
     }
   })
 
-  addProviderButton.addEventListener('click', () => addProviderRow())
+  addProviderButton?.addEventListener('click', () => addProviderRow())
   closeButton.addEventListener('click', close)
 
   form.addEventListener('submit', async (event) => {
@@ -559,38 +575,44 @@ export function createSettingsPanel(
     saveButton.disabled = true
     setMessage('保存中…')
     try {
-      const providers: LlmProvider[] = rows.map((row) => ({
-        id: row.idInput.value.trim(),
-        label: row.nameInput.value.trim(),
-        baseUrl: row.baseUrlInput.value.trim(),
-        model: row.modelInput.value.trim(),
-        apiKeyEnv: row.apiKeyEnvInput.value.trim() || deriveEnvName(row.idInput.value)
-      }))
-      const payload: Record<string, unknown> = {
-        auto: autoInput.checked,
-        intervalMinutes: Number(intervalInput.value),
-        budgetTokensPerDay: Number(budgetInput.value),
-        retryBackoffMinutes: backoffInput.value
+      /** 只发本页存在的字段：塞默认值会把别的页面（或旧版本）的设置覆盖掉 */
+      const payload: Record<string, unknown> = {}
+      if (autoInput) payload.auto = autoInput.checked
+      if (onlineInput) payload.onlineThemes = onlineInput.checked
+      if (intervalInput) payload.intervalMinutes = Number(intervalInput.value)
+      if (budgetInput) payload.budgetTokensPerDay = Number(budgetInput.value)
+      if (backoffInput) {
+        payload.retryBackoffMinutes = backoffInput.value
           .split(',')
           .map((part) => part.trim())
           .filter((part) => part !== '')
-          .map(Number),
-        batchMaxMoments: Number(batchInput.value),
-        maxTokens: Number(maxTokensInput.value),
-        providers,
-        activeProvider: activeSelect.value,
-        hotkeys: {
-          toggleCapture: hotkeyToggleInput.value.trim(),
-          openGraph: hotkeyGraphInput.value.trim()
-        },
-        outboundConsent: consentInput.checked
+          .map(Number)
       }
-      // 只有全局图页有这个输入框；缺省时不要带字段（免得清掉已有设置）
+      if (batchInput) payload.batchMaxMoments = Number(batchInput.value)
+      if (maxTokensInput) payload.maxTokens = Number(maxTokensInput.value)
       if (dayHeatInput) payload.dayHeatMax = Number(dayHeatInput.value)
       if (scaleHintInput) payload.scaleHintMoments = Number(scaleHintInput.value)
-      if (onlineInput) payload.onlineThemes = onlineInput.checked
+      if (consentInput) payload.outboundConsent = consentInput.checked
+
+      if (providersEl && activeSelect) {
+        payload.providers = rows.map((row) => ({
+          id: row.idInput.value.trim(),
+          label: row.nameInput.value.trim(),
+          baseUrl: row.baseUrlInput.value.trim(),
+          model: row.modelInput.value.trim(),
+          apiKeyEnv: row.apiKeyEnvInput.value.trim() || deriveEnvName(row.idInput.value)
+        }))
+        payload.activeProvider = activeSelect.value
+      }
+      if (hotkeySection && hotkeyToggleInput && hotkeyGraphInput) {
+        payload.hotkeys = {
+          toggleCapture: hotkeyToggleInput.value.trim(),
+          openGraph: hotkeyGraphInput.value.trim()
+        }
+      }
       const thresholdPatch = readThresholdPatch()
       if (thresholdPatch) payload.thresholds = thresholdPatch
+
       const result = await api.saveSettings(payload)
       if (!result.ok) {
         setMessage(result.error, 'error')
@@ -619,22 +641,10 @@ export function createSettingsPanel(
         }
       }
 
-      current = result.settings
-      fillProviders(result.settings)
+      fill(result.settings)
       for (const row of rows) {
         const key = failedKeys.get(row.idInput.value)
         if (key) row.apiKeyInput.value = key
-      }
-      hotkeyToggleInput.value = result.settings.hotkeys.toggleCapture
-      hotkeyGraphInput.value = result.settings.hotkeys.openGraph ?? ''
-      consentInput.checked = result.settings.outboundConsent
-      if (onlineInput) onlineInput.checked = result.settings.onlineThemes
-      if (dayHeatInput) dayHeatInput.value = String(result.settings.dayHeatMax)
-      if (scaleHintInput) scaleHintInput.value = String(result.settings.scaleHintMoments)
-      if (thresholdInputs) {
-        thresholdInputs.mergeSimInput.value = String(result.settings.thresholds.themeMergeSim)
-        thresholdInputs.edgeSimInput.value = String(result.settings.thresholds.edgeMinSim)
-        thresholdInputs.edgeKInput.value = String(result.settings.thresholds.edgeTopK)
       }
       void refreshKeyStatus()
       void refreshHotkeyStatus()

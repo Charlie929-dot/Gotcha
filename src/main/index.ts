@@ -132,6 +132,7 @@ import type { EncodedImage } from './chain-retention'
 import { claimSingleInstance } from './single-instance'
 import { BALL_STATE_FILE } from './ball-state'
 import { createBallShell, type BallShell } from './ball'
+import { createBallMenu, type BallMenuShell } from './ball-menu'
 import { installTray, type TrayShell } from './tray'
 import { toggleEnabled } from './tray-menu'
 import {
@@ -210,6 +211,7 @@ let graphWindow: BrowserWindow | null = null
 /** 问记忆窗口（S3-lite） */
 let askWindow: BrowserWindow | null = null
 let ballShell: BallShell | null = null
+let ballMenuShell: BallMenuShell | null = null
 let trayShell: TrayShell | null = null
 let hotkeyHandle: HotkeyHandle | null = null
 let hotkeyNoticeShown = false
@@ -925,14 +927,31 @@ function sendToAskWindow(window: BrowserWindow, payload: AskPrefill): void {
   else deliver()
 }
 
+/** 「设置」入口（托盘 / 球右键）：打开问记忆并展开设置抽屉 */
+function sendAskSettings(window: BrowserWindow): void {
+  const deliver = (): void => {
+    if (window.isDestroyed()) return
+    window.webContents.send('ask:open-settings')
+  }
+  if (window.webContents.isLoading()) window.webContents.once('did-finish-load', deliver)
+  else deliver()
+}
+
+interface AskOpenOptions {
+  prefill?: AskPrefill
+  /** 打开就展开设置抽屉（D53） */
+  settings?: boolean
+}
+
 /** 问记忆窗口（S3-lite）：懒创建、关闭即销毁；打开即视为一次交互 */
-function showAskWindow(prefill?: AskPrefill): void {
+function showAskWindow(options: AskOpenOptions = {}): void {
   if (!app.isReady()) return
   if (askWindow && !askWindow.isDestroyed()) {
     if (askWindow.isMinimized()) askWindow.restore()
     askWindow.show()
     askWindow.focus()
-    if (prefill) sendToAskWindow(askWindow, prefill)
+    if (options.prefill) sendToAskWindow(askWindow, options.prefill)
+    if (options.settings) sendAskSettings(askWindow)
     return
   }
   const window = createAskWindow({
@@ -944,12 +963,13 @@ function showAskWindow(prefill?: AskPrefill): void {
     }
   })
   askWindow = window
-  if (prefill) sendToAskWindow(window, prefill)
+  if (options.prefill) sendToAskWindow(window, options.prefill)
+  if (options.settings) sendAskSettings(window)
 }
 
-function openAsk(): void {
+function openAsk(options: AskOpenOptions = {}): void {
   cancelStartupResume(true)
-  showAskWindow()
+  showAskWindow(options)
 }
 
 /** 选区问答在跑：连点球不会叠出两层遮罩 / 两个输入框 */
@@ -1071,7 +1091,7 @@ async function openRegionAsk(): Promise<void> {
       display,
       onSend: (question) => {
         cancelStartupResume(true)
-        showAskWindow({ question, imagePath })
+        showAskWindow({ prefill: { question, imagePath } })
       }
     })
   } catch (error) {
@@ -1096,6 +1116,8 @@ app.on('before-quit', (event) => {
   tempJanitor = null
   disposeGraphIpc?.()
   disposeAskIpc?.()
+  ballMenuShell?.dispose()
+  ballMenuShell = null
   inductionRuntime?.dispose()
   inductionRuntime = null
   momentRuntime?.stop()
@@ -1789,6 +1811,17 @@ if (primaryInstance) {
       },
       history: () => readAskHistory(askHistoryPath),
       clearHistory: () => clearAskHistory(askHistoryPath),
+      // D53：设置抽屉（供应商 / 密钥 / 出网确认）与图谱窗口共用同一批实现，
+      // 校验 / 落盘 / 副作用都必须一致，否则同一个设置会在两个入口表现不同。
+      settings: () => readGraphSettings(connections.queryDb()),
+      saveSettings: (patch) => saveGraphSettings(connections.ensureWritable().db, patch),
+      onSettingsSaved: applyGraphSettings,
+      providerModels: async (input) => {
+        const apiKey = input.apiKey?.trim() ? input.apiKey.trim() : storedProviderKey(input.providerId)
+        return fetchModelsFromProvider({ baseUrl: input.baseUrl, apiKey })
+      },
+      saveProviderKey: (providerId, apiKey) => saveProviderKey(providerId, apiKey),
+      providerKeys: () => providerKeyStatus(),
       log: (level, message, data) => captureLog(level, message, data)
     })
 
@@ -1886,6 +1919,15 @@ if (primaryInstance) {
       log: captureLog
     })
 
+    ballMenuShell = createBallMenu({
+      devServerUrl: process.env['ELECTRON_RENDERER_URL'],
+      htmlPath: join(__dirname, '../renderer/ball-menu/index.html'),
+      preloadPath: join(__dirname, '../preload/ball-menu.js'),
+      log: captureLog
+    })
+
+    const openAskSettings = (): void => openAsk({ settings: true })
+
     ballShell = createBallShell({
       preloadPath: join(__dirname, '../preload/ball.js'),
       devServerUrl: process.env['ELECTRON_RENDERER_URL'],
@@ -1896,6 +1938,9 @@ if (primaryInstance) {
         void openRegionAsk()
       },
       openAsk,
+      openSettings: openAskSettings,
+      showMenu: (entries, anchor) => ballMenuShell?.open(entries, anchor),
+      hideMenu: () => ballMenuShell?.close(),
       toggleCapture: () => {
         void toggleCapture()
       },
@@ -1909,6 +1954,7 @@ if (primaryInstance) {
     trayShell = installTray(
       {
         openAsk,
+        openSettings: openAskSettings,
         toggleCapture: () => {
           void toggleCapture()
         },

@@ -12,6 +12,7 @@ import {
 function actions(): TrayMenuActions {
   return {
     openAsk: vi.fn((): void => {}),
+    openSettings: vi.fn((): void => {}),
     toggleCapture: vi.fn((): void => {}),
     quit: vi.fn((): void => {})
   }
@@ -43,10 +44,11 @@ describe('toggleLabel / toggleEnabled：状态映射', () => {
 })
 
 describe('buildTrayMenu：托盘 / 球右键共用菜单（Q4）', () => {
-  it('结构固定：问记忆 / 开关 / 退出，含两条分隔线；图谱与时间线入口已摘除（D51）', () => {
+  it('结构固定：问记忆 / 设置 / 开关 / 退出，含两条分隔线；图谱与时间线入口已摘除（D51/D53）', () => {
     const entries = buildTrayMenu('paused', actions())
     expect(entries.map((entry) => ('id' in entry ? entry.id : entry.type))).toEqual([
       'open-ask',
+      'open-settings',
       'separator',
       'toggle-capture',
       'separator',
@@ -62,10 +64,12 @@ describe('buildTrayMenu：托盘 / 球右键共用菜单（Q4）', () => {
     const entries = buildTrayMenu('running', handlers)
 
     pickAction(entries, 'open-ask').click()
+    pickAction(entries, 'open-settings').click()
     pickAction(entries, 'toggle-capture').click()
     pickAction(entries, 'quit').click()
 
     expect(handlers.openAsk).toHaveBeenCalledTimes(1)
+    expect(handlers.openSettings).toHaveBeenCalledTimes(1)
     expect(handlers.toggleCapture).toHaveBeenCalledTimes(1)
     expect(handlers.quit).toHaveBeenCalledTimes(1)
   })

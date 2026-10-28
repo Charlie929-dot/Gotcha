@@ -101,6 +101,7 @@ Foam 内核是独立 Lit 组件（`src/renderer/foam/foam-graph.ts`，vendored�
   引用纪律：`citations[].segmentId` **必须落在本次检索命中的集合里**，编造的整条丢弃（剥离后若一条不剩，
   与「没找到证据」同样处理）；`answer` 缺失或不是字符串 → 整次失败。
 - **拒答**：无命中 → 固定文案「信息链里没找到」，不调 LLM 编话；检索到相关段但撑不起结论 → `insufficient` 出口（模型说明 + 0～3 条相关引用 + 最多 5 条「检索到的段」，只标相关、不当结论；D55 ①）。
+- **过程（D55 ③）**：工具循环默认开 thinking，每轮 `reasoning_content` + 工具调用摘要进 `trace.steps`；随结果返回、落 `ask-history.jsonl`，界面折叠展示（只展示，不写回请求）。
 
 ## 5. 阶段表（每阶段独立 PR、独立验收）
 

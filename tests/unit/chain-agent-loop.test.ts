@@ -569,6 +569,41 @@ describe('问记忆 · 工具循环（主路径）', () => {
     })
   })
 
+  it('过程可见：每轮思考 + 工具摘要进 trace', async () => {
+    const seg = seed({
+      pid: 1,
+      app: 'Firefox',
+      title: '文档',
+      from: at(0),
+      to: at(60),
+      text: 'LNK1104 的记录'
+    })
+    const client = new FakeLlmClient([
+      {
+        toolCalls: [{ name: 'search_info', arguments: { keywords: ['LNK1104'] } }],
+        reasoning: '先搜 LNK1104。'
+      },
+      {
+        json: {
+          answer: '09:00 的〈Firefox〉里查过。',
+          citations: [{ segmentId: seg, why: '文档段' }]
+        },
+        reasoning: '找到了一段，作答。'
+      }
+    ])
+    const result = await askChain(buildDeps(client), 'LNK1104')
+    expect(result.kind).toBe('answer')
+    if (result.kind !== 'answer') return
+    expect(result.trace?.steps).toHaveLength(2)
+    expect(result.trace?.steps[0]?.thinking).toBe('先搜 LNK1104。')
+    expect(result.trace?.steps[0]?.tools[0]).toMatchObject({
+      name: 'search_info',
+      summary: expect.stringContaining('命中 1 段')
+    })
+    expect(result.trace?.steps[1]?.thinking).toBe('找到了一段，作答。')
+    expect(result.trace?.steps[1]?.tools).toEqual([])
+  })
+
   it('semantic 走注入的 embedder；算不出向量就只剩关键词路', async () => {
     seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: '看文档' })
     const embedded: string[] = []

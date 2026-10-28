@@ -15,7 +15,8 @@ import {
   type ChainAskRelatedSegment,
   type ChainAskResult,
   type ChainAskResumeDecision,
-  type ChainAskStats
+  type ChainAskStats,
+  type ChainAskTrace
 } from '../../chain/agent/types'
 import type { SegmentEvidence } from '../../chain/agent/evidence'
 import type { AskHistoryEntry } from '../../main/ask-history'
@@ -377,6 +378,48 @@ function appendRelated(card: HTMLElement, related: ChainAskRelatedSegment[] | un
   card.append(title, relatedList(related))
 }
 
+/**
+ * 过程（D55 ③）：模型思考（CoT）+ 每轮工具调用摘要，折叠展示。
+ * 只展示，不参与回答；没开 thinking 的供应商就只有「查了什么」。
+ */
+function traceFold(trace: ChainAskTrace | undefined): HTMLElement | null {
+  if (!trace || trace.steps.length === 0) return null
+  const details = element('details', 'trace')
+  const summary = element('summary')
+  const hasThinking = trace.steps.some((step) => (step.thinking ?? '') !== '')
+  summary.textContent = hasThinking
+    ? `思考过程（${trace.steps.length} 轮）`
+    : `查了什么（${trace.steps.length} 轮）`
+  details.append(summary)
+  for (const step of trace.steps) {
+    const wrap = element('div', 'trace-step')
+    const head = element('div', 'trace-head')
+    head.textContent = `第 ${step.turn} 轮`
+    wrap.append(head)
+    if (step.thinking) {
+      const pre = element('pre', 'trace-thinking')
+      pre.textContent = step.thinking
+      wrap.append(pre)
+    }
+    if (step.tools.length > 0) {
+      const list = element('ul', 'trace-tools')
+      for (const tool of step.tools) {
+        const item = element('li')
+        item.textContent = `${tool.name} · ${tool.summary}`
+        list.append(item)
+      }
+      wrap.append(list)
+    }
+    details.append(wrap)
+  }
+  return details
+}
+
+function appendTrace(card: HTMLElement, trace: ChainAskTrace | undefined): void {
+  const fold = traceFold(trace)
+  if (fold) card.append(fold)
+}
+
 function assistantCard(className: string, label: string, at: number, stats: ChainAskStats): HTMLElement {
   const wrap = element('div', 'msg assistant')
   const card = element('div', `card ${className}`)
@@ -405,6 +448,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `引用（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    appendTrace(card, entry.trace)
     return
   }
 
@@ -419,6 +463,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       card.append(title, citationList(entry.citations))
     }
     appendRelated(card, entry.related, entry.citations.length > 0)
+    appendTrace(card, entry.trace)
     return
   }
 
@@ -446,6 +491,7 @@ function renderTurn(entry: AskHistoryEntry): void {
     const hint = element('p', 'muted')
     hint.textContent = '补一句再问，或直接点上面的候选。'
     card.append(hint)
+    appendTrace(card, entry.trace)
     return
   }
 
@@ -466,6 +512,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       card.append(title, citationList(entry.citations))
     }
     appendRelated(card, entry.related, entry.citations.length > 0)
+    appendTrace(card, entry.trace)
     return
   }
 
@@ -473,6 +520,7 @@ function renderTurn(entry: AskHistoryEntry): void {
   const text = element('p', 'answer-text')
   text.textContent = errorTextOf(entry.reason, entry.message)
   card.append(text)
+  appendTrace(card, entry.trace)
 }
 
 function renderEmptyThread(): void {

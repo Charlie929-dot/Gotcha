@@ -52,6 +52,10 @@ interface ChatCompletionResponse {
   choices?: Array<{
     message?: {
       content?: string | null
+      /** DeepSeek V4 开 thinking 时正文之前先给这段思维链 */
+      reasoning_content?: string | null
+      /** 个别网关把思维链叫 reasoning */
+      reasoning?: string | null
       tool_calls?: Array<{
         id?: string | null
         function?: { name?: string | null; arguments?: string | null }
@@ -315,6 +319,8 @@ function userContent(
  * ------------------------------------------------------------------ */
 
 /** 工具循环发给网关的 tools 参数（名字与参数形状和 agent 层执行器一一对应） */
+const ASK_LOOP_MAX_TOKENS = 6_000
+
 const ASK_LOOP_TOOLS = [
   {
     type: 'function',
@@ -632,7 +638,10 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
     mode: AskLoopRequestMode
   ): Promise<LlmJsonResult | LlmAskLoopResult> {
     const controller = new AbortController()
-    const maxTokens = callOptions.maxTokens ?? LLM_DEFAULTS.maxTokens
+    // 工具循环默认开 thinking（D55 ③）：思维链先吃 token，2000 的默认上限会把
+    // 最终 JSON / tool_calls 截断，所以工具轮统一抬到 6000（调用方仍可覆盖）。
+    const askMode = mode !== 'json'
+    const maxTokens = callOptions.maxTokens ?? (askMode ? ASK_LOOP_MAX_TOKENS : LLM_DEFAULTS.maxTokens)
     let timedOut = false
     const timer = setTimeout(() => {
       timedOut = true
@@ -674,7 +683,9 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
             temperature: callOptions.temperature ?? LLM_DEFAULTS.temperature,
             max_tokens: maxTokens,
             stream: false,
-            ...(disableThinking ? { thinking: { type: 'disabled' } } : {})
+            // 问记忆工具循环开 thinking（D55 ③：过程可见）；其余结构化输出仍关掉，
+            // 避免 CoT 把 max_tokens 吃满（见 isDeepSeekEndpoint 注释）。非 DeepSeek 端点不发这个字段。
+            ...(disableThinking && !askMode ? { thinking: { type: 'disabled' } } : {})
           }),
           signal: controller.signal,
           // 不跟随重定向：避免 302 把带 Authorization 的请求带到别的地址
@@ -707,6 +718,10 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
       const finishReason = data.choices?.[0]?.finish_reason
       const truncated = finishReason === 'length'
       const content = data.choices?.[0]?.message?.content
+      const rawReasoning =
+        data.choices?.[0]?.message?.reasoning_content ?? data.choices?.[0]?.message?.reasoning
+      const reasoning = typeof rawReasoning === 'string' && rawReasoning.trim() !== '' ? rawReasoning : undefined
+      const reasoningView = reasoning ? { reasoning } : {}
 
       // 工具轮：带 tool_calls 就直接回（finish_reason 各网关写法不一，以字段为准）
       if (mode === 'ask-loop') {
@@ -736,7 +751,7 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
               arguments: args
             })
           })
-          if (toolCalls.length > 0) return { toolCalls, usage }
+          if (toolCalls.length > 0) return { toolCalls, usage, ...reasoningView }
         }
       }
 
@@ -782,7 +797,7 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
           )
         }
       }
-      return { json, usage }
+      return { json, usage, ...reasoningView }
     } finally {
       clearTimeout(timer)
       externalSignal?.removeEventListener('abort', onExternalAbort)

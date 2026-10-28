@@ -175,6 +175,37 @@ describe('对话记录：折条', () => {
     expect(parseAskHistoryEntry(JSON.parse(JSON.stringify(record)))).toEqual(record)
   })
 
+  it('trace 落盘 / 读回；坏 trace 整行跳过', () => {
+    const result: ChainAskResult = {
+      kind: 'answer',
+      answer: '你问了 B 站',
+      citations: [CITATION],
+      trace: {
+        steps: [
+          {
+            turn: 1,
+            thinking: '先检索。',
+            tools: [
+              {
+                name: 'search_info',
+                arguments: { keywords: ['B站'] },
+                summary: '检索命中 1 段（keywords）'
+              }
+            ]
+          },
+          { turn: 2, tools: [] }
+        ]
+      },
+      stats: { hits: 1, evidence: 1, cited: 1, questionChars: 3 }
+    }
+    const record = toHistoryEntry('问', result, 5_000)
+    expect(record.trace?.steps).toHaveLength(2)
+    expect(parseAskHistoryEntry(JSON.parse(JSON.stringify(record)))).toEqual(record)
+    expect(
+      parseAskHistoryEntry({ ...record, trace: { steps: [{ turn: 'x', tools: [] }] } })
+    ).toBeNull()
+  })
+
   it('error 留原因与可读消息', () => {
     const result: ChainAskResult = {
       kind: 'error',

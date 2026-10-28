@@ -28,7 +28,13 @@
  * - 每轮 usage 累计、**结束时一次** `onUsage`（失败路径也记账，F03 口径）；
  * - 「answer 说没找到但 citations 非空」强转 no-evidence（根因 7）。
  */
-import type { AskLoopFreshness, AskOutbound, AskRecentSegment, RedactableAskLoopTurn } from './payload'
+import type {
+  AskLoopFreshness,
+  AskOutbound,
+  AskRecentSegment,
+  RedactableAskLoopToolResult,
+  RedactableAskLoopTurn
+} from './payload'
 import {
   LlmAbortError,
   LlmParseError,
@@ -42,6 +48,8 @@ import {
   type ChainAskResult,
   type ChainAskRelatedSegment,
   type ChainAskStats,
+  type ChainAskTraceStep,
+  type ChainAskTraceTool,
   type ChainAskTurnContext
 } from './types'
 import { createAskToolExecutor, type AskHistorySummary } from './tools'
@@ -70,6 +78,8 @@ export interface AskLoopResumeState {
   grants: number
   /** 暂停时的统计（questionChars 等；最终出口会用当前值重算 turns / hits） */
   stats: ChainAskStats
+  /** 暂停前已经发生的思考 / 工具步骤（恢复后继续累积） */
+  steps: readonly ChainAskTraceStep[]
 }
 
 export interface AskLoopContext {
@@ -139,6 +149,36 @@ function relatedFromWhitelist(
   }))
 }
 
+/** 每轮思考落盘上限：CoT 可能很长，全存会把历史文件撑大 */
+const MAX_TRACE_THINKING_CHARS = 4_000
+/** 每轮最多记几条工具调用（异常网关可能一口气给很多） */
+const MAX_TRACE_TOOLS = 8
+
+function clipThinking(text: string): string {
+  return text.length <= MAX_TRACE_THINKING_CHARS
+    ? text
+    : `${text.slice(0, MAX_TRACE_THINKING_CHARS)}…`
+}
+
+/** 工具结果的一句话摘要（过程展示用；不搬正文） */
+function summarizeToolOutcome(
+  result: RedactableAskLoopToolResult,
+  segments: number
+): string {
+  switch (result.kind) {
+    case 'search_info':
+      return `检索命中 ${segments} 段（${result.stats.mode}）`
+    case 'ask_history':
+      return `问答记录 ${result.entries.length} 条`
+    case 'get_freshness':
+      return '查了数据边界'
+    case 'read_segment':
+      return `打开段 ${result.segmentId}`
+    default:
+      return `失败：${result.message}`
+  }
+}
+
 /**
  * 跑一次工具循环。调用方（`askChain`）已经把空问题 / consent / budget / 客户端
  * 解析都判过了；这里只负责循环本身，返回结构化 `ChainAskResult`，不向调用方抛异常。
@@ -151,6 +191,11 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
 
   /// 引用白名单：search_info 返回过、且脱敏后仍然给模型看过的段（read_segment 的越权门）
   const whitelist = new Map<number, CitationMeta>(resume?.whitelist ?? [])
+
+  /** 过程（D55 ③）：每轮思考 + 工具调用摘要；恢复时先继承暂停前的步骤 */
+  const steps: ChainAskTraceStep[] = resume ? [...resume.steps] : []
+  const withTrace = (result: ChainAskResult): ChainAskResult =>
+    steps.length === 0 ? result : { ...result, trace: { steps } }
 
   const executor = createAskToolExecutor({
     db: ctx.db,
@@ -233,7 +278,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     if (ctx.signal?.aborted) {
       log('info', 'chain ask loop: 用户停止', { turn: globalTurn })
       settleUsage()
-      return { kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(turnsUsed + turn - 1, toolCallCount) }
+      return withTrace({ kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(turnsUsed + turn - 1, toolCallCount) })
     }
     // 收尾轮：不再给工具，逼模型用已看到的段作答（不带 tools 的请求也不可能回 tool_calls）。
     // 用户选「先按现在的结果回答」时，恢复后的第一轮就是这个收尾轮。
@@ -272,18 +317,18 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       if (error instanceof LlmAbortError) {
         log('info', 'chain ask loop: 请求已停止', { turn: globalTurn })
         settleUsage()
-        return { kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(globalTurn, toolCallCount) }
+        return withTrace({ kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(globalTurn, toolCallCount) })
       }
       log('warn', 'chain ask loop: 模型调用失败', { error: String(error), turn: globalTurn })
       // 解析失败也消耗了 token（LlmParseError.usage）：先入账再返回失败
       if (error instanceof LlmParseError) accumulate(error.usage)
       settleUsage()
-      return {
+      return withTrace({
         kind: 'error',
         reason: 'failed',
         message: String(error),
         stats: withLoopDiag(globalTurn, toolCallCount)
-      }
+      })
     }
     assistantTurns = globalTurn
     accumulate(response.usage)
@@ -291,6 +336,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     // 收尾轮即便客户端还回了 tool_calls（假客户端 / 网关异常）也不执行：
     // 直接按「最终答复」解析，宁可报不成形，也不无限延长循环
     const toolCalls = allowTools ? response.toolCalls ?? [] : []
+    const thinking =
+      response.reasoning !== undefined ? clipThinking(response.reasoning) : undefined
     if (!allowTools && (response.toolCalls?.length ?? 0) > 0) {
       log('warn', 'chain ask loop: 收尾轮仍返回 tool_calls，已忽略', {
         turn: globalTurn,
@@ -304,14 +351,16 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           toolCallCount,
           incoming: toolCalls.length
         })
+        steps.push({ turn: globalTurn, ...(thinking ? { thinking } : {}), tools: [] })
         settleUsage()
-        return {
+        return withTrace({
           kind: 'error',
           reason: 'failed',
           message: `模型在 ${toolCallBudget} 次工具调用内没有收敛（也可能是这一问确实没有记录）`,
           stats: withLoopDiag(globalTurn, toolCallCount)
-        }
+        })
       }
+      const traceTools: ChainAskTraceTool[] = []
       for (const call of toolCalls) {
         toolCallCount += 1
         if (call.name === 'ask_history') usedAskHistory = true
@@ -320,6 +369,11 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         const toolMs = Date.now() - toolStartedAt
         turns.push({ toolCall: { name: call.name, arguments: call.arguments }, toolResult: outcome.result })
         hitsShown += outcome.segments.length
+        traceTools.push({
+          name: call.name,
+          arguments: call.arguments,
+          summary: summarizeToolOutcome(outcome.result, outcome.segments.length)
+        })
         for (const meta of outcome.segments) {
           whitelist.set(meta.segmentId, meta)
         }
@@ -335,6 +389,11 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           log('warn', 'chain ask loop: 工具执行失败', { tool: call.name })
         }
       }
+      steps.push({
+        turn: globalTurn,
+        ...(thinking ? { thinking } : {}),
+        tools: traceTools.slice(0, MAX_TRACE_TOOLS)
+      })
       // 预算正好在最后一轮用完、模型还想继续查：**不硬掐**。把状态交回调用方，
       // 由它问用户「还要继续吗」；用户同意就再给一轮预算，不同意就按现有结果收尾。
       // 暂停前的工具已经执行完并留在 turns 里，恢复时不用重查。
@@ -347,7 +406,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           usedAskHistory,
           turnsUsed: globalTurn,
           grants,
-          stats: { ...stats, hits: hitsShown, evidence: whitelist.size, turns: globalTurn, toolCalls: toolCallCount }
+          stats: { ...stats, hits: hitsShown, evidence: whitelist.size, turns: globalTurn, toolCalls: toolCallCount },
+          steps: [...steps]
         })
         log('info', 'chain ask loop: 轮数用尽，等用户决定是否继续', {
           turns: globalTurn,
@@ -355,17 +415,18 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           grants
         })
         settleUsage()
-        return {
+        return withTrace({
           kind: 'continue-ask',
           question: `已经查了 ${globalTurn} 轮，还要接着查吗？`,
           options: [`继续查（再给 ${ASK_LOOP_MAX_TOOL_TURNS} 轮）`, '先按现在的结果回答'],
           stats: withLoopDiag(globalTurn, toolCallCount)
-        }
+        })
       }
       continue
     }
 
     // 最终答复轮：引用白名单 + 归一 + 出口（hits / evidence 由 withLoopDiag 统一填）
+    steps.push({ turn: globalTurn, ...(thinking ? { thinking } : {}), tools: [] })
     const rawCitations = (response.json as { citations?: unknown } | null)?.citations
     stats.cited = Array.isArray(rawCitations) ? rawCitations.length : 0
 
@@ -377,41 +438,41 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     if (!parsed.ok) {
       settleUsage()
       if (parsed.reason === 'no-citations') {
-        return {
+        return withTrace({
           kind: 'no-evidence',
           related: relatedFromWhitelist(whitelist),
           stats: withLoopDiag(globalTurn, toolCallCount)
-        }
+        })
       }
-      return {
+      return withTrace({
         kind: 'error',
         reason: 'unparseable',
         message: parsed.message,
         stats: withLoopDiag(globalTurn, toolCallCount)
-      }
+      })
     }
     if (parsed.kind === 'clarify') {
       // 模型选择先问一句：这是正常出口，不是失败；选项已在上限内去重
       log('info', 'chain ask loop: 模型要求确认', { options: parsed.options.length })
       settleUsage()
-      return {
+      return withTrace({
         kind: 'clarify',
         question: parsed.question,
         options: parsed.options,
         stats: withLoopDiag(globalTurn, toolCallCount)
-      }
+      })
     }
     settleUsage()
     if (parsed.kind === 'insufficient') {
       // 查到了相关段但撑不起结论：保留模型说明，引用（0–3 条）只当「看过的证据」，
       // 另外把检索到的段列出来——不再用一句固定文案把这一轮整个盖掉。
-      return {
+      return withTrace({
         kind: 'insufficient',
         answer: parsed.answer,
         citations: parsed.citations,
         related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
-      }
+      })
     }
     if (isNoEvidenceAnswer(parsed.answer) && parsed.citations.length > 0) {
       // 根因 7：嘴上说没找到却塞了引用。以前整段丢掉，用户只看到「没找到」；
@@ -419,38 +480,38 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       log('warn', 'chain ask loop: answer 声称没找到但 citations 非空，按没找到保留说明', {
         cited: parsed.citations.length
       })
-      return {
+      return withTrace({
         kind: 'no-evidence',
         note: parsed.answer,
         citations: parsed.citations,
         related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
-      }
+      })
     }
     if (isNoEvidenceAnswer(parsed.answer)) {
       // 无引用且自称没找到：维持「没找到」，不把固定文案当回答
-      return {
+      return withTrace({
         kind: 'no-evidence',
         related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
-      }
+      })
     }
-    return {
+    return withTrace({
       kind: 'answer',
       answer: parsed.answer,
       citations: parsed.citations,
       stats: withLoopDiag(globalTurn, toolCallCount)
-    }
+    })
   }
 
   // 循环出口全覆盖（上限路径在循环内返回），到这里是防御性兜底
   settleUsage()
-  return {
+  return withTrace({
     kind: 'error',
     reason: 'failed',
     message: '工具循环异常结束',
     stats: withLoopDiag(assistantTurns, toolCallCount)
-  }
+  })
 }
 
 /** 供 `askChain` 判定走循环还是回退单发：客户端带 `completeAskLoop` 就走循环 */

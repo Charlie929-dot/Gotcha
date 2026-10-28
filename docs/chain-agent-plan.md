@@ -94,7 +94,7 @@ Foam 内核是独立 Lit 组件（`src/renderer/foam/foam-graph.ts`，vendored�
     **一段完整回答 + 它引用的窗口段**（P7，不拆 step）。`at` / `app` / `title` 由服务端从命中段行填好，
     前端不用再查库；`why` 是模型对这一段的一句「那是什么」。引用上限 **6 条**（初值，超了按相关度截断）；
   - `narrateSegment(segmentId)` → 针对单段的续讲（S4 前纯文本；S4 起带该段证据截图）。
-- **检索**：问题全文进 `text`（`normalizeOcrSql` 口径）+ bge 段向量（`src/chain/index.ts` 现有会话）双路 RRF；`limit` 取 5~10。
+- **检索**：问题全文进 `text`（`normalizeOcrSql` 口径）+ bge 段向量（`src/chain/index.ts` 现有会话）双路 RRF；`limit` 取 5~10。工具循环里纯过滤支持 `order:"oldest"`（问「第一次 / 最早」用，D55 ④）；提问前最后一段（应用 / 标题 / 时刻）随载荷注入当指代线索（不是证据，引用仍要经检索）。
 - **证据组装**：命中段 → `getSegmentDetail()` → 每段带起止时间 / 应用 / 标题 / 命中原文片段（截 ~500 字）/ 标签 / 双链。
 - **出云**：`redact.ts` 新增 `ChainAskPayload` / `ChainNarratePayload`（证据直传，见 §0.1），`LlmClient` 加 `completeAsk()` / `completeNarrate()`；与派生层共用确认门、日账、退避与 abort。
 - **解析纪律**：照抄派生层 `parse.ts`——只信字段与上限，结构不对整次失败，不当空结果。

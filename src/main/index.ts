@@ -74,7 +74,9 @@ import { createDeterministicFakeEmbedder, type DeterministicFakeEmbedder } from 
 import { createGraphWindow } from './graph-window'
 import { createAskWindow } from './ask-window'
 import { askChain, type ChainAskOptions } from '../chain/agent/ask'
+import type { AskRecentSegment } from '../chain/agent/payload'
 import type { ChainDb } from '../chain/store'
+import { querySegments } from '../chain/store'
 import {
   searchChainSegmentsBatch,
   type ChainSearchBatchQuery,
@@ -1700,6 +1702,19 @@ if (primaryInstance) {
     // 问记忆的依赖（提问与「继续查」共用一份：两边口径必须一致，否则续查会绕过脱敏 / 预算 / 记账）
     // 出云安全只在边界生效：核心拿到的只是一个载荷组装端口，不 import 脱敏实现。
     const askOutbound = createCloudAskOutbound()
+    /**
+     * 提问前最后一段证据（应用 / 标题 / 时刻）：给「这个界面 / 刚才那个」一个指代落点。
+     * 取段库最新的那一段（含开着的）；app / 标题在载荷层过策略，命中阻断就整条不出云。
+     */
+    const latestSegmentHint = (db: ChainDb): AskRecentSegment | undefined => {
+      const [row] = querySegments(db, { includeOpen: true, limit: 1 })
+      if (!row) return undefined
+      return {
+        app: row.app ?? '',
+        title: row.title_last ?? row.title_first ?? '',
+        at: row.start_ts
+      }
+    }
     const askOptionsFor = (db: ChainDb, context: AskQueryContext): ChainAskOptions => ({
       db,
       resolveClient,
@@ -1713,7 +1728,22 @@ if (primaryInstance) {
       // 工具循环注入：固定钟、采集运行态、问答历史（freshness / ask_history 工具的数据源）
       now: () => Date.now(),
       captureRunning: () => controller.status() === 'running',
-      readAskHistory: () => readAskHistory(askHistoryPath),
+      // ask_history 默认只查本会话（D55 ②）：以前把全库问答倒给模型，别的会话的问题会被写成
+      // 「你刚才问的」。要跨会话必须显式 scope:"all"，每条带 session 标记。
+      readAskHistory: (scope) => {
+        const current = (entry: { conversationId?: string; id: string }): boolean =>
+          (entry.conversationId ?? entry.id) === context.conversationId
+        return readAskHistory(askHistoryPath)
+          .filter((entry) => scope === 'all' || current(entry))
+          .map((entry) => ({
+            at: entry.at,
+            question: entry.question,
+            kind: entry.kind,
+            session: (current(entry) ? 'current' : 'other') as 'current' | 'other'
+          }))
+      },
+      // 指代线索：提问前最后一段（不是证据；引用仍要经 search_info / read_segment）
+      recent: latestSegmentHint(db),
       searchBatch: runSearchBatch,
       // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
       history: context.history,

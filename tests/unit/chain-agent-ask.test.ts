@@ -444,6 +444,17 @@ describe('问记忆：载荷脱敏与解析纪律', () => {
     expect(built.payload.history.map((turn) => turn.question)).toEqual(['问 3', '问 4', '问 5', '问 6'])
   })
 
+  it('循环载荷：最近一段的应用命中密码类词 → 整条不带（不出云）', () => {
+    const built = buildChainAskLoopPayload({
+      question: '这个界面',
+      systemTime: '2026-10-27 09:00 周二',
+      freshness: { latestEvidenceTs: null, captureRunning: false },
+      turns: [],
+      recent: { app: '1Password.exe', title: 'Vault', at: 0 }
+    })
+    expect(built.payload.recent).toBeUndefined()
+  })
+
   it('循环载荷：工具参数的键名也过脱敏（blocked 键整条丢，正常键原样）', () => {
     const built = buildChainAskLoopPayload({
       question: '随便问问',

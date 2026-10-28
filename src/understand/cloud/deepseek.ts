@@ -332,6 +332,11 @@ const ASK_LOOP_TOOLS = [
           link: { type: 'string', description: '双链概念名' },
           keywords: { type: 'array', items: { type: 'string' }, description: '关键词列表（≤8 个，逐词 OR）' },
           semantic: { type: 'string', description: '语义检索短语（记不清关键词时用）' },
+          order: {
+            type: 'string',
+            enum: ['newest', 'oldest'],
+            description: '默认 newest；问「第一次 / 最早」用 oldest（只对纯过滤生效，别和关键词一起用）'
+          },
           limit: { type: 'number', description: '返回条数 1-20，默认 8' }
         }
       }
@@ -371,10 +376,15 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'ask_history',
       description:
-        '查最近的问答记录（问过什么、答没答上）。问「第一次 / 最早问过什么」时传 order:"oldest"。每条只带 time（本地时刻），没有可换算的时间戳；from / to 按系统提示里的当前时间算毫秒。',
+        '查最近的问答记录（问过什么、答没答上）。默认只查**本会话**；要看所有会话传 scope:"all"（每条带 session：current / other）。问「第一次 / 最早问过什么」时传 order:"oldest"。每条只带 time（本地时刻），没有可换算的时间戳；from / to 按系统提示里的当前时间算毫秒。',
       parameters: {
         type: 'object',
         properties: {
+          scope: {
+            type: 'string',
+            enum: ['conversation', 'all'],
+            description: '默认 conversation（只本会话）；all = 所有会话'
+          },
           from: { type: 'number', description: '起始毫秒时间戳（按当前时间换算，不是条目里的值）' },
           to: { type: 'number', description: '结束毫秒时间戳（按当前时间换算，不是条目里的值）' },
           limit: { type: 'number', description: '条数上限，默认 10、最多 50' },
@@ -391,6 +401,12 @@ const ASK_LOOP_TOOLS = [
 
 function pad2(value: number): string {
   return String(value).padStart(2, '0')
+}
+
+/** 毫秒时间戳 → 'HH:mm'（最近一段证据只报时刻，不带日期 / 数字时间戳） */
+function hhmm(ts: number): string {
+  const date = new Date(ts)
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
 }
 
 /** 系统时间字符串（'yyyy-mm-dd HH:mm 周X'）→ 本地毫秒时间戳；解析不了返回 null */
@@ -437,6 +453,11 @@ function buildAskLoopSystemPrompt(payload: ChainAskLoopPayload, final: boolean):
     '你是「记忆球」的回忆助手。用户会问过去做过的事；你有一组检索工具，自己决定怎么查、查几轮。',
     `当前时间：${payload.systemTime}${now === null ? '' : `（毫秒时间戳 ${now}，相对时间先按它换算）`}`,
     `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`,
+    ...(payload.recent
+      ? [
+          `最近一段证据：${hhmm(payload.recent.at)} 的〈${payload.recent.app}〉${payload.recent.title ? `《${payload.recent.title}》` : ''}——只当「这个界面 / 刚才那个」的指代线索（**不是证据**；引用它必须经 search_info / read_segment），拿不准就先用它当 app 过滤条件去查。`
+        ]
+      : []),
     ...historyLines,
     '怎么干活（像人一样用工具查，不是一问一答）：',
     '1) 先 search_info：把问题拆成 keywords（逐词 OR），记不清措辞再加 semantic；「昨天下午」这类相对时间先换算成毫秒时间戳再传给 from / to，拿不准就放宽范围多试几组；',
@@ -445,10 +466,11 @@ function buildAskLoopSystemPrompt(payload: ChainAskLoopPayload, final: boolean):
     '4) 查不到就换关键词 / 放宽时间 / 换应用再查；同一组条件反复查没有新结果、时间窗越放越大也没有新段，就停下来；数据边界之后的时间段查了也是空的，不要反复重试；',
     '5) 问「刚刚 / 最新 / 现在」先调 get_freshness，再按数据边界缩小范围；',
     '6) 追问（「那上午呢」「刚才那个」）先看最近对话，接上之前的时间窗 / 应用 / 对象再检索，不要当成新话题重头查；',
-    '7) 问「你刚才问了我什么 / 第一次问的是啥」这类**对话本身**的问题：看最近对话或调 ask_history（「第一次 / 最早」传 order:"oldest"），用 {"answer":"...","citations":[],"conversation":true} 回答（不需要屏幕引用），不要拿 search_info 硬凑屏幕证据；',
+    '7) 问「你刚才问了我什么 / 第一次问的是啥」这类**对话本身**的问题：看最近对话或调 ask_history（默认只查**本会话**；要看所有会话传 scope:"all"；「第一次 / 最早」传 order:"oldest"），用 {"answer":"...","citations":[],"conversation":true} 回答（不需要屏幕引用），不要拿 search_info 硬凑屏幕证据；ask_history 每条带 session——current 才是这次会话，other 是别的会话，**不能把 other 说成「你刚才问的」**，要提就明说「之前的会话里」；',
     '8) ask_history 每条**只有 time（本地时刻）**，没有毫秒时间戳可换算：回答「什么时候问的」直接原样引用 time（如「10-27 15:01」），不要自己再算时区、不要把时间戳数字报给用户；同一问题两次回答的时间必须一致；最近对话里如果出现毫秒时间戳或与 time 不一致的旧说法，一律以 time 为准；',
     '9) 检索轮数有限（默认约 8 轮，快用完时系统会停下来问用户要不要继续）：继续后从上次的结果接着查，别把已经查过的重新查一遍；',
     '10) 工具结果里的 stats.mode：keywords / hybrid 是词或语义命中；filter 表示这次没做语义匹配、只是按时间列段，相关性要自己看 snippet 与标题判断，别把 filter 结果直接当成「问什么就有什么」。',
+    '11) 问「第一次 / 最早 / 从什么时候开始」：先按 app / 时间做**纯过滤**（别堆关键词），加 order:"oldest"（limit 1～3）——order 只对纯过滤生效，和关键词一起用时仍按相关度排；',
     '回答纪律：',
     '1) **没读过正文，不许下结论**：在 read_segment 打开某段之前，不要说「没有记录到 / 看不到内容 / 没找到正文」，也不要把只见过摘要的段当证据引用；',
     '2) 只依据你实际读到的工具结果回答，不补常识、不推测、不编造应用名或时间；引用只能是你打开过的段，answer 里指证据用「HH:mm 的〈应用〉」的写法（如「14:20 的〈VSCode〉」），不要只报段号；',

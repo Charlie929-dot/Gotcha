@@ -28,11 +28,7 @@
  * - 每轮 usage 累计、**结束时一次** `onUsage`（失败路径也记账，F03 口径）；
  * - 「answer 说没找到但 citations 非空」强转 no-evidence（根因 7）。
  */
-import type {
-  AskLoopFreshness,
-  AskOutbound,
-  RedactableAskLoopTurn
-} from './payload'
+import type { AskLoopFreshness, AskOutbound, AskRecentSegment, RedactableAskLoopTurn } from './payload'
 import {
   LlmAbortError,
   LlmParseError,
@@ -88,12 +84,14 @@ export interface AskLoopContext {
   now: () => number
   /** 采集是否在跑 */
   captureRunning: () => boolean
-  /** 最近问答记录（ask_history 工具的数据源） */
-  readAskHistory?: () => readonly AskHistorySummary[]
+  /** 最近问答记录（ask_history 工具的数据源；默认只查本会话，`all` 才跨会话） */
+  readAskHistory?: (scope: 'conversation' | 'all') => readonly AskHistorySummary[]
   /** 关键词批量检索的执行体（主进程注入 worker 版；不传 = 进程内同步查） */
   searchBatch?: (query: ChainSearchBatchQuery) => Promise<ChainSearchBatchResult>
   /** 同一会话之前的几轮（续问）；没有就是新对话 */
   history?: readonly ChainAskTurnContext[]
+  /** 提问前最后一段证据（指代线索；不是证据） */
+  recent?: AskRecentSegment
   /** 用户点「停止」时中止在途请求 */
   signal?: AbortSignal
   /** 选区问答：随本轮问题一起给模型看的截图（data URL；不脱敏，D51 之后的新入口） */
@@ -177,7 +175,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     systemTime,
     freshness,
     turns: [],
-    ...(ctx.history ? { history: ctx.history } : {})
+    ...(ctx.history ? { history: ctx.history } : {}),
+    ...(ctx.recent ? { recent: ctx.recent } : {})
   })
   if (probe.questionBlocked) {
     return { kind: 'error', reason: 'question-blocked', message: '问题里含敏感内容，未出云', stats }
@@ -245,7 +244,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       systemTime,
       freshness,
       turns,
-      ...(ctx.history ? { history: ctx.history } : {})
+      ...(ctx.history ? { history: ctx.history } : {}),
+      ...(ctx.recent ? { recent: ctx.recent } : {})
     })
     // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；
     // 用可见集合而不是「累加后删除被挡 id」，是避免粘性误删——同一段后续轮次

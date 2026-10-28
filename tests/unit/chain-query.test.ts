@@ -280,6 +280,17 @@ describe('searchChainSegments · 过滤', () => {
     expect(searchChainSegments(db, {}).hits).toEqual([])
     expect(searchChainSegments(db, { app: 'Firefox', limit: 1 }).hits.map((hit) => hit.segment.id)).toEqual([b])
   })
+
+  it('order=oldest：纯过滤取最早的一段（问「第一次」不用再二分时间）', () => {
+    const a = segment({ app: 'DSH NEXT', title: '最早', startTs: T0 })
+    const b = segment({ app: 'DSH NEXT', title: '后来', startTs: T0 + MINUTE })
+
+    expect(searchChainSegments(db, { app: 'DSH NEXT', order: 'oldest', limit: 1 }).hits.map((hit) => hit.segment.id)).toEqual([a])
+    expect(searchChainSegments(db, { app: 'DSH NEXT', order: 'newest', limit: 1 }).hits.map((hit) => hit.segment.id)).toEqual([b])
+    // 关键词路仍按相关度排：order 不改名次（已在文档里写明只对纯过滤生效）
+    const keyword = searchChainSegments(db, { text: '共同词', order: 'oldest' })
+    expect(keyword.stats.mode).toBe('keyword')
+  })
 })
 
 describe('searchChainSegmentsBatch · 多关键词一次扫描（P0-3）', () => {

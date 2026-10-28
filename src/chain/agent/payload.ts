@@ -85,6 +85,17 @@ export interface AskLoopFreshness {
   readonly captureRunning: boolean
 }
 
+/**
+ * 提问前最后一段证据（应用 / 标题 / 时刻）。
+ * 只当「这个界面 / 刚才那个」的指代线索——不是证据，模型引用它必须经 search_info / read_segment。
+ */
+export interface AskRecentSegment {
+  readonly app: string
+  readonly title: string
+  /** 毫秒时间戳（送云前按 HH:mm 展示，不带数字） */
+  readonly at: number
+}
+
 /** search_info 摘要里的一条命中（送云前过策略；`at` 是 'HH:mm'，提示纪律要求模型用它指证据） */
 export interface RedactableAskLoopHit {
   segmentId: number
@@ -107,6 +118,8 @@ export interface RedactableAskLoopHistoryEntry {
   time: string
   question: string
   kind: string
+  /** 本会话 / 其他会话（scope=all 时尤其重要：别的会话不能被说成「你刚才问的」） */
+  session?: 'current' | 'other'
 }
 
 /** 续问时带上的一轮对话（问题 + 最终答复 / 澄清问题） */
@@ -167,6 +180,8 @@ export interface ChainAskLoopPayload {
   readonly turns: readonly CloudAskLoopTurn[]
   /** 同一会话里之前几轮（已处理、已限额；空数组 = 新对话） */
   readonly history: readonly { readonly question: string; readonly answer: string }[]
+  /** 提问前最后一段证据（指代线索；已过策略，阻断则缺省） */
+  readonly recent?: AskRecentSegment
   readonly [chainAskLoopBrand]: true
 }
 
@@ -177,6 +192,8 @@ export interface ChainAskLoopBuildInput {
   turns: readonly RedactableAskLoopTurn[]
   /** 同一会话之前的几轮（新对话不传） */
   history?: readonly RedactableAskLoopConversationTurn[]
+  /** 提问前最后一段证据（应用 / 标题 / 时刻；送云前过策略） */
+  recent?: AskRecentSegment
 }
 
 export interface ChainAskLoopBuildResult {
@@ -437,6 +454,16 @@ export function buildAskLoopPayload(
     })
   }
 
+  // 最近一段证据：只当指代线索（app / 标题都过策略；命中阻断的整条不给，免得把密码类标题送出去）
+  let recent: AskRecentSegment | undefined
+  if (input.recent) {
+    const app = guardText(policy, input.recent.app, ASK_APP_MAX_CHARS)
+    const title = guardText(policy, input.recent.title, ASK_TITLE_MAX_CHARS)
+    if (!app.blocked && !title.blocked) {
+      recent = { app: app.text, title: title.text, at: input.recent.at }
+    }
+  }
+
   const turns: CloudAskLoopTurn[] = []
   const blockedSegmentIds: number[] = []
   for (const turn of input.turns) {
@@ -457,14 +484,15 @@ export function buildAskLoopPayload(
         break
       }
       case 'ask_history': {
-        const entries: Array<{ time: string; question: string; kind: string }> = []
+        const entries: Array<{ time: string; question: string; kind: string; session?: 'current' | 'other' }> = []
         for (const entry of result.entries) {
           const question = policy.redact(normalizeText(entry.question))
           if (question.blocked) continue // 单条丢，不连坐
           entries.push({
             time: entry.time, // 本地时刻由工具层生成，不含屏幕文本
             question: question.text.slice(0, ASK_LOOP_QUESTION_MAX_CHARS),
-            kind: entry.kind
+            kind: entry.kind,
+            ...(entry.session !== undefined ? { session: entry.session } : {})
           })
         }
         view = { kind: 'ask_history', freshness: result.freshness, entries }
@@ -525,7 +553,8 @@ export function buildAskLoopPayload(
       systemTime: input.systemTime,
       freshness: input.freshness,
       turns,
-      history
+      history,
+      ...(recent ? { recent } : {})
     } as unknown as ChainAskLoopPayload,
     questionBlocked: asked.blocked,
     blockedSegmentIds

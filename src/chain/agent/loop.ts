@@ -37,6 +37,7 @@ import type {
 } from './payload'
 import {
   LlmAbortError,
+  LlmHttpError,
   LlmParseError,
   type LlmClient,
   type LlmUsage
@@ -319,7 +320,14 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         settleUsage()
         return withTrace({ kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(globalTurn, toolCallCount) })
       }
-      log('warn', 'chain ask loop: 模型调用失败', { error: String(error), turn: globalTurn })
+      log('warn', 'chain ask loop: 模型调用失败', {
+        error: String(error),
+        // 网关错误正文（400 的真实原因）只进日志，不进界面
+        ...(error instanceof LlmHttpError && error.detail !== undefined
+          ? { detail: error.detail }
+          : {}),
+        turn: globalTurn
+      })
       // 解析失败也消耗了 token（LlmParseError.usage）：先入账再返回失败
       if (error instanceof LlmParseError) accumulate(error.usage)
       settleUsage()
@@ -367,7 +375,15 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         const toolStartedAt = Date.now()
         const outcome = await executor.execute({ name: call.name, arguments: call.arguments })
         const toolMs = Date.now() - toolStartedAt
-        turns.push({ toolCall: { name: call.name, arguments: call.arguments }, toolResult: outcome.result })
+        turns.push({
+          toolCall: { name: call.name, arguments: call.arguments },
+          toolResult: outcome.result,
+          // 同一轮的 CoT 挂在轮内每条 turn 上：载荷重建时要把它原样回传，
+          // 否则 DeepSeek 带 tools 的第 2 轮起直接 400（trace 里那份是裁剪过的，不能拿来回传）
+          ...(response.reasoning !== undefined && response.reasoning !== ''
+            ? { reasoning: response.reasoning }
+            : {})
+        })
         hitsShown += outcome.segments.length
         traceTools.push({
           name: call.name,

@@ -1267,6 +1267,91 @@ describe('工具循环 · schema 与执行器一致性', () => {
 })
 
 /* ------------------------------------------------------------------ */
+/* CoT 回传（2026-10-29 回归）                                          */
+/*                                                                     */
+/* DeepSeek 开 thinking 后，请求带 `tools` 时历史各轮的 reasoning_content */
+/* 必须原样回传，否则第 2 轮起直接 400（官方 thinking_mode 文档）。        */
+/* 这条曾经红过：trace 里存了裁剪版 CoT，但 turn 里没留、wire 层也没发。   */
+/* ------------------------------------------------------------------ */
+
+describe('工具循环 · CoT 回传', () => {
+  it('每轮 reasoning 进 turn（整段、不裁剪），回填消息时作为 reasoning_content', async () => {
+    const seg = seedOne(1, 'Firefox', at(0), 'LNK1104 的记录')
+    // 超过 trace 的 4000 字上限：证明「回传给模型的」和「界面展示的」不是同一份
+    const longThinking = '先查数据边界，再看命中的段。'.repeat(400)
+    const client = new FakeLlmClient([
+      { ...searchCall({ keywords: ['LNK1104'] }), reasoning: longThinking },
+      { json: { answer: '找到了。', citations: [{ segmentId: seg, why: '记录' }] }, reasoning: '收尾。' }
+    ])
+    const result = await askChain(buildDeps(client), 'LNK1104')
+    expect(result.kind).toBe('answer')
+
+    // 送云的 turn 带完整 CoT；界面展示的才裁剪
+    expect(client.askLoopRequests[1].turns[0].reasoning).toBe(longThinking)
+    const thinking = result.trace?.steps[0]?.thinking ?? ''
+    expect(thinking.length).toBe(4_001)
+    expect(thinking.endsWith('…')).toBe(true)
+
+    // 回填消息：assistant(tool_calls) 上带 reasoning_content，调用本身不变
+    const messages = buildChainAskLoopMessages(client.askLoopRequests[1])
+    const assistant = messages.find((message) => message.role === 'assistant')
+    expect(assistant?.reasoningContent).toBe(longThinking)
+    expect(assistant?.toolCalls?.[0]?.name).toBe('search_info')
+  })
+
+  it('一轮多个调用：同一段 CoT 挂在轮内每条 turn 上（不会只留最后一条）', async () => {
+    const first = seedOne(1, 'Firefox', at(0), 'LNK1104 的记录')
+    const second = seedOne(2, 'Visual Studio Code', at(120), 'Electron 的说明')
+    const client = new FakeLlmClient([
+      {
+        reasoning: '两个词分开查。',
+        toolCalls: [
+          { id: 'real_id_a', name: 'search_info', arguments: { keywords: ['LNK1104'] } },
+          { id: 'real_id_b', name: 'search_info', arguments: { keywords: ['Electron'] } }
+        ]
+      },
+      {
+        json: {
+          answer: '两段都提到过。',
+          citations: [
+            { segmentId: first, why: '报错那段' },
+            { segmentId: second, why: '说明那段' }
+          ]
+        }
+      }
+    ])
+    const result = await askChain(buildDeps(client), 'LNK1104 和 Electron')
+    expect(result.kind).toBe('answer')
+
+    const turns = client.askLoopRequests[1].turns
+    expect(turns.map((turn) => turn.reasoning)).toEqual(['两个词分开查。', '两个词分开查。'])
+    const assistants = buildChainAskLoopMessages(client.askLoopRequests[1]).filter(
+      (message) => message.role === 'assistant'
+    )
+    expect(assistants.map((message) => message.reasoningContent)).toEqual([
+      '两个词分开查。',
+      '两个词分开查。'
+    ])
+  })
+
+  it('没有 reasoning（关 thinking / 非 DeepSeek 网关）时不带这个字段', async () => {
+    const seg = seedOne(1, 'Firefox', at(0), 'LNK1104 的记录')
+    const client = new FakeLlmClient([
+      searchCall({ keywords: ['LNK1104'] }),
+      { json: { answer: '找到了。', citations: [{ segmentId: seg, why: '记录' }] } }
+    ])
+    await askChain(buildDeps(client), 'LNK1104')
+    const assistant = buildChainAskLoopMessages(client.askLoopRequests[1]).find(
+      (message) => message.role === 'assistant'
+    )
+    expect(assistant?.reasoningContent).toBeUndefined()
+    expect(buildChainAskLoopMessages(client.askLoopRequests[1])).not.toContainEqual(
+      expect.objectContaining({ reasoningContent: expect.anything() })
+    )
+  })
+})
+
+/* ------------------------------------------------------------------ */
 /* search_info 的执行体注入（§5.11：主进程把它塞进 worker）            */
 /* ------------------------------------------------------------------ */
 

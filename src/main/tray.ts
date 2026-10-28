@@ -27,8 +27,8 @@ export function installTray(actions: TrayMenuActions, status: CaptureStatus): Tr
   }
   update(status)
 
-  // Windows 下单击托盘图标打开时间线（右键由 context menu 接管）
-  tray.on('click', () => actions.openTimeline())
+  // Windows 下单击托盘图标打开「问记忆」（右键由 context menu 接管）；D51 之后时间线没有入口
+  tray.on('click', () => actions.openAsk())
 
   const balloon = (title: string, content: string): void => {
     try {

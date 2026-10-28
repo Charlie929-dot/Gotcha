@@ -743,12 +743,11 @@ function ensureThemeOnlineRuntime(): ThemeOnlineRuntime | null {
 
 function readHotkeyBindings(): HotkeyBindings {
   const db = connections.queryDb()
-  if (!db) return { ...DEFAULT_HOTKEYS }
+  if (!db) return { toggleCapture: DEFAULT_HOTKEYS.toggleCapture }
   return {
+    // D51：图谱入口摘除后不再注册 openGraph，Alt+Space 归还系统
     toggleCapture:
-      getSetting(db, HOTKEY_SETTING_KEYS.toggleCapture).trim() || DEFAULT_HOTKEYS.toggleCapture,
-    openGraph:
-      getSetting(db, HOTKEY_SETTING_KEYS.openGraph).trim() || DEFAULT_HOTKEYS.openGraph
+      getSetting(db, HOTKEY_SETTING_KEYS.toggleCapture).trim() || DEFAULT_HOTKEYS.toggleCapture
   }
 }
 
@@ -760,8 +759,7 @@ function registerGlobalHotkeys(): void {
     {
       toggleCapture: () => {
         void toggleCapture()
-      },
-      openGraph: () => openGraph()
+      }
     },
     readHotkeyBindings(),
     captureLog
@@ -1171,14 +1169,12 @@ const controller = new CaptureController({
   onStatusChange: (status) => {
     ballShell?.setStatus(status)
     trayShell?.update(status)
-    if (!shuttingDown && (status === 'running' || status === 'paused' || status === 'stopping')) {
-      ensureInductionRuntime().onCaptureStatus(status)
-    }
+    // D51：图谱与时间线入口摘除后，归纳调度与在线归属（唯一会出云的旧路径）不再随采集启动；
+    // 代码与数据保留，重做画布时再决定怎么接。
     // 时刻在线补跑只跟采集状态走：暂停 / 停止时没有新事件，停掉定时器不空转
     if (!shuttingDown) {
       if (status === 'running') {
         ensureMomentRuntime()?.start()
-        ensureThemeOnlineRuntime()?.start()
         // 信息链跟着采集开：新方向的事件源（D42）
         ensureChainRecording()?.start()
       } else if (status === 'paused' || status === 'stopping') {
@@ -1456,8 +1452,9 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 }
 
 // 单实例：必须在创建任何窗口之前抢锁；没抢到直接退出（§4.8）
+// D51：时间线窗口不再有界面入口，二次启动改为打开「问记忆」（剩下的唯一主窗口）
 const primaryInstance = claimSingleInstance(app, () => {
-  openTimeline()
+  openAsk()
 })
 
 if (primaryInstance) {
@@ -1699,8 +1696,6 @@ if (primaryInstance) {
       htmlPath: join(__dirname, '../renderer/ball/ball.html'),
       stateFilePath: join(app.getPath('userData'), BALL_STATE_FILE),
       getStatus: () => controller.status(),
-      openTimeline,
-      openGraph,
       openAsk,
       toggleCapture: () => {
         void toggleCapture()
@@ -1714,9 +1709,7 @@ if (primaryInstance) {
 
     trayShell = installTray(
       {
-        openGraph,
         openAsk,
-        openTimeline,
         toggleCapture: () => {
           void toggleCapture()
         },

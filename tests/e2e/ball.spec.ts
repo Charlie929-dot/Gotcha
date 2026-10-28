@@ -1,6 +1,6 @@
 /**
  * M1b Phase 1 E2E：球窗口存在且透明置顶 / 默认暂停视觉 / 停靠缩入 + 悬停滑出 /
- * 点击打开图谱（D20）/ 拖动松手（近边吸附、中间自由）/ 离开宽限与兜底缩回（D16）
+ * 点击不再开图谱（D51）/ 拖动松手（近边吸附、中间自由）/ 离开宽限与兜底缩回（D16）
  *
  * 隔离：GOTCHA_USER_DATA 指向临时目录，不碰真实 userData，也不启动真实采集
  * （默认暂停，A3：球壳与时间线都不应建库、不写 ball.json）。
@@ -228,18 +228,15 @@ test('悬停滑出全显；窗口内移动不收起；离开 600ms 宽限后缩�
   await expect(ballPage.locator('#ball')).not.toHaveClass(/expanded/)
 })
 
-test('点击球打开图谱窗口（D20）；默认暂停不建库（A3 红线）', async () => {
+test('点击球不再开图谱窗口（D51 封掉入口）；默认暂停不建库（A3 红线）', async () => {
   await hoverVisibleHalf()
-  const graphPromise = app.waitForEvent('window')
+  const windowsBefore = app.windows().length
   await ballPage.mouse.click(32, 32)
-  const graph = await graphPromise
-  await graph.waitForLoadState('domcontentloaded')
-  await expect(graph.locator('#status')).toBeVisible()
-  // 空日显示空状态（#node-count 无内容时为 0 高，不能用 toBeVisible）
-  await expect(graph.locator('#empty')).toBeVisible()
+  // 旧口径（D20）点击会新开图谱窗口；D51 之后点击不产生任何新窗口
+  await ballPage.waitForTimeout(800)
+  expect(app.windows().length).toBe(windowsBefore)
 
   // 默认暂停：没有采集就不应产生 memory.db 或 ball.json
-  await graph.waitForTimeout(500)
   expect(existsSync(join(userDataDir, 'memory.db'))).toBe(false)
   expect(existsSync(join(userDataDir, 'ball.json'))).toBe(false)
 })

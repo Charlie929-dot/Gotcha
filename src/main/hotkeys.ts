@@ -25,7 +25,8 @@ export const HOTKEY_SETTING_KEYS = {
 
 export interface HotkeyBindings {
   toggleCapture: string
-  openGraph: string
+  /** D51：图谱入口已摘除；不提供这个键就不注册，默认 `Alt+Space` 归还系统 */
+  openGraph?: string
 }
 
 export type HotkeyAction = keyof HotkeyBindings
@@ -149,7 +150,7 @@ function sameAccelerator(a: string, b: string): boolean {
 
 export function registerHotkeys(
   shortcuts: GlobalShortcutLike,
-  actions: Record<HotkeyAction, () => void>,
+  actions: Partial<Record<HotkeyAction, () => void>>,
   bindings: HotkeyBindings = DEFAULT_HOTKEYS,
   log?: CaptureLog
 ): HotkeyHandle {
@@ -174,8 +175,14 @@ export function registerHotkeys(
       return { action, accelerator: value, ok: false, reason: 'invalid' }
     }
     let registered = false
+    const handler = actions[action]
+    if (!handler) {
+      // D51：调用方没提供这个动作（例如图谱入口已摘除）就不注册，键位归还系统
+      log?.('warn', 'global hotkey action missing', { action })
+      return { action, accelerator: value, ok: false, reason: 'invalid' }
+    }
     try {
-      registered = shortcuts.register(value, actions[action]) === true
+      registered = shortcuts.register(value, handler) === true
     } catch (error) {
       log?.('warn', 'global hotkey register threw', { accelerator: value, error: String(error) })
       return { action, accelerator: value, ok: false, reason: 'occupied' }
@@ -191,25 +198,33 @@ export function registerHotkeys(
   const apply = (next: HotkeyBindings): void => {
     current = {
       toggleCapture: typeof next.toggleCapture === 'string' ? next.toggleCapture.trim() : '',
-      openGraph: typeof next.openGraph === 'string' ? next.openGraph.trim() : ''
+      ...(typeof next.openGraph === 'string' ? { openGraph: next.openGraph.trim() } : {})
     }
-    if (sameAccelerator(current.toggleCapture, current.openGraph)) {
+    // D51：没有 openGraph 绑定（或调用方没给回调）就不注册——Alt+Space 归还系统，
+    // 不再被一个空动作占着。toggleCapture 的行为与改造前完全一致。
+    const graph = current.openGraph
+    if (
+      graph !== undefined &&
+      actions.openGraph !== undefined &&
+      sameAccelerator(current.toggleCapture, graph)
+    ) {
       const reason = '两键相同，无法同时注册'
       log?.('warn', 'global hotkey duplicate binding', {
         toggleCapture: current.toggleCapture,
-        openGraph: current.openGraph,
+        openGraph: graph,
         reason
       })
       results = [
         { action: 'toggleCapture', accelerator: current.toggleCapture, ok: false, reason: 'duplicate' },
-        { action: 'openGraph', accelerator: current.openGraph, ok: false, reason: 'duplicate' }
+        { action: 'openGraph', accelerator: graph, ok: false, reason: 'duplicate' }
       ]
       return
     }
-    results = [
-      registerOne('toggleCapture', current.toggleCapture),
-      registerOne('openGraph', current.openGraph)
-    ]
+    const nextResults: HotkeyRegisterResult[] = [registerOne('toggleCapture', current.toggleCapture)]
+    if (graph !== undefined && actions.openGraph !== undefined) {
+      nextResults.push(registerOne('openGraph', graph))
+    }
+    results = nextResults
   }
 
   apply(current)
@@ -223,7 +238,7 @@ export function registerHotkeys(
     },
     reregister(next: HotkeyBindings): void {
       unregister(current.toggleCapture)
-      unregister(current.openGraph)
+      if (current.openGraph !== undefined) unregister(current.openGraph)
       apply(next)
     },
     dispose(): void {

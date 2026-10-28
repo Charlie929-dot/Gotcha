@@ -1,15 +1,18 @@
 /**
- * 托盘 / 球右键菜单模板（m1b-plan §3 Phase 1 / Q4）
+ * 托盘 / 球右键菜单模板（m1b-plan §3 Phase 1 / Q4；D51 封掉图谱与时间线入口）
  *
- * 纯函数，不 import Electron：托盘与球右键共用同一份菜单（打开时间线 /
+ * 纯函数，不 import Electron：托盘与球右键共用同一份菜单（问记忆 /
  * 暂停·恢复 / 退出），单测断言文案与状态映射（tests/unit/tray-menu.test.ts）。
  * 托盘图标用内联 PNG（nativeImage），不新增依赖。
+ *
+ * D51（2026-10-28 拍板）：图谱窗口与时间线窗口的 UI 入口全部摘除——代码与数据保留，
+ * 但用户在界面上再也打不开它们；菜单只剩「问记忆 / 记录开关 / 退出」。
  */
 
 import type { CaptureStatus } from './capture-controller'
 import type { MenuItemConstructorOptions } from 'electron'
 
-export type TrayMenuActionId = 'open-graph' | 'open-ask' | 'open-timeline' | 'toggle-capture' | 'quit'
+export type TrayMenuActionId = 'open-ask' | 'toggle-capture' | 'quit'
 
 export interface TrayMenuAction {
   id: TrayMenuActionId
@@ -25,11 +28,8 @@ export interface TrayMenuSeparator {
 export type TrayMenuEntry = TrayMenuAction | TrayMenuSeparator
 
 export interface TrayMenuActions {
-  /** D20：球点击默认打开图谱 */
-  openGraph(): void
   /** 问记忆窗口（S3-lite） */
   openAsk(): void
-  openTimeline(): void
   toggleCapture(): void
   quit(): void
 }
@@ -49,9 +49,7 @@ export function toggleEnabled(status: CaptureStatus): boolean {
 
 export function buildTrayMenu(status: CaptureStatus, actions: TrayMenuActions): TrayMenuEntry[] {
   return [
-    { id: 'open-graph', label: '打开图谱', enabled: true, click: actions.openGraph },
     { id: 'open-ask', label: '问记忆', enabled: true, click: actions.openAsk },
-    { id: 'open-timeline', label: '打开时间线', enabled: true, click: actions.openTimeline },
     { type: 'separator' },
     {
       id: 'toggle-capture',

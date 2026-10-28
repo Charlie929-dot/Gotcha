@@ -14,6 +14,8 @@
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-28（晚）：**图谱 / 时间线 UI 入口封存（D51）**。菜单只剩「问记忆 / 记录开关 / 退出」（`tray-menu.ts`）；球左键点击不再开窗（`ball.ts`，段二接「选区问答」）；`Alt+Space` 注销、`hotkey.open_graph` 不再读取（`hotkeys.ts` 绑定改可选，不提供就不注册）；二次启动与托盘单击改开问记忆（`index.ts` / `tray.ts`）；归纳调度与在线归属不再随采集启动（旧管线仅有的两条出云路径），时刻补跑（本地、零出网）继续。代码与数据全留（`renderer/graph/**`、`graph-ipc`、`graph-window`、`understand/*-runtime`、`moments` / `themes`），测试钩子保留供 E2E 回放。验证：`npm test` **1341 条 / 123 文件全绿**、`npm run typecheck` 通过；E2E 未跑（`ball.spec` 的 D20 用例已改写为「点击不产生新窗口」）。**未做**：选区问答（段二：选区 → 浮动框 → 问记忆）。
+
 - 2026-10-28（晚）：**自由开发分支收口并入 main**（拍板人定，直推不走 PR；D50）。`vibe/docs-edit` 先快进并入 `vibe/free`（`3729e69`），再 **squash** 成 `a851f78` 落 `main`（134 文件 / +17 072 / −823）：性能优化 P0-1 / P0-3 / P0-4 与 P1-2~P1-6（`性能优化方案.md` §5.1–§5.16）、出云边界端口化（D49）、问记忆对话记录、两份立项方案移入 `docs/human` 并校订。`handover.md` 移出版本库（`.gitignore`，本地保留）；`vibe/docs-edit` 与 `vibe/free` 均已删，后续自由开发另开分支。验证：沿用 `94cc344` 的 `npm test` 1341 条 / 123 文件全绿 + `typecheck` + `build`，合并前未重跑（D47）。**未做**：P0-2 第二步（`capture.metadata_only` 仍 `0`，待真机开一天观察）、P1-1、P2-1~P2-5。
 
 - 2026-10-28：**两份立项方案移入 docs/human + 校订**。`记忆球-产品策划案.md` / `记忆球-产品技术方案.md` 从仓库根 `git mv` 到 `docs/human/`；新增 `docs/human/README.md` 复核表（策划案 11 项、技术方案 15 项 + 5 个共同缺口），两份文首加 2026-10-28 校订，正文就地修正 embedding bge-m3→bge-small、schema v5→v7+chain v4、`sensitive` 注释、单进程→多进程、sigma→Foam、键鼠钩子等；同步 `AGENTS.md` / `workflow.md` / 归档文档引用。纯文档，按 D47 免跑测试。

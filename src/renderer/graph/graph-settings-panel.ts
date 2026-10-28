@@ -524,7 +524,7 @@ export function createSettingsPanel(
       }
       consentInput.checked = settings.outboundConsent
       hotkeyToggleInput.value = settings.hotkeys.toggleCapture
-      hotkeyGraphInput.value = settings.hotkeys.openGraph
+      hotkeyGraphInput.value = settings.hotkeys.openGraph ?? ''
       usageEl.textContent = `今日用量：${settings.usage.calls} 次调用 / 输入 ${settings.usage.promptTokens} tokens / 输出 ${settings.usage.completionTokens} tokens`
       fillProviders(settings)
       void refreshKeyStatus()
@@ -626,7 +626,7 @@ export function createSettingsPanel(
         if (key) row.apiKeyInput.value = key
       }
       hotkeyToggleInput.value = result.settings.hotkeys.toggleCapture
-      hotkeyGraphInput.value = result.settings.hotkeys.openGraph
+      hotkeyGraphInput.value = result.settings.hotkeys.openGraph ?? ''
       consentInput.checked = result.settings.outboundConsent
       if (onlineInput) onlineInput.checked = result.settings.onlineThemes
       if (dayHeatInput) dayHeatInput.value = String(result.settings.dayHeatMax)

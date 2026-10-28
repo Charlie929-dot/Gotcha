@@ -16,6 +16,18 @@ export interface ChainAskCitation {
   why: string
 }
 
+/**
+ * 「检索到了、但没作为引用」的段（2026-10-29）：
+ * 命中很多却答不上时，UI 至少要让人看见查到了哪些段（可点开证据）。
+ * 只带段身份与标题，不带正文；**不等于引用**，界面按「相关」展示，不能当结论。
+ */
+export interface ChainAskRelatedSegment {
+  segmentId: number
+  at: number
+  app: string
+  title: string
+}
+
 /** 送云前的一段证据（已脱敏、已截断） */
 export interface ChainAskEvidence {
   segmentId: number
@@ -71,6 +83,20 @@ export type ChainAskResult =
       resumeId?: string
     }
   /**
+   * 查到了相关段、但撑不起结论（2026-10-29）：模型给「查到了什么、为什么不够」，
+   * 以及（可选，0–3 条）最相关的段作为「看过的证据」，**不当结论**。
+   * 以前这种答复会被解析层整段丢掉、界面只剩固定文案「信息链里没找到」；
+   * 拍板人要求「不能一句话都不说」，所以单独给一个出口。
+   */
+  | {
+      kind: 'insufficient'
+      answer: string
+      citations: ChainAskCitation[]
+      /** 检索到、但没进引用的段（最多 5 条，按检索顺序），给人一个入口 */
+      related: ChainAskRelatedSegment[]
+      stats: ChainAskStats
+    }
+  /**
    * 没命中 / 引用全被剥空：**不调 LLM 编话**，UI 直接展示 `NO_EVIDENCE_TEXT`。
    *
    * 2026-10-27 补：模型嘴上说「没找到」、却给了能点开的引用时，不再把整段说明丢掉——
@@ -82,6 +108,8 @@ export type ChainAskResult =
       stats: ChainAskStats
       note?: string
       citations?: ChainAskCitation[]
+      /** 检索到、但没进引用的段（同 `insufficient`） */
+      related?: ChainAskRelatedSegment[]
     }
   | { kind: 'error'; reason: ChainAskErrorReason; message: string; stats: ChainAskStats }
 

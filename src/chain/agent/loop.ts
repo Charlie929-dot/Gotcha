@@ -44,6 +44,7 @@ import { readChainFreshness } from './freshness'
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import {
   type ChainAskResult,
+  type ChainAskRelatedSegment,
   type ChainAskStats,
   type ChainAskTurnContext
 } from './types'
@@ -122,6 +123,22 @@ export function formatSystemTime(now: number): string {
 
 function emptyStats(): ChainAskStats {
   return { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
+}
+
+/**
+ * 检索到、但没进引用的段（最多 5 条，按 search_info 的返回顺序）。
+ * 「查到了但不够」时给界面一个入口——命中很多却什么都不说，用户无从判断是没查到还是没查对。
+ */
+function relatedFromWhitelist(
+  whitelist: ReadonlyMap<number, CitationMeta>,
+  limit = 5
+): ChainAskRelatedSegment[] {
+  return [...whitelist.values()].slice(0, limit).map((meta) => ({
+    segmentId: meta.segmentId,
+    at: meta.at,
+    app: meta.app,
+    title: meta.title
+  }))
 }
 
 /**
@@ -360,7 +377,11 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     if (!parsed.ok) {
       settleUsage()
       if (parsed.reason === 'no-citations') {
-        return { kind: 'no-evidence', stats: withLoopDiag(globalTurn, toolCallCount) }
+        return {
+          kind: 'no-evidence',
+          related: relatedFromWhitelist(whitelist),
+          stats: withLoopDiag(globalTurn, toolCallCount)
+        }
       }
       return {
         kind: 'error',
@@ -381,6 +402,17 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       }
     }
     settleUsage()
+    if (parsed.kind === 'insufficient') {
+      // 查到了相关段但撑不起结论：保留模型说明，引用（0–3 条）只当「看过的证据」，
+      // 另外把检索到的段列出来——不再用一句固定文案把这一轮整个盖掉。
+      return {
+        kind: 'insufficient',
+        answer: parsed.answer,
+        citations: parsed.citations,
+        related: relatedFromWhitelist(whitelist),
+        stats: withLoopDiag(globalTurn, toolCallCount)
+      }
+    }
     if (isNoEvidenceAnswer(parsed.answer) && parsed.citations.length > 0) {
       // 根因 7：嘴上说没找到却塞了引用。以前整段丢掉，用户只看到「没找到」；
       // 现在保留说明与引用（「查到了这些，但不足以回答」比空白有用），日志留 mismatch 供排查。
@@ -391,12 +423,17 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         kind: 'no-evidence',
         note: parsed.answer,
         citations: parsed.citations,
+        related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
       }
     }
     if (isNoEvidenceAnswer(parsed.answer)) {
       // 无引用且自称没找到：维持「没找到」，不把固定文案当回答
-      return { kind: 'no-evidence', stats: withLoopDiag(globalTurn, toolCallCount) }
+      return {
+        kind: 'no-evidence',
+        related: relatedFromWhitelist(whitelist),
+        stats: withLoopDiag(globalTurn, toolCallCount)
+      }
     }
     return {
       kind: 'answer',

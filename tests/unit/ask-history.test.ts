@@ -159,6 +159,22 @@ describe('对话记录：折条', () => {
     expect(parseAskHistoryEntry(JSON.parse(JSON.stringify(record)))).toEqual(record)
   })
 
+  it('insufficient 保留说明、引用与相关段', () => {
+    const related = [
+      { segmentId: 9, at: 1_000, app: 'DSH NEXT', title: '继续任务 — DeepSeek Harness' }
+    ]
+    const result: ChainAskResult = {
+      kind: 'insufficient',
+      answer: '只查到界面上的零散段落，没有「第一次打开」的时间锚点。',
+      citations: [],
+      related,
+      stats: { hits: 40, evidence: 27, cited: 0, questionChars: 14, turns: 9, toolCalls: 9 }
+    }
+    const record = toHistoryEntry('我第一次打开这个界面是啥时候', result, 5_000, 'conv-1')
+    expect(record).toMatchObject({ kind: 'insufficient', answer: result.answer, related })
+    expect(parseAskHistoryEntry(JSON.parse(JSON.stringify(record)))).toEqual(record)
+  })
+
   it('error 留原因与可读消息', () => {
     const result: ChainAskResult = {
       kind: 'error',
@@ -195,6 +211,15 @@ describe('对话记录：折条', () => {
     ).toBeNull()
     expect(parseAskHistoryEntry({ ...base, conversationId: 42 })).toBeNull()
     expect(parseAskHistoryEntry(base)).toEqual(base)
+  })
+
+  it('单行校验：related 坏形状整行拒绝；空数组原样保留', () => {
+    const base = entry(1_000, 'q')
+    expect(parseAskHistoryEntry({ ...base, related: 'nope' })).toBeNull()
+    expect(
+      parseAskHistoryEntry({ ...base, related: [{ segmentId: 0, at: 1, app: 'A', title: 'T' }] })
+    ).toBeNull()
+    expect(parseAskHistoryEntry({ ...base, related: [] })).toEqual({ ...base, related: [] })
   })
 
   it('同一毫秒的两次折条 id 不重复', () => {

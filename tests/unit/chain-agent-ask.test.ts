@@ -379,6 +379,44 @@ describe('问记忆：载荷脱敏与解析纪律', () => {
     expect(parseChainReply({ ask: '   ' }, meta)).toMatchObject({ ok: false, reason: 'shape' })
   })
 
+  it('解析：citations 为空但写了说明 → insufficient（说明不再被丢掉）', () => {
+    const meta = new Map([[1, { segmentId: 1, at: 0, app: 'A', title: 'T' }]])
+    const parsed = parseChainReply(
+      { answer: '查到了 10-27 的 DSH 段，但都没有「第一次打开」的锚点。', citations: [] },
+      meta
+    )
+    expect(parsed).toMatchObject({
+      ok: true,
+      kind: 'insufficient',
+      answer: '查到了 10-27 的 DSH 段，但都没有「第一次打开」的锚点。',
+      citations: []
+    })
+  })
+
+  it('解析：显式 insufficient + 引用 → 保留说明与引用', () => {
+    const meta = new Map([[1, { segmentId: 1, at: 0, app: 'A', title: 'T' }]])
+    const parsed = parseChainReply(
+      { answer: '这些只是相关', citations: [{ segmentId: 1, why: '相关' }], insufficient: true },
+      meta
+    )
+    expect(parsed).toMatchObject({ ok: true, kind: 'insufficient' })
+    if (parsed.ok && parsed.kind === 'insufficient') {
+      expect(parsed.citations.map((citation) => citation.segmentId)).toEqual([1])
+    }
+  })
+
+  it('解析：只有一句「信息链里没找到」时仍按没找到收口', () => {
+    const meta = new Map([[1, { segmentId: 1, at: 0, app: 'A', title: 'T' }]])
+    expect(parseChainReply({ answer: '信息链里没找到', citations: [] }, meta)).toMatchObject({
+      ok: false,
+      reason: 'no-citations'
+    })
+    expect(parseChainReply({ answer: '信息链里没找到。', citations: [] }, meta)).toMatchObject({
+      ok: false,
+      reason: 'no-citations'
+    })
+  })
+
   it('循环载荷：连续追问的历史会重新脱敏（命中密码类整轮丢，正常轮保留）', () => {
     const built = buildChainAskLoopPayload({
       question: '那下午呢',

@@ -31,6 +31,12 @@ export interface CitationMeta {
 
 export type ParseChainReplyResult =
   | { ok: true; kind: 'answer'; answer: string; citations: ChainAskCitation[] }
+  /**
+   * 查到了相关段、但撑不起结论：说明留下，引用 0–3 条（不当结论）。
+   * 2026-10-29：以前 citations 为空就把整段说明丢掉、界面只剩固定文案，
+   * 拍板人明确要求「命中很多却一句话都不说」不能再出现。
+   */
+  | { ok: true; kind: 'insufficient'; answer: string; citations: ChainAskCitation[] }
   | { ok: true; kind: 'clarify'; question: string; options: string[] }
   | { ok: false; reason: 'shape' | 'no-citations'; message: string }
 
@@ -117,9 +123,30 @@ export function parseChainReply(
     if (options.allowConversationAnswer === true && json.conversation === true) {
       return { ok: true, kind: 'answer', answer: truncate(text, ANSWER_MAX_CHARS), citations: [] }
     }
+    // 只剩一句固定文案、什么也没说：维持「没找到」，UI 用固定文案（证据即沉默）。
+    if (isBareNoEvidence(text)) {
+      return { ok: false, reason: 'no-citations', message: '引用全被剥空' }
+    }
+    // 给了引用却全被白名单剥掉 = 编造 / 指错段：仍按「没找到」收口，不把无依据的正文放出来。
+    // 只有「一条引用都没给」、且本轮**确实检索到了段**时，才把说明当成「查到了但不够」——
+    // 说明不是结论，UI 会标成「相关但不足」，并列出检索到的段。
+    if (raw.length === 0 && meta.size > 0) {
+      return { ok: true, kind: 'insufficient', answer: truncate(text, ANSWER_MAX_CHARS), citations: [] }
+    }
     return { ok: false, reason: 'no-citations', message: '引用全被剥空' }
   }
+  if (json.insufficient === true) {
+    return { ok: true, kind: 'insufficient', answer: truncate(text, ANSWER_MAX_CHARS), citations }
+  }
   return { ok: true, kind: 'answer', answer: truncate(text, ANSWER_MAX_CHARS), citations }
+}
+
+/** 是否只有一句「信息链里没找到」（允许句末标点），没有任何补充说明 */
+function isBareNoEvidence(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith(NO_EVIDENCE_TEXT)) return false
+  const rest = trimmed.slice(NO_EVIDENCE_TEXT.length).replace(/[。.!！\s]+$/u, '').trim()
+  return rest === ''
 }
 
 /**

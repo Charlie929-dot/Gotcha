@@ -165,6 +165,46 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(result.stats).toMatchObject({ turns: 1, toolCalls: 0 })
   })
 
+  it('查到了但撑不起结论：insufficient 出口保留说明与「检索到的段」', async () => {
+    const seg = seed({
+      pid: 1,
+      app: 'DSH NEXT',
+      title: '继续任务 — DeepSeek Harness',
+      from: at(0),
+      to: at(60),
+      text: '右键菜单位置与设置 — DeepSeek Harness'
+    })
+    const client = new FakeLlmClient([
+      searchCall({ keywords: ['菜单'] }),
+      {
+        json: {
+          answer: '只查到界面上的零散段落，没有「第一次打开」的时间锚点。',
+          citations: [],
+          insufficient: true
+        }
+      }
+    ])
+    const result = await askChain(buildDeps(client), '我第一次打开这个界面是啥时候')
+    expect(result.kind).toBe('insufficient')
+    if (result.kind !== 'insufficient') return
+    expect(result.answer).toContain('没有「第一次打开」')
+    expect(result.citations).toEqual([])
+    expect(result.related.map((item) => item.segmentId)).toEqual([seg])
+    expect(result.stats).toMatchObject({ hits: 1, evidence: 1 })
+  })
+
+  it('no-evidence 也带上「检索到的段」，不再只剩固定文案', async () => {
+    const seg = seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: 'LNK1104 的记录' })
+    const client = new FakeLlmClient([
+      searchCall({ keywords: ['LNK1104'] }),
+      { json: { answer: '信息链里没找到', citations: [] } }
+    ])
+    const result = await askChain(buildDeps(client), 'LNK1104')
+    expect(result.kind).toBe('no-evidence')
+    if (result.kind !== 'no-evidence') return
+    expect(result.related?.map((item) => item.segmentId)).toEqual([seg])
+  })
+
   it('keywords 逐词 OR：整句搜不到的组合也能召回，且双词同段排最前', async () => {
     const both = seed({ pid: 1, app: 'A', title: '双词', from: at(0), to: at(60), text: 'LNK1104 与 Electron' })
     const onlyLink = seed({ pid: 2, app: 'B', title: '链接词', from: at(100), to: at(160), text: '只提到 Electron' })

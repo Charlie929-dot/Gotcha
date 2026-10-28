@@ -91,7 +91,7 @@ function formatDuration(ms: number): string {
 const ERROR_TEXT: Record<ChainAskErrorReason, string> = {
   'empty-question': '问题不能为空。',
   consent: '还没允许出云，先把上面那条确认掉。',
-  budget: '今天的模型额度用完了，明天再问。',
+  budget: '今天的模型额度用完了，可在设置里调高每日额度。',
   client: '没有可用的模型：去设置里配好供应商与 API key 再来。',
   'question-blocked': '这句话里有敏感内容（密码类），没有发出去。',
   unparseable: '模型这次答得不成形（结构不对），换个问法再试。',

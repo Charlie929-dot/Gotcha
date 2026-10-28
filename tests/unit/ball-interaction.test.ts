@@ -53,11 +53,13 @@ describe('停靠展开入口（热区 24 + 8px 容差）', () => {
   it('自由位不展开，只更新球体命中', () => {
     expect(run([{ type: 'pointer-move', geometry: free(10) }])).toEqual({
       state: 'idle',
-      pointerInside: true
+      pointerInside: true,
+      menuOpen: false
     })
     expect(run([{ type: 'pointer-move', geometry: free(30) }])).toEqual({
       state: 'idle',
-      pointerInside: false
+      pointerInside: false,
+      menuOpen: false
     })
   })
 })
@@ -81,13 +83,18 @@ describe('离开宽限（grace）', () => {
     const grace = run([{ type: 'pointer-leave' }], expanded)
     expect(run([{ type: 'grace-expired' }], grace)).toEqual({
       state: 'idle',
-      pointerInside: false
+      pointerInside: false,
+      menuOpen: false
     })
     expect(run([{ type: 'grace-expired' }], expanded).state).toBe('expanded')
   })
 
   it('缩入态离开窗口不会进入宽限', () => {
-    expect(run([{ type: 'pointer-leave' }])).toEqual({ state: 'idle', pointerInside: false })
+    expect(run([{ type: 'pointer-leave' }])).toEqual({
+      state: 'idle',
+      pointerInside: false,
+      menuOpen: false
+    })
   })
 })
 
@@ -99,7 +106,7 @@ describe('拖动', () => {
     )
 
     const dragging = run([{ type: 'pointer-down', geometry: docked(10) }], idle)
-    expect(dragging).toEqual({ state: 'dragging', pointerInside: true })
+    expect(dragging).toEqual({ state: 'dragging', pointerInside: true, menuOpen: false })
     expect(run([{ type: 'pointer-leave' }], dragging).state).toBe('dragging')
     expect(run([{ type: 'grace-expired' }], dragging).state).toBe('dragging')
     expect(run([{ type: 'pointer-move', geometry: docked(50) }], dragging).state).toBe('dragging')
@@ -111,7 +118,8 @@ describe('拖动', () => {
     expect(run([{ type: 'pointer-up', docked: false }], dragging).state).toBe('idle')
     expect(run([{ type: 'pointer-cancel' }], dragging)).toEqual({
       state: 'idle',
-      pointerInside: false
+      pointerInside: false,
+      menuOpen: false
     })
   })
 })
@@ -121,7 +129,8 @@ describe('落位与兜底', () => {
     const expanded = run([{ type: 'pointer-move', geometry: docked(10) }])
     expect(run([{ type: 'placement', docked: true }], expanded)).toEqual({
       state: 'idle',
-      pointerInside: false
+      pointerInside: false,
+      menuOpen: false
     })
   })
 
@@ -129,7 +138,8 @@ describe('落位与兜底', () => {
     const expanded = run([{ type: 'pointer-move', geometry: docked(10) }])
     expect(run([{ type: 'force-retract' }], expanded)).toEqual({
       state: 'idle',
-      pointerInside: false
+      pointerInside: false,
+      menuOpen: false
     })
 
     const grace = run([{ type: 'pointer-leave' }], expanded)
@@ -138,5 +148,50 @@ describe('落位与兜底', () => {
     expect(run([{ type: 'force-retract' }]).state).toBe('idle')
     const dragging = run([{ type: 'pointer-down', geometry: docked(10) }])
     expect(run([{ type: 'force-retract' }], dragging).state).toBe('dragging')
+  })
+})
+
+describe('右键菜单打开期间钉住展开（D54）', () => {
+  const expanded = run([{ type: 'pointer-move', geometry: docked(10) }])
+  const menuOpen = run([{ type: 'menu-open', docked: true }], expanded)
+
+  it('菜单打开后鼠标离开球 → 不进宽限、保持全显', () => {
+    expect(menuOpen.state).toBe('expanded')
+    expect(isExpanded(menuOpen)).toBe(true)
+    const left = run([{ type: 'pointer-leave' }], menuOpen)
+    expect(left.state).toBe('expanded')
+    expect(left.pointerInside).toBe(false)
+  })
+
+  it('菜单打开期间宽限到期 / 主进程兜底都不缩回', () => {
+    expect(run([{ type: 'grace-expired' }], menuOpen).state).toBe('expanded')
+    expect(run([{ type: 'force-retract' }], menuOpen).state).toBe('expanded')
+  })
+
+  it('菜单关闭且指针不在球上 → 进宽限，到期缩回', () => {
+    const left = run([{ type: 'pointer-leave' }], menuOpen)
+    const closed = run([{ type: 'menu-close', docked: true }], left)
+    expect(closed).toEqual({ state: 'grace', pointerInside: false, menuOpen: false })
+    expect(run([{ type: 'grace-expired' }], closed).state).toBe('idle')
+  })
+
+  it('菜单关闭时指针还在球上 → 保持展开', () => {
+    const closed = run([{ type: 'menu-close', docked: true }], menuOpen)
+    expect(closed.state).toBe('expanded')
+    expect(closed.menuOpen).toBe(false)
+  })
+
+  it('缩入态打开菜单会展开；缩入态关闭不会闪一下展开', () => {
+    const idle = initialSnapshot()
+    expect(run([{ type: 'menu-open', docked: true }], idle).state).toBe('expanded')
+    expect(run([{ type: 'menu-close', docked: true }], idle).state).toBe('idle')
+  })
+
+  it('自由位菜单打开不改变状态，只记 menuOpen', () => {
+    expect(run([{ type: 'menu-open', docked: false }], initialSnapshot())).toEqual({
+      state: 'idle',
+      pointerInside: false,
+      menuOpen: true
+    })
   })
 })

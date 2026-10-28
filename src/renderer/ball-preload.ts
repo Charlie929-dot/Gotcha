@@ -2,7 +2,7 @@
  * 球专用 preload（m1b-plan §3 Phase 2 / §4.9 权限面分离）
  *
  * 只暴露球需要的通道：状态订阅 / 状态查询 / 停靠信息 / 指针进出 / 交互状态 /
- * 兜底缩回订阅 / 拖动 / 打开时间线 / 右键菜单。时间线 preload 不追加采集开关 API，
+ * 兜底缩回订阅 / 菜单开合 / 拖动 / 打开时间线 / 右键菜单。时间线 preload 不追加采集开关 API，
  * 球 preload 也不暴露时间线查询。
  */
 
@@ -41,6 +41,8 @@ export interface BallApi {
   onPlacement(callback: (placement: BallPlacement) => void): () => void
   onForceRetract(callback: () => void): () => void
   onNotice(callback: (notice: BallNotice | null) => void): () => void
+  /** 右键菜单开合（D54）：打开期间球保持展开 */
+  onMenu(callback: (open: boolean) => void): () => void
   setPointerInside(inside: boolean): void
   setInteractionState(state: BallInteractionState): void
   dragStart(point: BallScreenPoint): void
@@ -88,6 +90,15 @@ const api: BallApi = {
     ipcRenderer.on('ball:notice', listener)
     return () => {
       ipcRenderer.removeListener('ball:notice', listener)
+    }
+  },
+  onMenu(callback) {
+    const listener = (_event: IpcRendererEvent, open: boolean): void => {
+      callback(open === true)
+    }
+    ipcRenderer.on('ball:menu', listener)
+    return () => {
+      ipcRenderer.removeListener('ball:menu', listener)
     }
   },
   setPointerInside: (inside) => ipcRenderer.send('ball:pointer-inside', inside === true),

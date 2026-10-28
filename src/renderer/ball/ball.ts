@@ -53,6 +53,7 @@ interface BallApi {
   onPlacement(callback: (placement: BallPlacement) => void): () => void
   onForceRetract(callback: () => void): () => void
   onNotice(callback: (notice: BallNotice | null) => void): () => void
+  onMenu(callback: (open: boolean) => void): () => void
   setPointerInside(inside: boolean): void
   setInteractionState(state: BallInteractionState): void
   dragStart(point: BallScreenPoint): void
@@ -253,5 +254,7 @@ window.gotchaBall.onStatus(applyStatus)
 window.gotchaBall.onPlacement(applyPlacement)
 window.gotchaBall.onForceRetract(() => dispatch({ type: 'force-retract' }))
 window.gotchaBall.onNotice(applyNotice)
+// 菜单打开期间钉住展开：鼠标移进菜单会离开球窗，不钉住就 600ms 后缩回（D54）
+window.gotchaBall.onMenu((open) => dispatch({ type: open ? 'menu-open' : 'menu-close', docked }))
 
 export {}

@@ -10,6 +10,10 @@
  * - `grace`：指针离开窗口后的宽限期（仍全显、仍可交互），600ms 内回来即恢复。
  * - `dragging`：拖动中；不自动缩回。
  *
+ * `menuOpen`（D54）：球右键菜单是独立窗口，鼠标移进菜单后球会收到 `pointerleave`。
+ * 菜单打开期间把球钉在展开态——忽略离开宽限、宽限到期与主进程兜底强制缩回；
+ * 菜单关闭后再按正常规则（指针不在球上就进宽限）缩回。
+ *
  * 为什么不再用「球心距离」判定收起（真机坑，见 gotchas）：
  * 旧实现展开后指针离球心 > 24px 就恢复鼠标穿透、> 40px 才收起。指针停在 24–40px
  * 中间带时球仍展开、窗口却已穿透，后续 move / leave 事件收不到，球会卡在展开态。
@@ -32,6 +36,8 @@ export interface BallInteractionSnapshot {
   state: BallInteractionState
   /** 指针是否在球体命中半径内；决定自由位 / 停靠 idle 的窗口可交互性与 hover 放大 */
   pointerInside: boolean
+  /** 球右键菜单是否打开；打开期间钉住展开（D54） */
+  menuOpen: boolean
 }
 
 export interface BallPointerGeometry {
@@ -50,9 +56,12 @@ export type BallInteractionEvent =
   | { type: 'pointer-cancel' }
   | { type: 'grace-expired' }
   | { type: 'force-retract' }
+  /** 右键菜单打开 / 关闭；`docked` 决定是否要钉在展开态 */
+  | { type: 'menu-open'; docked: boolean }
+  | { type: 'menu-close'; docked: boolean }
 
 export function initialSnapshot(): BallInteractionSnapshot {
-  return { state: 'idle', pointerInside: false }
+  return { state: 'idle', pointerInside: false, menuOpen: false }
 }
 
 /** 视觉是否全显（展开 / 宽限 / 拖动都保持滑出，不再缩入） */
@@ -64,51 +73,84 @@ export function reduceInteraction(
   snapshot: BallInteractionSnapshot,
   event: BallInteractionEvent
 ): BallInteractionSnapshot {
+  const menuOpen = snapshot.menuOpen
   switch (event.type) {
     case 'placement':
       // 主进程落位（拖动松手 / 屏幕变化）后由停靠状态决定缩入或自由，先回到 idle
-      return { state: 'idle', pointerInside: false }
+      return {
+        state: event.docked && menuOpen ? 'expanded' : 'idle',
+        pointerInside: false,
+        menuOpen
+      }
 
     case 'pointer-move': {
       const { docked, distance } = event.geometry
       if (snapshot.state === 'dragging') return snapshot
       let state = snapshot.state
-      if (docked) {
+      if (menuOpen) {
+        // 菜单开着：停靠球始终全显；自由位本来就全显，保持常态
+        state = docked ? 'expanded' : snapshot.state
+      } else if (docked) {
         if (state === 'idle' && distance <= BALL_HOT_RADIUS) state = 'expanded'
         else if (state === 'grace') state = 'expanded'
       }
-      return { state, pointerInside: distance <= BALL_HIT_RADIUS }
+      return { state, pointerInside: distance <= BALL_HIT_RADIUS, menuOpen }
     }
 
     case 'pointer-leave':
       if (snapshot.state === 'dragging') return snapshot
-      if (snapshot.state === 'expanded') return { state: 'grace', pointerInside: false }
-      return { state: snapshot.state, pointerInside: false }
+      // 菜单开着：鼠标是移去菜单了，不能进宽限，否则 600ms 后球就缩回去了
+      if (menuOpen) return { ...snapshot, pointerInside: false }
+      if (snapshot.state === 'expanded') return { state: 'grace', pointerInside: false, menuOpen }
+      return { state: snapshot.state, pointerInside: false, menuOpen }
 
     case 'pointer-down': {
       if (event.geometry.distance > BALL_HIT_RADIUS) return snapshot
-      return { state: 'dragging', pointerInside: true }
+      return { state: 'dragging', pointerInside: true, menuOpen }
     }
 
     case 'pointer-up':
       // 未拖动的按下-释放按点击处理：指针还在球上，停靠态保持展开；移动后的落位由
       // 主进程 placement 消息重置（见 onDragEnd -> settleAt -> pushPlacement）
       if (snapshot.state !== 'dragging') return snapshot
-      return { state: event.docked ? 'expanded' : 'idle', pointerInside: true }
+      return { state: event.docked ? 'expanded' : 'idle', pointerInside: true, menuOpen }
 
     case 'pointer-cancel':
       if (snapshot.state !== 'dragging') return snapshot
-      return { state: 'idle', pointerInside: false }
+      return { state: 'idle', pointerInside: false, menuOpen }
 
     case 'grace-expired':
-      if (snapshot.state !== 'grace') return snapshot
-      return { state: 'idle', pointerInside: false }
+      // 菜单开着时宽限不计时（菜单关闭后会重新进宽限）
+      if (menuOpen || snapshot.state !== 'grace') return snapshot
+      return { state: 'idle', pointerInside: false, menuOpen }
 
     case 'force-retract':
-      // 主进程兜底：只处理展开 / 宽限，拖动与已缩回时忽略
+      // 主进程兜底：菜单打开期间不许强收（鼠标正在菜单上），拖动与已缩回时也忽略
+      if (menuOpen) return snapshot
       if (snapshot.state === 'expanded' || snapshot.state === 'grace') {
-        return { state: 'idle', pointerInside: false }
+        return { state: 'idle', pointerInside: false, menuOpen }
       }
       return snapshot
+
+    case 'menu-open':
+      return {
+        state: event.docked ? 'expanded' : snapshot.state,
+        pointerInside: snapshot.pointerInside,
+        menuOpen: true
+      }
+
+    case 'menu-close': {
+      if (snapshot.state === 'dragging') return { ...snapshot, menuOpen: false }
+      let state = snapshot.state
+      if (event.docked) {
+        // 指针还在球上就保持展开；否则给一个正常宽限再缩回
+        if (snapshot.state === 'expanded') state = snapshot.pointerInside ? 'expanded' : 'grace'
+        else if (snapshot.state === 'grace') state = 'grace'
+        else state = 'idle'
+      } else if (snapshot.state === 'grace') {
+        state = 'idle'
+      }
+      return { state, pointerInside: snapshot.pointerInside, menuOpen: false }
+    }
   }
 }

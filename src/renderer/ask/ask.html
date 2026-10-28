@@ -10,7 +10,7 @@
     <header class="bar">
       <h1>问记忆</h1>
       <span id="status" class="status" data-kind="idle">就绪</span>
-      <button id="settings-open" class="ghost" type="button" title="供应商 / 出网确认">设置</button>
+      <button id="settings-open" class="ghost" type="button" title="供应商 / 出网确认 / 每日额度">设置</button>
       <button id="new-chat" class="ghost" type="button" title="开一段新对话">＋ 新对话</button>
     </header>
 
@@ -99,6 +99,12 @@
             <p class="hint">
               问记忆会把问题、命中的窗口文本和这段对话之前的几轮发给模型；原始截图与完整正文
               永不离开本机。
+            </p>
+            <label>每日额度（tokens）
+              <input id="set-budget" type="number" min="1000" max="100000000" step="1000" />
+            </label>
+            <p class="hint">
+              问记忆与后台归纳共用这一份日额度；今日用量达到上限后不再出网，第二天自动重置。
             </p>
             <p id="usage" class="hint"></p>
           </section>

@@ -31,23 +31,75 @@ export interface ChainAskEvidence {
   links: string[]
 }
 
-/** 检索到、但最终没进引用的段（诊断用） */
+/**
+ * 检索到、但最终没进引用的段（诊断用）。
+ * `turns` / `toolCalls` 是工具循环（toolloop）的诊断字段：老单发路径没有、
+ * `ask-history` 的 `isStats` 只校验前四个 number 键，多出来的键不破坏旧记录读取。
+ */
 export interface ChainAskStats {
-  /** 检索命中段数 */
+  /** 检索命中段数（循环口径：search_info 各次返回的命中总数） */
   hits: number
-  /** 真正送进载荷的段数（脱敏挡下的不算） */
+  /** 真正给模型看过的段数（循环口径：去重后的引用白名单大小） */
   evidence: number
   /** 模型返回的引用条数（剥白名单前） */
   cited: number
   /** 送进载荷的问题字符数 */
   questionChars: number
+  /** 工具循环：assistant 轮数（含最终答复那一轮） */
+  turns?: number
+  /** 工具循环：工具调用总数 */
+  toolCalls?: number
 }
 
 export type ChainAskResult =
   | { kind: 'answer'; answer: string; citations: ChainAskCitation[]; stats: ChainAskStats }
-  /** 没命中 / 引用全被剥空：**不调 LLM 编话**，UI 直接展示 `NO_EVIDENCE_TEXT` */
-  | { kind: 'no-evidence'; stats: ChainAskStats }
+  /**
+   * 模型选择先向用户确认（缺关键信息 / 检索结果撑不起答案）：
+   * 不硬凑回答，而是抛回一个问题 + 可点的候选，由用户补一句再问。
+   */
+  | { kind: 'clarify'; question: string; options: string[]; stats: ChainAskStats }
+  /**
+   * 检索轮数快用完、模型还想继续查：先停下来问用户一句「还要继续吗」。
+   * `resumeId` 是主进程内存里的检查点句柄（不落盘）：选「继续」就带着它恢复循环
+   * 再给一轮工具预算；选「收尾」就按已经查到的内容作答。窗口重开 / 超时后失效。
+   */
+  | {
+      kind: 'continue-ask'
+      question: string
+      options: string[]
+      stats: ChainAskStats
+      resumeId?: string
+    }
+  /**
+   * 没命中 / 引用全被剥空：**不调 LLM 编话**，UI 直接展示 `NO_EVIDENCE_TEXT`。
+   *
+   * 2026-10-27 补：模型嘴上说「没找到」、却给了能点开的引用时，不再把整段说明丢掉——
+   * 把说明留在 `note`、引用留在 `citations`（`note` 说明「查到了什么、为什么还是答不了」）。
+   * 只说明「没找到」而没有额外信息时不带这两个字段，UI 仍显示固定文案。
+   */
+  | {
+      kind: 'no-evidence'
+      stats: ChainAskStats
+      note?: string
+      citations?: ChainAskCitation[]
+    }
   | { kind: 'error'; reason: ChainAskErrorReason; message: string; stats: ChainAskStats }
+
+/** 续问时带上的上一轮对话（问题 + 最终答复 / 澄清问题），让「那上午呢」这类指代有处可落 */
+export interface ChainAskTurnContext {
+  question: string
+  answer: string
+}
+
+/** 「还要继续查吗」的两个选择：继续检索（再给一轮预算）/ 按已经查到的结果收尾 */
+export type ChainAskResumeDecision = 'continue' | 'stop'
+
+/** 澄清问题里最多几个候选（模型可能一口气给一堆，UI 只画得下几个） */
+export const MAX_CLARIFY_OPTIONS = 4
+/** 单个候选的长度上限 */
+export const CLARIFY_OPTION_MAX_CHARS = 60
+/** 澄清问题本身的长度上限 */
+export const CLARIFY_QUESTION_MAX_CHARS = 200
 
 export type ChainAskErrorReason =
   | 'empty-question'
@@ -63,6 +115,8 @@ export type ChainAskErrorReason =
   | 'unparseable'
   /** 客户端抛错（网络 / 截断 / 超时） */
   | 'failed'
+  /** 用户点了停止（在途请求被取消，不是失败） */
+  | 'aborted'
 
 /** 没证据时的固定文案（契约 §4：不调 LLM 编话） */
 export const NO_EVIDENCE_TEXT = '信息链里没找到'

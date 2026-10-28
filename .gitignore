@@ -1,6 +1,9 @@
 # 本地记忆 / 项目数据，不入库（类比 AGENTS.local.md 的本地层）
 .workbuddy/
 
+# 交接文件：工具持续写入，不进库
+handover.md
+
 # 依赖与构建产物（M1 起出现）
 node_modules/
 dist/

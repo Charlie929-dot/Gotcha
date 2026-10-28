@@ -347,7 +347,11 @@ describe('createCaptureSession · 装配与失败回滚', () => {
 
       expect(createScheduler).toHaveBeenCalledTimes(1)
       expect(setFlushTimer).toHaveBeenCalledTimes(1)
-      expect(log).toHaveBeenCalledWith('info', expect.stringContaining('started schema=v1'))
+      expect(log).toHaveBeenCalledWith(
+        'info',
+        expect.stringContaining('started schema=v1'),
+        expect.objectContaining({ metadata_only: false })
+      )
 
       session.flushStats()
       const row = db
@@ -364,6 +368,42 @@ describe('createCaptureSession · 装配与失败回滚', () => {
       expect(ocr.dispose).toHaveBeenCalledTimes(1)
       await session.disposeScreenStream()
       expect(stream.dispose).toHaveBeenCalledTimes(1)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('capture.metadata_only=1：会话装配成仅元数据，不截帧、不 OCR', async () => {
+    const db = openDatabase(':memory:')
+    try {
+      db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('capture.metadata_only', '1')
+      const stream = fakeStream()
+      const ocr = {
+        recognize: vi.fn(async () => ({ text: 'x', ms: 1 })),
+        dispose: vi.fn(async () => {})
+      }
+      const deps = baseDeps(db, {
+        createScreenStream: () => stream,
+        createOcr: () => ocr,
+        getActiveWindow: async () => ({
+          title: '终端',
+          app: 'Windows Terminal',
+          executable: 'windowsterminal.exe',
+          bounds: { x: 0, y: 0, width: 900, height: 600 }
+        })
+      })
+
+      const session = await createCaptureSession(deps)
+      await session.pipeline.tick()
+      await session.pipeline.flush()
+
+      expect(stream.capture).not.toHaveBeenCalled()
+      expect(ocr.recognize).not.toHaveBeenCalled()
+      const rows = db
+        .prepare('SELECT app, window_title, ocr_text FROM events ORDER BY id')
+        .all()
+      expect(rows).toEqual([{ app: 'Windows Terminal', window_title: '终端', ocr_text: null }])
+      expect(session.pipeline.getStats()).toMatchObject({ metadata_events: 1, frames_total: 0 })
     } finally {
       db.close()
     }

@@ -7,6 +7,10 @@ import type { Db } from './index'
 export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'capture.diff_threshold': '8',
   'capture.save_shots': '0',
+  // P0-2（性能方案 §3）：旧管线默认保持原样；双写（events_mirror）默认开，
+  // 观察一周覆盖后再把 metadata_only 置 1（旧管线只记 app/title，不截图、不 OCR）。
+  'capture.metadata_only': '0',
+  'capture.events_mirror': '1',
   // M2 归纳（D18/D22；m2-plan §3 Phase 1）
   'graph.auto': '1',
   'graph.interval_minutes': '10',

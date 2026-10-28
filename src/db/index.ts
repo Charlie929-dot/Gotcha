@@ -8,7 +8,8 @@
  */
 
 import Database from 'better-sqlite3'
-import { copyFileSync, existsSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { applyMigrations, getSchemaVersion, migrations } from './migrations'
 
 export type Db = Database.Database
@@ -88,6 +89,49 @@ function backupBeforeMigration(db: Db, filePath: string): string {
   return backupPath
 }
 
+/** 迁移备份保留份数（性能方案 P0-4：历史 5 份 235 MB 一直没人清） */
+export const MIGRATION_BACKUP_KEEP = 2
+
+/** 文件名里的时间戳（与 `backupStamp()` 同形），按字符串排序即按时间排序 */
+const BACKUP_FILE_PATTERN = '^%BASE%\\.bak\\.(\\d{8}-\\d{6})$'
+
+/**
+ * 迁移备份轮转：只保留最近 `keep` 份，其余删除。
+ *
+ * 只动「同目录 + 同库名 + 严格时间戳后缀」的文件；删不掉（被占用 / 没权限）只计入
+ * `failed`，绝不因为清理失败影响启动。
+ */
+export function pruneMigrationBackups(
+  filePath: string,
+  keep: number = MIGRATION_BACKUP_KEEP
+): { removed: number; failed: number } {
+  if (filePath === ':memory:') return { removed: 0, failed: 0 }
+  const dir = dirname(filePath)
+  const base = basename(filePath).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(BACKUP_FILE_PATTERN.replace('%BASE%', base))
+  let entries: string[]
+  try {
+    entries = readdirSync(dir)
+  } catch {
+    return { removed: 0, failed: 0 }
+  }
+  const stamped = entries
+    .map((name) => ({ name, match: pattern.exec(name) }))
+    .filter((item): item is { name: string; match: RegExpExecArray } => item.match !== null)
+    .sort((a, b) => b.match[1].localeCompare(a.match[1]))
+  let removed = 0
+  let failed = 0
+  for (const item of stamped.slice(Math.max(0, keep))) {
+    try {
+      rmSync(join(dir, item.name), { force: true })
+      removed++
+    } catch {
+      failed++
+    }
+  }
+  return { removed, failed }
+}
+
 /** 打开库并迁移到最新版本。文件库开 WAL（采集高频小写入）。 */
 export function openDatabase(filePath: string): Db {
   const isFile = filePath !== ':memory:'
@@ -103,6 +147,14 @@ export function openDatabase(filePath: string): Db {
       backupBeforeMigration(db, filePath)
     }
     applyMigrations(db)
+    if (isFile) {
+      // 备份轮转：迁移成功之后才清旧备份（失败时保底要留着它们）
+      try {
+        pruneMigrationBackups(filePath)
+      } catch {
+        // 清理失败不影响启动；下次打开还会再试
+      }
+    }
   } catch (error) {
     // 迁移失败必须释放句柄（Windows 上不 close 会让用户无法用 .bak 覆盖恢复，EBUSY）
     db.close()

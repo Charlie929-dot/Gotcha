@@ -84,24 +84,25 @@
 ```
 Gotcha/
 ├─ AGENTS.md
-├─ 记忆球-产品策划案.md
-├─ 记忆球-产品技术方案.md
+├─ docs/
+│  ├─ human/       # 人看的原始方案（产品策划案 / 技术方案，2026-10-28 移入）
+│  └─ agent/       # workflow / testing / security / decisions / gotchas
 ├─ package.json / tsconfig.json
 ├─ src/
 │  ├─ main/        # Electron 主进程：窗口、悬浮球、托盘、全局热键
 │  ├─ capture/     # 截图、帧差(dHash)、前台窗口元数据、剪贴板/URL 信号
 │  ├─ understand/  # 脱敏管道、OCR、DeepSeek 结构化、JSON 校验
-│  ├─ graph/       # 节点/边、归纳任务、LOD 数据组装
+│  ├─ chain/       # 信息链：段 / 内容 / 证据 / 双链 / 检索 / 问记忆
 │  ├─ db/          # better-sqlite3、schema、迁移
-│  └─ renderer/    # 悬浮球 + 图谱画布(sigma.js) + 解说面板
+│  └─ renderer/    # 悬浮球 + 信息链画布 + 问记忆窗口
 ├─ workers/        # OCR / 归纳任务队列
 ├─ scripts/        # 本地工具（Node 原生跑 TS，如门一基线计分 recall-baseline）
 ├─ tests/
 └─ docs/agent/     # workflow / testing / security / decisions / gotchas
 ```
 
-- **进程模型**：单 Electron 进程起步；OCR/归纳走 worker + 本地任务队列，UI 永不阻塞（技术方案 §3.1）。
-- **数据契约**：表与字段以技术方案 §4 为准（四张：`events` / `nodes` / `edges` / `settings`，2026-10-21 已核实修正）。任何上层归纳节点必须带 `source_events`；时间统一毫秒时间戳；schema 变更必须写迁移（版本号 + 幂等 + 回滚）。
+- **进程模型**：Electron 主进程 + 隐藏采集 renderer + 长驻 PowerShell UIA worker + `utilityProcess`（embedding / search）+ 图谱 / 问记忆窗口；重活不阻塞 UI。
+- **数据契约**：主库 schema v7；信息链独立记账 `chain_meta.schema_version=4`（10 张 `chain_*` 表），以 `docs/information-chain-contract.md` 为准。旧 `nodes` / `edges` 归纳模型已随 D38 冻结；schema 变更必须写迁移（版本号 + 幂等 + 回滚）。
 - **出网**：所有送 DeepSeek 的文本必须经过脱敏管道（见 security.md），禁止业务代码直接调 API。
 - **依赖**：新依赖先报备（现有方案为何不行/替代/体积/维护/许可/原生模块）；包管理器用 npm（本机 node v24 / npm 11，无 pnpm）；`better-sqlite3@13` 已 N-API 化（自带 prebuilds，Node/Electron 通用），大版本升级后跑 `npm test` + 冒烟确认。
 - **可扩展性（克制设计）**：当产品已明确同一能力会有多个实现（如皮肤、模型供应商、OCR 引擎、存储/导出策略）时，在第二个实现落地前或本次改动会明显绑死核心时，分离“稳定核心 / 最小契约 / 具体实现”；核心只输出状态与能力接口，不依赖具体视觉、供应商或策略；必须保留可工作的默认实现、加载失败回退，以及契约级回归测试。不要为未拍板的假设需求提前建设通用插件平台、动态脚本加载、复杂注册中心或配置 DSL；一次性逻辑保持直接，等出现第二个真实实现再抽象。
@@ -114,8 +115,9 @@ Gotcha/
 
 | 文档 | 职责 | 何时必改 |
 | - | - | - |
-| `记忆球-产品策划案.md` | 需求真相：定位/指标/功能优先级/风险 | 功能范围/优先级/指标变化 |
-| `记忆球-产品技术方案.md` | 实现真相：架构/选型/数据模型/流程/里程碑 | 架构/依赖/表结构/流程/验收标准变化 |
+| `docs/human/记忆球-产品策划案.md` | 立项产品稿：定位 / 产品宪法 / 用户 / 隐私原则 | 产品意图或宪法变化时补注；功能与指标以progress.md为准 |
+| `docs/human/记忆球-产品技术方案.md` | 立项技术稿：旧架构 / 选型 / 数据模型 | 只读参考；实现变化写 `docs/agent/` 与 `docs/information-chain-*.md` |
+| `docs/human/README.md` | 两份原稿的 2026-10-28 复核（漏项 / 过时项 / 现状指针） | 原稿结论变化时同步 |
 | `docs/agent/decisions.md` | 已拍板决策 | 新增/变更决策 |
 | `docs/agent/gotchas.md` | 已知坑 | 踩到新坑 |
 | `AGENTS.md` | 常驻指令 | 工作流变化（只升 1–3 行） |

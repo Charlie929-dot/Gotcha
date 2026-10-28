@@ -32,6 +32,8 @@ let app: ElectronApplication
 let graph: Page
 let todayKey: string
 let otherKey: string
+/** 时刻 1 的超长摘要：超过列表截断长度（60 字），侧栏必须现取全文 */
+const LONG_SUMMARY = `改按钮样式 / 调试悬停状态${'，逐条核对悬停细节'.repeat(12)}`
 
 interface GlobalDebug {
   count(): number
@@ -55,7 +57,9 @@ interface GlobalDebug {
 interface GraphWindowApi {
   global(): Promise<{
     stats: { themes: number; moments: number; memberships: number; edges: number; positions: number }
+    moments: Array<{ id: number; ocrSummary: string | null; ocrTrimmed: boolean }>
   }>
+  momentSummary(momentId: number): Promise<{ found: boolean; ocrSummary: string | null }>
   nodeEvents(nodeId: number): Promise<{ found: boolean; events: Array<{ id: number }>; missingIds: number[] }>
   momentEvents(
     momentId: number
@@ -147,7 +151,7 @@ test.beforeAll(async () => {
   db.prepare(
     `INSERT INTO moments (id, start_ts, end_ts, day_key, app, window_title, ocr_summary, event_ids, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
-  ).run(1, t1, t1 + 30_000, todayKey, 'Code', 'a.ts', '改按钮样式 / 调试悬停状态', JSON.stringify([e1, e2]))
+  ).run(1, t1, t1 + 30_000, todayKey, 'Code', 'a.ts', LONG_SUMMARY, JSON.stringify([e1, e2]))
   db.prepare(
     `INSERT INTO moments (id, start_ts, end_ts, day_key, app, window_title, ocr_summary, event_ids, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`
@@ -316,6 +320,29 @@ test.describe.serial('全局图谱（主题 + 时刻 + 日历调暗）', () => {
     // 从「也属于」跳到另一个主题
     await graph.locator('#panel-related li').first().click()
     await expect(graph.locator('#panel-title')).toHaveText('按钮调试')
+  })
+
+  test('时刻摘要：列表只带前 60 字，侧栏展开现取全文', async () => {
+    const payload = await graph.evaluate(async () =>
+      (window as unknown as { gotchaGraph: GraphWindowApi }).gotchaGraph.global()
+    )
+    const moment = payload.moments.find((item) => item.id === 1)
+    expect(moment?.ocrTrimmed).toBe(true)
+    expect(moment?.ocrSummary?.length).toBe(60)
+    expect(moment?.ocrSummary).not.toBe(LONG_SUMMARY)
+
+    // 现取接口本身可用（侧栏点击前也会走它）
+    const detail = await graph.evaluate(async () =>
+      (window as unknown as { gotchaGraph: GraphWindowApi }).gotchaGraph.momentSummary(1)
+    )
+    expect(detail).toEqual({ found: true, ocrSummary: LONG_SUMMARY })
+
+    await graph.evaluate(async () => {
+      await (window as unknown as { __gotchaGraphView: GlobalDebug }).__gotchaGraphView.select('m:1')
+    })
+    await expect(graph.locator('#panel')).toBeVisible()
+    // 侧栏拿到的是全文，不是截断版
+    await expect(graph.locator('#panel-summary')).toHaveText(LONG_SUMMARY)
   })
 
   test('日历调暗：节点数不变、只改 dimmed；空范围有提示', async () => {

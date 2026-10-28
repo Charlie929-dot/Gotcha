@@ -77,4 +77,28 @@ describe('sanitize · 脱敏标记（D10：本地保留原文）', () => {
   it('drop 规则不误伤普通英文单词', () => {
     expect(sanitize('spinning wheel 转圈').drop).toBe(false)
   })
+
+  it('pin 只在密码上下文里整帧丢弃（技术文本里的 to pin 不误伤）', () => {
+    // 真实风险形态：pin 紧邻码 / code / 冒号等号，或 40 字符内出现 4–8 位数字
+    for (const text of [
+      'PIN 码',
+      'Your PIN is 1234',
+      'PIN: 4321',
+      'PIN code 8899',
+      'pin 1 2 3 4',
+      'pin=4321',
+      // OCR 版式：标签与输入框不在同一行
+      'Enter your PIN\n1234'
+    ]) {
+      expect(sanitize(text).drop, text).toBe(true)
+    }
+    // 技术散文：pin 是动词 / 属性名，附近没有 4 位数字
+    for (const text of [
+      'd3-force supports node.fx to pin. force-graph exposes nodeRelSize',
+      '画布 pin fx/fy + cooldownTicks(1)',
+      'pin the node, then drag it'
+    ]) {
+      expect(sanitize(text).drop, text).toBe(false)
+    }
+  })
 })

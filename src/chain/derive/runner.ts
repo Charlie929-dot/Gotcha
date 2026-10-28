@@ -22,11 +22,7 @@
 import type { Embedder } from '../../understand/embedding/types'
 import { recordUsage, readUsage } from '../../understand/induction'
 import type { LlmClient } from '../../understand/cloud/llm-client'
-import {
-  buildChainExtractPayload,
-  buildChainMergePayload,
-  type ChainPairKind
-} from '../../understand/cloud/redact'
+import type { ChainPairKind, DeriveOutbound } from './payload'
 import { getSetting } from '../../db/settings'
 import type { ChainDb } from '../store'
 import { getSegment } from '../store'
@@ -56,6 +52,12 @@ export type DeriveLog = (
   data?: Record<string, unknown>
 ) => void
 
+/** 错误 → code（日志红线：只带 code，不带正文） */
+function errorCode(error: unknown): string {
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : 'unknown'
+}
+
 /** 与 `main/induction-runtime.ts` 的 `ClientResolution` 同形（避免 chain 依赖 main） */
 export type DeriveClientResolution =
   | { ok: true; client: LlmClient }
@@ -63,6 +65,11 @@ export type DeriveClientResolution =
 
 export interface ChainDeriverOptions {
   db: ChainDb
+  /**
+   * 派生层载荷组装（安全边界的唯一注入点）。
+   * 远端供应商：`createCloudDeriveOutbound()`；本机 / 测试：`createLocalDeriveOutbound()`。
+   */
+  outbound: DeriveOutbound
   now?: () => number
   log?: DeriveLog
   /** 出网确认门（D24）；缺省按未确认处理（零出网） */
@@ -134,6 +141,7 @@ interface CandidateResolution {
 type SkipReason = 'consent' | 'client' | null
 export class ChainDeriver {
   private readonly db: ChainDb
+  private readonly outbound: DeriveOutbound
   private readonly now: () => number
   private readonly log: DeriveLog
   private readonly readConsent: () => boolean
@@ -159,6 +167,7 @@ export class ChainDeriver {
 
   constructor(options: ChainDeriverOptions) {
     this.db = options.db
+    this.outbound = options.outbound
     this.now = options.now ?? (() => Date.now())
     this.log = options.log ?? (() => {})
     this.readConsent = options.readConsent ?? (() => false)
@@ -386,7 +395,15 @@ export class ChainDeriver {
       return { budgetExhausted: context.budgetExhausted, embedded: false }
     }
 
-    const embedded = await this.ensureVector(item, text.hash, text.text)
+    let embedded = false
+    try {
+      embedded = await this.ensureVector(item, text.hash, text.text)
+    } catch (error) {
+      // 向量失败（worker 崩 / 超时 / 协议拒绝 / 模型换了）不挡派生：标签与双链照常抽，
+      // 段向量留给下一轮扫描补（`getSegmentVector` 为空就会重试）。
+      const code = errorCode(error)
+      this.noteOnce('derive-vector', 'chain derive: 段向量算不出来，本段照常抽标签 / 双链', { code })
+    }
 
     const marker = getDeriveMarker(this.db, item.segmentId)
     if (marker && marker.text_hash === text.hash) {
@@ -414,7 +431,7 @@ export class ChainDeriver {
       return { budgetExhausted: true, embedded }
     }
 
-    const built = buildChainExtractPayload(
+    const built = this.outbound.buildExtract(
       [
         {
           segmentId: item.segmentId,
@@ -588,32 +605,40 @@ export class ChainDeriver {
 
     if (needVector.length > 0 && context.embedder) {
       const embedder = context.embedder
-      const candidateVectors = await this.embedDirect(
-        embedder,
-        needVector.map((entry) => entry.name)
-      )
-      // 双链的匹配池要带别名，但**名字要归到链本身**——否则命中的是别名时，
-      // 写库会把别名当成另一条链（第一版就踩过：多了个「记忆系统设计」链）。
-      const linkEntries = await this.linkEntries(embedder, links)
-      const tagEntries = await this.namedVectors(embedder, 'tag', tags)
+      try {
+        const candidateVectors = await this.embedDirect(
+          embedder,
+          needVector.map((entry) => entry.name)
+        )
+        // 双链的匹配池要带别名，但**名字要归到链本身**——否则命中的是别名时，
+        // 写库会把别名当成另一条链（第一版就踩过：多了个「记忆系统设计」链）。
+        const linkEntries = await this.linkEntries(embedder, links)
+        const tagEntries = await this.namedVectors(embedder, 'tag', tags)
 
-      for (const entry of needVector) {
-        const vec = candidateVectors.get(entry.name)
-        if (!vec) continue
-        const pool = entry.kind === 'link' ? linkEntries : tagEntries
-        const best = bestMatch(vec, pool)
-        const resolution = resolutions[entry.index]
-        if (!best) continue
-        const band = mergeBand(best.similarity)
-        if (band === 'reuse') {
-          resolution.action = 'reuse'
-          resolution.canonical = best.name
-          resolution.similarity = best.similarity
-        } else if (band === 'ask') {
-          resolution.ask = true
-          resolution.canonical = best.name
-          resolution.similarity = best.similarity
+        for (const entry of needVector) {
+          const vec = candidateVectors.get(entry.name)
+          if (!vec) continue
+          const pool = entry.kind === 'link' ? linkEntries : tagEntries
+          const best = bestMatch(vec, pool)
+          const resolution = resolutions[entry.index]
+          if (!best) continue
+          const band = mergeBand(best.similarity)
+          if (band === 'reuse') {
+            resolution.action = 'reuse'
+            resolution.canonical = best.name
+            resolution.similarity = best.similarity
+          } else if (band === 'ask') {
+            resolution.ask = true
+            resolution.canonical = best.name
+            resolution.similarity = best.similarity
+          }
         }
+      } catch (error) {
+        // 向量只是「同名之外还能认出近似名」的增强：算不出来就退回精确同名匹配（名字按新建处理），
+        // 不能让一次推理失败把整段派生（标签 / 双链 / 水位）一起丢掉、还在下一轮反复重试烧 token。
+        this.noteOnce('derive-vectors', 'chain derive: 名字向量算不出来，本段只做精确同名匹配', {
+          code: errorCode(error)
+        })
       }
     }
 
@@ -621,7 +646,7 @@ export class ChainDeriver {
       .map((resolution, index) => ({ resolution, index }))
       .filter((entry) => entry.resolution.ask)
     if (asks.length > 0) {
-      const built = buildChainMergePayload(
+      const built = this.outbound.buildMerge(
         asks.map((entry) => ({
           candidate: entry.resolution.candidate,
           existing: entry.resolution.canonical,

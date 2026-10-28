@@ -14,6 +14,7 @@
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { validateContent, validateSegment } from './invariants'
+import { collectUrls, contentUrlsOf, decodeContentUrls, CONTENT_URLS_MAX } from './content/urls'
 import {
   CHAIN_CONTENT_SOURCES,
   CHAIN_EVENT_KINDS,
@@ -252,8 +253,8 @@ export function insertContent(db: ChainDb, input: NewChainContent): number {
 
   const result = db
     .prepare(
-      `INSERT INTO chain_content (segment_id, captured_at, source, text, chars, hash)
-       VALUES (@segmentId, @capturedAt, @source, @text, @chars, @hash)`
+      `INSERT INTO chain_content (segment_id, captured_at, source, text, chars, hash, urls)
+       VALUES (@segmentId, @capturedAt, @source, @text, @chars, @hash, @urls)`
     )
     .run({
       segmentId: row.segment_id,
@@ -261,7 +262,8 @@ export function insertContent(db: ChainDb, input: NewChainContent): number {
       source: row.source,
       text: row.text,
       chars: row.chars,
-      hash: row.hash
+      hash: row.hash,
+      urls: contentUrlsOf(row.text)
     })
   return Number(result.lastInsertRowid)
 }
@@ -490,6 +492,123 @@ export interface SegmentDetail {
   events: ChainEventRow[]
   shots: ChainShotRow[]
   contents: ChainContentRow[]
+}
+
+/**
+ * `chain_content.urls` 是否就位（chain v4 迁移前的老库没有这一列）。
+ *
+ * 只缓存**肯定**结果：否定结果每次都重新探测——同一个连接上「先查了没列的库、随后
+ * `ensureChainSchema` 补了列」是真实会发生的顺序（启动时迁移、只读脚本先开连接），
+ * 缓存住 false 会让之后所有检索一直走慢路径。
+ */
+const contentUrlsReady = new WeakMap<object, true>()
+
+function hasContentUrls(db: ChainDb): boolean {
+  if (contentUrlsReady.get(db)) return true
+  let ready = false
+  try {
+    const columns = db.prepare("SELECT name FROM pragma_table_info('chain_content')").all() as Array<{
+      name: string
+    }>
+    ready = columns.some((column) => column.name === 'urls')
+  } catch {
+    ready = false
+  }
+  if (ready) contentUrlsReady.set(db, true)
+  return ready
+}
+
+/**
+ * 只读这些段的网址（去重、按内容时间顺序、最多 `CONTENT_URLS_MAX` 条）。
+ *
+ * 性能方案 P1-6：`search_info` 以前为抽网址把每条命中段的**整段正文**取回内存
+ * （limit 8 时 2.3 MB、19 ms）。网址在写入时已落到 `chain_content.urls`，这里只读几十字节。
+ * 老库（v4 之前）没有这一列时退回现场扫正文，口径不变。
+ */
+export function listSegmentUrls(db: ChainDb, segmentIds: readonly number[]): Map<number, string[]> {
+  const ids = [...new Set(segmentIds.filter((id) => Number.isInteger(id) && id > 0))]
+  const result = new Map<number, string[]>()
+  if (ids.length === 0) return result
+  const withUrls = hasContentUrls(db)
+  for (let start = 0; start < ids.length; start += 400) {
+    const chunk = ids.slice(start, start + 400)
+    if (!withUrls) {
+      const rows = db
+        .prepare(
+          `SELECT segment_id, text FROM chain_content
+            WHERE segment_id IN (${chunk.map(() => '?').join(',')})
+            ORDER BY captured_at ASC, id ASC`
+        )
+        .all(...chunk) as Array<{ segment_id: number; text: string }>
+      for (const row of rows) {
+        const urls = result.get(row.segment_id) ?? []
+        collectUrls([row.text], urls)
+        result.set(row.segment_id, urls)
+      }
+      continue
+    }
+    const rows = db
+      .prepare(
+        `SELECT segment_id, urls FROM chain_content
+          WHERE segment_id IN (${chunk.map(() => '?').join(',')})
+          ORDER BY captured_at ASC, id ASC`
+      )
+      .all(...chunk) as Array<{ segment_id: number; urls: string | null }>
+    for (const row of rows) {
+      const current = result.get(row.segment_id) ?? []
+      for (const url of decodeContentUrls(row.urls)) {
+        if (current.includes(url)) continue
+        if (current.length >= CONTENT_URLS_MAX) break
+        current.push(url)
+      }
+      result.set(row.segment_id, current)
+    }
+  }
+  return result
+}
+
+/**
+ * 只读这些段「最长那条正文」的开头（兜底摘要用）。
+ *
+ * `getSegmentDetail` 里兜底摘要取的是正文最长那行（`chars` 最大）的前几十字，
+ * 所以这里只要 `substr(text, 1, chars)`，不把整段正文拉进内存。
+ */
+export function listSegmentLongestHeads(
+  db: ChainDb,
+  segmentIds: readonly number[],
+  headChars = 2000
+): Map<number, string> {
+  const ids = [...new Set(segmentIds.filter((id) => Number.isInteger(id) && id > 0))]
+  const result = new Map<number, string>()
+  if (ids.length === 0) return result
+  const limit = Math.max(1, Math.floor(headChars))
+  for (let start = 0; start < ids.length; start += 400) {
+    const chunk = ids.slice(start, start + 400)
+    // 先只按元数据排名（不碰 text），再回表取那几行的开头：
+    // 直接在窗口函数里 SELECT text 会让 SQLite 把每条正文都读出来（等于旧路径），
+    // 排名只用 chars / captured_at / id 就便宜得多。
+    const rows = db
+      .prepare(
+        `WITH picked AS (
+           SELECT id FROM (
+             SELECT id,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY segment_id ORDER BY chars DESC, captured_at ASC, id ASC
+                    ) AS rn
+               FROM chain_content
+              WHERE segment_id IN (${chunk.map(() => '?').join(',')})
+           )
+           WHERE rn = 1
+         )
+         SELECT c.segment_id, substr(c.text, 1, ?) AS head
+           FROM chain_content c JOIN picked ON picked.id = c.id`
+      )
+      .all(...chunk, limit) as Array<{ segment_id: number; head: string | null }>
+    for (const row of rows) {
+      if (typeof row.head === 'string') result.set(row.segment_id, row.head)
+    }
+  }
+  return result
 }
 
 /** 段 → 事件 / 截图 / 内容，一次取全（契约 §6 的反查方向） */

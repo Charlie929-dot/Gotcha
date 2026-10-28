@@ -70,6 +70,12 @@ export interface ChainRecorderOptions {
   onSegmentClosed?: (segmentId: number) => void
   /** 内容写进库后通知（派生层据此知道水位变了；抛错不影响采集） */
   onContentWritten?: (segmentId: number) => void
+  /**
+   * 内容**真正落行**后通知（去重 / 空文本不会触发）。P0-2：用它把正文镜像进 `events`。
+   * 与 `onContentWritten` 分开：那个只关心「段的水位变了」，不必携带正文；
+   * 这个要正文与 captured_at（镜像行的 ts 必须与内容行一致）。抛错不影响采集。
+   */
+  onContentInserted?: (segmentId: number, capturedAt: number, payload: ContentPayload) => void
 }
 
 export type ShotTaker = (request: ShotRequest) => ShotResult | null | Promise<ShotResult | null>
@@ -120,6 +126,11 @@ export class ChainRecorder {
   private readonly dedupeContent: boolean
   private readonly onSegmentClosed?: (segmentId: number) => void
   private readonly onContentWritten?: (segmentId: number) => void
+  private readonly onContentInserted?: (
+    segmentId: number,
+    capturedAt: number,
+    payload: ContentPayload
+  ) => void
   /** 当前开着的段 id（段机保证同一时刻最多一段） */
   private openSegmentId: number | null = null
   /** 异步采图串行队列：保证落库顺序 = 事件顺序 */
@@ -134,6 +145,7 @@ export class ChainRecorder {
     this.dedupeContent = options.dedupeContent ?? true
     this.onSegmentClosed = options.onSegmentClosed
     this.onContentWritten = options.onContentWritten
+    this.onContentInserted = options.onContentInserted
   }
 
   get currentSegmentId(): number | null {
@@ -290,7 +302,7 @@ export class ChainRecorder {
     if (payload.text.trim() === '') return false
     if (!this.dedupeContent) {
       insertContent(this.db, { segmentId, capturedAt, source: payload.source, text: payload.text })
-      this.notifyContent(segmentId)
+      this.notifyContent(segmentId, capturedAt, payload)
       return true
     }
     const last = this.db
@@ -299,16 +311,21 @@ export class ChainRecorder {
     const hash = contentHash(payload.text)
     if (last && last.hash === hash) return false
     insertContent(this.db, { segmentId, capturedAt, source: payload.source, text: payload.text, hash })
-    this.notifyContent(segmentId)
+    this.notifyContent(segmentId, capturedAt, payload)
     return true
   }
 
-  /** 派生层叫醒（v0.8）：抛错不影响内容已落库这个事实 */
-  private notifyContent(segmentId: number): void {
+  /** 派生层 / 镜像叫醒（v0.8 / P0-2）：抛错不影响内容已落库这个事实 */
+  private notifyContent(segmentId: number, capturedAt: number, payload: ContentPayload): void {
     try {
       this.onContentWritten?.(segmentId)
     } catch {
       // 派生晚一点，不影响采集
+    }
+    try {
+      this.onContentInserted?.(segmentId, capturedAt, payload)
+    } catch {
+      // 镜像失败只是 events 少一行，不影响 chain_content 已落库
     }
   }
 }

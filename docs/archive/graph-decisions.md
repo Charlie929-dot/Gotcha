@@ -40,5 +40,5 @@
 ## 4. 与旧文档的关系
 
 - `docs/m2-plan.md` 的 §0 C3/C4、§3 Phase 2、§5 图谱依赖、§8 Q5 已标记 superseded；归纳/隐私/供应商/设置部分仍有效。
-- `记忆球-产品技术方案.md` §6.2 的「线宽 + 布局距离双重编码」与 sigma 选型已标记 superseded。
+- `docs/human/记忆球-产品技术方案.md` §6.2 的「线宽 + 布局距离双重编码」与 sigma 选型已标记 superseded。
 - 旧草案 `docs/archive/m2-foam-graph-draft-v0.1.md` 是「Foam 兼容 Sigma」的中间稿，仅作历史，不再作为实施依据。

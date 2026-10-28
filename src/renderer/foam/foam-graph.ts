@@ -252,8 +252,17 @@ export class FoamGraph extends LitElement {
   }
 
   /** P0 性能：累计渲染帧 / 布局 tick（harness 用差值算「布局中 FPS」）。 */
-  stats(): { frames: number; ticks: number } {
-    return this.canvas?.stats() ?? { frames: 0, ticks: 0 };
+  stats(): { frames: number; ticks: number; bloom: boolean } {
+    return this.canvas?.stats() ?? { frames: 0, ticks: 0, bloom: false };
+  }
+
+  /** P1-2：窗口隐藏时停动画（引擎 tick + 重绘），可见时恢复。 */
+  pauseAnimation() {
+    this.canvas?.pauseAnimation();
+  }
+
+  resumeAnimation() {
+    this.canvas?.resumeAnimation();
   }
 
   /** Public: viewport position of a node, for E2E real-click tests. */

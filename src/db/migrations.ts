@@ -37,6 +37,11 @@ import {
   THEME_MOMENTS_MOMENT_INDEX_DDL,
   normalizeOcrSql
 } from './schema'
+import {
+  decodeEmbeddingVector,
+  encodeVectorFloat32,
+  encodeVectorInt16
+} from '../understand/vector-int16'
 
 export interface Migration {
   version: number
@@ -184,8 +189,71 @@ export const migrations: Migration[] = [
         db.exec('ALTER TABLE node_embeddings DROP COLUMN text_hash')
       }
     }
+  },
+  {
+    /**
+     * v7：`event_embeddings.vec` 从 Float32 换成 int16（性能方案 §3 P1-3 / §6）。
+     *
+     * 动因：512 维 Float32 = 2048 B/行，SQLite 4096 页里每行都会溢出到第二页，
+     * 实测 15,567 行吃掉 61.0 MB；int16（每行 1028 B）能整行放下，同批数据只要 20.3 MB（≈3×）。
+     * 为什么不是 int8：真实库抽样 top-1 最近邻只有 96.7% 一致（近重复向量被量化误差翻盘），
+     * int16 是 100%，见 `src/understand/vector-int16.ts` 与 `tests/perf/vector-int8.perf.test.ts`。
+     *
+     * 幂等：已经是 int16 的行跳过；长度与声明维度对不上的坏行原样不动。
+     * 派生数据：down 反量化回 Float32（有轻微精度损失，但结构/可读性恢复），L0 事件不受影响。
+     */
+    version: 7,
+    up(db) {
+      rebuildEventEmbeddings(db, (vec) => encodeVectorInt16(vec))
+    },
+    down(db) {
+      rebuildEventEmbeddings(db, (vec) => encodeVectorFloat32(vec))
+    }
   }
 ]
+
+/**
+ * 重建 `event_embeddings`（v7 用）：把每行 BLOB 换成新编码后整表重建。
+ *
+ * 为什么不是 `UPDATE ... SET vec = ?`：行变小了不会自动回收页，B-tree 仍按原来的
+ * 2 KB/行跨页摆放（实测表还是 61 MB）。整表重建一次就能把 1 KB 的行排满页（61 → 20 MB）。
+ * 也顺便绕开「VACUUM 不能跑在迁移事务里」的限制。
+ *
+ * 幂等：编码函数对已经是目标格式的行不重复转换（长度/魔数对得上就原样搬）。
+ */
+function rebuildEventEmbeddings(
+  db: Database.Database,
+  encode: (vec: Float32Array) => Buffer
+): void {
+  const rows = db
+    .prepare('SELECT event_id, model, dim, vec, updated_at FROM event_embeddings')
+    .all() as Array<{
+    event_id: number
+    model: string
+    dim: number
+    vec: Buffer
+    updated_at: number
+  }>
+  db.exec(`CREATE TABLE event_embeddings_rebuild (
+    event_id   INTEGER PRIMARY KEY,
+    model      TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    vec        BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`)
+  const insert = db.prepare(
+    `INSERT INTO event_embeddings_rebuild (event_id, model, dim, vec, updated_at)
+     VALUES (?, ?, ?, ?, ?)`
+  )
+  for (const row of rows) {
+    const vec = decodeEmbeddingVector(row.vec, row.dim)
+    // 长度与声明维度对不上的坏行：原样搬过去，不丢数据
+    const blob = vec.length === row.dim && vec.length > 0 ? encode(vec) : row.vec
+    insert.run(row.event_id, row.model, row.dim, blob, row.updated_at)
+  }
+  db.exec('DROP TABLE event_embeddings')
+  db.exec('ALTER TABLE event_embeddings_rebuild RENAME TO event_embeddings')
+}
 
 /** 列是否存在（ALTER 加列 / 删列前检查，保证迁移 up/down 可重复执行） */
 function hasColumn(db: Database.Database, table: string, column: string): boolean {

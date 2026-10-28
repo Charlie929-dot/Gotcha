@@ -1,11 +1,12 @@
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { askChain, type ChainAskOptions } from '../../src/chain/agent/ask'
-import { parseChainAnswer } from '../../src/chain/agent/parse'
+import { parseChainReply } from '../../src/chain/agent/parse'
 import { ensureChainSchema } from '../../src/chain/schema'
 import { closeSegment, insertContent, openSegment, type ChainDb } from '../../src/chain/store'
-import { FakeLlmClient } from '../../src/understand/cloud/llm-client'
-import { buildChainAskPayload } from '../../src/understand/cloud/redact'
+import { FakeLlmClient, type LlmClient } from '../../src/understand/cloud/llm-client'
+import { createCloudAskOutbound } from '../../src/understand/cloud/ask-outbound'
+import { buildChainAskLoopPayload, buildChainAskPayload } from '../../src/understand/cloud/redact'
 
 /** 本地 2026-10-27 09:00 */
 const T0 = new Date(2026, 9, 27, 9, 0, 0, 0).getTime()
@@ -67,15 +68,31 @@ function seed(options: SeedOptions): number {
   return id
 }
 
+/**
+ * 单发回退路径的客户端：FakeLlmClient 现在带 completeAskLoop（会走工具循环主路径），
+ * 这里显式剥掉它，逼 askChain 落回保留的老单发管道。
+ */
+function legacyClient(fake: FakeLlmClient): LlmClient {
+  return {
+    completeJson: fake.completeJson.bind(fake),
+    completeNaming: fake.completeNaming.bind(fake),
+    completeAssignments: fake.completeAssignments.bind(fake),
+    completeChainExtract: fake.completeChainExtract.bind(fake),
+    completeChainMerge: fake.completeChainMerge.bind(fake),
+    completeAsk: fake.completeAsk.bind(fake)
+  }
+}
+
 function buildDeps(client: FakeLlmClient, extra: Partial<ChainAskOptions> = {}): ChainAskOptions {
   return {
     db,
-    resolveClient: () => ({ ok: true, client }),
+    outbound: createCloudAskOutbound(),
+    resolveClient: () => ({ ok: true, client: legacyClient(client) }),
     ...extra
   }
 }
 
-describe('问记忆：编排与白名单（S1）', () => {
+describe('问记忆：单发回退路径（客户端没有 completeAskLoop 时保留的老管道）', () => {
   it('命中段 → 一段回答 + 引用，引用的事实由服务端从段行补', async () => {
     const vscode = seed({
       pid: 1,
@@ -185,6 +202,30 @@ describe('问记忆：编排与白名单（S1）', () => {
     expect(result.reason).toBe('unparseable')
   })
 
+  it('answer 宣称没找到却带引用 → 仍按没找到收口，但保留说明与引用（根因 7）', async () => {
+    seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: 'LNK1104 的记录' })
+    const client = new FakeLlmClient([
+      {
+        json: {
+          answer: '信息链里没找到相关记录。',
+          citations: [{ segmentId: 1, why: '不该出现的引用' }]
+        }
+      }
+    ])
+    const logs: string[] = []
+    const result = await askChain(
+      buildDeps(client, { log: (_level, message) => logs.push(message) }),
+      'LNK1104'
+    )
+    expect(result.kind).toBe('no-evidence')
+    if (result.kind !== 'no-evidence') return
+    expect(result.note).toBe('信息链里没找到相关记录。')
+    expect(result.citations?.map((citation) => citation.segmentId)).toEqual([1])
+    expect(logs.some((message) => message.includes('按没找到保留说明'))).toBe(true)
+    // 模型确实被问过了（回退路径照常出云），只是结果被归一
+    expect(client.askRequests).toHaveLength(1)
+  })
+
   it('出云门关着：一次调用都不发', async () => {
     seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: 'LNK1104 的记录' })
     const client = new FakeLlmClient([])
@@ -192,6 +233,16 @@ describe('问记忆：编排与白名单（S1）', () => {
     expect(result.kind).toBe('error')
     if (result.kind !== 'error') return
     expect(result.reason).toBe('consent')
+    expect(client.askRequests).toHaveLength(0)
+  })
+
+  it('日预算用完：报 budget，不出云', async () => {
+    seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: 'LNK1104 的记录' })
+    const client = new FakeLlmClient([])
+    const result = await askChain(buildDeps(client, { overBudget: () => true }), 'LNK1104')
+    expect(result.kind).toBe('error')
+    if (result.kind !== 'error') return
+    expect(result.reason).toBe('budget')
     expect(client.askRequests).toHaveLength(0)
   })
 
@@ -204,7 +255,10 @@ describe('问记忆：编排与白名单（S1）', () => {
       completeChainExtract: fake.completeChainExtract.bind(fake),
       completeChainMerge: fake.completeChainMerge.bind(fake)
     }
-    const result = await askChain({ db, resolveClient: () => ({ ok: true, client }) }, '任何问题')
+    const result = await askChain(
+      { db, outbound: createCloudAskOutbound(), resolveClient: () => ({ ok: true, client }) },
+      '任何问题'
+    )
     expect(result.kind).toBe('error')
     if (result.kind !== 'error') return
     expect(result.reason).toBe('client')
@@ -299,13 +353,83 @@ describe('问记忆：载荷脱敏与解析纪律', () => {
 
   it('解析：citations 不是数组 / answer 为空都算结构不对', () => {
     const meta = new Map([[1, { segmentId: 1, at: 0, app: 'A', title: 'T' }]])
-    expect(parseChainAnswer({ answer: '有', citations: 'nope' }, meta)).toMatchObject({
+    expect(parseChainReply({ answer: '有', citations: 'nope' }, meta)).toMatchObject({
       ok: false,
       reason: 'shape'
     })
-    expect(parseChainAnswer({ answer: '   ', citations: [] }, meta)).toMatchObject({
+    expect(parseChainReply({ answer: '   ', citations: [] }, meta)).toMatchObject({
       ok: false,
       reason: 'shape'
     })
+  })
+
+  it('解析：{"ask":...} 走确认出口；候选去空 / 去重 / 截断', () => {
+    const meta = new Map([[1, { segmentId: 1, at: 0, app: 'A', title: 'T' }]])
+    const parsed = parseChainReply(
+      { ask: '  想找上午还是下午的？ ', options: ['上午', '上午', '', 42, '下午'] },
+      meta
+    )
+    expect(parsed).toMatchObject({
+      ok: true,
+      kind: 'clarify',
+      question: '想找上午还是下午的？',
+      options: ['上午', '下午']
+    })
+    // ask 是空白 → 仍按答复解析，answer 缺失就是结构不对
+    expect(parseChainReply({ ask: '   ' }, meta)).toMatchObject({ ok: false, reason: 'shape' })
+  })
+
+  it('循环载荷：连续追问的历史会重新脱敏（命中密码类整轮丢，正常轮保留）', () => {
+    const built = buildChainAskLoopPayload({
+      question: '那下午呢',
+      systemTime: '2026-10-27 09:00 周二',
+      freshness: { latestEvidenceTs: null, captureRunning: false },
+      turns: [],
+      history: [
+        { question: '密码 123456 是哪次', answer: '在写代码' },
+        { question: '上午在干什么', answer: '密码 abc123 那次' },
+        { question: '上午在干什么', answer: '在写代码' }
+      ]
+    })
+    // 前两轮都命中敏感规则整轮丢；第三轮原样留下
+    expect(built.payload.history).toEqual([{ question: '上午在干什么', answer: '在写代码' }])
+  })
+
+  it('循环载荷：历史轮数有上限（只带最近 4 轮）', () => {
+    const built = buildChainAskLoopPayload({
+      question: '继续',
+      systemTime: '2026-10-27 09:00 周二',
+      freshness: { latestEvidenceTs: null, captureRunning: false },
+      turns: [],
+      history: Array.from({ length: 7 }, (_, index) => ({ question: `问 ${index}`, answer: `答 ${index}` }))
+    })
+    expect(built.payload.history.map((turn) => turn.question)).toEqual(['问 3', '问 4', '问 5', '问 6'])
+  })
+
+  it('循环载荷：工具参数的键名也过脱敏（blocked 键整条丢，正常键原样）', () => {
+    const built = buildChainAskLoopPayload({
+      question: '随便问问',
+      systemTime: '2026-10-27 09:00 周二',
+      freshness: { latestEvidenceTs: null, captureRunning: false },
+      turns: [
+        {
+          toolCall: {
+            name: 'search_info',
+            arguments: {
+              '密码 123456': 1,
+              'keywords': [{ '密码 abc123': ['x'], 'text': '正常值' }]
+            }
+          },
+          toolResult: { kind: 'get_freshness', freshness: { latestEvidenceTs: null, captureRunning: false } }
+        }
+      ]
+    })
+    const args = built.payload.turns[0].toolCall.arguments
+    const wire = JSON.stringify(args)
+    // 键名命中密码类词：整条丢掉 / 不写入（不留键、不留值）
+    expect(wire).not.toContain('123456')
+    expect(wire).not.toContain('abc123')
+    // 正常键与数字值原样（别把 limit / 布尔脱成字符串）
+    expect(args.keywords).toEqual([{ text: '正常值' }])
   })
 })

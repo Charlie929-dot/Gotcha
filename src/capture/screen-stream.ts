@@ -14,7 +14,6 @@ import type { Display } from 'electron'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isCaptureFrameRequest } from './display-media'
-import { dHash, rgbaToGray } from './frame-diff'
 import { captureTargetSize, type CaptureTargetOptions } from './ocr-scaling'
 import {
   computeCaptureGeometry,
@@ -42,7 +41,15 @@ interface StreamInfo {
 interface GrabResult {
   image: Uint8Array
   ocrPng?: Uint8Array
-  diff: Uint8Array
+  /** 90x80 灰度 dHash（16 位十六进制字符串；在渲染端算，主进程不再解像素） */
+  hash: string
+  width: number
+  height: number
+}
+
+/** 渲染端「只回指纹」的结果（不编码、不落盘） */
+interface ProbeResult {
+  hash: string
   width: number
   height: number
 }
@@ -53,6 +60,11 @@ export interface CaptureOptions extends CaptureTargetOptions {
   format?: 'png' | 'jpeg'
   /** 同时出一张 2× PNG 给 OCR（证据图这条链路；旧管线不需要） */
   withOcrImage?: boolean
+  /**
+   * 画之前是否等一个新帧（默认 true）。判重前移后，探针刚刚等过新帧，
+   * 紧接着的编码不必再等一次（静止画面下每次等会白耗 ~500ms）。
+   */
+  fresh?: boolean
 }
 
 export interface ScreenCaptureOptions {
@@ -90,6 +102,17 @@ function expectedDisplaySize(display: DisplayInfo): { width: number; height: num
 
 function toDisplayInfo(display: Display): DisplayInfo {
   return { id: display.id, bounds: display.bounds, scaleFactor: display.scaleFactor }
+}
+
+/**
+ * 渲染端回传的 dHash（16 位十六进制）。校验失败就抛错——指纹是判重的唯一依据，
+ * 宁可这一帧算抓帧失败，也不能拿一个坏指纹去比（会把「变了」误判成「没变」）。
+ */
+export function parseDiffHash(value: string): bigint {
+  if (typeof value !== 'string' || !/^0x[0-9a-f]{1,16}$/.test(value)) {
+    throw new Error('采集窗口返回的帧差指纹非法')
+  }
+  return BigInt(value)
 }
 
 export class ScreenCapture {
@@ -132,7 +155,8 @@ export class ScreenCapture {
    * `options` 决定三件事（默认全走旧口径，旧管线行为不变）：
    * - 尺寸：不传 = OCR 的 2× / 封顶 3840；证据图传 `{ upscale: 1, maxWidth: 1920 }`；
    * - 格式：默认 PNG；证据图传 `format: 'jpeg'`——采集即编码，主进程只写字节、不解码不重编码；
-   * - `withOcrImage`：同一帧再出一张 2× PNG 给 OCR（UIA 文本不足时兜底用，卡内删除）。
+   * - `withOcrImage`：同一帧再出一张 2× PNG 给 OCR（UIA 文本不足时兜底用，卡内删除）；
+   * - `fresh`：画之前是否等新帧（默认等；判重前移后，紧跟探针的编码传 false）。
    */
   async capture(
     bounds: WindowBounds,
@@ -140,20 +164,8 @@ export class ScreenCapture {
     ts: number,
     options: CaptureOptions = {}
   ): Promise<CapturedFrame> {
-    const display = this.displayFor(bounds)
     const target: CaptureTargetOptions = { upscale: options.upscale, maxWidth: options.maxWidth }
-    let info = await this.ensureStream(display)
-    let geometry = computeCaptureGeometry(bounds, display, info, undefined, target)
-    let result: GrabResult
-    try {
-      result = await this.grab(geometry, options)
-    } catch {
-      // 流可能已结束（锁屏 / 显示切换）：丢弃流状态后重建一次
-      this.stream = null
-      info = await this.ensureStream(display)
-      geometry = computeCaptureGeometry(bounds, display, info, undefined, target)
-      result = await this.grab(geometry, options)
-    }
+    const result = await this.withStream(bounds, target, (geometry) => this.grab(geometry, options))
 
     const ext = options.format === 'jpeg' ? 'jpg' : 'png'
     const imagePath = join(tempDir, `frame-${ts}.${ext}`)
@@ -165,9 +177,54 @@ export class ScreenCapture {
       writeFileSync(ocrPath, Buffer.from(result.ocrPng))
     }
 
-    const gray = rgbaToGray(new Uint8Array(result.diff), DIFF_WIDTH, DIFF_HEIGHT)
-    const diffHash = dHash(gray, DIFF_WIDTH, DIFF_HEIGHT)
-    return { imagePath, width: result.width, height: result.height, diffHash, ocrPath }
+    return {
+      imagePath,
+      width: result.width,
+      height: result.height,
+      diffHash: parseDiffHash(result.hash),
+      bytes: result.image.byteLength + (result.ocrPng?.byteLength ?? 0),
+      ocrPath
+    }
+  }
+
+  /**
+   * 只探测「这一帧变了没有」：画到 90x80 灰度、算 dHash 回主进程，**不编码、不落盘**。
+   *
+   * 判重前移（性能方案 P0-1）：每 2 s 的 tick 先调它，未变帧连 PNG 都不产生；
+   * 只有变了才 `capture()` 真编码。`crop` 与 `capture()` 完全同一套几何计算，
+   * 指纹口径（90x80 + 同一份 dHash）也一致，所以不会「探测说变了、编码后又说没变」。
+   */
+  async probe(bounds: WindowBounds): Promise<{ diffHash: bigint }> {
+    const diff = { width: DIFF_WIDTH, height: DIFF_HEIGHT }
+    const result = await this.withStream(bounds, {}, (geometry) =>
+      this.callRenderer<ProbeResult>(
+        `window.__gotchaCapture.probe(${JSON.stringify({ crop: geometry.crop, diff })})`,
+        GRAB_TIMEOUT_MS
+      )
+    )
+    return { diffHash: parseDiffHash(result.hash) }
+  }
+
+  /**
+   * 同一套「流可能已结束（锁屏 / 显示切换）→ 重建一次」的重试逻辑：
+   * probe 与 capture 共用，免得两处几何计算 / 重建口径漂移。
+   */
+  private async withStream<T>(
+    bounds: WindowBounds,
+    target: CaptureTargetOptions,
+    run: (geometry: CaptureGeometry) => Promise<T>
+  ): Promise<T> {
+    const display = this.displayFor(bounds)
+    let info = await this.ensureStream(display)
+    let geometry = computeCaptureGeometry(bounds, display, info, undefined, target)
+    try {
+      return await run(geometry)
+    } catch {
+      this.stream = null
+      info = await this.ensureStream(display)
+      geometry = computeCaptureGeometry(bounds, display, info, undefined, target)
+      return await run(geometry)
+    }
   }
 
   dispose(): void {
@@ -290,7 +347,9 @@ export class ScreenCapture {
       target: geometry.target,
       format: options.format ?? 'png',
       ocrTarget,
-      diff: { width: DIFF_WIDTH, height: DIFF_HEIGHT }
+      diff: { width: DIFF_WIDTH, height: DIFF_HEIGHT },
+      // 判重前移后，探针刚刚等过新帧：紧跟的编码不必再等一次（默认 true，证据图口径不变）
+      fresh: options.fresh !== false
     })
     return await this.callRenderer<GrabResult>(
       `window.__gotchaCapture.grab(${payload})`,

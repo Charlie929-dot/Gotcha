@@ -6,7 +6,13 @@ export default defineConfig({
   main: {
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/main/index.ts') }
+        input: {
+          index: resolve(__dirname, 'src/main/index.ts'),
+          // P1-4：向量推理工作进程（utilityProcess.fork 的目标，产物 out/main/embedding-worker.js）
+          'embedding-worker': resolve(__dirname, 'src/main/embedding-worker.ts'),
+          // §5.11：检索工作进程（LIKE 全扫不进主线程，产物 out/main/search-worker.js）
+          'search-worker': resolve(__dirname, 'src/main/search-worker.ts')
+        }
       }
     }
   },

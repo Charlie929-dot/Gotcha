@@ -1,0 +1,423 @@
+/**
+ * 信息链 · 问记忆工具循环的驱动层（toolloop）
+ *
+ * 消息协议：system（纪律 + 当前时间 + 数据边界）→ user（问题）→
+ * assistant tool_calls → tool 结果摘要 → … → 最终 assistant JSON
+ * `{answer, citations:[{segmentId, why}]}`（与单发路径同形）。
+ *
+ * 上限（2026-10-27 调整）：**8 轮可以调工具、工具调用总数 ≤16**；第 9 轮是
+ * **强制收尾轮**——不再发 tools，要求模型直接给最终 JSON。这样「轮数用尽」
+ * 只会变成「基于已查到的内容作答 / 如实说没找到」，不会变成「问记忆出错了」。
+ * 只有工具调用数超限、或客户端真的失败，才按 `failed` 收口。
+ *
+ * 2026-10-27 再调：加 `read_segment` 后模型需要多走一步「展开命中段看全文」，
+ * 轮数 / 调用数放宽（模型不是笨，是之前只能看到 80 字摘要、又没有打开正文的工具）。
+ *
+ * 2026-10-27 续查：预算快用完、模型还想调工具时**不硬掐**——把状态交回
+ * `onPause`（`ask.ts` 存成检查点），返回 `continue-ask` 让用户决定：
+ * 继续 = 再给 8 轮 / 16 次（最多 3 次），收尾 = 下一轮不带 tools 直接作答。
+ * 暂停前那一轮工具照常执行，用户点「继续」时结果还在，不用重查。
+ *
+ * 出口纪律（不可妥协）：
+ * - 出云载荷由注入的 `AskOutbound` 组装（branded）；每个工具结果回填前由该端口
+ *   统一处理，核心不调 `redactSensitive`（安全策略在边界，见 cloud-boundary.md）；
+ * - consent / budget / 问题敏感在**循环开始前一次判定**（`askChain` 的门口 +
+ *   首次构建载荷时验 questionBlocked）；
+ * - 引用白名单 = search_info 返回过、且**没有被脱敏整条挡下**的段并集，
+ *   编造 / 被挡的引用在 `parseChainAnswer` 里硬剥；
+ * - 每轮 usage 累计、**结束时一次** `onUsage`（失败路径也记账，F03 口径）；
+ * - 「answer 说没找到但 citations 非空」强转 no-evidence（根因 7）。
+ */
+import type {
+  AskLoopFreshness,
+  AskOutbound,
+  RedactableAskLoopTurn
+} from './payload'
+import {
+  LlmAbortError,
+  LlmParseError,
+  type LlmClient,
+  type LlmUsage
+} from '../../understand/cloud/llm-client'
+import type { ChainAskClientResolution, ChainAskLog } from './ask'
+import { readChainFreshness } from './freshness'
+import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
+import {
+  type ChainAskResult,
+  type ChainAskStats,
+  type ChainAskTurnContext
+} from './types'
+import { createAskToolExecutor, type AskHistorySummary } from './tools'
+import type { ChainDb } from '../store'
+import type { ChainSearchBatchQuery, ChainSearchBatchResult } from '../query'
+
+/** 允许模型调用工具的轮数上限（用户点一次「继续查」就再批这么多） */
+export const ASK_LOOP_MAX_TOOL_TURNS = 8
+/** assistant 调用总上限：8 轮工具 + 1 轮强制收尾（收尾轮不带 tools） */
+export const ASK_LOOP_MAX_TURNS = ASK_LOOP_MAX_TOOL_TURNS + 1
+/** 工具调用总数上限（跨轮累计）：read_segment 让单轮内多开几段成为常态 */
+export const ASK_LOOP_MAX_TOOL_CALLS = 16
+/** 用户最多点几次「继续查」；每次 ±8 轮 / ±16 次调用，不点就不会多花 */
+export const ASK_LOOP_MAX_GRANTS = 3
+
+/** 暂停时交回给 `ask.ts` 的检查点（只在本进程内存里流转，不出 IPC、不落盘） */
+export interface AskLoopResumeState {
+  turns: readonly RedactableAskLoopTurn[]
+  whitelist: ReadonlyMap<number, CitationMeta>
+  toolCallCount: number
+  hitsShown: number
+  usedAskHistory: boolean
+  /** 已经发生过的 assistant 轮数（含工具轮） */
+  turnsUsed: number
+  /** 已经批准过几次「继续查」 */
+  grants: number
+  /** 暂停时的统计（questionChars 等；最终出口会用当前值重算 turns / hits） */
+  stats: ChainAskStats
+}
+
+export interface AskLoopContext {
+  db: ChainDb
+  /** 已验过 `completeAskLoop` 存在的客户端 */
+  client: LlmClient & Pick<Required<LlmClient>, 'completeAskLoop'>
+  /** 出云载荷组装（组合根注入；核心不依赖具体脱敏实现） */
+  outbound: AskOutbound
+  /** 语义检索向量（bge 会话；没接就只走关键词） */
+  embedQuestion?: (question: string) => Promise<Float32Array | null> | Float32Array | null
+  /** 固定钟（测试注入） */
+  now: () => number
+  /** 采集是否在跑 */
+  captureRunning: () => boolean
+  /** 最近问答记录（ask_history 工具的数据源） */
+  readAskHistory?: () => readonly AskHistorySummary[]
+  /** 关键词批量检索的执行体（主进程注入 worker 版；不传 = 进程内同步查） */
+  searchBatch?: (query: ChainSearchBatchQuery) => Promise<ChainSearchBatchResult>
+  /** 同一会话之前的几轮（续问）；没有就是新对话 */
+  history?: readonly ChainAskTurnContext[]
+  /** 用户点「停止」时中止在途请求 */
+  signal?: AbortSignal
+  /** 记账：整次循环结束后一次（含失败路径已消耗的量） */
+  onUsage?: (usage: LlmUsage) => void
+  /** 从暂停点恢复（`ask.ts` 按检查点回填）；暂停轮的 turns / 白名单 / 计数都在里面 */
+  resume?: AskLoopResumeState
+  /** 恢复后用户的选择：continue=继续检索，stop=按现有结果收尾 */
+  resumeDecision?: 'continue' | 'stop'
+  /** 预算用尽、模型还想查时把状态交回调用方，由它问用户要不要继续（不传=旧行为：直接收尾） */
+  onPause?: (state: AskLoopResumeState) => void
+  log?: ChainAskLog
+}
+
+const WEEKDAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'] as const
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/** 毫秒时间戳 → 'yyyy-mm-dd HH:mm 周X'（注入 system，模型据此换算相对时间） */
+export function formatSystemTime(now: number): string {
+  const date = new Date(now)
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())} 周${WEEKDAY_NAMES[date.getDay()]}`
+}
+
+function emptyStats(): ChainAskStats {
+  return { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
+}
+
+/**
+ * 跑一次工具循环。调用方（`askChain`）已经把空问题 / consent / budget / 客户端
+ * 解析都判过了；这里只负责循环本身，返回结构化 `ChainAskResult`，不向调用方抛异常。
+ */
+export async function runAskLoop(ctx: AskLoopContext, question: string): Promise<ChainAskResult> {
+  const log = ctx.log ?? (() => {})
+  const resume = ctx.resume
+  const stats: ChainAskStats = resume ? { ...resume.stats } : emptyStats()
+  stats.questionChars = question.length
+
+  /// 引用白名单：search_info 返回过、且脱敏后仍然给模型看过的段（read_segment 的越权门）
+  const whitelist = new Map<number, CitationMeta>(resume?.whitelist ?? [])
+
+  const executor = createAskToolExecutor({
+    db: ctx.db,
+    now: ctx.now,
+    captureRunning: ctx.captureRunning,
+    ...(ctx.embedQuestion ? { embed: ctx.embedQuestion } : {}),
+    ...(ctx.readAskHistory ? { readAskHistory: ctx.readAskHistory } : {}),
+    ...(ctx.searchBatch ? { searchBatch: ctx.searchBatch } : {}),
+    // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
+    canReadSegment: (segmentId) => whitelist.has(segmentId)
+  })
+
+  const freshness: AskLoopFreshness = {
+    latestEvidenceTs: readChainFreshness(ctx.db, ctx.now()).latestEvidenceTs,
+    captureRunning: ctx.captureRunning()
+  }
+  const systemTime = formatSystemTime(ctx.now())
+
+  // 问题敏感：循环开始前一次判定（与单发路径同口径——宁可答「没找到」，不发敏感问题）
+  const probe = ctx.outbound.buildLoop({
+    question,
+    systemTime,
+    freshness,
+    turns: [],
+    ...(ctx.history ? { history: ctx.history } : {})
+  })
+  if (probe.questionBlocked) {
+    return { kind: 'error', reason: 'question-blocked', message: '问题里含敏感内容，未出云', stats }
+  }
+
+  const turns: RedactableAskLoopTurn[] = resume ? [...resume.turns] : []
+  let hitsShown = resume?.hitsShown ?? 0
+  let toolCallCount = resume?.toolCallCount ?? 0
+  let assistantTurns = resume?.turnsUsed ?? 0
+  /** 已经发生过的 assistant 轮数（恢复时先继承，出参 / 预算都按全局轮次算） */
+  let turnsUsed = resume?.turnsUsed ?? 0
+  /** 已经批过的「继续查」次数：每次把轮数 / 调用数预算翻一倍窗口 */
+  let grants =
+    resume && ctx.resumeDecision === 'continue' ? resume.grants + 1 : resume?.grants ?? 0
+  /** 本轮（含恢复前）还能调工具的全局轮数 / 调用次数 */
+  const toolTurnBudget = ASK_LOOP_MAX_TOOL_TURNS * (1 + grants)
+  const toolCallBudget = ASK_LOOP_MAX_TOOL_CALLS * (1 + grants)
+  /** 本地循环上限：全局预算 + 收尾轮 - 已经用掉的轮数 */
+  const localTurnLimit = Math.max(1, toolTurnBudget + 1 - turnsUsed)
+  /** 本轮是否查过问答记录：决定「关于对话本身」的答案能否不带屏幕引用 */
+  let usedAskHistory = resume?.usedAskHistory ?? false
+
+  /**
+   * 统计口径（诊断用）：hits / evidence 取**当前已发生**的量——失败收口（客户端抛错 /
+   * 超轮超调用）也要留下「其实查到了几段」，事后排查看得见。
+   */
+  const withLoopDiag = (turnsUsed: number, toolCalls: number): ChainAskStats => ({
+    ...stats,
+    hits: hitsShown,
+    evidence: whitelist.size,
+    turns: turnsUsed,
+    toolCalls
+  })
+
+  // usage 累计：所有出口（成功 / 失败 / 拒答）都只在这里发一次 onUsage
+  let usageTotal: LlmUsage = { promptTokens: 0, completionTokens: 0 }
+  let usageSettled = false
+  const settleUsage = (): void => {
+    if (usageSettled) return
+    usageSettled = true
+    ctx.onUsage?.(usageTotal)
+  }
+  const accumulate = (usage: LlmUsage | undefined): void => {
+    if (!usage) return
+    usageTotal = {
+      promptTokens: usageTotal.promptTokens + usage.promptTokens,
+      completionTokens: usageTotal.completionTokens + usage.completionTokens
+    }
+  }
+
+  for (let turn = 1; turn <= localTurnLimit; turn++) {
+    /** 全局轮次：恢复前已经用掉的 + 本轮；预算、诊断、暂停判断都按全局算 */
+    const globalTurn = turnsUsed + turn
+    if (ctx.signal?.aborted) {
+      log('info', 'chain ask loop: 用户停止', { turn: globalTurn })
+      settleUsage()
+      return { kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(turnsUsed + turn - 1, toolCallCount) }
+    }
+    // 收尾轮：不再给工具，逼模型用已看到的段作答（不带 tools 的请求也不可能回 tool_calls）。
+    // 用户选「先按现在的结果回答」时，恢复后的第一轮就是这个收尾轮。
+    const allowTools =
+      globalTurn <= toolTurnBudget && !(turn === 1 && ctx.resumeDecision === 'stop')
+    const built = ctx.outbound.buildLoop({
+      question,
+      systemTime,
+      freshness,
+      turns,
+      ...(ctx.history ? { history: ctx.history } : {})
+    })
+    // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；
+    // 用可见集合而不是「累加后删除被挡 id」，是避免粘性误删——同一段后续轮次
+    // 以干净摘要重新展示时，模型见过它，就该能引用（先挡后见的假阴性）。
+    const visible = new Set<number>()
+    for (const seen of built.payload.turns) {
+      const view = seen.toolResult as { kind?: string; hits?: Array<{ segmentId: number }> }
+      if (view.kind !== 'search_info') continue
+      for (const hit of view.hits ?? []) visible.add(hit.segmentId)
+    }
+    for (const segmentId of [...whitelist.keys()]) {
+      if (!visible.has(segmentId)) whitelist.delete(segmentId)
+    }
+
+    let response: Awaited<ReturnType<AskLoopContext['client']['completeAskLoop']>>
+    try {
+      response = await ctx.client.completeAskLoop(built.payload, {
+        allowTools,
+        ...(ctx.signal ? { signal: ctx.signal } : {})
+      })
+    } catch (error) {
+      // 用户点「停止」：不算失败，如实回 aborted
+      if (error instanceof LlmAbortError) {
+        log('info', 'chain ask loop: 请求已停止', { turn: globalTurn })
+        settleUsage()
+        return { kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(globalTurn, toolCallCount) }
+      }
+      log('warn', 'chain ask loop: 模型调用失败', { error: String(error), turn: globalTurn })
+      // 解析失败也消耗了 token（LlmParseError.usage）：先入账再返回失败
+      if (error instanceof LlmParseError) accumulate(error.usage)
+      settleUsage()
+      return {
+        kind: 'error',
+        reason: 'failed',
+        message: String(error),
+        stats: withLoopDiag(globalTurn, toolCallCount)
+      }
+    }
+    assistantTurns = globalTurn
+    accumulate(response.usage)
+
+    // 收尾轮即便客户端还回了 tool_calls（假客户端 / 网关异常）也不执行：
+    // 直接按「最终答复」解析，宁可报不成形，也不无限延长循环
+    const toolCalls = allowTools ? response.toolCalls ?? [] : []
+    if (!allowTools && (response.toolCalls?.length ?? 0) > 0) {
+      log('warn', 'chain ask loop: 收尾轮仍返回 tool_calls，已忽略', {
+        turn: globalTurn,
+        incoming: response.toolCalls?.length ?? 0
+      })
+    }
+    if (toolCalls.length > 0) {
+      if (toolCallCount + toolCalls.length > toolCallBudget) {
+        log('warn', 'chain ask loop: 工具调用数超限', {
+          turn: globalTurn,
+          toolCallCount,
+          incoming: toolCalls.length
+        })
+        settleUsage()
+        return {
+          kind: 'error',
+          reason: 'failed',
+          message: `模型在 ${toolCallBudget} 次工具调用内没有收敛（也可能是这一问确实没有记录）`,
+          stats: withLoopDiag(globalTurn, toolCallCount)
+        }
+      }
+      for (const call of toolCalls) {
+        toolCallCount += 1
+        if (call.name === 'ask_history') usedAskHistory = true
+        const toolStartedAt = Date.now()
+        const outcome = await executor.execute({ name: call.name, arguments: call.arguments })
+        const toolMs = Date.now() - toolStartedAt
+        turns.push({ toolCall: { name: call.name, arguments: call.arguments }, toolResult: outcome.result })
+        hitsShown += outcome.segments.length
+        for (const meta of outcome.segments) {
+          whitelist.set(meta.segmentId, meta)
+        }
+        // 检索是主进程同步执行的，耗时直接等于「点下去没反应」的时长。
+        // 慢的才记一条（性能方案 §4.4 的 search_ms 观测点），别给每次工具调用刷日志。
+        if (outcome.result.kind === 'search_info' && toolMs >= 100) {
+          log('info', 'chain ask loop: 检索较慢', {
+            ms: toolMs,
+            keywordRows: outcome.result.stats.keywordRows
+          })
+        }
+        if (outcome.result.kind === 'error') {
+          log('warn', 'chain ask loop: 工具执行失败', { tool: call.name })
+        }
+      }
+      // 预算正好在最后一轮用完、模型还想继续查：**不硬掐**。把状态交回调用方，
+      // 由它问用户「还要继续吗」；用户同意就再给一轮预算，不同意就按现有结果收尾。
+      // 暂停前的工具已经执行完并留在 turns 里，恢复时不用重查。
+      if (ctx.onPause && globalTurn >= toolTurnBudget && grants < ASK_LOOP_MAX_GRANTS) {
+        ctx.onPause({
+          turns: [...turns],
+          whitelist: new Map(whitelist),
+          toolCallCount,
+          hitsShown,
+          usedAskHistory,
+          turnsUsed: globalTurn,
+          grants,
+          stats: { ...stats, hits: hitsShown, evidence: whitelist.size, turns: globalTurn, toolCalls: toolCallCount }
+        })
+        log('info', 'chain ask loop: 轮数用尽，等用户决定是否继续', {
+          turns: globalTurn,
+          toolCalls: toolCallCount,
+          grants
+        })
+        settleUsage()
+        return {
+          kind: 'continue-ask',
+          question: `已经查了 ${globalTurn} 轮，还要接着查吗？`,
+          options: [`继续查（再给 ${ASK_LOOP_MAX_TOOL_TURNS} 轮）`, '先按现在的结果回答'],
+          stats: withLoopDiag(globalTurn, toolCallCount)
+        }
+      }
+      continue
+    }
+
+    // 最终答复轮：引用白名单 + 归一 + 出口（hits / evidence 由 withLoopDiag 统一填）
+    const rawCitations = (response.json as { citations?: unknown } | null)?.citations
+    stats.cited = Array.isArray(rawCitations) ? rawCitations.length : 0
+
+    const parsed = parseChainReply(response.json, whitelist, {
+      // 「关于对话本身」的答案不引用屏幕段：只有本会话有上文、或真的查过 ask_history 时才放行，
+      // 避免模型把普通问题也降级成无引用的自由发挥。
+      allowConversationAnswer: (ctx.history?.length ?? 0) > 0 || usedAskHistory
+    })
+    if (!parsed.ok) {
+      settleUsage()
+      if (parsed.reason === 'no-citations') {
+        return { kind: 'no-evidence', stats: withLoopDiag(globalTurn, toolCallCount) }
+      }
+      return {
+        kind: 'error',
+        reason: 'unparseable',
+        message: parsed.message,
+        stats: withLoopDiag(globalTurn, toolCallCount)
+      }
+    }
+    if (parsed.kind === 'clarify') {
+      // 模型选择先问一句：这是正常出口，不是失败；选项已在上限内去重
+      log('info', 'chain ask loop: 模型要求确认', { options: parsed.options.length })
+      settleUsage()
+      return {
+        kind: 'clarify',
+        question: parsed.question,
+        options: parsed.options,
+        stats: withLoopDiag(globalTurn, toolCallCount)
+      }
+    }
+    settleUsage()
+    if (isNoEvidenceAnswer(parsed.answer) && parsed.citations.length > 0) {
+      // 根因 7：嘴上说没找到却塞了引用。以前整段丢掉，用户只看到「没找到」；
+      // 现在保留说明与引用（「查到了这些，但不足以回答」比空白有用），日志留 mismatch 供排查。
+      log('warn', 'chain ask loop: answer 声称没找到但 citations 非空，按没找到保留说明', {
+        cited: parsed.citations.length
+      })
+      return {
+        kind: 'no-evidence',
+        note: parsed.answer,
+        citations: parsed.citations,
+        stats: withLoopDiag(globalTurn, toolCallCount)
+      }
+    }
+    if (isNoEvidenceAnswer(parsed.answer)) {
+      // 无引用且自称没找到：维持「没找到」，不把固定文案当回答
+      return { kind: 'no-evidence', stats: withLoopDiag(globalTurn, toolCallCount) }
+    }
+    return {
+      kind: 'answer',
+      answer: parsed.answer,
+      citations: parsed.citations,
+      stats: withLoopDiag(globalTurn, toolCallCount)
+    }
+  }
+
+  // 循环出口全覆盖（上限路径在循环内返回），到这里是防御性兜底
+  settleUsage()
+  return {
+    kind: 'error',
+    reason: 'failed',
+    message: '工具循环异常结束',
+    stats: withLoopDiag(assistantTurns, toolCallCount)
+  }
+}
+
+/** 供 `askChain` 判定走循环还是回退单发：客户端带 `completeAskLoop` 就走循环 */
+export function resolveLoopClient(
+  resolution: ChainAskClientResolution
+): (LlmClient & Pick<Required<LlmClient>, 'completeAskLoop'>) | null {
+  const client = resolution.ok ? resolution.client : undefined
+  if (!client || typeof client.completeAskLoop !== 'function') return null
+  return client as LlmClient & Pick<Required<LlmClient>, 'completeAskLoop'>
+}

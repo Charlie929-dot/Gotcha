@@ -11,7 +11,10 @@
  */
 
 import type { Db } from '../db'
-import { decodeVector, encodeVector } from './graph-edges'
+import {
+  decodeEmbeddingVector,
+  encodeVectorInt16
+} from './vector-int16'
 import {
   EMBEDDING_MODEL_NAME,
   type Embedder,
@@ -265,7 +268,7 @@ export function writeEventVectors(
         skipped += 1
         continue
       }
-      insert.run(row.eventId, options.model, dim, encodeVector(row.vec), now)
+      insert.run(row.eventId, options.model, dim, encodeVectorInt16(row.vec), now)
       written += 1
     }
   })
@@ -298,7 +301,7 @@ export function readEventVectors(
   let skipped = 0
   for (const row of rows) {
     if (model === null) model = row.model
-    const vec = decodeVector(row.vec)
+    const vec = decodeEmbeddingVector(row.vec, row.dim)
     if (row.dim !== vec.length) {
       skipped += 1
       continue
@@ -345,7 +348,7 @@ export function readEventVectorsByIds(
     ) as Array<{ event_id: number; model: string; dim: number; vec: Buffer }>
     for (const row of rows) {
       if (model === null) model = row.model
-      const vec = decodeVector(row.vec)
+      const vec = decodeEmbeddingVector(row.vec, row.dim)
       if (row.dim !== vec.length) {
         skipped += 1
         continue

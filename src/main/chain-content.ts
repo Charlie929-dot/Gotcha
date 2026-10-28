@@ -94,6 +94,21 @@ export function createChainContentCapture(options: ChainContentCaptureOptions): 
   let lastSegmentId: number | null = null
   let lastReadAt = 0
 
+  /**
+   * OCR 中转图是临时文件（2× PNG，单张 2–7 MB）：**读到、被节流、车道已关**都要删。
+   * 以前只在读完之后删，被节流的帧（同段 15 s 内的第二张起，约占抓帧的 38%）永远没人读，
+   * 文件就留在 tmp-chain 里——实测 1.5 h 攒了 94 个 / 213 MB，折合 ~200 MB/h。
+   * 删不掉（句柄被 OCR 子进程占着）就留给启动清理，不抛错。
+   */
+  const discardOcr = (path: string | undefined): void => {
+    if (!path) return
+    try {
+      rmSync(path, { force: true })
+    } catch {
+      // 删不掉就留给启动清理
+    }
+  }
+
   const run = async (shot: ChainContentShot): Promise<void> => {
     try {
       const payload = await options.reader.read({
@@ -120,23 +135,22 @@ export function createChainContentCapture(options: ChainContentCaptureOptions): 
       })
     } finally {
       // OCR 副图是临时文件：读完（成功 / 失败 / 空）都清掉，别让 tmp-chain 长胖
-      if (shot.ocrPath) {
-        try {
-          rmSync(shot.ocrPath, { force: true })
-        } catch {
-          // 删不掉就留给启动清理
-        }
-      }
+      discardOcr(shot.ocrPath)
     }
   }
 
   return {
     onShot(shot: ChainContentShot): void {
-      if (closed) return
+      if (closed) {
+        discardOcr(shot.ocrPath)
+        return
+      }
       const at = now()
       // 节流按「尝试读取」的时刻算：读失败也占一个窗口，免得坏窗口每张图都重试一遍
       if (shot.segmentId === lastSegmentId && at - lastReadAt < minIntervalMs) {
         stats.throttled += 1
+        // 这张不会有人读了：OCR 中转图必须当场删，否则按抓帧频率堆在 tmp-chain 里
+        discardOcr(shot.ocrPath)
         return
       }
       lastSegmentId = shot.segmentId

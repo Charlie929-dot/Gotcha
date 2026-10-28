@@ -101,7 +101,17 @@ export class CaptureDbConnections {
 /** 屏幕捕获流（生产是 ScreenCapture，测试注入假实现） */
 export interface CaptureStream {
   start(): Promise<void>
-  capture(bounds: WindowBounds, tempDir: string, ts: number): Promise<CapturedFrame>
+  capture(
+    bounds: WindowBounds,
+    tempDir: string,
+    ts: number,
+    options?: { fresh?: boolean }
+  ): Promise<CapturedFrame>
+  /**
+   * 判重前移（P0-1）：只回 90x80 dHash，不编码、不落盘。
+   * 不实现就退回旧口径（先抓帧再判重），单测 / 假采集不必实现。
+   */
+  probe?(bounds: WindowBounds): Promise<{ diffHash: bigint }>
   dispose(): void
 }
 
@@ -206,6 +216,13 @@ export async function createCaptureSession(deps: CaptureSessionDeps): Promise<Ca
     stream = screen
     await screen.start()
 
+    // 有 probe 能力就走「先判重、后编码」（P0-1）：未变帧连 IPC 里的 PNG 都不产生。
+    // 没有 probe（测试注入的假流）保持旧口径，避免测试为了新接口全改一遍。
+    const canProbe = typeof screen.probe === 'function'
+
+    // P0-2 第二步：旧管线降级为仅元数据。默认关（0），双写覆盖验证一周后再打开。
+    const metadataOnly = getNumberSetting(db, 'capture.metadata_only', 0) === 1
+
     const engine = deps.createOcr()
     ocr = engine
 
@@ -214,7 +231,11 @@ export async function createCaptureSession(deps: CaptureSessionDeps): Promise<Ca
       ocr: engine,
       now: deps.now,
       getActiveWindow: deps.getActiveWindow,
-      captureWindow: (bounds) => screen.capture(bounds, tempDir, deps.now()),
+      metadataOnly,
+      probeWindow: canProbe ? (bounds) => screen.probe!(bounds) : undefined,
+      // probe 刚刚等过新帧，紧接着的编码不必再等一次
+      captureWindow: (bounds) =>
+        screen.capture(bounds, tempDir, deps.now(), canProbe ? { fresh: false } : undefined),
       deleteFrame: (imagePath) => rmSync(imagePath, { force: true }),
       isBlacklisted: deps.isBlacklisted,
       saveShot:
@@ -236,7 +257,7 @@ export async function createCaptureSession(deps: CaptureSessionDeps): Promise<Ca
     flushTimer = setFlushTimer(() => flusher.flush(), FLUSH_INTERVAL_MS)
     flushTimerSet = true
 
-    deps.log('info', `started schema=v1 db=${DB_FILE_NAME}`)
+    deps.log('info', `started schema=v1 db=${DB_FILE_NAME}`, { metadata_only: metadataOnly })
 
     return {
       pipeline,

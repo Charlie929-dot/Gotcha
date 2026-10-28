@@ -130,6 +130,7 @@ describe('toGlobalGraphInput（graph:global DTO → Foam 输入）', () => {
           app: 'Code',
           windowTitle: '改 CSS',
           ocrSummary: null,
+          ocrTrimmed: false,
           eventIds: [1, 2],
           assigned: true
         },
@@ -141,6 +142,7 @@ describe('toGlobalGraphInput（graph:global DTO → Foam 输入）', () => {
           app: null,
           windowTitle: null,
           ocrSummary: '查文档',
+          ocrTrimmed: false,
           eventIds: [3],
           assigned: true
         }
@@ -189,6 +191,7 @@ describe('toGlobalGraphInput（graph:global DTO → Foam 输入）', () => {
           app: 'Code',
           windowTitle: null,
           ocrSummary: null,
+          ocrTrimmed: false,
           eventIds: [],
           assigned: false
         }

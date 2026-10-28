@@ -2,6 +2,7 @@
 
 > **状态（2026-10-26 立项 / 2026-10-27 修订）：已拍板；S1 已落地（2026-10-27），S2 起未开工。** 本文是「问记忆」消费端（问答代理 + 画布）的实施事实源；S1 起每阶段仍过开工门（理解卡 + 拍板人「执行」）。
 > **2026-10-27 落地（S1，D48）：** 核心在 `src/chain/agent/`（`ask.ts` 编排 / `parse.ts` 白名单解析 / `types.ts`），出云复用派生层那套门（D24 确认 + D22 日账），载荷由 `redact.ts` 的 `buildChainAskPayload()` 产出、`deepseek.ts` 拼 prompt。**只做 `ask`**：`narrateSegment` 推迟到 S4（纯文本续讲没价值）。真库副本问 5 题已跑（详见 `progress.md` 2026-10-27 条目）：能答的都给出一段回答 + 引用段（含真实 BV 号），证据不覆盖的问题诚实回「没找到」。
+> **2026-10-28 边界化（D49）：** 问记忆载荷组装搬到 `src/chain/agent/payload.ts`（只做协议 / 截断 / 品牌），脱敏策略在 `understand/cloud/ask-outbound.ts`，`main/index.ts` 只对远端供应商注入 `createCloudAskOutbound()`；核心不再 import `redact.ts`。行为不变，新增 `tests/unit/ask-outbound.test.ts` 守「同一句敏感问题云端拒、本机过」。派生层也已按同一模式迁移（`chain/derive/payload.ts` + `understand/cloud/derive-outbound.ts`）。
 > **2026-10-27 修订（P7）：取消「逐步解说」。** 拍板人原话「step 我觉得多余，或者说不需要一步步解说……直接回答需求，然后补充在什么时候的截图说明什么，模型只需要给出引用的窗口段」。S1 的输出与幕二交互按「一次给完整回答 + 引用段列表」重写（§2 / §4 / §5）；幕一、幕三不变。
 > 概念以 `docs/information-chain-direction.md` 为准，表结构与不变量以 `docs/information-chain-contract.md`（v0.10）为准；与那两份冲突时以它们为准。
 > 本方案不改冻结管线（D38）：代理只读链表，新代码进 `src/chain/` 与新 renderer 页；`src/renderer/graph/` 旧图谱页只修 bug。契约 §6 不动，不建新表。
@@ -21,7 +22,7 @@
 ### 0.1 核心期安全退场（P2 的执行口径）
 
 - **不把安全当设计驱动**：本方案所有阶段不新增安全项；S4 看图不做开关、不做新确认流、不扩脱敏规则；证据上下文直传 LLM，截图默认随问带出；各阶段验收标准不含安全项。
-- **已建成的出云管道不拆**：D24 确认门、D22 日账、`redact.ts` 唯一出口类型、D18 暂停零出网已经建好测好，拆除是额外工作且与在案决策相抵；新调用自然流经（`ChainAskPayload` 仍是 `redact.ts` 的 payload 类型，走同一客户端出口）。
+- **已建成的出云管道不拆，但只在边界生效**：D24 确认门、D22 日账、D18 暂停零出网保留；`ChainAskPayload` 仍是品牌类型，但组装在核心、策略在边界（`docs/agent/cloud-boundary.md`）。本机 / 测试可注入直通策略，不因安全规则卡住核心。
 - **与宪法的关系**：本条与《产品策划案》§4.2「原始数据永不离开本机」事实相抵；核心期结束后回头立正式决策改写，届时由拍板人签。
 
 ## 1. 目标与固定检索路径

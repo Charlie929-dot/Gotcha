@@ -9,12 +9,20 @@ import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
 import { getActiveWindow, isBlacklisted } from '../capture/window-meta'
-import { cleanStaleFrames } from '../capture/temp-store'
+import {
+  CHAIN_FRAME_FILE_PATTERN,
+  cleanStaleFrames,
+  createTempJanitor,
+  OCR_FILE_PATTERN,
+  type TempCleanupResult,
+  type TempJanitor
+} from '../capture/temp-store'
 import {
   emptyGlobalGraph,
   queryGlobalGraph,
   queryGraphDay,
   queryMomentEvents,
+  queryMomentSummary,
   queryNodeEvents
 } from '../understand/graph-query'
 import { saveNodePositions } from '../understand/node-positions'
@@ -25,6 +33,7 @@ import {
 } from '../understand/search'
 import { loadEnvFile } from '../understand/cloud/env-file'
 import { createDeepSeekClient } from '../understand/cloud/deepseek'
+import { createCloudAskOutbound } from '../understand/cloud/ask-outbound'
 import {
   apiKeySource,
   DEFAULT_PROVIDER,
@@ -46,9 +55,22 @@ import { createDeterministicFakeLlm } from './fake-llm'
 import { createDeterministicFakeEmbedder, type DeterministicFakeEmbedder } from './fake-embedding'
 import { createGraphWindow } from './graph-window'
 import { createAskWindow } from './ask-window'
-import { askChain } from '../chain/agent/ask'
+import { askChain, type ChainAskOptions } from '../chain/agent/ask'
+import type { ChainDb } from '../chain/store'
+import {
+  searchChainSegmentsBatch,
+  type ChainSearchBatchQuery,
+  type ChainSearchBatchResult
+} from '../chain/query'
 import { readSegmentEvidence } from '../chain/agent/evidence'
-import { runGraphBackfill, loadSharedEmbedder } from './graph-backfill-runtime'
+import {
+  BACKFILL_EMBEDDER_OPTIONS,
+  loadSharedEmbedder,
+  runGraphBackfill
+} from './graph-backfill-runtime'
+import { createEmbeddingHost } from './embedding-host'
+import { createSearchHost } from './search-host'
+import { createSearchMetricsStore } from './search-metrics'
 import { createMomentRuntime, type MomentRuntime } from './moment-runtime'
 import {
   createThemeOnlineRuntime,
@@ -57,14 +79,21 @@ import {
 } from './theme-online-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
 import type { Embedder } from '../understand/embedding/types'
-import { createLocalEmbedder, isModelReady } from '../understand/embedding/session'
+import { isModelReady } from '../understand/embedding/session'
 import {
   registerGraphIpc,
   type GraphChangedEvent,
   type GraphRecomputeResult,
   type ProviderKeySaveResult
 } from './graph-ipc'
-import { registerAskIpc, type AskConsentView } from './ask-ipc'
+import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
+import {
+  appendAskHistory,
+  ASK_HISTORY_FILE,
+  clearAskHistory,
+  readAskHistory,
+  toHistoryEntry
+} from './ask-history'
 import { listThemeMerges, revertThemeMerge } from '../understand/theme-merge'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
@@ -236,14 +265,47 @@ function installCrashLogging(): void {
   })
 }
 
-/** 启动清理上次崩溃 / 删除失败留下的临时帧（F06）：只删 userData/tmp 下的 frame-*.png */
+/** 启动清理上次崩溃 / 删除失败留下的临时帧（F06 + 性能方案 P0-4） */
 function cleanTempFramesOnStartup(): void {
-  const cleaned = cleanStaleFrames(join(app.getPath('userData'), 'tmp'))
-  if (cleaned.removed === 0 && cleaned.failed === 0) return
-  captureLog(cleaned.failed > 0 ? 'warn' : 'info', 'temp frames cleaned on startup', {
-    removed: cleaned.removed,
-    failed: cleaned.failed
+  const userDataDir = app.getPath('userData')
+  const cleaned: TempCleanupResult = cleanStaleFrames(join(userDataDir, 'tmp'))
+  // tmp-chain 是证据图 / OCR 的中转目录：以前清理只认 tmp/frame-*.png，
+  // 这里 129 个孤立 ocr-*.png（495 MB）从来没被删过。留 1h 安全边际：
+  // 启动清理发生在起流之前，正常流程的临时帧几分钟内就会 rename / 删除，
+  // 留下来的都是残留；1h 既能回收当天的，也不会和刚崩溃进程的收尾抢文件。
+  const chain = cleanStaleFrames(join(userDataDir, 'tmp-chain'), {
+    patterns: [CHAIN_FRAME_FILE_PATTERN, OCR_FILE_PATTERN],
+    olderThanMs: 60 * 60 * 1000
   })
+  const total = {
+    removed: cleaned.removed + chain.removed,
+    failed: cleaned.failed + chain.failed,
+    chain_removed: chain.removed
+  }
+  if (total.removed === 0 && total.failed === 0) return
+  captureLog(total.failed > 0 ? 'warn' : 'info', 'temp frames cleaned on startup', total)
+}
+
+/** tmp-chain 周期清理：长会话（几天不重启）里删除失败的 OCR 中转图不会一直堆着 */
+const TEMP_JANITOR_INTERVAL_MS = 10 * 60 * 1000
+/** 15 分钟足够覆盖一次在途 OCR 读（秒级）；比启动清理的 1h 更积极，稳态不超一小时 */
+const TEMP_CHAIN_OCR_MAX_AGE_MS = 15 * 60 * 1000
+const TEMP_CHAIN_FRAME_MAX_AGE_MS = 60 * 60 * 1000
+
+let tempJanitor: TempJanitor | null = null
+
+function startTempJanitor(): void {
+  if (tempJanitor) return
+  const chainDir = join(app.getPath('userData'), 'tmp-chain')
+  tempJanitor = createTempJanitor({
+    intervalMs: TEMP_JANITOR_INTERVAL_MS,
+    targets: [
+      { dir: chainDir, patterns: [OCR_FILE_PATTERN], olderThanMs: TEMP_CHAIN_OCR_MAX_AGE_MS },
+      { dir: chainDir, patterns: [CHAIN_FRAME_FILE_PATTERN], olderThanMs: TEMP_CHAIN_FRAME_MAX_AGE_MS }
+    ],
+    log: (level, message, data) => captureLog(level, message, data)
+  })
+  tempJanitor.start()
 }
 
 /* ------------------------------------------------------------------ *
@@ -362,12 +424,119 @@ function resolveModelDir(): string {
 }
 
 /**
+ * 向量推理宿主（P1-4）：`onnxruntime` 会话跑在 `utilityProcess` 里，主进程只收发消息。
+ * 懒创建：第一次真要算向量时才 fork（`utilityProcess.fork` 要求 app ready）。
+ */
+let embeddingHost: ReturnType<typeof createEmbeddingHost> | null = null
+function getEmbeddingHost(): ReturnType<typeof createEmbeddingHost> {
+  if (!embeddingHost) {
+    embeddingHost = createEmbeddingHost({ log: captureLog })
+  }
+  return embeddingHost
+}
+
+/**
+ * 检索工作进程（性能方案 §5.11）：`search_info` 的 LIKE 全扫在 40 MB 正文上要 1 s+，
+ * 放主进程里会把球 / 热键 / 窗口 IPC 一起卡住。懒创建，形态同向量宿主。
+ */
+let searchHost: ReturnType<typeof createSearchHost> | null = null
+function getSearchHost(): ReturnType<typeof createSearchHost> {
+  if (!searchHost) {
+    searchHost = createSearchHost({ dbPath, log: captureLog })
+  }
+  return searchHost
+}
+
+/**
+ * 检索耗时常驻指标（性能方案 §5.9 第 6 条，也是 §5.11 的复评门槛）：
+ * 按日累计关键词路的次数 / 命中数 / 耗时分布（`stats.search.day.<yyyy-mm-dd>`）。
+ * 写失败只记一条 warn —— 指标坏了不能影响「问记忆」。
+ */
+let searchMetricsStore: ReturnType<typeof createSearchMetricsStore> | null = null
+function getSearchMetricsStore(): ReturnType<typeof createSearchMetricsStore> {
+  if (!searchMetricsStore) {
+    searchMetricsStore = createSearchMetricsStore({
+      read: (key) => {
+        const db = connections.queryDb()
+        return db ? getSetting(db, key) : null
+      },
+      write: (key, value) => {
+        const writable = connections.ensureWritable()
+        setSetting(writable.db, key, value)
+      }
+    })
+  }
+  return searchMetricsStore
+}
+
+function recordSearchSample(sample: {
+  ms: number
+  hits: number
+  ok: boolean
+  fallback?: boolean
+}): void {
+  try {
+    getSearchMetricsStore().record(sample)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    captureLog('warn', 'search metrics failed', {
+      error: message.length > 200 ? `${message.slice(0, 200)}…` : message
+    })
+  }
+}
+
+/** 每路命中条数之和（指标口径：一次检索给模型看了多少条） */
+function countHitsPerText(result: ChainSearchBatchResult): number {
+  return result.hitsPerText.reduce((sum, hits) => sum + hits.length, 0)
+}
+
+/**
+ * 工具循环里的 `search_info` 走这里：worker 正常时结果与进程内完全一致（同一份 SQL）；
+ * worker 起不来 / 超时 / 崩了就退回主线程查（宁可卡一下，也别让「问记忆」答不出来）。
+ */
+async function runSearchBatch(query: ChainSearchBatchQuery): Promise<ChainSearchBatchResult> {
+  const startedAt = Date.now()
+  try {
+    const result = await getSearchHost().search(query)
+    recordSearchSample({ ms: Date.now() - startedAt, hits: countHitsPerText(result), ok: true })
+    return result
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    captureLog('warn', 'search worker failed, fallback to main thread', {
+      error: message.length > 200 ? `${message.slice(0, 200)}…` : message
+    })
+    const db = connections.queryDb()
+    if (!db) {
+      recordSearchSample({ ms: Date.now() - startedAt, hits: 0, ok: false, fallback: true })
+      throw error
+    }
+    try {
+      const result = searchChainSegmentsBatch(db, query)
+      recordSearchSample({
+        ms: Date.now() - startedAt,
+        hits: countHitsPerText(result),
+        ok: true,
+        fallback: true
+      })
+      return result
+    } catch (fallbackError) {
+      recordSearchSample({ ms: Date.now() - startedAt, hits: 0, ok: false, fallback: true })
+      throw fallbackError
+    }
+  }
+}
+
+/**
  * 图谱回填 / 在线归属共用的 embedder 入口。
- * E2E 注入假向量时直接返回假实现（不加载 95 MB 模型）；正常路径仍走进程内共享的真模型会话。
+ * E2E 注入假向量时直接返回假实现（不加载 95 MB 模型）；正常路径走 utilityProcess 里的真模型会话
+ * （256 token / 批 1，见 `BACKFILL_EMBEDDER_OPTIONS`）。模型缺失时这里会 throw，调用方按老口径降级。
  */
 function loadGraphEmbedder(): Promise<Embedder | null> {
   if (fakeEmbeddingBundle) return Promise.resolve(fakeEmbeddingBundle.embedder)
-  return loadSharedEmbedder(resolveModelDir(), { log: captureLog })
+  return loadSharedEmbedder(resolveModelDir(), {
+    log: captureLog,
+    ...createEmbedderFactory()
+  })
 }
 
 /**
@@ -379,12 +548,15 @@ let chainEmbedder: Promise<Embedder | null> | null = null
 function loadChainEmbedder(): Promise<Embedder | null> {
   if (fakeEmbeddingBundle) return Promise.resolve(fakeEmbeddingBundle.embedder)
   if (!chainEmbedder) {
-    chainEmbedder = createLocalEmbedder({
-      modelDir: resolveModelDir(),
-      maxLength: 512,
-      batchSize: 1,
-      intraOpNumThreads: 4
-    }).catch((error: unknown) => {
+    chainEmbedder = Promise.resolve().then(() =>
+      getEmbeddingHost().getEmbedder({
+        key: 'chain',
+        modelDir: resolveModelDir(),
+        maxLength: 512,
+        batchSize: 1,
+        intraOpNumThreads: 4
+      })
+    ).catch((error: unknown) => {
       captureLog('warn', 'chain embedder unavailable', {
         error: error instanceof Error ? error.name : 'unknown'
       })
@@ -395,11 +567,25 @@ function loadChainEmbedder(): Promise<Embedder | null> {
   return chainEmbedder
 }
 
-/** 回填的 embedder 工厂：只有假向量注入时才显式给（真模型路径自己按 `modelDir` 加载） */
+/**
+ * 回填 / 归属用的 embedder 工厂：
+ * - 假向量注入时直接给假实现；
+ * - 正常路径指向 utilityProcess 宿主（图谱 profile：256 token / 批 1 / 4 线程）。
+ *   模型缺失时 `getEmbedder` 抛 `model-missing`，`runGraphBackfill` 会降级成只回填结构。
+ */
 function createEmbedderFactory(): { createEmbedder?: (modelDir: string) => Promise<Embedder> } {
-  if (!fakeEmbeddingBundle) return {}
-  const embedder = fakeEmbeddingBundle.embedder
-  return { createEmbedder: async () => embedder }
+  if (fakeEmbeddingBundle) {
+    const embedder = fakeEmbeddingBundle.embedder
+    return { createEmbedder: async () => embedder }
+  }
+  return {
+    createEmbedder: async (modelDir: string) =>
+      getEmbeddingHost().getEmbedder({
+        key: 'graph',
+        modelDir,
+        ...BACKFILL_EMBEDDER_OPTIONS
+      })
+  }
 }
 
 /**
@@ -741,6 +927,8 @@ app.on('before-quit', (event) => {
   shuttingDown = true
   startupCountdown?.cancel()
   hotkeyHandle?.dispose()
+  tempJanitor?.stop()
+  tempJanitor = null
   disposeGraphIpc?.()
   disposeAskIpc?.()
   inductionRuntime?.dispose()
@@ -749,6 +937,11 @@ app.on('before-quit', (event) => {
   momentRuntime = null
   themeOnlineRuntime?.dispose()
   themeOnlineRuntime = null
+  // 向量工作进程：退出前杀掉，别留孤儿进程（在途推理直接失败，不影响收口）
+  embeddingHost?.dispose()
+  embeddingHost = null
+  searchHost?.dispose()
+  searchHost = null
   // 退出前等 stop 收口（在途 OCR 丢弃、stats 落盘、流释放）；3s 超时后放弃并强退。
   // 用 before-quit + preventDefault：will-quit 阶段再拦会被 Electron 当成 quit 已在进行。
   event.preventDefault()
@@ -937,12 +1130,15 @@ function ensureChainRecording(): ChainRecordingHandle | null {
     resourcesPath: app.isPackaged ? process.resourcesPath : undefined,
     log: captureLog
   })
+  // P0-2 第一阶段：信息链正文镜像成 events 行（默认开，capture.events_mirror=0 可关）。
+  // 每次起采集读一次（暂停 / 开始即生效）；先双写、后切读，等时间线 / 时刻 / 主题的覆盖对得上再降级。
   chainRecording = createChainRecording({
     db,
     source,
     screen: screenCapture ?? undefined,
     userDataDir: app.getPath('userData'),
     log: captureLog,
+    eventsMirror: { enabled: () => getSetting(db, 'capture.events_mirror') === '1' },
     // 内容来源（D43）：UIA 优先、OCR 兜底。脚本缺失 / 工作器起不来都会降级成「留空」，不会崩
     content: {
       uiaScript: scriptResourcePath('chain', 'uia-text.ps1'),
@@ -1153,6 +1349,17 @@ async function toggleCapture(): Promise<void> {
   }
 }
 
+/** 检索探针回包：只带计数与首条段 id（没有正文、没有标题） */
+interface SearchProbeResult {
+  ok: boolean
+  elapsedMs: number
+  /** 每个关键词一路的命中条数（顺序与入参对齐） */
+  hits: number[]
+  topSegmentId: number | null
+  /** 失败时的截断消息（最多 200 字，日志红线同款） */
+  error?: string
+}
+
 /**
  * 测试钩子：只在假采集 / 假 LLM / 假向量（临时 userData + 非打包）下挂到主进程 globalThis。
  * 任何一条注入都意味着「这是测试进程」，钩子不额外放宽业务约束（`toggle()` 走同一个入口）。
@@ -1166,6 +1373,12 @@ interface GotchaTestHook {
   openTimeline(): void
   /** 假 LLM 请求计数（断言暂停后零新增请求 / 零真实网络） */
   fakeLlm(): { requests: number; aborted: number } | null
+  /**
+   * 检索探针（§5.13 真机校验）：直接走生产那条 `runSearchBatch()`——
+   * 即 `utilityProcess` 里的 LIKE 全扫，坏了才退回主线程。只回每路命中数与首条段 id：
+   * 日志红线不打印正文，钩子也不往外递正文。
+   */
+  searchProbe(texts: string[], limit?: number): Promise<SearchProbeResult>
   /**
    * 在线归属跑一轮（S7 E2E）：60s 定时器对用例太慢，这里直接走 `runOnce()`。
    * 采集没跑 / 暂停 / 销毁时返回 `skipped`，不绕过 D18（暂停仍零出网）。
@@ -1192,6 +1405,32 @@ function installTestHook(): void {
       fakeLlmBundle
         ? { requests: fakeLlmBundle.counters.requests, aborted: fakeLlmBundle.counters.aborted }
         : null,
+    searchProbe: async (texts, limit = 5) => {
+      const started = Date.now()
+      const query: ChainSearchBatchQuery = {
+        texts: texts.slice(0, 16).map((text) => text.slice(0, 200)),
+        limit: Math.min(Math.max(1, Math.trunc(limit)), 200),
+        includeOpen: true
+      }
+      try {
+        const result = await runSearchBatch(query)
+        return {
+          ok: true,
+          elapsedMs: Date.now() - started,
+          hits: result.hitsPerText.map((hits) => hits.length),
+          topSegmentId: result.hitsPerText[0]?.[0]?.segment.id ?? null
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return {
+          ok: false,
+          elapsedMs: Date.now() - started,
+          hits: [],
+          topSegmentId: null,
+          error: message.length > 200 ? `${message.slice(0, 200)}…` : message
+        }
+      }
+    },
     onlineTick: () => {
       const runtime = ensureThemeOnlineRuntime()
       return runtime ? runtime.runOnce() : Promise.resolve(null)
@@ -1225,6 +1464,7 @@ if (primaryInstance) {
   app.whenReady().then(async () => {
     installCrashLogging()
     cleanTempFramesOnStartup()
+    startTempJanitor()
     const capture = resolveCapture(process.argv, process.env)
     if (capture) {
       try {
@@ -1241,6 +1481,8 @@ if (primaryInstance) {
     registerTimelineIpc()
 
     // 问记忆（S3-lite）：只读链库 + 出云确认门（D24）+ 日账（D22）
+    // 对话记录：显式提问 / 清空才写盘（A3 口径不变），文件在 userData 下
+    const askHistoryPath = join(app.getPath('userData'), ASK_HISTORY_FILE)
     const askConsentView = (): AskConsentView => {
       const db = connections.queryDb()
       const consented = db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
@@ -1249,9 +1491,53 @@ if (primaryInstance) {
         ? { consented, clientReady: true }
         : { consented, clientReady: false, clientReason: resolved.reason }
     }
+    // 问记忆的依赖（提问与「继续查」共用一份：两边口径必须一致，否则续查会绕过脱敏 / 预算 / 记账）
+    // 出云安全只在边界生效：核心拿到的只是一个载荷组装端口，不 import 脱敏实现。
+    const askOutbound = createCloudAskOutbound()
+    const askOptionsFor = (db: ChainDb, context: AskQueryContext): ChainAskOptions => ({
+      db,
+      resolveClient,
+      outbound: askOutbound,
+      embedQuestion: async (text) => {
+        const embedder = await loadChainEmbedder()
+        if (!embedder) return null
+        const [vector] = await embedder.embed([text])
+        return vector ?? null
+      },
+      // 工具循环注入：固定钟、采集运行态、问答历史（freshness / ask_history 工具的数据源）
+      now: () => Date.now(),
+      captureRunning: () => controller.status() === 'running',
+      readAskHistory: () => readAskHistory(askHistoryPath),
+      searchBatch: runSearchBatch,
+      // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
+      history: context.history,
+      signal: context.signal,
+      canSend: () => getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
+      overBudget: () => {
+        const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
+        if (budget <= 0) return false
+        const usage = readUsage(db, Date.now())
+        return usage.promptTokens + usage.completionTokens >= budget
+      },
+      onUsage: (usage) => {
+        try {
+          // 显式提问是用户动作：允许打开写连接记账（D22 日账）
+          const writable = connections.ensureWritable().db
+          recordUsage(writable, Date.now(), {
+            calls: 1,
+            promptTokens: usage.promptTokens,
+            completionTokens: usage.completionTokens
+          })
+        } catch (error) {
+          captureLog('warn', 'ask usage record failed', { error: String(error) })
+        }
+      },
+      log: (level, message, data) => captureLog(level, message, data)
+    })
+
     disposeAskIpc = registerAskIpc({
       getWindow: () => askWindow,
-      ask: async (question) => {
+      ask: async (question, context) => {
         const db = connections.queryDb()
         // A3 红线：没有库（从未采集）就不建库；时间轴上本来也没东西可找
         if (!db) {
@@ -1260,39 +1546,20 @@ if (primaryInstance) {
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
           }
         }
+        return askChain(askOptionsFor(db, context), question)
+      },
+      // 「还要继续查吗」→ 恢复暂停的循环（问题用检查点里的原话，续查通道不再传）
+      resume: async (resumeId, decision, context) => {
+        const db = connections.queryDb()
+        if (!db) {
+          return {
+            kind: 'no-evidence',
+            stats: { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
+          }
+        }
         return askChain(
-          {
-            db,
-            resolveClient,
-            embedQuestion: async (text) => {
-              const embedder = await loadChainEmbedder()
-              if (!embedder) return null
-              const [vector] = await embedder.embed([text])
-              return vector ?? null
-            },
-            canSend: () => getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
-            overBudget: () => {
-              const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
-              if (budget <= 0) return false
-              const usage = readUsage(db, Date.now())
-              return usage.promptTokens + usage.completionTokens >= budget
-            },
-            onUsage: (usage) => {
-              try {
-                // 显式提问是用户动作：允许打开写连接记账（D22 日账）
-                const writable = connections.ensureWritable().db
-                recordUsage(writable, Date.now(), {
-                  calls: 1,
-                  promptTokens: usage.promptTokens,
-                  completionTokens: usage.completionTokens
-                })
-              } catch (error) {
-                captureLog('warn', 'ask usage record failed', { error: String(error) })
-              }
-            },
-            log: (level, message, data) => captureLog(level, message, data)
-          },
-          question
+          { ...askOptionsFor(db, context), resume: { id: resumeId, decision } },
+          ''
         )
       },
       segment: (segmentId) => {
@@ -1305,6 +1572,30 @@ if (primaryInstance) {
         setSetting(writable, GRAPH_SETTING_KEYS.outboundConsent, consented ? '1' : '0')
         return askConsentView()
       },
+      record: (question, result, conversationId) => {
+        appendAskHistory(
+          askHistoryPath,
+          toHistoryEntry(question, result, Date.now(), conversationId)
+        )
+      },
+      conversationHistory: (conversationId) => {
+        // 由新到旧取出该会话最近的几轮，翻成「问题 + 上一轮的答复」当上下文。
+        // 只给最近 6 轮（载荷层还会再截到 4 轮并重新脱敏），旧记录没有 conversationId 时按单条会话计。
+        return readAskHistory(askHistoryPath)
+          .filter((entry) => (entry.conversationId ?? entry.id) === conversationId)
+          .slice(0, 6)
+          .reverse()
+          .map((entry) => ({
+            question: entry.question,
+            answer:
+              entry.answer ??
+              entry.clarify?.question ??
+              (entry.kind === 'no-evidence' ? '信息链里没找到' : '')
+          }))
+          .filter((turn) => turn.answer !== '')
+      },
+      history: () => readAskHistory(askHistoryPath),
+      clearHistory: () => clearAskHistory(askHistoryPath),
       log: (level, message, data) => captureLog(level, message, data)
     })
 
@@ -1329,6 +1620,10 @@ if (primaryInstance) {
         return db
           ? queryMomentEvents(db, momentId)
           : { found: false, events: [], missingIds: [], malformed: false }
+      },
+      queryMomentSummary: (momentId) => {
+        const db = connections.queryDb()
+        return db ? queryMomentSummary(db, momentId) : { found: false, ocrSummary: null }
       },
       search: (input) => {
         const db = connections.queryDb()
@@ -1441,6 +1736,9 @@ if (primaryInstance) {
     if (fakeCapture || fakeLlm || fakeEmbedding) installTestHook()
 
     registerGlobalHotkeys()
+
+    // 开发 / 验收便利：GOTCHA_ASK_ON_START=1 启动即打开问记忆窗口（默认不改变行为）
+    if (process.env['GOTCHA_ASK_ON_START'] === '1') openAsk()
 
     // Q1=B：只有上次显式开启（resume_on_start=1）才延迟 3s 自动恢复，且可被任意交互取消
     if (!launchCapture && readResumeOnStart()) scheduleStartupResume()

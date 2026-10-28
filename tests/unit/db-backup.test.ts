@@ -5,11 +5,11 @@
  */
 
 import Database from 'better-sqlite3'
-import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { LATEST_SCHEMA_VERSION, openDatabase } from '../../src/db'
+import { LATEST_SCHEMA_VERSION, openDatabase, pruneMigrationBackups } from '../../src/db'
 import { applyMigrations, getSchemaVersion, revertMigrations } from '../../src/db/migrations'
 
 function backups(dir: string): string[] {
@@ -121,6 +121,29 @@ describe('openDatabase · 迁移前自动备份', () => {
       expect(getSchemaVersion(db)).toBe(LATEST_SCHEMA_VERSION)
     } finally {
       db.close()
+    }
+  })
+
+  it('迁移备份轮转：只保留最近 2 份，非备份文件一律不动（P0-4）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gotcha-backup-prune-'))
+    const file = join(dir, 'memory.db')
+    try {
+      openDatabase(file).close()
+      for (const stamp of ['20260101-000000', '20260102-000000', '20260103-000000', '20260104-000000']) {
+        writeFileSync(`${file}.bak.${stamp}`, 'x')
+      }
+      writeFileSync(join(dir, 'memory.db.bak.not-a-stamp'), 'keep')
+      writeFileSync(join(dir, 'other.db.bak.20260101-000000'), 'keep')
+
+      expect(pruneMigrationBackups(file)).toEqual({ removed: 2, failed: 0 })
+      const kept = readdirSync(dir)
+        .filter((name) => /^memory\.db\.bak\.\d{8}-\d{6}$/.test(name))
+        .sort()
+      expect(kept).toEqual(['memory.db.bak.20260103-000000', 'memory.db.bak.20260104-000000'])
+      expect(existsSync(join(dir, 'memory.db.bak.not-a-stamp'))).toBe(true)
+      expect(existsSync(join(dir, 'other.db.bak.20260101-000000'))).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })

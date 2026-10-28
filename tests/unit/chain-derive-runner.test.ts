@@ -9,6 +9,7 @@ import {
   type ChainDb
 } from '../../src/chain/store'
 import { ChainDeriver } from '../../src/chain/derive/runner'
+import { createCloudDeriveOutbound } from '../../src/understand/cloud/derive-outbound'
 import {
   insertLink,
   listLinks,
@@ -113,6 +114,7 @@ async function startDeriver(
   const client = options.client === undefined ? new FakeLlmClient() : options.client
   const deriver = new ChainDeriver({
     db,
+    outbound: createCloudDeriveOutbound(),
     now: () => now,
     log: () => {},
     sweepIntervalMs: 0,
@@ -134,6 +136,7 @@ describe('ChainDeriver · 向量与抽取', () => {
     let consent = false
     const deriver = new ChainDeriver({
       db,
+      outbound: createCloudDeriveOutbound(),
       now: () => now,
       log: () => {},
       sweepIntervalMs: 0,
@@ -298,6 +301,26 @@ describe('ChainDeriver · 预算 / 失败退避 / 生命周期', () => {
     await deriver.runNow()
     expect(client.chainExtractRequests).toHaveLength(2)
     expect(getDeriveMarker(db, segmentId)).not.toBeNull()
+    deriver.stop()
+  })
+
+  it('向量算不出来（worker 报错）：派生照常收口，只丢向量并留给下一轮补', async () => {
+    const { segmentId } = closedSegment(T0, '记忆球 信息链 内容')
+    const client = new FakeLlmClient([extractionReply(['记忆球'], ['信息链'])])
+    const broken: Embedder = {
+      model: 'fake-embedding-v1',
+      dim: 8,
+      async embed() {
+        throw Object.assign(new Error('请求不合法'), { code: 'run-failed' })
+      }
+    }
+    const deriver = await startDeriver({ client, embed: broken })
+    await deriver.runNow()
+    // 真机 10-28 晚：一次 embed() 超协议上限 → 整段派生失败、反复重试烧 token；现在只丢向量
+    expect(getSegmentVector(db, segmentId)).toBeNull()
+    expect(listSegmentTags(db, segmentId).map((tag) => tag.name)).toEqual(['记忆球'])
+    expect(getDeriveMarker(db, segmentId)).not.toBeNull()
+    expect(deriver.status()).toMatchObject({ extracted: 1, failed: 0, vectors: 0 })
     deriver.stop()
   })
 

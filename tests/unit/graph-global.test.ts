@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { insertEvent, openDatabase } from '../../src/db'
-import { queryGlobalGraph, queryMomentEvents } from '../../src/understand/graph-query'
+import {
+  MOMENT_SUMMARY_PREVIEW_CHARS,
+  queryGlobalGraph,
+  queryMomentEvents,
+  queryMomentSummary
+} from '../../src/understand/graph-query'
 
 function at(day: number, hour: number): number {
   return new Date(2026, 9, day, hour, 0, 0, 0).getTime()
@@ -25,11 +30,17 @@ function seedTheme(
   )
 }
 
-function seedMoment(db: ReturnType<typeof openDatabase>, id: number, dayKey: string, startTs: number): void {
+function seedMoment(
+  db: ReturnType<typeof openDatabase>,
+  id: number,
+  dayKey: string,
+  startTs: number,
+  summary = ''
+): void {
   db.prepare(
     `INSERT INTO moments (id, start_ts, end_ts, day_key, app, window_title, ocr_summary, event_ids, created_at)
-     VALUES (?, ?, ?, ?, 'Code', 'a.ts', '', ?, 1)`
-  ).run(id, startTs, startTs + 60_000, dayKey, JSON.stringify([id * 10]))
+     VALUES (?, ?, ?, ?, 'Code', 'a.ts', ?, ?, 1)`
+  ).run(id, startTs, startTs + 60_000, dayKey, summary, JSON.stringify([id * 10]))
 }
 
 function seedMembership(
@@ -151,6 +162,48 @@ describe('queryGlobalGraph', () => {
     }
   })
 
+  it('列表摘要按 60 字截断并打标记，完整正文用 queryMomentSummary 现取', () => {
+    const db = openDatabase(':memory:')
+    try {
+      const long = '长'.repeat(400)
+      seedMoment(db, 1, '2026-10-22', at(22, 9), long)
+      seedMoment(db, 2, '2026-10-22', at(22, 10), '短短一句')
+      seedTheme(db, 1)
+      seedMembership(db, 1, 1)
+      seedMembership(db, 1, 2)
+
+      const data = queryGlobalGraph(db)
+      const byId = new Map(data.moments.map((moment) => [moment.id, moment]))
+      expect(byId.get(1)?.ocrSummary).toBe('长'.repeat(MOMENT_SUMMARY_PREVIEW_CHARS))
+      expect(byId.get(1)?.ocrTrimmed).toBe(true)
+      expect(byId.get(2)?.ocrSummary).toBe('短短一句')
+      expect(byId.get(2)?.ocrTrimmed).toBe(false)
+
+      expect(queryMomentSummary(db, 1)).toEqual({ found: true, ocrSummary: long })
+
+      // 老口径（导出 / 调试）：不截断、带成员事件 id
+      const fullList = queryGlobalGraph(db, { ocrSummaryChars: 0, includeMomentEventIds: true })
+      expect(fullList.moments.every((moment) => moment.ocrTrimmed === false)).toBe(true)
+      expect(fullList.moments.find((moment) => moment.id === 1)?.ocrSummary).toBe(long)
+      expect(fullList.moments.find((moment) => moment.id === 1)?.eventIds).toEqual([10])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('queryMomentSummary：不存在 / 非法 id 不建库也不抛错', () => {
+    const db = openDatabase(':memory:')
+    try {
+      expect(queryMomentSummary(db, 42)).toEqual({ found: false, ocrSummary: null })
+      expect(queryMomentSummary(db, 0).found).toBe(false)
+      expect(queryMomentSummary(db, 1.5).found).toBe(false)
+      seedMoment(db, 3, '2026-10-22', at(22, 9), '有摘要')
+      expect(queryMomentSummary(db, 3)).toEqual({ found: true, ocrSummary: '有摘要' })
+    } finally {
+      db.close()
+    }
+  })
+
   it('空库返回空图而不是抛错', () => {
     const db = openDatabase(':memory:')
     try {
@@ -204,7 +257,9 @@ describe('queryGlobalGraph', () => {
       seedTheme(db, 1)
       seedMembership(db, 1, 1)
       const data = queryGlobalGraph(db)
-      expect(data.moments[0].eventIds).toEqual([])
+      // 全局图列表默认不带成员事件 id（画布用不到，4k 时刻约 0.2 MB）
+      expect(data.moments[0].eventIds).toBeUndefined()
+      expect(queryGlobalGraph(db, { includeMomentEventIds: true }).moments[0].eventIds).toEqual([])
     } finally {
       db.close()
     }

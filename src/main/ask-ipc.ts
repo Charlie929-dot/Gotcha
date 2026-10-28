@@ -5,14 +5,19 @@
  * 出错变成可读结果（不把异常抛回渲染进程 —— 渲染层白屏比报错更坏）。
  *
  * 通道：
- * - `ask:query`        问题 → `ChainAskResult`（S1 的 `askChain`）
+ * - `ask:query`        问题（+ 会话 id）→ `ChainAskResult`（S1 的 `askChain`），成功走完落一条对话记录
+ * - `ask:resume`       「还要继续查吗」的选择（continue / stop）→ 恢复暂停的循环，结果落同一条对话
+ * - `ask:cancel`       中止当前在途提问（用户点「停止」）
  * - `ask:segment`      段 id → 段证据（截图转 data URL 由 deps 注入）
  * - `ask:consent:get`  出云确认门状态
  * - `ask:consent:set`  就地确认 / 撤销
+ * - `ask:history`      全部对话记录（最新在前）
+ * - `ask:history:clear` 清空对话记录
  */
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
-import type { ChainAskResult } from '../chain/agent/types'
+import type { ChainAskResult, ChainAskResumeDecision, ChainAskTurnContext } from '../chain/agent/types'
 import type { SegmentEvidence } from '../chain/agent/evidence'
+import type { AskHistoryEntry } from './ask-history'
 
 export interface AskConsentView {
   /** D24 一次性出网授权 */
@@ -23,17 +28,48 @@ export interface AskConsentView {
   clientReason?: string
 }
 
+/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号 */
+export interface AskQueryContext {
+  conversationId: string
+  history: readonly ChainAskTurnContext[]
+  signal: AbortSignal
+}
+
 export interface AskIpcDeps {
   getWindow: () => BrowserWindow | null
-  ask: (question: string) => Promise<ChainAskResult>
+  ask: (question: string, context: AskQueryContext) => Promise<ChainAskResult>
   segment: (segmentId: number) => SegmentEvidence | null
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
+  /** 成功走完一次提问就落一条历史（失败只记日志，不能影响回答） */
+  record: (question: string, result: ChainAskResult, conversationId: string) => void
+  /**
+   * 续查：恢复上一次被暂停的循环（`continue-ask`）。
+   * `decision=continue` 继续检索；`decision=stop` 按现有结果收尾。
+   * 没接这个能力时 `ask:resume` 一律失败（老版本窗口不会用到）。
+   */
+  resume?: (
+    resumeId: string,
+    decision: ChainAskResumeDecision,
+    context: AskQueryContext
+  ) => Promise<ChainAskResult>
+  /** 同一会话之前的几轮（主进程按 conversationId 从历史里筛；缺省按空对话处理） */
+  conversationHistory?: (conversationId: string) => readonly ChainAskTurnContext[]
+  /** 全部历史（最新在前） */
+  history: () => AskHistoryEntry[]
+  /** 清空历史 */
+  clearHistory: () => void
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
 /** 问题长度上限：和 `buildChainAskPayload` 的 500 字对齐 */
 export const ASK_QUESTION_MAX_CHARS = 500
+/** 会话 id 的形态上限（渲染层生成；只作分组键，不落 SQL） */
+const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+/** 续查句柄形态（主进程生成：r + 时间 + 随机） */
+const RESUME_ID_RE = /^r[a-z0-9]{4,40}$/
+/** 同时挂起的「还要继续吗」上限：正常一次只有一个，多窗口也不会无限攒 */
+const PENDING_RESUME_MAX = 8
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -62,23 +98,126 @@ function failure(message: string): ChainAskResult {
 
 export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown> {
   const ensureSender = createSenderCheck(deps)
+  /** 在途提问（同一时刻只跑一次；新提问会中止旧的，避免两次回答交错落进同一会话） */
+  let active: AbortController | null = null
+  /** 挂起的「还要继续吗」：resumeId → 原始问题 + 会话（答案没出来前不落历史） */
+  const pendingResume = new Map<string, { question: string; conversationId: string }>()
+
+  /**
+   * 一次问答收口：暂停（continue-ask）暂时不落历史——用户还没决定、答案还没出来；
+   * 其余结果照常落一条。历史写失败不能让提问失败，记一条 warn 就行。
+   */
+  const settle = (
+    question: string,
+    conversationId: string,
+    result: ChainAskResult
+  ): ChainAskResult => {
+    if (result.kind === 'continue-ask') {
+      if (result.resumeId) {
+        while (pendingResume.size >= PENDING_RESUME_MAX) {
+          const oldest = pendingResume.keys().next().value
+          if (oldest === undefined) break
+          pendingResume.delete(oldest)
+        }
+        pendingResume.set(result.resumeId, { question, conversationId })
+      }
+      return result
+    }
+    try {
+      deps.record(question, result, conversationId)
+    } catch (error) {
+      deps.log('warn', 'ask history record failed', { error: String(error) })
+    }
+    return result
+  }
+
   return new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>([
     [
       'ask:query',
-      async (event, question) => {
+      async (event, input) => {
         if (!ensureSender(event)) return failure('forbidden')
-        if (typeof question !== 'string') return failure('问题不合法')
-        const asked = question.trim()
+        const payload = isPlainObject(input) ? input : { question: input }
+        const rawQuestion = payload.question
+        if (typeof rawQuestion !== 'string') return failure('问题不合法')
+        const asked = rawQuestion.trim()
         if (asked === '') return failure('问题是空的')
         if (asked.length > ASK_QUESTION_MAX_CHARS) {
           return failure(`问题太长（上限 ${ASK_QUESTION_MAX_CHARS} 字）`)
         }
+        // 会话 id：老调用方（纯字符串）没有就现造一个，保证每次提问都有归属
+        const conversationId =
+          typeof payload.conversationId === 'string' && CONVERSATION_ID_RE.test(payload.conversationId)
+            ? payload.conversationId
+            : `c${Date.now().toString(36)}`
+
+        let history: readonly ChainAskTurnContext[] = []
         try {
-          return await deps.ask(asked)
+          history = deps.conversationHistory?.(conversationId) ?? []
+        } catch (error) {
+          deps.log('warn', 'ask history context failed', { error: String(error) })
+        }
+
+        active?.abort()
+        const controller = new AbortController()
+        active = controller
+        try {
+          const result = await deps.ask(asked, { conversationId, history, signal: controller.signal })
+          return settle(asked, conversationId, result)
         } catch (error) {
           deps.log('error', 'ask:query failed', { error: String(error) })
           return failure('问记忆出错，看日志')
+        } finally {
+          if (active === controller) active = null
         }
+      }
+    ],
+    [
+      'ask:resume',
+      async (event, input) => {
+        if (!ensureSender(event)) return failure('forbidden')
+        if (!isPlainObject(input)) return failure('续查参数不合法')
+        const resumeId = input.resumeId
+        const decision = input.decision
+        if (typeof resumeId !== 'string' || !RESUME_ID_RE.test(resumeId)) {
+          return failure('续查参数不合法')
+        }
+        if (decision !== 'continue' && decision !== 'stop') return failure('续查参数不合法')
+        if (!deps.resume) return failure('当前版本不支持续查')
+        const pending = pendingResume.get(resumeId)
+        if (!pending) return failure('这次追问已经过期（窗口重开或等太久），重新问一遍就好')
+        pendingResume.delete(resumeId)
+
+        let history: readonly ChainAskTurnContext[] = []
+        try {
+          history = deps.conversationHistory?.(pending.conversationId) ?? []
+        } catch (error) {
+          deps.log('warn', 'ask history context failed', { error: String(error) })
+        }
+
+        active?.abort()
+        const controller = new AbortController()
+        active = controller
+        try {
+          const result = await deps.resume(resumeId, decision, {
+            conversationId: pending.conversationId,
+            history,
+            signal: controller.signal
+          })
+          return settle(pending.question, pending.conversationId, result)
+        } catch (error) {
+          deps.log('error', 'ask:resume failed', { error: String(error) })
+          return failure('续查出错，看日志')
+        } finally {
+          if (active === controller) active = null
+        }
+      }
+    ],
+    [
+      'ask:cancel',
+      (event) => {
+        if (!ensureSender(event)) return false
+        active?.abort()
+        return true
       }
     ],
     [
@@ -105,6 +244,31 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask:consent:set failed', { error: String(error) })
           return null
+        }
+      }
+    ],
+    [
+      'ask:history',
+      (event) => {
+        if (!ensureSender(event)) return []
+        try {
+          return deps.history()
+        } catch (error) {
+          deps.log('error', 'ask:history read failed', { error: String(error) })
+          return []
+        }
+      }
+    ],
+    [
+      'ask:history:clear',
+      (event) => {
+        if (!ensureSender(event)) return false
+        try {
+          deps.clearHistory()
+          return true
+        } catch (error) {
+          deps.log('error', 'ask:history:clear failed', { error: String(error) })
+          return false
         }
       }
     ]

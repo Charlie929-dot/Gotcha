@@ -24,7 +24,16 @@ interface Rule {
 /** 顺序有意义：drop 规则先判定 */
 const RULES: Rule[] = [
   // 密码输入特征词 → 整帧丢弃（视觉级检测超出 M1a 范围）
-  { name: 'password-context', re: /密码|passw(?:or)?d|passphrase|\bpin\b/i, drop: true },
+  // `pin` 必须带上下文才丢：裸 `\bpin\b` 会把技术文本里的 “to pin / pin fx/fy” 整帧丢掉
+  // （2026-10-28 真实库：上线后 3.7% 的内容行、46.9 万字，性能方案 §5.4.1）。保留两种真实风险形态：
+  //   ① 紧邻 `码 / code / : / =`（表单标签，数字可能被遮罩成点）
+  //   ② 40 字符内出现 4–8 位数字（可带空格 / 横线 / 换行分隔，覆盖 “Your PIN is 1234”、
+  //      “1 2 3 4” 与「标签在上、输入框在下」的 OCR 版式）
+  {
+    name: 'password-context',
+    re: /密码|passw(?:or)?d|passphrase|\bpin\b\s*(?:码|code\b|[:：=])|\bpin\b[\s\S]{0,40}?(?:\d[\s-]?){4,8}/i,
+    drop: true
+  },
   // 认证头 / 通用 Bearer、Basic 凭据（security.md 正则层「JWT/Bearer」）
   // 字符集放宽到「任意非空白」：Bearer 后面可能是 percent-encoded / 带冒号 / 自定义形态，
   // 按 RFC 6750 b64token 白名单会漏检（PR #23 复审发现 abc%2Fdef%3Dxyz 原样出云）；

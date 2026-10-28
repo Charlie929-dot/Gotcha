@@ -245,6 +245,47 @@ describe('假事件源跑通整条链', () => {
     expect(contents.map((row) => row.text)).toEqual(['第一版正文', '第二版正文'])
   })
 
+  it('正文真正落行后才回调 onContentInserted（去重跳过的不触发）', () => {
+    const inserted: Array<{ segmentId: number; capturedAt: number; text: string }> = []
+    const recorder = new ChainRecorder({
+      db,
+      now: () => at(0),
+      takeShot: fakeShot(),
+      onContentInserted: (segmentId, capturedAt, payload) => {
+        inserted.push({ segmentId, capturedAt, text: payload.text })
+      }
+    })
+    const segmenter = new ChainSegmenter()
+    const feed = (inputs: ChainInput[]) => inputs.flatMap((input) => recorder.apply(segmenter.feed(input)))
+    feed([focus(0, 1, 'A'), click(5), click(9)])
+    recorder.apply(segmenter.flush(at(20)))
+
+    const [segment] = querySegments(db)
+    // 两张证据的正文一样：只落一行，也就只镜像一次
+    expect(getSegmentDetail(db, segment.id)?.contents).toHaveLength(1)
+    expect(inserted).toEqual([{ segmentId: segment.id, capturedAt: at(0), text: '同一段里没变的正文' }])
+  })
+
+  it('镜像回调抛错不影响内容落库（采集不因镜像崩）', () => {
+    const recorder = new ChainRecorder({
+      db,
+      now: () => at(0),
+      takeShot: fakeShot(),
+      onContentInserted: () => {
+        throw new Error('mirror down')
+      }
+    })
+    const segmenter = new ChainSegmenter()
+    const feed = (inputs: ChainInput[]) => inputs.flatMap((input) => recorder.apply(segmenter.feed(input)))
+    feed([focus(0, 1, 'A'), click(5)])
+    recorder.apply(segmenter.flush(at(20)))
+
+    const [segment] = querySegments(db)
+    expect(getSegmentDetail(db, segment.id)?.contents.map((row) => row.text)).toEqual([
+      '同一段里没变的正文'
+    ])
+  })
+
   it('外部补写内容：没有开着的段就丢弃', () => {
     const { feed, flush, recorder } = wire(fakeShot())
     expect(recorder.recordContent({ source: 'manual', text: '段外内容' }, at(1))).toBe(false)

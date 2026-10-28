@@ -1,26 +1,40 @@
 /**
  * 信息链 · 问记忆（S1 代理核心）
  *
- * 一次提问 = 一次回答 + 它引用的窗口段（`docs/chain-agent-plan.md` §4，P7 不做逐步解说）：
+ * 一次提问 = 一次回答 + 它引用的窗口段（`docs/chain-agent-plan.md` §4，P7 不做逐步解说）。
  *
- * 1. 检索：问题全文进 `text`（`despaceSearchText` 口径）+ 问题向量，双路 RRF（`query.ts`）；
- * 2. 证据：命中段 → `getSegmentDetail()` → 起止时间 / 应用 / 标题 / 命中原文 / 标签 / 双链；
- * 3. 出云：`buildChainAskPayload()`（脱敏 + 上限）→ `LlmClient.completeAsk()`；
- * 4. 解析：`parseChainAnswer()`（引用白名单硬剥，编造的整条丢）；
- * 5. 拒答：没命中 / 引用全被剥空 → `no-evidence`，**不调 LLM 编话**。
+ * 现在有两条出云路径，由客户端能力决定：
+ *
+ * 1. **工具循环（主路径，`loop.ts`）**：客户端带 `completeAskLoop` 时走。
+ *    模型自己拆关键词、换算时间戳、多轮调 `search_info` / `get_freshness` /
+ *    `ask_history`，最后给与单发同形的 `{answer, citations}`。
+ * 2. **单发回退（本文件的 `askOnce`）**：客户端只有 `completeAsk` 时保留老管道——
+ *    整句 + 向量检索一次、证据拼装一次、问一次。留作回退，不是死代码。
+ *
+ * 两条路径共用的门口（在 `askChain` 一次判定，循环内不再重复）：
+ * 空问题 / 出云门（consent）/ 日预算（budget）/ 客户端解析。
  *
  * 这一层不抛异常给调用方：出云门、客户端、解析失败都变成结构化的 `error`，
  * 因为「问不到」是正常结果，不该把 UI 带崩。
  */
-import { searchChainSegments, type ChainHit } from '../query'
+import {
+  searchChainSegments,
+  type ChainHit,
+  type ChainSearchBatchQuery,
+  type ChainSearchBatchResult
+} from '../query'
 import { getSegmentDetail, type ChainDb } from '../store'
 import type { LlmClient, LlmUsage } from '../../understand/cloud/llm-client'
-import { buildChainAskPayload, type RedactableChainAskEvidence } from '../../understand/cloud/redact'
-import { parseChainAnswer, type CitationMeta } from './parse'
+import type { AskOutbound, RedactableChainAskEvidence } from './payload'
+import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
+import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
+import type { AskHistorySummary } from './tools'
 import {
   EVIDENCE_TEXT_CHARS,
   type ChainAskResult,
-  type ChainAskStats
+  type ChainAskResumeDecision,
+  type ChainAskStats,
+  type ChainAskTurnContext
 } from './types'
 
 /** 客户端解析结果（与 `main/index.ts` 的 `resolveClient()` 同形，便于直接接） */
@@ -40,18 +54,46 @@ export type ChainAskLog = (
 export interface ChainAskOptions {
   db: ChainDb
   resolveClient: () => ChainAskClientResolution
+  /**
+   * 出云载荷组装（安全边界的唯一注入点）。
+   * - 远端供应商：`createCloudAskOutbound()`（脱敏墙生效）；
+   * - 本机模型 / 测试：`createLocalAskOutbound()`（直通，不被安全规则卡住）。
+   * 核心不再 import 脱敏实现，安全规则坏掉不影响检索与循环本身。
+   */
+  outbound: AskOutbound
   /** 问题向量（bge 会话）；没接或算不出来就只走关键词 */
   embedQuestion?: (question: string) => Promise<Float32Array | null> | Float32Array | null
   /** 出云门（D24 一次性确认）；默认放行。返回 false 就整次不出云 */
   canSend?: () => boolean
   /** 当日 token 预算用完了（D22）：返回 true 就整次不出云，理由报 `budget` */
   overBudget?: () => boolean
-  /** 记账：问一次记一次（复用 `induction.recordUsage`） */
+  /** 记账：问一次记一次（循环路径整次结束发一次累计值） */
   onUsage?: (usage: LlmUsage) => void
-  /** 检索条数上限（契约 §4 取 5~10，默认 8） */
+  /** 检索条数上限（契约 §4 取 5~10，默认 8；单发路径用，循环的 limit 由模型自己给） */
   limit?: number
-  /** 每段证据的正文字符上限（默认 500） */
+  /** 每段证据的正文字符上限（默认 500；单发路径用） */
   textChars?: number
+  /**
+   * 关键词批量检索的执行体（主进程注入 worker 版；性能方案 §5.11）。不传 = 进程内同步查。
+   * 只影响工具循环里的 `search_info`：单发路径本来只查一次、也没人同时用球。
+   */
+  searchBatch?: (query: ChainSearchBatchQuery) => Promise<ChainSearchBatchResult>
+  /** 循环用：当前时间（默认 `Date.now`；测试注入固定钟） */
+  now?: () => number
+  /** 循环用：采集是否在跑（freshness 的 captureRunning） */
+  captureRunning?: () => boolean
+  /** 循环用：最近问答记录（ask_history 工具的数据源） */
+  readAskHistory?: () => readonly AskHistorySummary[]
+  /** 同一会话之前的几轮（续问）；不传 = 新对话 */
+  history?: readonly ChainAskTurnContext[]
+  /**
+   * 恢复上一次被暂停的循环（`continue-ask`）：
+   * `continue` = 再给一轮工具预算继续查；`stop` = 按现有结果收尾。
+   * 检查点在主进程内存里，带过期时间；窗口重开 / 超时后失效。
+   */
+  resume?: { id: string; decision: ChainAskResumeDecision }
+  /** 用户点「停止」时中止在途请求 */
+  signal?: AbortSignal
   log?: ChainAskLog
 }
 
@@ -61,6 +103,49 @@ const MAX_LIMIT = 20
 
 function emptyStats(): ChainAskStats {
   return { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
+}
+
+/* ------------------------------------------------------------------ */
+/* 续查检查点（只在主进程内存里；不落盘、不过 IPC）                      */
+/* ------------------------------------------------------------------ */
+
+/** 检查点有效期：10 分钟内没点「继续 / 收尾」就作废（窗口重开也拿不到） */
+export const ASK_RESUME_TTL_MS = 10 * 60_000
+/** 同时最多留几个检查点：正常一次只有一个，多开窗口也不会无限攒 */
+const ASK_RESUME_MAX = 8
+
+interface PendingAskLoop {
+  question: string
+  state: AskLoopResumeState
+  at: number
+}
+
+const pendingAskLoops = new Map<string, PendingAskLoop>()
+
+function newResumeId(): string {
+  return `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+}
+
+function rememberPendingAskLoop(
+  id: string,
+  question: string,
+  state: AskLoopResumeState,
+  now: number
+): void {
+  for (const [key, entry] of pendingAskLoops) {
+    if (now - entry.at > ASK_RESUME_TTL_MS) pendingAskLoops.delete(key)
+  }
+  while (pendingAskLoops.size >= ASK_RESUME_MAX) {
+    const oldest = pendingAskLoops.keys().next().value
+    if (oldest === undefined) break
+    pendingAskLoops.delete(oldest)
+  }
+  pendingAskLoops.set(id, { question, state, at: now })
+}
+
+/** 测试用：清掉未消费的检查点，避免跨用例串状态 */
+export function clearPendingAskLoops(): void {
+  pendingAskLoops.clear()
 }
 
 /** 段里选哪段正文当证据：优先模型实际命中的那条内容，其次最长的一条 */
@@ -86,21 +171,30 @@ function titleOf(hit: ChainHit): string {
 }
 
 /**
- * 问一次记忆。
+ * 问一次记忆。门口共用的判定在这里做一次；之后按客户端能力分流：
+ * 带 `completeAskLoop` → 工具循环；只有 `completeAsk` → 单发回退；都没有 → `client` 错误。
  *
  * @param question 用户原话（空白会被拒）
  */
 export async function askChain(options: ChainAskOptions, question: string): Promise<ChainAskResult> {
   const stats = emptyStats()
-  const asked = question.trim()
+  // 续查：问题用检查点里的原话（续查通道不再传问题，避免渲染层改词后两轮问题对不上）
+  const pending = options.resume ? pendingAskLoops.get(options.resume.id) : undefined
+  if (options.resume && !pending) {
+    return {
+      kind: 'error',
+      reason: 'failed',
+      message: '这次追问的上下文已经过期（窗口重开或等太久），重新问一遍就好',
+      stats
+    }
+  }
+  const asked = (pending?.question ?? question).trim()
   stats.questionChars = asked.length
   if (asked === '') {
     return { kind: 'error', reason: 'empty-question', message: '问题是空的', stats }
   }
 
   const log = options.log ?? (() => {})
-  const limit = Math.min(MAX_LIMIT, Math.max(MIN_LIMIT, options.limit ?? DEFAULT_LIMIT))
-  const textChars = Math.max(80, options.textChars ?? EVIDENCE_TEXT_CHARS)
 
   if (options.canSend && !options.canSend()) {
     return { kind: 'error', reason: 'consent', message: '还没确认出云，先不提问', stats }
@@ -118,10 +212,72 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
       stats
     }
   }
-  const client = resolved.client
-  if (typeof client.completeAsk !== 'function') {
+
+  // 主路径：工具循环（模型自己检索，修七个召回根因里的前五个）
+  const loopClient = resolveLoopClient(resolved)
+  if (loopClient) {
+    // 检查点一次性：同一份状态不能被恢复两次（否则两个窗口各跑一遍、各记一次账）
+    if (pending && options.resume) pendingAskLoops.delete(options.resume.id)
+
+    const paused: { state?: AskLoopResumeState } = {}
+    const result = await runAskLoop(
+      {
+        db: options.db,
+        client: loopClient,
+        outbound: options.outbound,
+        ...(options.embedQuestion ? { embedQuestion: options.embedQuestion } : {}),
+        now: options.now ?? (() => Date.now()),
+        captureRunning: options.captureRunning ?? (() => false),
+        ...(options.readAskHistory ? { readAskHistory: options.readAskHistory } : {}),
+        ...(options.searchBatch ? { searchBatch: options.searchBatch } : {}),
+        ...(options.history ? { history: options.history } : {}),
+        ...(pending ? { resume: pending.state } : {}),
+        ...(options.resume ? { resumeDecision: options.resume.decision } : {}),
+        // 轮数用尽时把状态交回来，由界面问用户「还要继续吗」
+        onPause: (state) => {
+          paused.state = state
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.onUsage ? { onUsage: options.onUsage } : {}),
+        log
+      },
+      asked
+    )
+
+    if (result.kind === 'continue-ask') {
+      if (!paused.state) {
+        // onPause 已经接上，正常不会走到这里；真走到也不把内部状态漏给界面
+        return { kind: 'no-evidence', stats: result.stats }
+      }
+      const id = newResumeId()
+      rememberPendingAskLoop(id, asked, paused.state, Date.now())
+      return { ...result, resumeId: id }
+    }
+    return result
+  }
+
+  // 回退：单发管道（客户端没有循环能力）
+  const legacy = resolved.client
+  const completeAsk = legacy.completeAsk?.bind(legacy)
+  if (typeof completeAsk !== 'function') {
     return { kind: 'error', reason: 'client', message: '当前客户端不支持问记忆', stats }
   }
+  return askOnce(options, { ...legacy, completeAsk }, asked, stats, log)
+}
+
+/* ------------------------------------------------------------------ */
+/* 单发回退路径（老管道原样保留；客户端只有 completeAsk 时使用）          */
+/* ------------------------------------------------------------------ */
+
+async function askOnce(
+  options: ChainAskOptions,
+  client: LlmClient & Pick<Required<LlmClient>, 'completeAsk'>,
+  asked: string,
+  stats: ChainAskStats,
+  log: ChainAskLog
+): Promise<ChainAskResult> {
+  const limit = Math.min(MAX_LIMIT, Math.max(MIN_LIMIT, options.limit ?? DEFAULT_LIMIT))
+  const textChars = Math.max(80, options.textChars ?? EVIDENCE_TEXT_CHARS)
 
   // 1. 检索：向量算不出来就只走关键词，不因此失败
   let vector: Float32Array | null = null
@@ -160,7 +316,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
     }
   })
 
-  const built = buildChainAskPayload(asked, evidence, { textMaxChars: textChars })
+  const built = options.outbound.buildAsk(asked, evidence, { textMaxChars: textChars })
   if (built.questionBlocked) {
     return { kind: 'error', reason: 'question-blocked', message: '问题里含敏感内容，未出云', stats }
   }
@@ -172,8 +328,13 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
   // 3. 出云
   let result
   try {
-    result = await client.completeAsk(built.payload)
+    result = await client.completeAsk(built.payload, {
+      ...(options.signal ? { signal: options.signal } : {})
+    })
   } catch (error) {
+    if (options.signal?.aborted) {
+      return { kind: 'error', reason: 'aborted', message: '已停止', stats }
+    }
     log('warn', 'chain ask: 模型调用失败', { error: String(error) })
     return { kind: 'error', reason: 'failed', message: String(error), stats }
   }
@@ -189,10 +350,25 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
   const rawCitations = (result.json as { citations?: unknown } | null)?.citations
   stats.cited = Array.isArray(rawCitations) ? rawCitations.length : 0
 
-  const parsed = parseChainAnswer(result.json, meta)
+  const parsed = parseChainReply(result.json, meta)
   if (!parsed.ok) {
     if (parsed.reason === 'no-citations') return { kind: 'no-evidence', stats }
     return { kind: 'error', reason: 'unparseable', message: parsed.message, stats }
+  }
+  if (parsed.kind === 'clarify') {
+    return { kind: 'clarify', question: parsed.question, options: parsed.options, stats }
+  }
+  if (isNoEvidenceAnswer(parsed.answer) && parsed.citations.length > 0) {
+    // 根因 7 的归一在两条路径上一致：按「没找到」收口，但保留说明与引用（别让用户只看到空白）
+    log('warn', 'chain ask: answer 声称没找到但 citations 非空，按没找到保留说明', {
+      cited: parsed.citations.length
+    })
+    return {
+      kind: 'no-evidence',
+      note: parsed.answer,
+      citations: parsed.citations,
+      stats
+    }
   }
 
   return { kind: 'answer', answer: parsed.answer, citations: parsed.citations, stats }

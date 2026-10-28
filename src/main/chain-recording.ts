@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { isBlacklisted as defaultBlacklist, executableName, type WindowBounds } from '../capture/window-meta'
 import type { ChainDb } from '../chain/store'
 import { ChainRuntime } from '../chain/hook/runtime'
+import { createCloudDeriveOutbound } from '../understand/cloud/derive-outbound'
 import { loadNativeBinding, nativeCandidates, NativeDesktopSource } from '../chain/hook/native'
 import type { DesktopEventSource, SourceInfo } from '../chain/hook/types'
 import type { ShotStats, ShotTaker } from '../chain/recorder'
@@ -34,6 +35,11 @@ import {
   type ChainShotWindow
 } from './chain-shot'
 import { createChainRetention, type ChainRetention, type ImageEncoder } from './chain-retention'
+import {
+  createChainEventMirror,
+  type ChainEventMirror,
+  type ChainEventMirrorStats
+} from './chain-events'
 import {
   ChainDeriver,
   type DeriveClientResolution,
@@ -137,6 +143,12 @@ export interface ChainRecordingOptions {
     readConsent: () => boolean
     loadEmbedder: () => Promise<Embedder | null>
   }
+  /**
+   * P0-2 第一阶段：把 `chain_content` 正文镜像成 `events` 行（时间线 / 时刻 / 主题的数据源）。
+   * 不给就完全不镜像；采集、证据与检索照常。
+   * `enabled` 在**每次起采集**时读一次（改开关后暂停 / 开始即生效，不必重启应用）。
+   */
+  eventsMirror?: { maxChars?: number; enabled?: () => boolean }
 }
 
 export interface ChainRecordingStatus {
@@ -147,6 +159,8 @@ export interface ChainRecordingStatus {
   content: ChainContentStats | null
   /** 派生层统计（没接线时为 null） */
   derive: DeriveStats | null
+  /** events 镜像统计（没接线时为 null） */
+  events: ChainEventMirrorStats | null
 }
 
 export interface ChainRecordingHandle {
@@ -184,6 +198,8 @@ interface ActiveChain {
   retention: ChainRetention | null
   /** 派生层（v0.8）；没给配置时为 null */
   derive: ChainDeriver | null
+  /** events 镜像（P0-2）；没给配置时为 null */
+  mirror: ChainEventMirror | null
   /** 关掉读取链（杀 PowerShell 子进程；在途读数由 `content.drain()` 先等） */
   dispose(): Promise<void>
 }
@@ -197,6 +213,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
   let lastContentStats: ChainContentStats | null = null
   /** 停掉之后的派生账（同样是「刚结束的那一轮」） */
   let lastDeriveStats: DeriveStats | null = null
+  /** 停掉之后的镜像账 */
+  let lastEventsStats: ChainEventMirrorStats | null = null
 
   const start = (): void => {
     if (active) return
@@ -236,10 +254,12 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
         })
       : null
 
-    // 派生层（v0.8）：向量本地算，抽取受出网确认门 + 每日预算约束；跟采集生命周期走
+    // 派生层（v0.8）：向量本地算，抽取受出网确认门 + 每日预算约束；跟采集生命周期走。
+    // 载荷组装在核心，脱敏策略由这里（组合根）注入。
     const derive = options.derive
       ? new ChainDeriver({
           db: options.db,
+          outbound: createCloudDeriveOutbound(),
           now: options.now,
           log,
           resolveClient: options.derive.resolveClient,
@@ -247,6 +267,18 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
           loadEmbedder: options.derive.loadEmbedder
         })
       : null
+    // P0-2 第一阶段：内容落行后镜像一条 events（时间线 / 时刻 / 主题的数据源）。
+    // 镜像失败只计数，不影响 chain_content 已落库。
+    // `enabled` 每次起采集读一次：关掉镜像只要暂停再开始（回滚不用重启应用）。
+    const mirrorEnabled = options.eventsMirror?.enabled?.() ?? options.eventsMirror !== undefined
+    const mirror =
+      options.eventsMirror && mirrorEnabled
+        ? createChainEventMirror({
+            db: options.db,
+            maxChars: options.eventsMirror.maxChars,
+            log
+          })
+        : null
     const runtime = new ChainRuntime({
       db: options.db,
       source,
@@ -255,7 +287,10 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
       sourceInfo: info,
       // 派生层叫醒（v0.8）：收口 / 内容写入都只是「叫醒」，判断在派生执行器里
       onSegmentClosed: (segmentId) => derive?.notifySegmentClosed(segmentId),
-      onContentWritten: (segmentId) => derive?.notifyContentWritten(segmentId)
+      onContentWritten: (segmentId) => derive?.notifyContentWritten(segmentId),
+      // P0-2：正文真正落行后镜像进 events（去重 / 空文本不会触发）
+      onContentInserted: (segmentId, capturedAt, payload) =>
+        void mirror?.onContent(segmentId, capturedAt, payload)
     })
     runtime.start()
     holder.runtime = runtime
@@ -276,6 +311,7 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
       content,
       retention,
       derive,
+      mirror,
       dispose: async () => {
         await contentReader?.dispose()
       }
@@ -285,7 +321,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
       detail: info.detail ?? null,
       shots: takeShot !== null,
       content: content !== null,
-      derive: derive !== null
+      derive: derive !== null,
+      events: mirror !== null
     })
   }
 
@@ -312,6 +349,7 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
       await current.dispose()
       lastContentStats = current.content?.stats ?? null
       lastDeriveStats = current.derive?.status() ?? null
+      lastEventsStats = current.mirror?.stats ?? null
       const stats = current.runtime.stats
       log('info', 'chain recording stopped', {
         openSegmentId: stats.openSegmentId,
@@ -321,7 +359,9 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
         // 被瞬间抢焦点、没停满确认窗就丢掉的闪段（v0.14），同样只做观测
         flashDropped: stats.flashDropped,
         content: current.content?.stats ?? null,
-        derive: lastDeriveStats
+        derive: lastDeriveStats,
+        // P0-2：镜像写了几条 / 截断几条 / 因敏感跳了几条
+        events: lastEventsStats
       })
     })().finally(() => {
       stopping = null
@@ -341,7 +381,8 @@ export function createChainRecording(options: ChainRecordingOptions): ChainRecor
         openSegmentId: shots?.openSegmentId ?? null,
         shots: shots?.shotStats ?? null,
         content: current?.content?.stats ?? lastContentStats,
-        derive: current?.derive?.status() ?? lastDeriveStats
+        derive: current?.derive?.status() ?? lastDeriveStats,
+        events: current?.mirror?.stats ?? lastEventsStats
       }
     }
   }

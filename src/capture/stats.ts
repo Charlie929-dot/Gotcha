@@ -16,6 +16,20 @@ export interface CaptureStats {
   capture_errors: number
   /** 临时帧删除失败次数（残留由下次启动的受控清理兜底，F06） */
   temp_delete_failed: number
+  /**
+   * 判重前移的观测点（2026-10-28 性能方案 §4.4）：
+   * `encode_count` = 真正编码 / 落盘的帧数（应 ≈ frames_total - frames_same），
+   * `encode_ms` 是这些帧的编码 + 写盘累计耗时，`write_bytes` 是临时帧落盘字节。
+   * 三者缺省 0（老库里没有这三个键也照常读出来）。
+   */
+  encode_count: number
+  encode_ms: number
+  write_bytes: number
+  /**
+   * 旧管线降级为「仅元数据」（P0-2）时写入的事件数：
+   * 只记 app / title，不截帧、不 OCR。正常抓帧模式下恒为 0。
+   */
+  metadata_events: number
 }
 
 export function zeroStats(): CaptureStats {
@@ -25,7 +39,11 @@ export function zeroStats(): CaptureStats {
     ocr_runs: 0,
     queue_dropped: 0,
     capture_errors: 0,
-    temp_delete_failed: 0
+    temp_delete_failed: 0,
+    encode_count: 0,
+    encode_ms: 0,
+    write_bytes: 0,
+    metadata_events: 0
   }
 }
 

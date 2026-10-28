@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { SETTINGS_DDL } from '../../src/db/schema'
+import { EVENTS_DDL, SETTINGS_DDL } from '../../src/db/schema'
 import { ensureChainSchema } from '../../src/chain/schema'
 import {
   closeSegment,
@@ -94,6 +94,9 @@ function build(
     window?: () => Promise<ChainShotWindow | null>
     content?: ChainContentWiring
     derive?: ChainRecordingOptions['derive']
+    eventsMirror?: ChainRecordingOptions['eventsMirror']
+    /** 时钟（需要多轮 start/stop 时用可变时间；默认固定在 at(60)） */
+    now?: () => number
   } = {}
 ) {
   let frameTs = 0
@@ -109,11 +112,12 @@ function build(
     },
     userDataDir: 'C:/userData',
     // 时钟固定在「所有事件之后」：stop 收口时段的结束时刻不会早于子行（契约 §3 第 3 条）
-    now: () => at(60),
+    now: options.now ?? (() => at(60)),
     getWindow: options.window ?? (async () => WINDOW),
     isBlacklisted: () => false,
     content: options.content,
     derive: options.derive,
+    eventsMirror: options.eventsMirror,
     log: (_level, _msg, data) => {
       if (data && typeof data.shots === 'object' && data.shots !== null) {
         shots.push(data.shots as ShotStats)
@@ -298,6 +302,98 @@ describe('内容来源接进采集（D43）', () => {
     const [segment] = querySegments(db)
     expect(getSegmentDetail(db, segment.id)?.contents).toHaveLength(1)
     expect(handle.status().content).toMatchObject({ queued: 2, inserted: 1, duplicates: 1 })
+  })
+
+  it('P0-2：正文落行后镜像一条 events（ts / app / title 取所属段）', async () => {
+    db.exec(EVENTS_DDL)
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      eventsMirror: {},
+      content: {
+        createReader: () => ({
+          read: async () => ({ source: 'uia', text: '正文 A' }),
+          dispose: async () => {}
+        })
+      }
+    })
+    handle.start()
+    source.emit(foreground(0))
+    source.emit(click(5))
+    await handle.stop()
+
+    const rows = db
+      .prepare('SELECT ts, app, window_title, ocr_text, sensitive FROM events ORDER BY id')
+      .all()
+    expect(rows).toEqual([
+      {
+        ts: at(0),
+        app: 'Firefox',
+        window_title: WINDOW.title,
+        ocr_text: '正文 A',
+        sensitive: 0
+      }
+    ])
+    expect(handle.status().events).toMatchObject({ written: 1, failed: 0 })
+  })
+
+  it('镜像开关每次起采集读一次：关掉后 stop / start 就不再写 events（回滚不用重启）', async () => {
+    db.exec(EVENTS_DDL)
+    let enabled = true
+    let nowTs = at(60)
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      now: () => nowTs,
+      eventsMirror: { enabled: () => enabled },
+      content: {
+        createReader: () => ({
+          read: async () => ({ source: 'uia', text: '正文 A' }),
+          dispose: async () => {}
+        })
+      }
+    })
+
+    handle.start()
+    source.emit(foreground(0))
+    source.emit(click(5))
+    await handle.stop()
+    expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
+
+    enabled = false
+    nowTs = at(120)
+    handle.start()
+    source.emit(foreground(70))
+    source.emit(click(75))
+    await handle.stop()
+
+    const [segment] = querySegments(db)
+    expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 1 })
+    expect(getSegmentDetail(db, segment.id)?.contents.length).toBeGreaterThan(0)
+    expect(handle.status().events).toBeNull()
+  })
+
+  it('不给 eventsMirror：内容照写 chain_content，events 一行不写', async () => {
+    db.exec(EVENTS_DDL)
+    const source = new FakeSource()
+    const { handle } = build({
+      source,
+      content: {
+        createReader: () => ({
+          read: async () => ({ source: 'uia', text: '正文 A' }),
+          dispose: async () => {}
+        })
+      }
+    })
+    handle.start()
+    source.emit(foreground(0))
+    source.emit(click(5))
+    await handle.stop()
+
+    const [segment] = querySegments(db)
+    expect(getSegmentDetail(db, segment.id)?.contents).toHaveLength(1)
+    expect(db.prepare('SELECT COUNT(*) AS n FROM events').get()).toEqual({ n: 0 })
+    expect(handle.status().events).toBeNull()
   })
 
   it('读不回来：不写内容行，截图照记', async () => {

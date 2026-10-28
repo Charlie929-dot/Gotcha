@@ -21,7 +21,8 @@ import {
 import {
   buildSnippet,
   despaceSearchText,
-  searchChainSegments
+  searchChainSegments,
+  searchChainSegmentsBatch
 } from '../../src/chain/query'
 
 const T0 = new Date(2026, 9, 26, 12, 0, 0, 0).getTime()
@@ -278,6 +279,124 @@ describe('searchChainSegments · 过滤', () => {
 
     expect(searchChainSegments(db, {}).hits).toEqual([])
     expect(searchChainSegments(db, { app: 'Firefox', limit: 1 }).hits.map((hit) => hit.segment.id)).toEqual([b])
+  })
+})
+
+describe('searchChainSegmentsBatch · 多关键词一次扫描（P0-3）', () => {
+  it('每一路的段 id / 摘要 / 命中条数与逐词检索一致，keywordRows 也是各词之和', () => {
+    const a = segment({ app: 'Firefox', title: '两词都有', startTs: T0 })
+    content(a, '检索入口 与 记忆球 都在这里', T0 + 1_000)
+    content(a, '再记一条：检索入口', T0 + 2_000)
+    const b = segment({ app: 'Obsidian', title: '只有记忆球', startTs: T0 + MINUTE })
+    content(b, '记 忆 球 的 设 计 草 案', T0 + MINUTE + 1_000, 'ocr')
+    const c = segment({ app: 'Chrome', title: '都没命中', startTs: T0 + 2 * MINUTE })
+    content(c, '完全无关的正文', T0 + 2 * MINUTE + 1_000)
+
+    const texts = ['检索入口', '记忆球', '不存在的词']
+    const batch = searchChainSegmentsBatch(db, { texts, includeOpen: true, limit: 8 })
+    let rows = 0
+    for (let index = 0; index < texts.length; index += 1) {
+      const single = searchChainSegments(db, { text: texts[index], includeOpen: true, limit: 8 })
+      const got = batch.hitsPerText[index]
+      expect(got.map((hit) => hit.segment.id)).toEqual(single.hits.map((hit) => hit.segment.id))
+      expect(got.map((hit) => hit.snippet)).toEqual(single.hits.map((hit) => hit.snippet))
+      expect(got.map((hit) => hit.matches)).toEqual(single.hits.map((hit) => hit.matches))
+      expect(got.map((hit) => hit.contentIds)).toEqual(single.hits.map((hit) => hit.contentIds))
+      rows += single.stats.keywordRows
+    }
+    expect(batch.stats.keywordRows).toBe(rows)
+    expect(batch.stats.mode).toBe('keyword')
+    // 两路都命中的段在两路里都出现（RRF 才能把它排前面）
+    expect(batch.hitsPerText[0][0].segment.id).toBe(a)
+    expect(batch.hitsPerText[1].map((hit) => hit.segment.id)).toContain(a)
+  })
+
+  it('摘要只给真正返回的名次补：命中段多于 limit 时返回的每条仍有摘要', () => {
+    // 扫描阶段不再搬正文（P0-3 收尾），摘要是排名定下来后按内容 id 补的；
+    // 这里钉住「补的范围 ≥ limit」——否则 limit 卡掉的段会把摘要一起漏掉。
+    for (let index = 0; index < 6; index += 1) {
+      const id = segment({ app: 'Firefox', title: `段${index}`, startTs: T0 + index * MINUTE })
+      content(id, `共同词 第${index}段`, T0 + index * MINUTE + 1_000)
+    }
+    const result = searchChainSegments(db, { text: '共同词', includeOpen: true, limit: 2 })
+    expect(result.hits).toHaveLength(2)
+    for (const hit of result.hits) {
+      expect(hit.snippet).toContain('共同词')
+      expect(hit.contentIds).toHaveLength(1)
+    }
+  })
+
+  it('重复关键词共用扫描槽位，但两路排名都在（RRF 权重不被静默去重）', () => {
+    const id = segment({ app: 'Firefox', title: '命中', startTs: T0 })
+    content(id, '检索入口', T0 + 1_000)
+
+    const batch = searchChainSegmentsBatch(db, { texts: ['检索入口', '检索入口'], limit: 8 })
+    expect(batch.hitsPerText).toHaveLength(2)
+    expect(batch.hitsPerText[0].map((hit) => hit.segment.id)).toEqual([id])
+    expect(batch.hitsPerText[1].map((hit) => hit.segment.id)).toEqual([id])
+    // 与逐词检索同口径：同一个词查两次就计两次命中行
+    expect(batch.stats.keywordRows).toBe(2)
+  })
+
+  it('过滤条件（时间 / 开段）与单路检索同口径', () => {
+    const old = segment({ app: 'Firefox', title: '旧', startTs: T0 })
+    content(old, '共同词 旧', T0 + 1_000)
+    const recent = segment({ app: 'Obsidian', title: '新', startTs: T0 + 30 * MINUTE })
+    content(recent, '共同词 新', T0 + 30 * MINUTE + 1_000)
+
+    const batch = searchChainSegmentsBatch(db, { texts: ['共同词'], from: T0 + 10 * MINUTE })
+    expect(batch.hitsPerText[0].map((hit) => hit.segment.id)).toEqual([recent])
+  })
+})
+
+describe('chain_content.text_norm（v3 归一列）', () => {
+  it('插入即由触发器写入，正文更新后跟着变', () => {
+    const id = segment({ app: 'Firefox', title: '归一列', startTs: T0 })
+    const contentId = content(id, '记 忆 球\u3000设 计\t草 案', T0 + 1_000, 'ocr')
+    const readNorm = (): string =>
+      (db.prepare('SELECT text_norm AS norm FROM chain_content WHERE id = ?').get(contentId) as {
+        norm: string
+      }).norm
+    expect(readNorm()).toBe('记忆球设计草案')
+
+    db.prepare('UPDATE chain_content SET text = ? WHERE id = ?').run('新的 正文', contentId)
+    expect(readNorm()).toBe('新的正文')
+  })
+
+  it('老库没有 text_norm 列时退回归一表达式，结果一致', () => {
+    const legacy = new Database(':memory:')
+    try {
+      ensureChainSchema(legacy)
+      legacy.exec('DROP TRIGGER chain_content_norm_ai')
+      legacy.exec('DROP TRIGGER chain_content_norm_au')
+      // 模拟 v2 老库：没有检索辅助列（触发器已删，插入不会再补）
+      legacy.exec('ALTER TABLE chain_content DROP COLUMN text_norm')
+      const id = openSegment(
+        legacy,
+        { startTs: T0, pid: 999, exe: 'firefox.exe', app: 'Firefox', hwnd: 998, title: '老库' },
+        T0
+      )
+      closeSegment(legacy, id, {
+        startTs: T0,
+        endTs: T0 + 30_000,
+        activeMs: 30_000,
+        idleMs: 0,
+        pid: 999,
+        exe: 'firefox.exe',
+        app: 'Firefox',
+        hwnd: 998,
+        titleFirst: '老库',
+        titleLast: '老库'
+      })
+      insertContent(legacy, { segmentId: id, capturedAt: T0 + 1_000, source: 'ocr', text: '记 忆 球 草 案' })
+
+      const result = searchChainSegments(legacy, { text: '记忆球' })
+      expect(result.hits.map((hit) => hit.segment.id)).toEqual([id])
+      const batch = searchChainSegmentsBatch(legacy, { texts: ['记忆球'] })
+      expect(batch.hitsPerText[0].map((hit) => hit.segment.id)).toEqual([id])
+    } finally {
+      legacy.close()
+    }
   })
 })
 

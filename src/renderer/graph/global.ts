@@ -389,7 +389,13 @@ function onGraphChanged(): void {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden || !refreshWhenVisible) return
+  // P1-2：窗口不可见就不画——隐藏时 rAF 还带着 4k 点的重绘，纯浪费（引擎 tick 一起停）
+  if (document.hidden) {
+    graphEl.pauseAnimation()
+    return
+  }
+  graphEl.resumeAnimation()
+  if (!refreshWhenVisible) return
   refreshWhenVisible = false
   scheduleGraphRefresh()
 })
@@ -514,7 +520,23 @@ async function openNodeKey(key: string): Promise<void> {
       .filter((theme): theme is GlobalThemeDto => theme !== undefined)
     const result: NodeEventsResult = await window.gotchaGraph.momentEvents(momentId)
     if (seq !== panelSeq) return
-    panel.showMoment(moment, result, themes)
+    // 列表载荷只带摘要前 60 字（画布标签够用）；侧栏要看全文，这里补一次。
+    // 补不到（库忙 / 时刻刚被删）就退回截断版，别让面板打不开。
+    if (!moment.ocrTrimmed) {
+      panel.showMoment(moment, result, themes)
+      return
+    }
+    let full = moment
+    try {
+      const detail = await window.gotchaGraph.momentSummary(momentId)
+      if (detail.found && detail.ocrSummary !== null) {
+        full = { ...moment, ocrSummary: detail.ocrSummary, ocrTrimmed: false }
+      }
+    } catch {
+      // 保留截断版
+    }
+    if (seq !== panelSeq) return
+    panel.showMoment(full, result, themes)
   }
 }
 
@@ -1051,6 +1073,7 @@ async function openSearchHit(hit: SearchHitDto): Promise<void> {
         app: hit.app,
         windowTitle: hit.windowTitle,
         ocrSummary: hit.ocrSummary ?? hit.snippet,
+        ocrTrimmed: false,
         eventIds: hit.eventIds,
         assigned: themes.length > 0
       },

@@ -1,6 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it } from 'vitest'
 import type { ContentPayload } from '../../src/chain/recorder'
 import { createChainContentCapture, type ChainContentShot } from '../../src/main/chain-content'
+
+/** 本文件里创建的临时目录（afterEach 统一清掉） */
+const dirs: string[] = []
+
+afterEach(() => {
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+  dirs.length = 0
+})
 
 const SHOT: ChainContentShot = {
   segmentId: 1,
@@ -155,5 +166,28 @@ describe('内容车道：抓帧落定后异步读，按段 15s 节流', () => {
     capture.onShot({ ...SHOT, eventId: 8, at: 9_000 })
     await capture.drain()
     expect(reads).toHaveLength(1)
+  })
+
+  it('被节流 / 车道已关的帧也要删 OCR 中转图（否则 tmp-chain 按抓帧频率长胖）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gotcha-ocr-'))
+    dirs.push(dir)
+    const readOne = join(dir, 'ocr-1.png')
+    const throttledOne = join(dir, 'ocr-2.png')
+    const closedOne = join(dir, 'ocr-3.png')
+    for (const path of [readOne, throttledOne, closedOne]) writeFileSync(path, 'x')
+
+    const { capture, clock } = build()
+    capture.onShot({ ...SHOT, ocrPath: readOne })
+    await capture.drain()
+    expect(existsSync(readOne)).toBe(false) // 读过的照旧删
+
+    clock.value += 5_000
+    capture.onShot({ ...SHOT, eventId: 8, at: 6_000, ocrPath: throttledOne })
+    expect(capture.stats.throttled).toBe(1)
+    expect(existsSync(throttledOne)).toBe(false) // 节流的这张没人读，必须当场删
+
+    capture.close()
+    capture.onShot({ ...SHOT, eventId: 9, at: 7_000, ocrPath: closedOne })
+    expect(existsSync(closedOne)).toBe(false) // 车道关了也要删
   })
 })

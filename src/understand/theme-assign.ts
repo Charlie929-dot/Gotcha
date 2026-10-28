@@ -17,6 +17,7 @@
 
 import type { Db } from '../db'
 import { cosineSimilarity, decodeVector, normalizeVector } from './graph-edges'
+import { decodeEmbeddingVector } from './vector-int16'
 import { GRAPH_THRESHOLD_DEFAULTS, type GraphThresholds } from './graph-thresholds'
 import { averageVectors } from './theme-centroids'
 
@@ -175,7 +176,7 @@ export function momentVector(db: Db, momentId: number): Float32Array | null {
     .all(...(ids as number[])) as Array<{ event_id: number; dim: number; vec: Buffer }>
   const list: Float32Array[] = []
   for (const vector of vectors) {
-    const vec = decodeVector(vector.vec)
+    const vec = decodeEmbeddingVector(vector.vec, vector.dim)
     if (vec.length === vector.dim && vec.length > 0) list.push(vec)
   }
   const mean = averageVectors(list)

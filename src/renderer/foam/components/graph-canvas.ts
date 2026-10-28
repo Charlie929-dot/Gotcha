@@ -18,6 +18,7 @@ import {
   getNodeLabelColor,
 } from '../lib/colors';
 import { distanceFromSim } from '../lib/distance';
+import { computeBloomLayout, momentOrbitPoint } from '../lib/bloom-layout';
 import { GraphModelLink } from '../lib/types';
 import type {
   GraphStates,
@@ -58,6 +59,28 @@ export interface NodePosition {
 const MOMENT_LABEL_SCALE = 2.2;
 /** 成员边默认不画（方案 §7.2：默认很淡/不可见，仅参与力与高亮）。 */
 const MEMBERSHIP_DISTANCE = 36;
+
+/**
+ * Gotcha patch F11（P1-2）：超过这个节点数就不再给连线挂「流动粒子」。
+ *
+ * force-graph 的动画循环条件是「引擎在跑 **或** 任一 link 上有 `__photons`」，
+ * 而全局图的粒子宽度只在连线高亮时非零 —— 4k 节点的图上等于「看不见的粒子」把
+ * 每一帧都拖着重画一次（4k 点 ≈ 10 ms/帧，沉降后 CPU 一直下不来）。小图保留粒子，
+ * 大图关闭；隐藏窗口时还会整体暂停动画（见 `pauseAnimation`）。
+ */
+const LARGE_GRAPH_NODE_LIMIT = 1500;
+
+/**
+ * P1-2 LOD（2026-10-28 晚）：超过这个节点数就「静态展开」。
+ *
+ * 4k 节点的全局图里 88% 是时刻点，而时刻点没有位置 seed —— 它们从随机位置开始，
+ * 靠力导跑 180 tick 才散开（每 tick 30–55 ms，用户要等 9 s）。超过这条线以后：
+ * - 主题用库里的 seed（没 seed 的挂到已定位邻居旁边）；
+ * - 时刻按「绕自己主题的黄金角螺旋」直接算出来（`lib/bloom-layout.ts`，确定性纯函数）；
+ * - 全部节点钉住（`fx/fy`）并把引擎的 tick 预算压到 1，打开即静。
+ * 小图完全不受影响，仍是原来的活布局。
+ */
+const BLOOM_NODE_LIMIT = 2000;
 
 export function measureGraphViewport(
   element: HTMLElement,
@@ -135,6 +158,9 @@ interface CanvasNode {
   id: string;
   x?: number;
   y?: number;
+  /** 静态展开（P1-2 LOD）时钉住坐标：force-graph 不会移动带 fx/fy 的节点 */
+  fx?: number;
+  fy?: number;
 }
 
 @customElement('foam-graph-canvas')
@@ -222,6 +248,14 @@ export class GraphCanvas extends LitElement {
   /** P0 性能测量：实际渲染帧数与布局 tick 数（harness 采样，不参与渲染逻辑）。 */
   private renderedFrames = 0;
   private engineTicks = 0;
+  /** 当前连线粒子数（0 = 大图省电模式，见 LARGE_GRAPH_NODE_LIMIT）。 */
+  private particleCount = 1;
+  /** P1-2 LOD：当前是否「静态展开」（见 BLOOM_NODE_LIMIT）。 */
+  private blooming = false;
+  /** 「重排」在静态模式下只换一个角度：布局是确定性的，换角度就是可见的变化。 */
+  private bloomRotation = 0;
+  /** 主题 id → 成员时刻 id（按节点顺序，拖完主题按同一套螺旋重摆）。 */
+  private momentMembers = new Map<string, string[]>();
 
   private readonly linkDistance = (link: GraphModelLink): number =>
     (link.kind ?? 'embedding') === 'membership'
@@ -392,6 +426,9 @@ export class GraphCanvas extends LitElement {
       .onEngineStop(() => this._handleEngineStop())
       .onEngineTick(() => {
         this.engineTicks += 1;
+      })
+      .onNodeDragEnd((node: any) => {
+        this._handleNodeDragEnd(node as CanvasNode);
       });
 
     this.resizeGraphToViewport();
@@ -497,7 +534,8 @@ export class GraphCanvas extends LitElement {
         this.firstGraphLoad = false;
         this.firstFitPending = true;
         // Gotcha patch F2/F6：先让活布局沉降，再按包围盒适配。
-        this.graphInstance.cooldownTicks(180);
+        // P1-2：静态展开的大图不需要沉降，别把 tick 预算又调回 180
+        if (!this.blooming) this.graphInstance.cooldownTicks(180);
       }
     }
   }
@@ -557,12 +595,29 @@ export class GraphCanvas extends LitElement {
   }
 
   /** P0 性能：累计渲染帧 / 布局 tick（harness 用差值算「布局中 FPS」）。 */
-  stats(): { frames: number; ticks: number } {
-    return { frames: this.renderedFrames, ticks: this.engineTicks };
+  stats(): { frames: number; ticks: number; bloom: boolean } {
+    return { frames: this.renderedFrames, ticks: this.engineTicks, bloom: this.blooming };
+  }
+
+  /** P1-2：窗口隐藏时停掉 rAF 循环（引擎 tick 与重绘都停），可见再恢复。 */
+  pauseAnimation() {
+    (this.graphInstance as any)?.pauseAnimation?.();
+  }
+
+  resumeAnimation() {
+    (this.graphInstance as any)?.resumeAnimation?.();
   }
 
   /** Re-runs the live simulation (harness「重排」/ 布局手感调试用). */
   reheat() {
+    // 静态展开模式没有力导可跑：换一个角度重算，用户能看到「排了一次」
+    if (this.blooming) {
+      this.bloomRotation += 0.9
+      this._updateGraphData(
+        this.visibleGraph ?? { nodeInfo: {}, nodes: [], links: [] }
+      )
+      return
+    }
     this.graphInstance?.d3ReheatSimulation();
   }
 
@@ -655,8 +710,31 @@ export class GraphCanvas extends LitElement {
     return this.getDegreeSize(info?.neighbors.length ?? 0) * multiplier;
   }
 
+  /** 只看类型的半径（静态展开排时刻轨道用；没有节点对象也能算）。 */
+  private _themeRadiusOf(id: string): number {
+    const raw = this.rs.nodeInfo[id]?.properties?.size;
+    const multiplier = this.rs.nodeSizeMultiplier || 1;
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      return Math.max(0.5, Math.min(40, raw)) * multiplier;
+    }
+    return 3 * multiplier;
+  }
+
   private _updateGraphData(visibleGraph: VisibleGraph) {
     if (!this.graphInstance) return;
+
+    // P1-2 LOD：大图先算静态坐标（确定性），小图照旧交给力导
+    const bloomPositions =
+      visibleGraph.nodes.length > BLOOM_NODE_LIMIT
+        ? computeBloomLayout({
+            nodes: visibleGraph.nodes,
+            links: visibleGraph.links,
+            typeOf: id => this.rs.nodeInfo[id]?.type,
+            sizeOf: id => this._themeRadiusOf(id),
+            seeds: this.seedPositions,
+            rotation: this.bloomRotation
+          })
+        : null;
 
     const nodeIdsToAdd = new Set(visibleGraph.nodes.map(node => node.id));
     const nodeIdsToRemove = new Set<string>();
@@ -674,20 +752,107 @@ export class GraphCanvas extends LitElement {
       if (idx !== -1) this.rs.data.nodes.splice(idx, 1);
     }
     for (const id of nodeIdsToAdd) {
-      const seed = this.seedPositions?.get(id);
+      const seed = bloomPositions?.get(id) ?? this.seedPositions?.get(id);
       this.rs.data.nodes.push(
         seed ? { id, x: seed.x, y: seed.y } : { id }
       );
     }
 
     this.rs.data.links = visibleGraph.links.map(link => ({ ...link }));
+    // P1-2：大图关掉流动粒子（必须在 graphData 之前设，光子数组是在 graphData 变更时重建的）
+    const nextParticles = visibleGraph.nodes.length > LARGE_GRAPH_NODE_LIMIT ? 0 : 1;
+    if (nextParticles !== this.particleCount) {
+      this.particleCount = nextParticles;
+      this.graphInstance.linkDirectionalParticles(nextParticles);
+    }
     // force-graph 的更新是节流的（约 17ms）：它先 `.nodes()` 再 `.links()`。
     // 图清空时若 link force 还挂着旧边，`.nodes([])` 会因找不到端点直接抛错，
     // 所以节点为空时先把 link force 的边清掉（Gotcha patch F5 稳定性）。
     if (this.rs.data.nodes.length === 0) {
       (this.graphInstance.d3Force('link') as any)?.links([]);
     }
+    this._applyBloomLayout(bloomPositions);
     this.graphInstance.graphData(this.rs.data as any);
+    this._refreshCanvas();
+  }
+
+  /**
+   * 静态展开：把坐标钉到节点上（`fx/fy`）并把引擎 tick 预算压到 1；
+   * 退出静态模式时解钉并让引擎重新跑（否则节点会永远停在旧坐标）。
+   */
+  private _applyBloomLayout(positions: Map<string, { x: number; y: number }> | null) {
+    const wasBlooming = this.blooming;
+    this.blooming = positions !== null;
+    this.momentMembers = new Map();
+
+    if (!positions) {
+      for (const node of this.rs.data.nodes) {
+        delete node.fx;
+        delete node.fy;
+      }
+      this.graphInstance?.cooldownTicks(180);
+      // 从静态模式退回来：图变了但引擎没在跑，不重加热会一直停着
+      if (wasBlooming) this.graphInstance?.d3ReheatSimulation();
+      return;
+    }
+
+    for (const node of this.rs.data.nodes) {
+      const point = positions.get(node.id);
+      if (!point) continue;
+      node.x = point.x;
+      node.y = point.y;
+      node.fx = point.x;
+      node.fy = point.y;
+    }
+
+    // 主题 → 成员时刻：按节点顺序分组，和 computeBloomLayout 的螺旋序号同源
+    const themesOfMoment = new Map<string, string[]>();
+    for (const link of this.rs.data.links) {
+      if ((link.kind ?? 'embedding') !== 'membership') continue;
+      const source = GraphModelLink.getNodeId(link.source);
+      const target = GraphModelLink.getNodeId(link.target);
+      if (!source || !target) continue;
+      const list = themesOfMoment.get(target) ?? [];
+      list.push(source);
+      themesOfMoment.set(target, list);
+    }
+    const ringCount = new Map<string, number>();
+    for (const node of this.rs.data.nodes) {
+      const themes = themesOfMoment.get(node.id);
+      const primary = themes?.[0];
+      if (!primary) continue;
+      const index = ringCount.get(primary) ?? 0;
+      ringCount.set(primary, index + 1);
+      const list = this.momentMembers.get(primary) ?? [];
+      list.push(node.id);
+      this.momentMembers.set(primary, list);
+    }
+
+    this.graphInstance?.warmupTicks(0).cooldownTicks(1);
+  }
+
+  /** 拖完一个主题：成员时刻绕新位置重摆（静态模式下没有力导，不重摆就会掉在原地）。 */
+  private _handleNodeDragEnd(node: CanvasNode) {
+    if (!this.blooming) return;
+    const members = this.momentMembers.get(node.id);
+    if (!members || members.length === 0) return;
+    const center = { x: node.x ?? 0, y: node.y ?? 0 };
+    const byId = new Map(this.rs.data.nodes.map(item => [item.id, item]));
+    for (let index = 0; index < members.length; index += 1) {
+      const member = byId.get(members[index]);
+      if (!member) continue;
+      const point = momentOrbitPoint(
+        node.id,
+        index,
+        center,
+        this.bloomRotation,
+        this._themeRadiusOf(node.id) + 7
+      );
+      member.x = point.x;
+      member.y = point.y;
+      member.fx = point.x;
+      member.fy = point.y;
+    }
     this._refreshCanvas();
   }
 

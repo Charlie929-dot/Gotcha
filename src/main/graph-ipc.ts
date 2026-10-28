@@ -8,7 +8,12 @@
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import type { BrowserWindow } from 'electron'
-import type { GraphDayData, GraphGlobalData, NodeEventsResult } from '../understand/graph-query'
+import type {
+  GraphDayData,
+  GraphGlobalData,
+  MomentSummaryResult,
+  NodeEventsResult
+} from '../understand/graph-query'
 import { emptyGlobalGraph } from '../understand/graph-query'
 import type { SaveNodePositionsResult } from '../understand/node-positions'
 import { MAX_POSITIONS_PER_SAVE } from '../understand/node-positions'
@@ -68,6 +73,8 @@ export interface GraphIpcDeps {
   queryGraph(from: number, to: number): GraphDayData
   /** v0.3 全局图：一次取主题 / 时刻 / 归属 / embedding 边 / 位置 */
   queryGlobal(): GraphGlobalData
+  /** 时刻的完整摘要（`graph:global` 只带前 60 字，侧栏展开时现取） */
+  queryMomentSummary(momentId: number): MomentSummaryResult
   queryNodeEvents(nodeId: number): NodeEventsResult
   /** 时刻下钻：`moments.event_ids` → events 行 */
   queryMomentEvents(momentId: number): NodeEventsResult
@@ -110,6 +117,8 @@ const EMPTY_NODE_EVENTS: NodeEventsResult = {
   missingIds: [],
   malformed: false
 }
+
+const EMPTY_MOMENT_SUMMARY: MomentSummaryResult = { found: false, ocrSummary: null }
 
 const EMPTY_SEARCH: SearchResult = {
   query: '',
@@ -240,6 +249,20 @@ export function createGraphIpcHandlers(
         } catch (error) {
           deps.log('warn', 'graph node events failed', { error: String(error) })
           return EMPTY_NODE_EVENTS
+        }
+      }
+    ],
+    [
+      'graph:moment-summary',
+      (event, momentId) => {
+        if (!ensureSender(event) || !Number.isInteger(momentId) || (momentId as number) <= 0) {
+          return EMPTY_MOMENT_SUMMARY
+        }
+        try {
+          return deps.queryMomentSummary(momentId as number)
+        } catch (error) {
+          deps.log('warn', 'graph moment summary failed', { error: String(error) })
+          return EMPTY_MOMENT_SUMMARY
         }
       }
     ],

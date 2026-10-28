@@ -1,16 +1,16 @@
 /**
- * 出云唯一出口（M2 / D19；security.md「三层脱敏墙」）
+ * 出云边界（旧管线 / 派生层兼容；D19 / D49）
  *
- * - 只输出必要字段：id / ts 区间 / app / 截断后的标题与 OCR 摘要 / event_ids，
- *   且三个文本字段全部过同一脱敏函数；
- * - `sensitive=1` 事件：命中片段替换为 `[已脱敏]` 后二次扫描；
- *   仍命中（含密码类规则）→ 整条（整「时刻」）不出云（excludedIds，由归纳层生成本地占位节点）；
- * - `CloudPayload` 带 nominal brand：LLM 客户端只接受本模块产出的载荷，
- *   业务代码无法直接拼 messages 绕过脱敏（审查发现「唯一出口可绕过」）。
+ * 问记忆的协议组装已搬到 `src/chain/agent/payload.ts`，云端策略见
+ * `./ask-outbound.ts`。本文件保留：
+ * - 旧「时刻—主题」与派生层的载荷 builder（仍走 `redactSensitive`）；
+ * - 问记忆旧导出名的兼容包装（新代码不要再 import 这里）；
+ * - `CloudPayload` 等 nominal brand：客户端只接受品牌载荷，防止旧管线被绕过。
  */
 
 import { redactSensitive } from '../sanitize'
 import { LLM_DEFAULTS } from './constants'
+import type { ChainBuildOptions as DeriveBuildOptions } from '../../chain/derive/payload'
 
 export interface RedactableEvent {
   id: number
@@ -369,267 +369,93 @@ export function buildThemeAssignmentPayload(
 }
 
 /* ------------------------------------------------------------------ *
- * 信息链派生层（v0.8 / D45）：段正文 → 抽标签 / 双链
- *
- * 与上面三条载荷同一纪律：文本一律过 `redactSensitive`，命中密码类规则整段剔掉
- * （`blockedSegmentIds` / `blocked`），有片段被替换就记 `redacted*` 并在日志里计数。
- * 段正文由 `src/chain/derive/text.ts` 先去重 / 截断——这里再做一次上限兜底，
- * 防止调用方忘了传上限把整篇 2 万字送出去。
+ * 信息链派生层（v0.8 / D45）的载荷：协议组装已搬到核心
+ * （src/chain/derive/payload.ts）。这里保留旧导出名 + 云端策略，供旧调用方 /
+ * 测试 / deepseek / fake-llm 继续使用；核心不再 import 本文件。
  * ------------------------------------------------------------------ */
 
-/** 双链合并提问里的一对名字（`kind` 只用来提示模型，不参与判定） */
-export type ChainPairKind = 'link' | 'tag'
+import { createCloudDeriveOutbound } from './derive-outbound'
 
-/** 一段正文的送云视图 */
-export interface CloudChainSegment {
-  readonly segmentId: number
-  readonly app: string
-  readonly title: string
-  readonly text: string
-  readonly truncated: boolean
-}
+export {
+  type ChainBuildOptions,
+  type ChainExtractBuildResult,
+  type ChainExtractPayload,
+  type ChainMergeBuildResult,
+  type ChainMergePayload,
+  type ChainPairKind,
+  type CloudChainPair,
+  type CloudChainSegment,
+  type RedactableChainPair,
+  type RedactableChainSegment
+} from '../../chain/derive/payload'
 
-declare const chainExtractBrand: unique symbol
-
-/** 抽取载荷（只能由 `buildChainExtractPayload()` 产生） */
-export interface ChainExtractPayload {
-  readonly segments: readonly CloudChainSegment[]
-  readonly [chainExtractBrand]: true
-}
-
-export interface RedactableChainSegment {
-  segmentId: number
-  app: string
-  title: string
-  /** 已去重 / 已截断的正文（链上 `buildDeriveText()` 的产物） */
-  text: string
-  /** 是否已在上游按上限截断（告诉模型「这不是全文」） */
-  truncated?: boolean
-}
-
-export interface ChainExtractBuildResult {
-  payload: ChainExtractPayload
-  /** 脱敏后仍命中敏感规则、整段不出云的段 id */
-  blockedSegmentIds: number[]
-  /** 有片段被替换为 `[已脱敏]` 的段 id */
-  redactedSegmentIds: number[]
-}
-
-export interface ChainBuildOptions {
-  /** 正文兜底上限（字符）；默认 6000，与 `chain/derive/text.ts` 的上限一致 */
-  textMaxChars?: number
-  appMaxChars?: number
-  titleMaxChars?: number
-}
+const cloudDeriveOutbound = createCloudDeriveOutbound()
 
 export function buildChainExtractPayload(
-  segments: readonly RedactableChainSegment[],
-  options: ChainBuildOptions = {}
-): ChainExtractBuildResult {
-  const limits = {
-    textMaxChars: options.textMaxChars ?? 6_000,
-    appMaxChars: options.appMaxChars ?? LLM_DEFAULTS.appMaxChars,
-    titleMaxChars: options.titleMaxChars ?? LLM_DEFAULTS.titleMaxChars
-  }
-  const payloadSegments: CloudChainSegment[] = []
-  const blockedSegmentIds: number[] = []
-  const redactedSegmentIds: number[] = []
-
-  for (const segment of segments) {
-    const texts = redactEventTexts(
-      { app: segment.app, title: segment.title, ocr: segment.text },
-      {
-        appMaxChars: limits.appMaxChars,
-        titleMaxChars: limits.titleMaxChars,
-        ocrMaxChars: limits.textMaxChars
-      }
-    )
-    if (texts.blocked) {
-      blockedSegmentIds.push(segment.segmentId)
-      continue
-    }
-    if (texts.redacted) redactedSegmentIds.push(segment.segmentId)
-    payloadSegments.push({
-      segmentId: segment.segmentId,
-      app: texts.app,
-      title: texts.title,
-      text: texts.ocr,
-      truncated: segment.truncated ?? false
-    })
-  }
-
-  return {
-    payload: { segments: payloadSegments } as unknown as ChainExtractPayload,
-    blockedSegmentIds,
-    redactedSegmentIds
-  }
-}
-
-/** 合并提问的一对名字（`index` 指回调用方的候选下标，便于把答复对回原候选） */
-export interface CloudChainPair {
-  readonly index: number
-  readonly candidate: string
-  readonly existing: string
-  readonly kind: ChainPairKind
-}
-
-export interface RedactableChainPair {
-  candidate: string
-  existing: string
-  kind: ChainPairKind
-}
-
-declare const chainMergeBrand: unique symbol
-
-/** 模糊带合并载荷（只能由 `buildChainMergePayload()` 产生） */
-export interface ChainMergePayload {
-  readonly pairs: readonly CloudChainPair[]
-  readonly [chainMergeBrand]: true
-}
-
-export interface ChainMergeBuildResult {
-  payload: ChainMergePayload
-  /** 被敏感规则挡下、不能发出去的对（下标是输入数组的下标） */
-  blocked: number[]
+  segments: readonly import('../../chain/derive/payload').RedactableChainSegment[],
+  options: import('../../chain/derive/payload').ChainBuildOptions = {}
+): import('../../chain/derive/payload').ChainExtractBuildResult {
+  return cloudDeriveOutbound.buildExtract(segments, options)
 }
 
 export function buildChainMergePayload(
-  pairs: readonly RedactableChainPair[]
-): ChainMergeBuildResult {
-  const views: CloudChainPair[] = []
-  const blocked: number[] = []
-  pairs.forEach((pair, index) => {
-    const candidate = redactSensitive(normalize(pair.candidate))
-    const existing = redactSensitive(normalize(pair.existing))
-    if (candidate.blocked || existing.blocked) {
-      blocked.push(index)
-      return
-    }
-    views.push({
-      index,
-      candidate: candidate.text.slice(0, 40),
-      existing: existing.text.slice(0, 40),
-      kind: pair.kind
-    })
-  })
-  return {
-    payload: { pairs: views } as unknown as ChainMergePayload,
-    blocked
-  }
+  pairs: readonly import('../../chain/derive/payload').RedactableChainPair[]
+): import('../../chain/derive/payload').ChainMergeBuildResult {
+  return cloudDeriveOutbound.buildMerge(pairs)
 }
 
-/** 问记忆（S1）里的单段证据 */
-export interface CloudChainAskEvidence {
-  readonly segmentId: number
-  readonly app: string
-  readonly title: string
-  readonly startTs: number
-  readonly endTs: number
-  readonly text: string
-  readonly truncated: boolean
-  readonly tags: readonly string[]
-  readonly links: readonly string[]
-}
+/* ------------------------------------------------------------------ *
+ * 问记忆载荷：协议组装已搬到核心（src/chain/agent/payload.ts）。
+ *
+ * 本文件只保留「云端策略 + 旧导出名」：旧调用方、测试、deepseek/fake-llm
+ * 的类型导入都不用改；但核心不再 import 这里——安全规则挂掉不会卡住核心组装，
+ * 本机模型也可以绕开脱敏墙（见 understand/cloud/ask-outbound.ts）。
+ * ------------------------------------------------------------------ */
 
-declare const chainAskBrand: unique symbol
+import { createCloudAskOutbound } from './ask-outbound'
 
-/** 问记忆载荷（只能由 `buildChainAskPayload()` 产生） */
-export interface ChainAskPayload {
-  readonly question: string
-  readonly evidence: readonly CloudChainAskEvidence[]
-  readonly [chainAskBrand]: true
-}
+export {
+  ASK_LOOP_READ_MAX_CHARS,
+  ASK_LOOP_READ_MIN_CHARS,
+  type AskLoopFreshness,
+  type ChainAskBuildResult,
+  type ChainAskLoopBuildResult,
+  type ChainAskLoopPayload,
+  type ChainAskPayload,
+  type CloudAskLoopTurn,
+  type CloudChainAskEvidence,
+  type RedactableAskLoopConversationTurn,
+  type RedactableAskLoopHit,
+  type RedactableAskLoopHistoryEntry,
+  type RedactableAskLoopToolResult,
+  type RedactableAskLoopTurn,
+  type RedactableChainAskEvidence
+} from '../../chain/agent/payload'
 
-export interface RedactableChainAskEvidence {
-  segmentId: number
-  app: string
-  title: string
-  startTs: number
-  endTs: number
-  /** 命中原文片段（上游已按上限截断） */
-  text: string
-  truncated?: boolean
-  tags?: readonly string[]
-  links?: readonly string[]
-}
-
-export interface ChainAskBuildOptions extends ChainBuildOptions {
+export interface ChainAskBuildOptions extends DeriveBuildOptions {
   /** 问题的字符上限；默认 500（问题是用户敲的，不该有长文） */
   questionMaxChars?: number
 }
 
-export interface ChainAskBuildResult {
-  payload: ChainAskPayload
-  /** 问题本身命中敏感规则：整次不该出云（载荷里 question 为空） */
-  questionBlocked: boolean
-  /** 被敏感规则挡下、整段不出云的段 id */
-  blockedSegmentIds: number[]
-  /** 有片段被替换成 `[已脱敏]` 的段 id */
-  redactedSegmentIds: number[]
-}
-
-const ASK_TAG_MAX_CHARS = 40
-const ASK_TAGS_MAX = 8
+const cloudAskOutbound = createCloudAskOutbound()
 
 /**
- * 问记忆的送云载荷：问题 + 命中的段（都过同一套脱敏）。
+ * 问记忆的送云载荷（兼容旧导出名）：问题 + 命中的段（都过同一套脱敏）。
  * 问题被挡就整次不出云——宁可答「没找到」，也不把敏感问题发出去。
  */
 export function buildChainAskPayload(
   question: string,
-  evidence: readonly RedactableChainAskEvidence[],
+  evidence: readonly import('../../chain/agent/payload').RedactableChainAskEvidence[],
   options: ChainAskBuildOptions = {}
-): ChainAskBuildResult {
-  const limits = {
-    textMaxChars: options.textMaxChars ?? 500,
-    appMaxChars: options.appMaxChars ?? LLM_DEFAULTS.appMaxChars,
-    titleMaxChars: options.titleMaxChars ?? LLM_DEFAULTS.titleMaxChars,
-    questionMaxChars: options.questionMaxChars ?? 500
-  }
-
-  const asked = redactEventTexts(
-    { app: '', title: '', ocr: question },
-    { appMaxChars: 0, titleMaxChars: 0, ocrMaxChars: limits.questionMaxChars }
-  )
-  const views: CloudChainAskEvidence[] = []
-  const blockedSegmentIds: number[] = []
-  const redactedSegmentIds: number[] = []
-
-  for (const segment of evidence) {
-    const texts = redactEventTexts(
-      { app: segment.app, title: segment.title, ocr: segment.text },
-      {
-        appMaxChars: limits.appMaxChars,
-        titleMaxChars: limits.titleMaxChars,
-        ocrMaxChars: limits.textMaxChars
-      }
-    )
-    if (texts.blocked) {
-      blockedSegmentIds.push(segment.segmentId)
-      continue
-    }
-    if (texts.redacted) redactedSegmentIds.push(segment.segmentId)
-    views.push({
-      segmentId: segment.segmentId,
-      app: texts.app,
-      title: texts.title,
-      startTs: segment.startTs,
-      endTs: segment.endTs,
-      text: texts.ocr,
-      truncated: segment.truncated ?? false,
-      tags: (segment.tags ?? []).slice(0, ASK_TAGS_MAX).map((tag) => tag.slice(0, ASK_TAG_MAX_CHARS)),
-      links: (segment.links ?? []).slice(0, ASK_TAGS_MAX).map((link) => link.slice(0, ASK_TAG_MAX_CHARS))
-    })
-  }
-
-  return {
-    payload: {
-      question: asked.blocked ? '' : asked.ocr,
-      evidence: views
-    } as unknown as ChainAskPayload,
-    questionBlocked: asked.blocked,
-    blockedSegmentIds,
-    redactedSegmentIds
-  }
+): import('../../chain/agent/payload').ChainAskBuildResult {
+  return cloudAskOutbound.buildAsk(question, evidence, options)
 }
 
+/**
+ * 循环载荷（兼容旧导出名）：协议组装在核心，脱敏策略在云端边界。
+ */
+export function buildChainAskLoopPayload(
+  input: import('../../chain/agent/payload').ChainAskLoopBuildInput
+): import('../../chain/agent/payload').ChainAskLoopBuildResult {
+  return cloudAskOutbound.buildLoop(input)
+}

@@ -343,8 +343,15 @@ export interface GlobalMomentDto {
   dayKey: string
   app: string | null
   windowTitle: string | null
+  /**
+   * 列表里的摘要：只给画布标签 / 侧栏标题用，**可能被截断**（见 `ocrTrimmed`）。
+   * 完整正文留在库里，侧栏展开时用 `queryMomentSummary` 现取。
+   */
   ocrSummary: string | null
-  eventIds: number[]
+  /** 摘要被截断（画布标签只需要前几十字，把 500 字全文搬进 IPC 是纯浪费） */
+  ocrTrimmed: boolean
+  /** 成员事件 id（全局图列表用不到；默认不带，见 `includeMomentEventIds`） */
+  eventIds?: number[]
   /** 是否有任何主题归属（false = 悬空时刻，日历聚焦时不会出现） */
   assigned: boolean
 }
@@ -404,7 +411,24 @@ export interface GlobalQueryOptions {
   includeLegacyAiEdges?: boolean
   /** 是否读 node_positions 做布局 seed（默认 true） */
   includePositions?: boolean
+  /**
+   * 列表里 `ocr_summary` 截断到多少字符（默认 `MOMENT_SUMMARY_PREVIEW_CHARS`）；
+   * `<= 0` 表示不截断（导出 / 调试 / 老口径对照用）。
+   */
+  ocrSummaryChars?: number
+  /**
+   * 是否带上 `moments.event_ids`（默认 false）。
+   * 全局图列表只画点、侧栏下钻另走 `queryMomentEvents`，4k 时刻的 id 数组约 0.2 MB。
+   */
+  includeMomentEventIds?: boolean
 }
+
+/**
+ * 列表摘要默认截断长度。
+ * 实测真实库 4,081 个时刻里 99% 的 `ocr_summary` 都顶到 500 字上限（合计 2.79 MB），
+ * 而画布标签只用到前 28 字、侧栏标题也只是兜底 —— 60 字够用，载荷降到 0.35 MB。
+ */
+export const MOMENT_SUMMARY_PREVIEW_CHARS = 60
 
 interface GlobalThemeRow {
   id: number
@@ -424,6 +448,7 @@ interface GlobalMomentRow {
   app: string | null
   window_title: string | null
   ocr_summary: string | null
+  ocr_trimmed: number | null
   event_ids: string | null
 }
 
@@ -491,6 +516,15 @@ function queryDayActivity(db: Db): DayActivityDto[] {
  * - 悬空时刻默认不返回（`includeOrphanMoments` 可显式要）。
  */
 export function queryGlobalGraph(db: Db, options: GlobalQueryOptions = {}): GraphGlobalData {
+  // 列表摘要按字符截断（SQLite 的 substr 对 TEXT 按字符算，中文不会被切成半个）
+  const summaryChars = Math.max(0, Math.floor(options.ocrSummaryChars ?? MOMENT_SUMMARY_PREVIEW_CHARS))
+  const summarySelect =
+    summaryChars > 0
+      ? `substr(ocr_summary, 1, ?) AS ocr_summary,
+         (ocr_summary IS NOT NULL AND length(ocr_summary) > ?) AS ocr_trimmed`
+      : `ocr_summary, 0 AS ocr_trimmed`
+  const summaryParams = summaryChars > 0 ? [summaryChars, summaryChars] : []
+
   const themeRows = db
     .prepare(
       `SELECT id, type, title, summary, ts_start, ts_end, source_events
@@ -504,10 +538,12 @@ export function queryGlobalGraph(db: Db, options: GlobalQueryOptions = {}): Grap
 
   const momentRows = db
     .prepare(
-      `SELECT id, start_ts, end_ts, day_key, app, window_title, ocr_summary, event_ids
+      `SELECT id, start_ts, end_ts, day_key, app, window_title,
+              ${summarySelect},
+              event_ids
        FROM moments ORDER BY start_ts ASC, id ASC`
     )
-    .all() as GlobalMomentRow[]
+    .all(...summaryParams) as GlobalMomentRow[]
 
   const themes: GlobalThemeDto[] = themeRows.map((row) => {
     const tsStart = row.ts_start ?? 0
@@ -542,6 +578,7 @@ export function queryGlobalGraph(db: Db, options: GlobalQueryOptions = {}): Grap
     momentThemeCount.set(row.moment_id, (momentThemeCount.get(row.moment_id) ?? 0) + 1)
   }
 
+  const includeMomentEventIds = options.includeMomentEventIds === true
   const moments: GlobalMomentDto[] = []
   for (const row of momentRows) {
     const assigned = (momentThemeCount.get(row.id) ?? 0) > 0
@@ -554,7 +591,8 @@ export function queryGlobalGraph(db: Db, options: GlobalQueryOptions = {}): Grap
       app: row.app,
       windowTitle: row.window_title,
       ocrSummary: row.ocr_summary,
-      eventIds: parseEventIds(row.event_ids).ids,
+      ocrTrimmed: row.ocr_trimmed === 1,
+      ...(includeMomentEventIds ? { eventIds: parseEventIds(row.event_ids).ids } : {}),
       assigned
     })
   }
@@ -613,4 +651,18 @@ export function queryGlobalGraph(db: Db, options: GlobalQueryOptions = {}): Grap
       positions: positions.length
     }
   }
+}
+
+/** 单个时刻的完整摘要（列表载荷只带前 60 字，侧栏展开时现取） */
+export interface MomentSummaryResult {
+  found: boolean
+  ocrSummary: string | null
+}
+
+export function queryMomentSummary(db: Db, momentId: number): MomentSummaryResult {
+  if (!Number.isInteger(momentId) || momentId <= 0) return { found: false, ocrSummary: null }
+  const row = db
+    .prepare('SELECT ocr_summary FROM moments WHERE id = ?')
+    .get(momentId) as { ocr_summary: string | null } | undefined
+  return row ? { found: true, ocrSummary: row.ocr_summary ?? null } : { found: false, ocrSummary: null }
 }

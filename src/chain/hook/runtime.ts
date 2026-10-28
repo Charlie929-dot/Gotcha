@@ -33,6 +33,8 @@ export interface ChainRuntimeOptions {
   onSegmentClosed?: (segmentId: number) => void
   /** 内容写入后通知（派生层叫醒；v0.8） */
   onContentWritten?: (segmentId: number) => void
+  /** 内容真正落行后通知（P0-2：镜像进 events；携带正文与 captured_at） */
+  onContentInserted?: (segmentId: number, capturedAt: number, payload: ContentPayload) => void
 }
 
 export interface ChainRuntimeStats {
@@ -81,7 +83,8 @@ export class ChainRuntime {
       now: this.now,
       takeShot: options.takeShot,
       onSegmentClosed: options.onSegmentClosed,
-      onContentWritten: options.onContentWritten
+      onContentWritten: options.onContentWritten,
+      onContentInserted: options.onContentInserted
     })
     this.sourceInfo = options.sourceInfo ?? { kind: 'fake' }
   }

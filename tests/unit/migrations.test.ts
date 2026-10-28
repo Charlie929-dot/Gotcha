@@ -6,6 +6,10 @@ import {
   migrations,
   revertMigrations
 } from '../../src/db/migrations'
+import {
+  decodeEmbeddingVector,
+  encodeVectorFloat32
+} from '../../src/understand/vector-int16'
 
 const LATEST = migrations[migrations.length - 1].version
 
@@ -39,7 +43,7 @@ describe('migrations · :memory: 库', () => {
     try {
       expect(getSchemaVersion(db)).toBe(0)
       expect(applyMigrations(db)).toBe(LATEST)
-      expect(LATEST).toBe(6)
+      expect(LATEST).toBe(7)
 
       db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
       // 第二次跑同一套迁移：不应抛错、版本不倒退、已有数据不丢
@@ -264,6 +268,58 @@ describe('migrations · :memory: 库', () => {
       expect(db.prepare('SELECT members_hash FROM theme_centroids WHERE node_id = 1').get()).toEqual({
         members_hash: null
       })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v7 把已有事件向量换成 int16：体积变小、读回近似原值；down 恢复 Float32', () => {
+    const db = new Database(':memory:')
+    try {
+      applyMigrations(db)
+      revertMigrations(db, 6)
+      expect(getSchemaVersion(db)).toBe(6)
+      const vec = Float32Array.from({ length: 512 }, (_, index) =>
+        Math.sin(index + 1) / Math.sqrt(512)
+      )
+      db.prepare(
+        `INSERT INTO event_embeddings (event_id, model, dim, vec, updated_at)
+         VALUES (1, 'fake', 512, ?, 7)`
+      ).run(encodeVectorFloat32(vec))
+      const before = (
+        db.prepare('SELECT LENGTH(vec) AS n FROM event_embeddings WHERE event_id = 1').get() as {
+          n: number
+        }
+      ).n
+      expect(before).toBe(512 * 4)
+
+      expect(applyMigrations(db)).toBe(LATEST)
+      const stored = db
+        .prepare('SELECT dim, vec FROM event_embeddings WHERE event_id = 1')
+        .get() as { dim: number; vec: Buffer }
+      // int16：每维 2 字节 + 8 字节头（魔数 + 尺度）
+      expect(stored.vec.byteLength).toBe(512 * 2 + 8)
+      expect(stored.vec.byteLength).toBeLessThan(before)
+
+      const decoded = decodeEmbeddingVector(stored.vec, stored.dim)
+      expect(decoded.length).toBe(512)
+      for (let i = 0; i < vec.length; i += 1) expect(decoded[i]).toBeCloseTo(vec[i], 4)
+
+      // 幂等：再跑一次不重复编码、不影响已压缩的行
+      expect(applyMigrations(db)).toBe(LATEST)
+      const again = db
+        .prepare('SELECT vec FROM event_embeddings WHERE event_id = 1')
+        .get() as { vec: Buffer }
+      expect(again.vec.equals(stored.vec)).toBe(true)
+
+      // down：反量化回 Float32，值仍近似（有量化损失但格式与老版本一致）
+      revertMigrations(db, 6)
+      const restored = db
+        .prepare('SELECT dim, vec FROM event_embeddings WHERE event_id = 1')
+        .get() as { dim: number; vec: Buffer }
+      expect(restored.vec.byteLength).toBe(512 * 4)
+      const back = decodeEmbeddingVector(restored.vec, restored.dim)
+      for (let i = 0; i < vec.length; i += 1) expect(back[i]).toBeCloseTo(vec[i], 4)
     } finally {
       db.close()
     }

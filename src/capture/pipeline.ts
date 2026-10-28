@@ -5,6 +5,9 @@
  *      dHash 帧差（按 app+title 分 key：已入库 / 在队的内容丢帧；OCR 失败只对
  *      同帧有限重试）→ 入 OCR 队列 → 异步 worker 识别 → sanitize → insertEvent。
  *
+ * `metadataOnly`（P0-2 第二步）打开后 tick 只做「前台窗口 → app+title 变化 → 一条元数据」，
+ * 不截帧、不 OCR；正文交给信息链双写（`main/chain-events.ts`）。
+ *
  * 所有外部依赖（时钟/截屏/OCR/删帧/日志）注入，便于合成数据单测。
  */
 
@@ -25,6 +28,20 @@ export interface CapturedFrame {
   height: number
   /** 由截图层按 90x80 灰度自算的 dHash 指纹（切勿用 width/height 重算） */
   diffHash: bigint
+  /** 落盘字节数（给了才计入 `write_bytes` 埋点；旧实现 / 测试可不传） */
+  bytes?: number
+}
+
+/**
+ * 只回指纹的探测结果（不编码、不落盘）。
+ *
+ * 判重前移的关键：每 2 s 的 tick 先 `probeWindow()` 拿 90x80 dHash，未变就直接丢，
+ * 只有「变了」才 `captureWindow()` 真编码 + 写盘。旧顺序是「先编码 3–7 MB PNG 落盘，
+ * 再比 dHash」——87% 的帧白编码白写（2026-10-28 实测 3.62 MB/s）。
+ */
+export interface FrameProbe {
+  /** 由截图层按 90x80 灰度自算的 dHash 指纹（与 captureWindow 同口径） */
+  diffHash: bigint
 }
 
 export interface PipelineLog {
@@ -39,11 +56,23 @@ export interface CaptureDeps {
   now(): number
   getActiveWindow(): Promise<WindowInfo | null>
   captureWindow(bounds: WindowInfo['bounds']): Promise<CapturedFrame | null>
+  /**
+   * 只回 dHash 指纹（可选）。给了就走「先判重、后编码」：
+   * 未变帧不产生 PNG、不落盘；不给则保持旧口径（先抓帧再判重），
+   * 单测 / 假采集不必实现它。
+   */
+  probeWindow?(bounds: WindowInfo['bounds']): Promise<FrameProbe | null>
   /** 删除临时帧文件（识别完 / 丢帧时调用） */
   deleteFrame(imagePath: string): void
   isBlacklisted(win: WindowInfo): boolean
   /** capture.save_shots=1 时由调用方落盘 <event_id>.jpg */
   saveShot?(eventId: number, imagePath: string): void
+  /**
+   * 旧管线降级（性能方案 P0-2 第二步）：true 时**不截帧、不 OCR**，只在
+   * `app + title` 变化时写一条元数据事件（时间线 / 时刻 / 主题的骨架仍在）。
+   * 正文由信息链双写到 `events`（`main/chain-events.ts`）；确认双写覆盖之后再打开它。
+   */
+  metadataOnly?: boolean
   diffThreshold?: number
   queue?: OcrQueue
   initialStats?: Partial<CaptureStats>
@@ -77,6 +106,8 @@ export class CapturePipeline {
   private readonly dedupKeyLimit: number
   /** 上次记录元数据的黑名单窗口（同窗口连续采样只记一条；切走再回来重新记） */
   private lastBlacklistedKey: string | null = null
+  /** 仅元数据模式（P0-2）下最近一条事件的 app+title（同窗口连续采样不重复写） */
+  private lastMetadataKey: string | null = null
   private currentDrain: Promise<void> | null = null
   private halted = false
 
@@ -150,29 +181,89 @@ export class CapturePipeline {
     // 离开黑名单窗口：清掉「上次记录」，切回同一黑名单窗口时重新记一条
     this.lastBlacklistedKey = null
 
-    let frame: CapturedFrame | null = null
-    try {
-      frame = await this.deps.captureWindow(window.bounds)
-    } catch {
-      frame = null
-    }
-    // 截屏期间关闸：帧丢弃，不入队、不写库
-    if (this.halted) {
-      if (frame) this.discard(frame.imagePath)
-      return
-    }
-    if (!frame) {
-      this.stats.capture_errors++
+    // P0-2 第二步：旧管线降级为仅元数据（不截帧、不 OCR）。
+    // 放在黑名单判断之后、探针 / 编码之前，走的路径与黑名单窗口完全一致。
+    if (this.deps.metadataOnly === true) {
+      this.recordMetadata(window, now)
       return
     }
 
-    this.stats.frames_total++
-    const hash = frame.diffHash
-    const entry = this.dedupEntry(window.app, window.title)
-    if (this.isDuplicate(entry, hash)) {
-      this.stats.frames_same++
-      this.discard(frame.imagePath)
-      return
+    let frame: CapturedFrame | null = null
+    let hash: bigint
+    let entry: DedupEntry
+
+    if (this.deps.probeWindow) {
+      // 快路径（P0-1）：只画 90x80 灰度算指纹，未变帧不编码 PNG、不落盘。
+      // 旧顺序是「先编码 3–7 MB PNG 落盘，再比 dHash」——实测 87% 的帧随后被丢弃。
+      let probe: FrameProbe | null = null
+      try {
+        probe = await this.deps.probeWindow(window.bounds)
+      } catch {
+        probe = null
+      }
+      // 探测期间关闸：这一轮没有产生任何帧文件，直接返回
+      if (this.halted) return
+      if (!probe) {
+        this.stats.capture_errors++
+        return
+      }
+      this.stats.frames_total++
+      entry = this.dedupEntry(window.app, window.title)
+      if (this.isDuplicate(entry, probe.diffHash)) {
+        this.stats.frames_same++
+        return
+      }
+
+      // 判定「变了」才真正编码 / 写盘。探针与编码之间画面仍可能再变，
+      // 所以拿真实帧的指纹再判一次：宁可多丢一帧，不把旧画面记成新证据。
+      const encodeStartedAt = this.deps.now()
+      try {
+        frame = await this.deps.captureWindow(window.bounds)
+      } catch {
+        frame = null
+      }
+      this.stats.encode_ms += Math.max(0, this.deps.now() - encodeStartedAt)
+      // 截屏期间关闸：帧丢弃，不入队、不写库
+      if (this.halted) {
+        if (frame) this.discard(frame.imagePath)
+        return
+      }
+      if (!frame) {
+        this.stats.capture_errors++
+        return
+      }
+      this.stats.encode_count++
+      this.stats.write_bytes += Math.max(0, frame.bytes ?? 0)
+      hash = frame.diffHash
+      if (this.isDuplicate(entry, hash)) {
+        this.stats.frames_same++
+        this.discard(frame.imagePath)
+        return
+      }
+    } else {
+      // 旧口径（没有探针能力的截图层 / 单测）：先抓帧再判重，行为与历史一致
+      try {
+        frame = await this.deps.captureWindow(window.bounds)
+      } catch {
+        frame = null
+      }
+      // 截屏期间关闸：帧丢弃，不入队、不写库
+      if (this.halted) {
+        if (frame) this.discard(frame.imagePath)
+        return
+      }
+      if (!frame) {
+        this.stats.capture_errors++
+        return
+      }
+      this.stats.frames_total++
+      hash = frame.diffHash
+      entry = this.dedupEntry(window.app, window.title)
+      if (this.isDuplicate(entry, hash)) {
+        this.stats.frames_same++
+        this.discard(frame.imagePath)
+        return
+      }
     }
 
     const job: OcrJob = {
@@ -305,6 +396,20 @@ export class CapturePipeline {
     if (key === this.lastBlacklistedKey) return
     this.lastBlacklistedKey = key
     insertEvent(this.deps.db, { ts: now, app: window.app, windowTitle: window.title })
+  }
+
+  /**
+   * 仅元数据模式（P0-2）：窗口（app + title）变化时写一条事件，不截图、不 OCR。
+   *
+   * 去重口径是「同一个 app + title 连续采样只记一条」——与黑名单路径一致。
+   * 正文不在这里产生：信息链读到内容后会双写到 `events`（`main/chain-events.ts`）。
+   */
+  private recordMetadata(window: WindowInfo, now: number): void {
+    const key = `${window.app}\u0000${window.title}`
+    if (key === this.lastMetadataKey) return
+    this.lastMetadataKey = key
+    insertEvent(this.deps.db, { ts: now, app: window.app, windowTitle: window.title })
+    this.stats.metadata_events++
   }
 
   /** 与「已提交」或「任一在途帧」相近即视为未变（监听器式去重） */

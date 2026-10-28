@@ -56,6 +56,9 @@ export const SNIPPET_RADIUS = 40
  */
 export const KEYWORD_SCAN_FACTOR = 20
 
+/** 补摘要时一条 SQL 里最多绑多少个内容 id（SQLite 默认变量上限 999，留余量） */
+const SNIPPET_FETCH_CHUNK = 200
+
 export interface ChainSearchFilter {
   /** 段与 [from, to] 有交集（`from` / `to` 是毫秒时间戳） */
   from?: number
@@ -257,56 +260,201 @@ interface KeywordRank {
 }
 
 /**
- * 正文关键词：按时间倒序扫 `scanLimit` 条命中行，按段聚合。
+ * 扫描行：只有小列 + 每个关键词一个命中标记（`m0`/`m1`…）。
  *
- * 排序口径：命中条数 → 最近命中时刻（同条数时新的在前）。只在这个窗口里排名，
- * 是为了给「高频词」一个硬上界（见 `KEYWORD_SCAN_FACTOR`）。
+ * 为什么要标记列而不是把 `text` 取回来自己比：`chain_content.text` 平均 17k 字，
+ * 467 行就有 8 MB，`SELECT c.text` 会让扫描 + `ORDER BY` 的临时 B 树一起搬 8 MB
+ * （实测 237 ms，而只取 id/段/时刻是 39 ms）。命中判断本来就由 SQL 的 `LIKE`
+ * 做完了（归一列上的 LIKE 与旧 JS `includes` 同口径、且更严），所以这里只回 0/1。
  */
-function rankByKeyword(
+interface KeywordRow {
+  id: number
+  segmentId: number
+  capturedAt: number
+  /** 第 i 个关键词是否命中（列名 `m{i}`），由一条 SQL 内联算出 */
+  [flag: `m${number}`]: number
+}
+
+/** 一个关键词的排名（按 命中条数 → 最近命中时刻 → 段 id 降序） */
+interface KeywordRanking {
+  ranking: number[]
+  ranks: Map<number, KeywordRank>
+  /** 扫描窗口内这个词命中的内容行数（= 旧实现 LIMIT 之后的 rows.length） */
+  rows: number
+}
+
+/**
+ * `chain_content.text_norm` 是否就位（v3 迁移前的老库没有这一列）。
+ * 每个连接只探测一次：没有这一列时查询退回老的 `normalizeOcrSql(text)` 表达式，
+ * 结果口径完全一致，只是慢一些——不让「还没迁移」变成「检索直接报错」。
+ */
+const textNormReady = new WeakMap<object, boolean>()
+
+function hasTextNorm(db: ChainDb): boolean {
+  const cached = textNormReady.get(db)
+  if (cached !== undefined) return cached
+  let ready = false
+  try {
+    const columns = db.prepare("SELECT name FROM pragma_table_info('chain_content')").all() as Array<{
+      name: string
+    }>
+    ready = columns.some((column) => column.name === 'text_norm')
+  } catch {
+    ready = false
+  }
+  textNormReady.set(db, ready)
+  return ready
+}
+
+/**
+ * 只给「真正会返回的名次」取正文做摘要（性能方案 P0-3 收尾）。
+ *
+ * 摘要只用于最终返回的每路前 `snippetLimit` 条，所以扫描阶段完全不碰 `text`；
+ * 排名定下来后再按内容 id 取一次（8 个词 × limit 8 ≈ 30 条 / 17k 字，实测 6 ms）。
+ */
+function attachSnippets(
   db: ChainDb,
-  filter: FilterSql,
-  text: string,
-  scanLimit: number
-): { ranking: number[]; ranks: Map<number, KeywordRank>; rows: number } {
-  const needle = despaceSearchText(text)
-  if (needle === '') return { ranking: [], ranks: new Map(), rows: 0 }
-
-  const rows = db
-    .prepare(
-      `SELECT c.id AS id, c.segment_id AS segmentId, c.captured_at AS capturedAt, c.text AS text
-         FROM chain_content c JOIN chain_segment s ON s.id = c.segment_id
-         ${filter.where === '' ? 'WHERE' : `${filter.where} AND`} ${normalizeOcrSql('c.text')} LIKE ? ESCAPE '\\'
-        ORDER BY c.captured_at DESC, c.id DESC
-        LIMIT ?`
-    )
-    .all(...filter.params, `%${escapeLike(needle)}%`, scanLimit) as Array<{
-    id: number
-    segmentId: number
-    capturedAt: number
-    text: string
-  }>
-
-  const ranks = new Map<number, KeywordRank>()
-  for (const row of rows) {
-    const existing = ranks.get(row.segmentId)
-    if (existing) {
-      existing.matches += 1
-      if (existing.contentIds.length < 3) existing.contentIds.push(row.id)
-      continue
+  unique: ReadonlyArray<{ text: string }>,
+  sorted: ReadonlyArray<ReadonlyArray<KeywordRank>>,
+  snippetLimit: number
+): void {
+  const wanted: Array<{ rank: KeywordRank; slot: number; contentId: number }> = []
+  const ids = new Set<number>()
+  for (let slot = 0; slot < sorted.length; slot += 1) {
+    for (const rank of sorted[slot].slice(0, Math.max(0, snippetLimit))) {
+      const contentId = rank.contentIds[0]
+      if (contentId === undefined) continue
+      wanted.push({ rank, slot, contentId })
+      ids.add(contentId)
     }
-    ranks.set(row.segmentId, {
-      segmentId: row.segmentId,
-      matches: 1,
-      latestAt: row.capturedAt,
-      contentIds: [row.id],
-      snippet: buildSnippet(row.text, text)
-    })
+  }
+  if (ids.size === 0) return
+
+  const textById = new Map<number, string>()
+  const list = [...ids]
+  for (let index = 0; index < list.length; index += SNIPPET_FETCH_CHUNK) {
+    const chunk = list.slice(index, index + SNIPPET_FETCH_CHUNK)
+    const placeholders = chunk.map(() => '?').join(', ')
+    for (const row of db
+      .prepare(`SELECT id, text FROM chain_content WHERE id IN (${placeholders})`)
+      .all(...chunk) as Array<{ id: number; text: string }>) {
+      textById.set(row.id, row.text)
+    }
   }
 
-  const ranking = [...ranks.values()]
-    .sort((a, b) => b.matches - a.matches || b.latestAt - a.latestAt || b.segmentId - a.segmentId)
-    .map((rank) => rank.segmentId)
-  return { ranking, ranks, rows: rows.length }
+  for (const item of wanted) {
+    const text = textById.get(item.contentId)
+    item.rank.snippet = text === undefined ? null : buildSnippet(text, unique[item.slot].text)
+  }
+}
+
+/**
+ * 多关键词一次扫描（性能方案 P0-3）。
+ *
+ * 旧实现每个关键词各发一条 SQL：8 个词就是 8 次全表 LIKE + 8 遍逐行归一化
+ * （`normalizeOcrSql` 是 6 层 replace），实测一次工具调用 818 ms 全压在主进程。
+ * 现在：一条 SQL 用 OR 扫一次、按时间倒序流式读，每个词各自累计到 scanLimit 条就停。
+ * 每个词的名次口径（命中条数 → 最近命中时刻 → 段 id）与逐词查询完全一致。
+ *
+ * 命中判断只由 SQL 的 `LIKE` 做（归一列上的 LIKE 是旧 JS `includes` 的子集：
+ * 空白已由归一列去掉、大小写只差非 ASCII 部分，所以不会多召回），不再把
+ * 每行 17k 字的正文搬回主进程逐词 `includes`——那一步在大库上要 200 ms 以上。
+ *
+ * 已知取舍：8 个词共用一个「最新命中行」扫描窗口（第 i 个词取满它自己的 scanLimit
+ * 为止）。旧实现是每词各取 200 条；如果最近 1600 条命中全被一个高频词占满，
+ * 低频词会少拿几行——用一次扫描换掉 8 次扫描的代价，记在性能方案 §4.5。
+ */
+function rankKeywords(
+  db: ChainDb,
+  filter: FilterSql,
+  texts: readonly string[],
+  scanLimit: number,
+  snippetLimit: number
+): { rankings: KeywordRanking[]; rows: number } {
+  // 去空白后相同的词（含重复传参）共用一个扫描槽位，排名对象也共用——
+  // 与旧实现「重复关键词各查一次、得到同样的排名」在 RRF 里等价。
+  const unique: Array<{ text: string; like: string; packed: string }> = []
+  const slotOf: number[] = []
+  for (const text of texts) {
+    const packed = despaceSearchText(text).toLowerCase()
+    if (packed === '') {
+      slotOf.push(-1)
+      continue
+    }
+    let slot = unique.findIndex((item) => item.packed === packed)
+    if (slot < 0) {
+      slot = unique.length
+      unique.push({ text, like: escapeLike(despaceSearchText(text)), packed })
+    }
+    slotOf.push(slot)
+  }
+
+  const emptyRanking = (): KeywordRanking => ({ ranking: [], ranks: new Map(), rows: 0 })
+  if (unique.length === 0) {
+    return { rankings: texts.map(emptyRanking), rows: 0 }
+  }
+
+  const perSlot = unique.map((item) => ({
+    text: item.text,
+    ranks: new Map<number, KeywordRank>(),
+    rows: 0
+  }))
+  const normColumn = hasTextNorm(db) ? 'c.text_norm' : normalizeOcrSql('c.text')
+  const like = (alias: string): string => `${normColumn} LIKE ${alias} ESCAPE '\\'`
+  // 占位符按「出现顺序」绑定（better-sqlite3 不认 `?1` 这种编号写法）：先 SELECT 里的
+  // 标记列，再 filter 的条件，最后 WHERE 里的 OR；同一个词因此会绑两次。
+  const flags = unique.map((_, index) => `(${like('?')}) AS m${index}`).join(', ')
+  const where = unique.map(() => `(${like('?')})`).join(' OR ')
+  const statement = db.prepare(
+    `SELECT c.id AS id, c.segment_id AS segmentId, c.captured_at AS capturedAt, ${flags}
+       FROM chain_content c JOIN chain_segment s ON s.id = c.segment_id
+      ${filter.where === '' ? 'WHERE' : `${filter.where} AND`} (${where})
+      ORDER BY c.captured_at DESC, c.id DESC`
+  )
+  const patterns = unique.map((item) => `%${item.like}%`)
+  const params = [...patterns, ...filter.params, ...patterns]
+
+  // 流式读 + 逐词截窗：不把命中行全部 materialize 进内存（大库上一词命中上万行很常见）
+  for (const row of statement.iterate(...params) as IterableIterator<KeywordRow>) {
+    for (let slot = 0; slot < unique.length; slot += 1) {
+      const bucket = perSlot[slot]
+      if (bucket.rows >= scanLimit) continue
+      if (!row[`m${slot}`]) continue
+      bucket.rows += 1
+      const existing = bucket.ranks.get(row.segmentId)
+      if (existing) {
+        existing.matches += 1
+        if (existing.contentIds.length < 3) existing.contentIds.push(row.id)
+      } else {
+        bucket.ranks.set(row.segmentId, {
+          segmentId: row.segmentId,
+          matches: 1,
+          latestAt: row.capturedAt,
+          contentIds: [row.id],
+          snippet: null
+        })
+      }
+    }
+    // 每个词都取满了：后面的行再新也不会改变任何一个词的名次
+    if (perSlot.every((bucket) => bucket.rows >= scanLimit)) break
+  }
+
+  const sorted = perSlot.map((bucket) =>
+    [...bucket.ranks.values()].sort(
+      (a, b) => b.matches - a.matches || b.latestAt - a.latestAt || b.segmentId - a.segmentId
+    )
+  )
+  attachSnippets(db, unique, sorted, snippetLimit)
+
+  const built = perSlot.map((bucket, index) => ({
+    ranking: sorted[index].map((rank) => rank.segmentId),
+    ranks: bucket.ranks,
+    rows: bucket.rows
+  }))
+  return {
+    rankings: slotOf.map((slot) => (slot >= 0 ? built[slot] : emptyRanking())),
+    rows: built.reduce((sum, item) => sum + item.rows, 0)
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -388,10 +536,18 @@ interface RankedHit {
   keyword: KeywordRank | null
 }
 
+/** 一条命中里与关键词无关的部分（段行 / 标签 / 双链 / 子行计数） */
+interface HitBase {
+  segment: ChainSegmentRow
+  tags: string[]
+  links: string[]
+  counts: ChainHitCounts
+}
+
 /** 段行 / 标签 / 双链 / 子行计数：一次批查询，避免每条命中各查一遍 */
-function hydrate(db: ChainDb, ranked: readonly RankedHit[], limit: number): ChainHit[] {
-  const ids = ranked.map((item) => item.segmentId)
-  if (ids.length === 0) return []
+function loadHitBase(db: ChainDb, ids: readonly number[]): Map<number, HitBase> {
+  const result = new Map<number, HitBase>()
+  if (ids.length === 0) return result
   const placeholders = ids.map(() => '?').join(', ')
 
   const segments = new Map<number, ChainSegmentRow>()
@@ -440,28 +596,49 @@ function hydrate(db: ChainDb, ranked: readonly RankedHit[], limit: number): Chai
     `SELECT segment_id AS segmentId, COUNT(*) AS n FROM chain_content WHERE segment_id IN (${placeholders}) GROUP BY segment_id`
   )
 
+  for (const segment of segments.values()) {
+    result.set(segment.id, {
+      segment,
+      tags: tags.get(segment.id) ?? [],
+      links: links.get(segment.id) ?? [],
+      counts: {
+        events: events.get(segment.id) ?? 0,
+        shots: shots.get(segment.id) ?? 0,
+        contents: contents.get(segment.id) ?? 0
+      }
+    })
+  }
+  return result
+}
+
+/** 排名 + 段信息 → 命中行（同分排序已在上游做过，这里只截断） */
+function assembleHits(
+  ranked: readonly RankedHit[],
+  base: ReadonlyMap<number, HitBase>,
+  limit: number
+): ChainHit[] {
   const hits: ChainHit[] = []
   for (const item of ranked) {
-    const segment = segments.get(item.segmentId)
-    if (!segment) continue // 段在排名与读行之间被删了（只可能是人为清理）：跳过，不编造
+    const row = base.get(item.segmentId)
+    if (!row) continue // 段在排名与读行之间被删了（只可能是人为清理）：跳过，不编造
     hits.push({
-      segment,
+      segment: row.segment,
       score: item.score,
       similarity: item.similarity,
       matches: item.keyword?.matches ?? 0,
       contentIds: item.keyword?.contentIds ?? [],
       snippet: item.keyword?.snippet ?? null,
-      tags: tags.get(item.segmentId) ?? [],
-      links: links.get(item.segmentId) ?? [],
-      counts: {
-        events: events.get(item.segmentId) ?? 0,
-        shots: shots.get(item.segmentId) ?? 0,
-        contents: contents.get(item.segmentId) ?? 0
-      }
+      tags: row.tags,
+      links: row.links,
+      counts: row.counts
     })
     if (hits.length >= limit) break
   }
   return hits
+}
+
+function hydrate(db: ChainDb, ranked: readonly RankedHit[], limit: number): ChainHit[] {
+  return assembleHits(ranked, loadHitBase(db, ranked.map((item) => item.segmentId)), limit)
 }
 
 /* ------------------------------------------------------------------ */
@@ -501,7 +678,10 @@ export function searchChainSegments(db: ChainDb, query: ChainSearchQuery = {}): 
   // 只用关键词 / 向量时 `limit` 是「返回多少条」；排名最多留 3 倍，融合后再截断
   const rankCap = Math.max(limit * 3, 60)
 
-  const keyword = hasText ? rankByKeyword(db, filter, query.text ?? '', Math.max(limit * KEYWORD_SCAN_FACTOR, 200)) : null
+  const keyword = hasText
+    ? rankKeywords(db, filter, [query.text ?? ''], Math.max(limit * KEYWORD_SCAN_FACTOR, 200), limit)
+        .rankings[0]
+    : null
   const vector = hasVector
     ? rankByVector(db, filter, query.vector as Float32Array, query.minSimilarity ?? 0, rankCap)
     : null
@@ -569,5 +749,58 @@ export function searchChainSegments(db: ChainDb, query: ChainSearchQuery = {}): 
       skippedVectors: vector?.skipped ?? 0,
       keywordRows: keyword?.rows ?? 0
     }
+  }
+}
+
+export interface ChainSearchBatchQuery extends ChainSearchFilter {
+  /** 每个关键词一路（去空白后相同 / 重复的词共用一个扫描槽位） */
+  texts: readonly string[]
+  /** 每一路返回多少条（默认 20、最大 200） */
+  limit?: number
+}
+
+export interface ChainSearchBatchResult {
+  /** 每个关键词一路命中（顺序与 `texts` 对齐；没有可执行条件时每路都是空数组） */
+  hitsPerText: ChainHit[][]
+  stats: ChainSearchStats
+}
+
+/**
+ * 多关键词检索（性能方案 P0-3 的「合并查询」）：一次 SQL 扫完所有关键词，
+ * 段行 / 标签 / 双链 / 子行计数也只查一次（旧实现是每词一次 `searchChainSegments`）。
+ *
+ * 只做关键词路（语义路由调用方另外走一次向量检索），返回的每一路名次口径与
+ * `searchChainSegments({ text })` 一致，调用方据此做 RRF 融合。
+ */
+export function searchChainSegmentsBatch(
+  db: ChainDb,
+  query: ChainSearchBatchQuery
+): ChainSearchBatchResult {
+  const filter = buildFilterSql(db, query)
+  const limit = Math.max(1, Math.min(MAX_SEARCH_LIMIT, Math.floor(query.limit ?? DEFAULT_SEARCH_LIMIT)))
+  const empty = (): ChainSearchBatchResult => ({
+    hitsPerText: query.texts.map(() => []),
+    stats: { mode: 'keyword', vectors: 0, skippedVectors: 0, keywordRows: 0 }
+  })
+  if (filter === null || query.texts.length === 0) return empty()
+
+  const scanned = rankKeywords(db, filter, query.texts, Math.max(limit * KEYWORD_SCAN_FACTOR, 200), limit)
+  const keywordRows = scanned.rankings.reduce((sum, item) => sum + item.rows, 0)
+  if (keywordRows === 0) return empty()
+
+  const rankedPerText: RankedHit[][] = scanned.rankings.map((item) =>
+    item.ranking.map((segmentId, index) => ({
+      segmentId,
+      score: 1 / (RRF_K + index + 1),
+      similarity: null,
+      keyword: item.ranks.get(segmentId) ?? null
+    }))
+  )
+  // 各路段 id 先并集再 hydration：8 个词最多查 6 次，而不是 8 × 6 次
+  const ids = [...new Set(rankedPerText.flat().map((item) => item.segmentId))]
+  const base = loadHitBase(db, ids)
+  return {
+    hitsPerText: rankedPerText.map((ranked) => assembleHits(ranked, base, limit)),
+    stats: { mode: 'keyword', vectors: 0, skippedVectors: 0, keywordRows }
   }
 }

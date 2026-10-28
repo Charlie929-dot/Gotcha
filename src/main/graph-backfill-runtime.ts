@@ -16,7 +16,7 @@ import {
   type ThemeGraphReport
 } from '../understand/graph-backfill'
 import { createLocalEmbedder, isModelReady } from '../understand/embedding/session'
-import type { Embedder } from '../understand/embedding/types'
+import { EmbeddingError, type Embedder } from '../understand/embedding/types'
 import type { ThemeEmbeddingResult } from '../understand/theme-embeddings'
 
 export type BackfillLogLevel = 'info' | 'warn' | 'error'
@@ -149,8 +149,12 @@ export async function runGraphBackfill(deps: GraphBackfillRuntimeDeps): Promise<
           }))
       embedder = await getEmbedder(deps.modelDir, factory)
     } catch (error) {
-      deps.log('warn', 'graph backfill: embedder unavailable, structure only', {
-        error: error instanceof Error ? error.name : 'unknown'
+      // 模型没装是预期状态（不是故障）：P1-4 起 embedder 由工作进程宿主提供，
+      // 走的是「工厂已注入」这条分支，所以这里要自己把 model-missing 降成 info。
+      const missingModel = error instanceof EmbeddingError && error.code === 'model-missing'
+      deps.log(missingModel ? 'info' : 'warn', 'graph backfill: embedder unavailable, structure only', {
+        error: error instanceof Error ? error.name : 'unknown',
+        ...(error instanceof EmbeddingError ? { code: error.code } : {})
       })
     }
 

@@ -2,6 +2,7 @@
   color-scheme: dark;
   --bg: #121218;
   --panel: #1b1b24;
+  --panel-2: #20202b;
   --line: #2c2c38;
   --text: #e8e8ef;
   --muted: #9a9aab;
@@ -15,6 +16,17 @@
   box-sizing: border-box;
 }
 
+/* .evidence / .consent 等块用了 display:flex，会盖掉 [hidden] 的 UA display:none，
+   所以这里统一兜底：带 hidden 的元素一律不占位（真机踩到：证据面板常驻盖住对话） */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
   padding: 14px 16px 18px;
@@ -23,7 +35,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  min-height: 100vh;
+  overflow: hidden;
 }
 
 .bar {
@@ -42,6 +54,7 @@ body {
 .status {
   font-size: 12px;
   color: var(--muted);
+  flex: 1;
 }
 
 .status[data-kind='busy'] {
@@ -51,6 +64,114 @@ body {
 .status[data-kind='error'] {
   color: var(--error);
 }
+
+.ghost {
+  background: transparent;
+}
+
+.layout {
+  flex: 1;
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+}
+
+.main-col {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ---- 会话列表（左栏） ---- */
+
+.history {
+  width: 244px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.history-search {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.history-search:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-list li button {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border-radius: 8px;
+}
+
+.history-list li button.active {
+  border-color: var(--accent);
+  background: #1d2a3a;
+}
+
+.history-question {
+  font-size: 12.5px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.history-empty {
+  padding: 8px 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.history-clear {
+  flex: none;
+  font-size: 12px;
+}
+
+/* ---- 出云确认条 ---- */
 
 .consent {
   background: var(--panel);
@@ -72,7 +193,190 @@ body {
   gap: 8px;
 }
 
+/* ---- 对话线程 ---- */
+
+.thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px 2px 6px;
+}
+
+.thread-empty {
+  margin: auto;
+  max-width: 460px;
+  text-align: center;
+  line-height: 1.7;
+}
+
+.thread-empty-title {
+  font-size: 14px;
+  margin: 0 0 4px;
+}
+
+.thread-truncated {
+  text-align: center;
+  margin: 0;
+}
+
+.msg {
+  display: flex;
+}
+
+.msg.user {
+  justify-content: flex-end;
+}
+
+.msg.user .bubble {
+  max-width: 82%;
+  background: #22405f;
+  border: 1px solid #35618f;
+  border-radius: 12px 12px 2px 12px;
+  padding: 9px 12px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg.assistant {
+  justify-content: flex-start;
+}
+
+.card {
+  max-width: 96%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px 12px 12px 2px;
+  padding: 11px 13px;
+}
+
+.card.pending {
+  color: var(--muted);
+}
+
+.card.clarify {
+  border-color: #4f6f4a;
+  background: #1b241c;
+}
+
+/* 检索轮数用尽、等用户决定要不要继续：和「需要确认」区分开，用琥珀色 */
+.card.continue {
+  border-color: #6a5a2a;
+  background: #241f14;
+}
+
+.card.continue .card-label {
+  color: #d8b96a;
+}
+
+.card.error {
+  border-color: #6a3030;
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.card-label {
+  font-size: 11.5px;
+  color: var(--accent);
+}
+
+.card.clarify .card-label {
+  color: #9ad08f;
+}
+
+.card.error .card-label {
+  color: var(--error);
+}
+
+.card-head .muted {
+  margin-left: auto;
+}
+
+.answer-text {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.clarify-question {
+  margin: 0 0 8px;
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+button.option {
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  background: #24352a;
+  border-color: #3f5c45;
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 10px 0 6px;
+}
+
+.citations {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.citations li button {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+
+.citation-title {
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.citation-meta,
+.muted {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.citation-why {
+  font-size: 12px;
+  color: #c8d6ea;
+  line-height: 1.5;
+}
+
+/* ---- 输入 ---- */
+
 .ask {
+  flex: none;
   display: flex;
   gap: 8px;
 }
@@ -116,83 +420,25 @@ button.primary {
   border-color: #35618f;
 }
 
-.result {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
+button.stop {
+  border-color: #6a4a30;
+  color: var(--warn);
 }
 
-.answer {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 12px 14px;
-}
-
-.answer-text {
-  margin: 0 0 12px;
-  font-size: 13.5px;
-  line-height: 1.75;
-  white-space: pre-wrap;
-}
-
-.section-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted);
-  margin: 0 0 8px;
-  text-transform: none;
-}
-
-.citations {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.citations li button {
-  width: 100%;
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 9px 11px;
-}
-
-.citation-title {
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.citation-meta,
-.muted {
-  font-size: 11.5px;
-  color: var(--muted);
-}
-
-.citation-why {
-  font-size: 12px;
-  color: #c8d6ea;
-  line-height: 1.5;
-}
-
-.empty {
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1.7;
-}
+/* ---- 证据面板（覆盖层） ---- */
 
 .evidence {
-  background: var(--panel);
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 12px 14px;
-  overflow: auto;
+  overflow-y: auto;
 }
 
 .evidence-head {
@@ -200,7 +446,6 @@ button.primary {
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
-  margin-bottom: 10px;
 }
 
 .evidence-head strong {
@@ -215,7 +460,6 @@ button.primary {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin-bottom: 10px;
 }
 
 .shots img {
@@ -236,4 +480,10 @@ button.primary {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: 'Cascadia Mono', Consolas, monospace;
+}
+
+@media (max-width: 680px) {
+  .history {
+    width: 178px;
+  }
 }

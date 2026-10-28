@@ -43,6 +43,8 @@ export interface CapturedFrame {
   diffHash: bigint
   /** 另出的 OCR 用 2× PNG（只有证据图这条带；旧管线没有） */
   ocrPath?: string
+  /** 主图（+ OCR 副图）落盘字节数，用于 `write_bytes` 埋点 */
+  bytes?: number
 }
 
 /** 与 Electron Display 同形，便于单测注入 */

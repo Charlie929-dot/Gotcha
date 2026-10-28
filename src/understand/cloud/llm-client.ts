@@ -7,6 +7,7 @@
  */
 
 import type {
+  ChainAskLoopPayload,
   ChainAskPayload,
   ChainExtractPayload,
   ChainMergePayload,
@@ -15,9 +16,20 @@ import type {
   ThemeNamingPayload
 } from './redact'
 
+/** 一次工具调用（客户端已把 JSON 参数解析成对象；id 用于把 tool 消息对回调用） */
+export interface LlmToolCall {
+  readonly id: string
+  readonly name: string
+  readonly arguments: Record<string, unknown>
+}
+
 export interface LlmMessage {
-  role: 'system' | 'user' | 'assistant'
+  role: 'system' | 'user' | 'assistant' | 'tool'
   content: string
+  /** role=assistant 调工具时附带（content 可为空串） */
+  toolCalls?: readonly LlmToolCall[]
+  /** role=tool 时：对应调用的 id */
+  toolCallId?: string
 }
 
 export interface LlmUsage {
@@ -27,6 +39,13 @@ export interface LlmUsage {
 
 export interface LlmJsonResult {
   json: unknown
+  usage: LlmUsage
+}
+
+/** 工具循环一轮的响应：要么带 toolCalls（继续循环），要么带最终答复 JSON */
+export interface LlmAskLoopResult {
+  toolCalls?: readonly LlmToolCall[]
+  json?: unknown
   usage: LlmUsage
 }
 
@@ -45,6 +64,12 @@ export interface LlmCompleteOptions {
    * （每条 ≤120 字、最多 5 条），避免业务代码借自由文本把内容注入 prompt。
    */
   repair?: LlmRepairContext
+  /**
+   * 该轮是否允许模型调用工具（**只对 `completeAskLoop` 生效**）。
+   * `false` = 收尾轮：请求不带 tools、强制给最终 JSON，模型只能基于已看到的结果作答。
+   * 缺省按 `true`（普通工具轮）。
+   */
+  allowTools?: boolean
 }
 
 export interface LlmClient {
@@ -72,6 +97,14 @@ export interface LlmClient {
    * **可选**：不是每个客户端都要能答问；没有这个能力时由调用方报 `client` 错误，不静默降级。
    */
   completeAsk?(payload: ChainAskPayload, options?: LlmCompleteOptions): Promise<LlmJsonResult>
+  /**
+   * 问记忆 · 工具循环（toolloop）：当前 branded 循环上下文 → 本轮的 toolCalls 或最终 JSON。
+   * 由 loop 驱动层迭代调用；**可选**：没有这个能力的客户端走保留的单发 `completeAsk` 回退路径。
+   */
+  completeAskLoop?(
+    payload: ChainAskLoopPayload,
+    options?: LlmCompleteOptions
+  ): Promise<LlmAskLoopResult>
 }
 
 /** 可重试性由子类 / 连接层决定，业务层只按类型判断 */
@@ -127,6 +160,11 @@ export class LlmAbortError extends LlmError {
 
 export type FakeLlmReply =
   | { json: unknown; usage?: Partial<LlmUsage> }
+  /** 工具循环脚本：本轮让模型发起这些调用（arguments 缺省为空对象） */
+  | {
+      toolCalls: ReadonlyArray<{ id?: string; name: string; arguments?: Record<string, unknown> }>
+      usage?: Partial<LlmUsage>
+    }
   | Error
 
 /** 假客户端：按队列返回预置结果，记录请求供断言（测试 / E2E 专用） */
@@ -140,6 +178,8 @@ export class FakeLlmClient implements LlmClient {
   readonly chainMergeRequests: ChainMergePayload[] = []
   /** 问记忆（S1）的调用留痕 */
   readonly askRequests: ChainAskPayload[] = []
+  /** 问记忆工具循环（toolloop）的调用留痕（每轮一条） */
+  readonly askLoopRequests: ChainAskLoopPayload[] = []
   /** 每次调用的选项（signal / repairHint 等），供暂停 / 修复重试断言 */
   readonly optionCalls: LlmCompleteOptions[] = []
   private readonly replies: FakeLlmReply[]
@@ -156,18 +196,43 @@ export class FakeLlmClient implements LlmClient {
     return this.replies.length
   }
 
-  private take(options: LlmCompleteOptions): LlmJsonResult {
+  /** 队列取一条预置回复（信号已取消 / 队列空 / 预置错误都如实抛出） */
+  private takeReply(options: LlmCompleteOptions): Exclude<FakeLlmReply, Error> {
     this.optionCalls.push(options)
     if (options.signal?.aborted) throw new LlmAbortError()
     const reply = this.replies.shift()
     if (!reply) throw new Error('FakeLlmClient: 没有预置回复')
     if (reply instanceof Error) throw reply
+    return reply
+  }
+
+  private usageOf(reply: { usage?: Partial<LlmUsage> }): LlmUsage {
     return {
-      json: reply.json,
-      usage: {
-        promptTokens: reply.usage?.promptTokens ?? 0,
-        completionTokens: reply.usage?.completionTokens ?? 0
-      }
+      promptTokens: reply.usage?.promptTokens ?? 0,
+      completionTokens: reply.usage?.completionTokens ?? 0
+    }
+  }
+
+  private take(options: LlmCompleteOptions): LlmJsonResult {
+    const reply = this.takeReply(options)
+    if ('toolCalls' in reply) {
+      // 单发路径收到了脚本化的工具调用：视为结构错误，与真客户端的解析失败同路
+      throw new LlmParseError('FakeLlmClient: 工具循环回复被单发路径消费')
+    }
+    return { json: reply.json, usage: this.usageOf(reply) }
+  }
+
+  private takeLoop(options: LlmCompleteOptions): LlmAskLoopResult {
+    const reply = this.takeReply(options)
+    if (!('toolCalls' in reply)) return { json: reply.json, usage: this.usageOf(reply) }
+    return {
+      toolCalls: reply.toolCalls.map((call, index) => ({
+        // 没给 id 就造一个确定性的：回填 tool 消息时能对上即可
+        id: call.id ?? `fake_call_${index}`,
+        name: call.name,
+        arguments: call.arguments ?? {}
+      })),
+      usage: this.usageOf(reply)
     }
   }
 
@@ -214,5 +279,13 @@ export class FakeLlmClient implements LlmClient {
   async completeAsk(payload: ChainAskPayload, options: LlmCompleteOptions = {}): Promise<LlmJsonResult> {
     this.askRequests.push(payload)
     return this.take(options)
+  }
+
+  async completeAskLoop(
+    payload: ChainAskLoopPayload,
+    options: LlmCompleteOptions = {}
+  ): Promise<LlmAskLoopResult> {
+    this.askLoopRequests.push(payload)
+    return this.takeLoop(options)
   }
 }

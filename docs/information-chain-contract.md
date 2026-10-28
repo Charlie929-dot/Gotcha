@@ -179,7 +179,7 @@ CREATE TABLE chain_derive       (segment_id INTEGER PRIMARY KEY, text_hash TEXT,
   - 相似度 = 两个名字各自过本地 `bge-small-zh-v1.5`（512 维）后的余弦；**精确同名 / 别名命中不花模型**。合并只影响「这一段的标签叫法 / 挂到哪条双链」，不删 `chain_link`（别的段还在用）。
 - **送模型前的正文整理**：`chain_content` 是 UIA 整窗树 + OCR 的叠加，同一段里会攒下多份几乎相同的文本。派生时先**按行去重**（保留第一次出现的顺序）、空白归一、**上限 6000 字**（超了截断并标 `truncated`）。指纹算在**截断后**的正文上：上限之外的滚动不触发重抽，上限之内的变化才重抽。实测一段 UIA 整窗 21 409 字 → 去重后 6 000 字（丢掉 80 行重复），OCR 段基本不变。
 - **幂等 / 水位**：`chain_vector.text_hash`、`chain_derive.text_hash` 记「这个指纹算过了」；`content_max_id` 是更便宜的判据——又读回来一条内容（`MAX(chain_content.id)` 变大）才重新看指纹，指纹没变就只推水位、不花 token。重抽时**整段替换**该段的 `chain_tag` / `chain_link_segment` 行。
-- **出网门与预算**：复用 **D24 一次性确认**（`graph.outbound_consent`）与 **D22 每日预算**（`graph.budget_tokens_per_day`，与图谱共用同一份日账 `graph.usage.<day>`）；确认文案覆盖「信息链段内文本也会脱敏后发往供应商」。未确认 / 缺 key / 超预算时**只建本地向量**，抽取留在待办里，下次开始采集再补（不静默假装抽过）。载荷仍由 `understand/cloud/redact.ts` 唯一出口产出（brand 在类型层）。
+- **出网门与预算**：复用 **D24 一次性确认**（`graph.outbound_consent`）与 **D22 每日预算**（`graph.budget_tokens_per_day`，与图谱共用同一份日账 `graph.usage.<day>`）；确认文案覆盖「信息链段内文本也会脱敏后发往供应商」。未确认 / 缺 key / 超预算时**只建本地向量**，抽取留在待办里，下次开始采集再补（不静默假装抽过）。问记忆载荷由核心 `chain/agent/payload.ts` 组装、边界 `understand/cloud/ask-outbound.ts` 注入脱敏策略；派生层载荷由 `chain/derive/payload.ts` 组装、`understand/cloud/derive-outbound.ts` 注入策略（brand 在类型层，见 `docs/agent/cloud-boundary.md`）。
 - **运行时机**：跟采集总开关走（暂停 / 退出即停，在途请求 abort、结果丢弃）。开采集先扫一轮（**最近 200 段**），之后每 **10 分钟**一轮；段收口 / 内容写入只是**叫醒**（防抖 5s，让晚到的 UIA / OCR 先落库）。失败按 1 / 2 / 4 … 最长 30 分钟退避，避免同一段每轮重抽。
 - **模型**：段向量与名字向量用**信息链自己的**本地 bge 会话（`maxLength 512`，批 1），与图谱那份（256 token）分开——段正文比单条 OCR 长。模型缺失只关向量与名字语义合并（标签 / 双链退化为精确同名复用），不阻塞采集。
 - 派生层不写证据表；唯一读证据层的地方是 `MAX(chain_content.id)`（只取水位，不读正文）。

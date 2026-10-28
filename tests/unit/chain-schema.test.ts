@@ -166,6 +166,44 @@ describe('ensureChainSchema', () => {
     })
   })
 
+  it('v3 老库迁移到 v4：补 chain_content.urls 并按同一规则回填', () => {
+    const database = open()
+    // 造一个 v3 形状的正文行：没有 urls 列（覆盖索引依赖这一列，得先删索引）
+    database.exec('DROP INDEX IF EXISTS idx_chain_content_segment_urls')
+    database.exec('ALTER TABLE chain_content DROP COLUMN urls')
+    database
+      .prepare('INSERT INTO chain_segment (id, start_ts, end_ts, active_ms, day_key, created_at) VALUES (1, 0, 1000, 1000, ?, 0)')
+      .run('2026-10-26')
+    database
+      .prepare(
+        `INSERT INTO chain_content (segment_id, captured_at, source, text, chars, hash)
+         VALUES (1, 1, 'uia', ?, ?, 'h1')`
+      )
+      .run('地址栏 https://example.com/a/b 正文', '地址栏 https://example.com/a/b 正文'.length)
+    database.prepare("UPDATE chain_meta SET value = '3' WHERE key = 'schema_version'").run()
+
+    ensureChainSchema(database)
+
+    const columns = (
+      database.prepare('PRAGMA table_info(chain_content)').all() as Array<{ name: string }>
+    ).map((column) => column.name)
+    expect(columns).toContain('urls')
+    const row = database.prepare('SELECT urls FROM chain_content WHERE segment_id = 1').get() as {
+      urls: string
+    }
+    expect(JSON.parse(row.urls)).toEqual(['https://example.com/a/b'])
+    // 幂等：再跑一次不重复写、不报 duplicate column
+    ensureChainSchema(database)
+    expect(
+      (database.prepare('SELECT urls FROM chain_content WHERE segment_id = 1').get() as { urls: string })
+        .urls
+    ).toBe(row.urls)
+    expect(
+      (database.prepare("SELECT value FROM chain_meta WHERE key = 'schema_version'").get() as { value: string })
+        .value
+    ).toBe(String(CHAIN_SCHEMA_VERSION))
+  })
+
   it('v1 老库迁移到 v2：补 chain_derive 表与 chain_vector.content_max_id，老向量不丢', () => {
     const database = open()
     // 把库退回 v1 形状：删掉 v2 的表 / 列，写入一条老向量，再把版本账本改成 1

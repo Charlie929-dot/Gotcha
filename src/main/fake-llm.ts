@@ -7,6 +7,7 @@
  */
 
 import type {
+  ChainAskLoopPayload,
   ChainAskPayload,
   ChainExtractPayload,
   ChainMergePayload,
@@ -16,6 +17,7 @@ import type {
 } from '../understand/cloud/redact'
 import {
   LlmAbortError,
+  type LlmAskLoopResult,
   type LlmClient,
   type LlmCompleteOptions,
   type LlmJsonResult
@@ -201,6 +203,47 @@ export function createDeterministicFakeLlm(options: { delayMs?: number } = {}): 
           citations
         },
         usage: { promptTokens: 120 + payload.evidence.length * 30, completionTokens: 20 }
+      }
+    },
+
+    /**
+     * 问记忆 · 工具循环（toolloop）：两轮脚本——先检索最近的段，
+     * 再引用检索结果的第一段作答。引用的 segmentId 来自工具返回（白名单内），
+     * E2E 断言「answer / no-evidence / citations」路径全部可复现。
+     */
+    async completeAskLoop(
+      payload: ChainAskLoopPayload,
+      callOptions: LlmCompleteOptions = {}
+    ): Promise<LlmAskLoopResult> {
+      counters.requests += 1
+      try {
+        if (delayMs > 0 || callOptions.signal) {
+          await abortableDelay(delayMs, callOptions.signal)
+        }
+      } catch (error) {
+        if (error instanceof LlmAbortError) counters.aborted += 1
+        throw error
+      }
+      const searched = payload.turns.some((turn) => turn.toolCall.name === 'search_info')
+      if (!searched) {
+        return {
+          toolCalls: [{ id: 'fake_call_search', name: 'search_info', arguments: { from: 0, limit: 5 } }],
+          usage: { promptTokens: 100, completionTokens: 5 }
+        }
+      }
+      const hits = payload.turns.flatMap((turn) => {
+        const result = turn.toolResult as { kind?: string; hits?: Array<{ segmentId: number; at: string; title: string }> }
+        return result.kind === 'search_info' ? (result.hits ?? []) : []
+      })
+      const first = hits[0]
+      return {
+        json: first
+          ? {
+              answer: truncate(`模拟回答：在「${first.title}」里做过相关的事（${first.at}）`, 200),
+              citations: [{ segmentId: first.segmentId, why: truncate(`模拟依据 ${first.segmentId}`, 40) }]
+            }
+          : { answer: '信息链里没找到', citations: [] },
+        usage: { promptTokens: 150, completionTokens: 20 }
       }
     },
 

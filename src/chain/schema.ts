@@ -14,6 +14,9 @@
  * `title_last` / `closed` 由收口时的**一次** UPDATE 落定；其余字段此后永不改。
  */
 
+import { normalizeOcrSql } from '../db/schema'
+import { contentUrlsOf } from './content/urls'
+
 /** 段：一个窗口的一段焦点占用 */
 export const CHAIN_SEGMENT_DDL = `
 CREATE TABLE IF NOT EXISTS chain_segment (
@@ -80,6 +83,8 @@ CREATE TABLE IF NOT EXISTS chain_content (
   text        TEXT    NOT NULL,
   chars       INTEGER NOT NULL,
   hash        TEXT    NOT NULL,
+  text_norm   TEXT,
+  urls        TEXT,
   CHECK (source IN ('uia', 'ocr', 'manual')),
   CHECK (chars >= 0)
 );
@@ -155,6 +160,12 @@ export const CHAIN_INDEX_DDLS: readonly string[] = [
   'CREATE INDEX IF NOT EXISTS idx_chain_shot_segment ON chain_shot(segment_id);',
   'CREATE INDEX IF NOT EXISTS idx_chain_shot_event ON chain_shot(event_id);',
   'CREATE INDEX IF NOT EXISTS idx_chain_content_segment ON chain_content(segment_id);',
+  /**
+   * 只读网址的覆盖索引（性能方案 P1-6）：正文行的 `text` 很大（平均 22k 字），
+   * 只 `SELECT urls` 也要先把整行（含正文）读出来；把 `urls` 放进索引后，
+   * `search_info` 取网址变成纯索引扫描，不碰正文页。
+   */
+  'CREATE INDEX IF NOT EXISTS idx_chain_content_segment_urls ON chain_content(segment_id, urls);',
   'CREATE INDEX IF NOT EXISTS idx_chain_tag_segment ON chain_tag(segment_id);',
   'CREATE INDEX IF NOT EXISTS idx_chain_link_segment_seg ON chain_link_segment(segment_id);'
 ]
@@ -197,13 +208,47 @@ CREATE TABLE IF NOT EXISTS chain_meta (
 `
 
 /**
+ * 检索用归一文本列（v3，性能方案 P0-3）。
+ *
+ * `normalizeOcrSql(text)` 是 6 层 `replace()`：以前每次查询都要对**每一行正文**重算
+ * 一次（8 个关键词 = 8 遍），实测 8 词一次检索 818 ms。把结果落成列后，查询只需做
+ * `LIKE`（同样走全扫，但不再逐行做字符替换），实测 112 ms（-86%）。
+ *
+ * 为什么不是 FTS5 trigram：中文关键词常常只有 2 个字（「插件」「窗口」），trigram
+ * 至少要 3 个字符才进索引，这类查询照样得回退 LIKE；索引还会按 ~4× 文本体积增长。
+ * 归一列只多 1× 体积，且所有长度都能直接命中。
+ */
+export const CHAIN_CONTENT_NORM_INSERT_TRIGGER_DDL = `
+CREATE TRIGGER IF NOT EXISTS chain_content_norm_ai AFTER INSERT ON chain_content BEGIN
+  UPDATE chain_content SET text_norm = ${normalizeOcrSql("new.text")} WHERE id = new.id;
+END;
+`
+
+export const CHAIN_CONTENT_NORM_UPDATE_TRIGGER_DDL = `
+CREATE TRIGGER IF NOT EXISTS chain_content_norm_au AFTER UPDATE OF text ON chain_content BEGIN
+  UPDATE chain_content SET text_norm = ${normalizeOcrSql("new.text")} WHERE id = new.id;
+END;
+`
+
+/**
+ * 维护性 DDL：必须在迁移**之后**执行（老库要先补上 `text_norm` 列，
+ * 否则 `CREATE TRIGGER` 里的 `text_norm` 解析不到）。
+ */
+export const CHAIN_TRIGGER_DDLS: readonly string[] = [
+  CHAIN_CONTENT_NORM_INSERT_TRIGGER_DDL,
+  CHAIN_CONTENT_NORM_UPDATE_TRIGGER_DDL
+]
+
+/**
  * 信息链自己的结构版本。**改任何 chain_ DDL 都要同时**：
  * ① 把这里 +1；② 在 `CHAIN_MIGRATIONS` 里补「旧版本 → 新版本」那一步（老库靠它补列 / 重建）。
  * 忘了的后果是静默：老库缺列，插入直接报 `no column named`（gotchas 记过这条）。
  *
- * 版本史：1 = v0.5 接线时的八张表；2 = 派生层（`chain_derive` + `chain_vector.content_max_id`）。
+ * 版本史：1 = v0.5 接线时的八张表；2 = 派生层（`chain_derive` + `chain_vector.content_max_id`）；
+ * 3 = `chain_content.text_norm`（检索归一列 + 维护触发器，性能方案 P0-3）；
+ * 4 = `chain_content.urls`（正文里的网址落列，检索不再为抽网址搬整段正文，性能方案 P1-6）。
  */
-export const CHAIN_SCHEMA_VERSION = 2
+export const CHAIN_SCHEMA_VERSION = 4
 
 /** 版本 → 迁移步骤。`CHAIN_MIGRATIONS[n]` 负责把 v(n-1) 的库改成 v(n) */
 export const CHAIN_MIGRATIONS: Record<number, (db: ChainSchemaDb) => void> = {
@@ -216,6 +261,42 @@ export const CHAIN_MIGRATIONS: Record<number, (db: ChainSchemaDb) => void> = {
    */
   2: (db) => {
     db.exec('ALTER TABLE chain_vector ADD COLUMN content_max_id INTEGER NOT NULL DEFAULT 0')
+  },
+  /**
+   * v2 → v3：`chain_content.text_norm`（检索归一列）+ 回填。
+   *
+   * 幂等：先探测列是否存在（迁移中途失败 / 版本号没来得及写时重跑不会撞
+   * `duplicate column name`），回填只碰 `text_norm IS NULL` 的行。
+   * 新库由 DDL 直接带上这一列，不走这里。
+   */
+  3: (db) => {
+    const columns = db.prepare("SELECT name FROM pragma_table_info('chain_content')").all() as Array<{
+      name: string
+    }>
+    if (!columns.some((column) => column.name === 'text_norm')) {
+      db.exec('ALTER TABLE chain_content ADD COLUMN text_norm TEXT')
+    }
+    db.exec(`UPDATE chain_content SET text_norm = ${normalizeOcrSql('text')} WHERE text_norm IS NULL`)
+  },
+  /**
+   * v3 → v4：`chain_content.urls`（正文里的网址，性能方案 P1-6）+ 回填。
+   *
+   * 幂等：先探测列；回填只碰 `urls IS NULL` 的行。抽取规则与写入路径共用
+   * `contentUrlsOf()`（`src/chain/content/urls.ts`），保证迁移回填与新增行一字不差。
+   */
+  4: (db) => {
+    const columns = db.prepare("SELECT name FROM pragma_table_info('chain_content')").all() as Array<{
+      name: string
+    }>
+    if (!columns.some((column) => column.name === 'urls')) {
+      db.exec('ALTER TABLE chain_content ADD COLUMN urls TEXT')
+    }
+    const rows = db.prepare('SELECT id, text FROM chain_content WHERE urls IS NULL').all() as Array<{
+      id: number
+      text: string
+    }>
+    const update = db.prepare('UPDATE chain_content SET urls = ? WHERE id = ?')
+    for (const row of rows) update.run(contentUrlsOf(row.text ?? ''), row.id)
   }
 }
 
@@ -227,8 +308,13 @@ export interface ExecutableDb {
 export interface ChainSchemaDb extends ExecutableDb {
   prepare(sql: string): {
     get(...params: unknown[]): unknown
+    all(...params: unknown[]): unknown[]
     run(...params: unknown[]): unknown
   }
+  /** better-sqlite3 的事务包装（可选：单测里的最小假 db 不一定有） */
+  transaction?<T>(fn: () => T): () => T
+  /** better-sqlite3 的是否在事务中（避免嵌套 BEGIN 抛错） */
+  inTransaction?: boolean
 }
 
 const SCHEMA_VERSION_KEY = 'schema_version'
@@ -239,10 +325,10 @@ const SCHEMA_VERSION_KEY = 'schema_version'
  * - 新建库（没有记账行）：DDL 已经把结构建成当前版本，直接记成 `CHAIN_SCHEMA_VERSION`；
  * - 已有记账行：低于当前版本就按 `CHAIN_MIGRATIONS` 逐步迁移，再做一次幂等建表；
  * - 高于当前版本：拒绝启动（别让旧程序往新结构的库里写）。
+ * - 迁移之后才建维护触发器（老库要先补 `text_norm` 列）。
  */
 export function ensureChainSchema(db: ChainSchemaDb): void {
   for (const ddl of CHAIN_SCHEMA_DDLS) db.exec(ddl)
-  for (const ddl of CHAIN_INDEX_DDLS) db.exec(ddl)
   db.exec(CHAIN_META_DDL)
 
   const row = db.prepare('SELECT value FROM chain_meta WHERE key = ?').get(SCHEMA_VERSION_KEY) as
@@ -253,29 +339,41 @@ export function ensureChainSchema(db: ChainSchemaDb): void {
       SCHEMA_VERSION_KEY,
       String(CHAIN_SCHEMA_VERSION)
     )
-    return
+  } else {
+    const current = Number(row.value)
+    if (!Number.isInteger(current) || current < 0) {
+      throw new Error(`chain_meta.schema_version 非法：${row.value}`)
+    }
+    if (current > CHAIN_SCHEMA_VERSION) {
+      throw new Error(
+        `信息链表结构版本 ${current} 高于本程序支持的 ${CHAIN_SCHEMA_VERSION}，请升级应用后再启动`
+      )
+    }
+    // 数据迁移逐行写（v3 回填 text_norm、v4 回填 urls），不包事务会每行一次提交——
+    // 350 行的回填实测要 1.8 s，包一层事务后是百毫秒级。调用方已在事务里就不重复开。
+    const migrateAll = (): void => {
+      for (let version = current; version < CHAIN_SCHEMA_VERSION; version += 1) {
+        const migrate = CHAIN_MIGRATIONS[version + 1]
+        if (!migrate) throw new Error(`缺少 chain v${version} → v${version + 1} 的迁移步骤`)
+        migrate(db)
+      }
+    }
+    if (db.transaction && db.inTransaction !== true) db.transaction(migrateAll)()
+    else migrateAll()
+    if (current !== CHAIN_SCHEMA_VERSION) {
+      db.prepare('UPDATE chain_meta SET value = ? WHERE key = ?').run(
+        String(CHAIN_SCHEMA_VERSION),
+        SCHEMA_VERSION_KEY
+      )
+    }
   }
 
-  const current = Number(row.value)
-  if (!Number.isInteger(current) || current < 0) {
-    throw new Error(`chain_meta.schema_version 非法：${row.value}`)
-  }
-  if (current > CHAIN_SCHEMA_VERSION) {
-    throw new Error(
-      `信息链表结构版本 ${current} 高于本程序支持的 ${CHAIN_SCHEMA_VERSION}，请升级应用后再启动`
-    )
-  }
-  for (let version = current; version < CHAIN_SCHEMA_VERSION; version += 1) {
-    const migrate = CHAIN_MIGRATIONS[version + 1]
-    if (!migrate) throw new Error(`缺少 chain v${version} → v${version + 1} 的迁移步骤`)
-    migrate(db)
-  }
-  if (current !== CHAIN_SCHEMA_VERSION) {
-    db.prepare('UPDATE chain_meta SET value = ? WHERE key = ?').run(
-      String(CHAIN_SCHEMA_VERSION),
-      SCHEMA_VERSION_KEY
-    )
-  }
+  // 索引也放在迁移之后：v4 的 `(segment_id, urls)` 覆盖索引在老库上要等 `urls` 列补出来，
+  // 否则 `CREATE INDEX` 直接报 no such column（新建库本来就带列，先建后建都一样）。
+  for (const ddl of CHAIN_INDEX_DDLS) db.exec(ddl)
+
+  // 维护性触发器放在迁移之后：老库要先补上 text_norm 列，触发器体才解析得到它
+  for (const ddl of CHAIN_TRIGGER_DDLS) db.exec(ddl)
 }
 
 /** 事件类型（与 DDL 的 CHECK 一致） */

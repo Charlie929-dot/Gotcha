@@ -1,14 +1,16 @@
 /**
- * 选区遮罩（段二 A）：在**当前显示器**上铺一层全屏窗口，让用户拖出矩形。
+ * 选区遮罩（段二 A）：在**鼠标所在的当前显示器**上蒙一层，拖出矩形。
  *
- * 为什么垫一张冻结的截图而不是透明看桌面：
- * 采集流是"活的"，如果遮罩真透明，用户选中的区域会带着遮罩的暗色一起被抓进图里；
- * 先截一帧当背景、遮罩只盖这张图，裁出来的就是用户看到的那一帧，且不会把遮罩自己拍进去。
+ * 两个 Windows 上的坑（2026-10-28 真机踩到）：
+ * 1. 普通无边框窗口会被系统夹到**工作区**（不含任务栏），`width = display.bounds.height` 也盖不住；
+ *    改用 `fullscreen: true` 才是「整屏蒙一层」——任务栏也盖住，和系统截图工具一样。
+ * 2. 冻结帧不能靠 `did-finish-load` 时 push：渲染层的监听有可能还没挂上（窗口就只显示一层空画布）。
+ *    改成渲染层主动 `invoke('region:image')` 拉一次，谁先谁后都不丢。
  *
- * 纪律：
- * - 只认自己这个窗口的 IPC（sender 校验），别的渲染进程发 `region:confirm` 一律丢弃；
- * - 一次只允许一个选区流程（球被连点也不会叠出两层遮罩）；
- * - Esc / 右键 = 取消，返回 null，不抛错（取消是正常结果）。
+ * 遮罩垫一张冻结截图而不是看桌面：采集流是活的，真透明的遮罩会被一起抓进图里；
+ * 冻结帧 + 暗层 = 用户看到的就是裁出来的那一帧。
+ *
+ * 纪律：只认自己这个窗口的 IPC；一次只允许一个选区流程；取消（Esc / 右键）返回 null。
  */
 
 import { BrowserWindow, ipcMain, screen } from 'electron'
@@ -19,9 +21,10 @@ export interface PickRegionOptions {
   devServerUrl?: string
   htmlPath: string
   preloadPath: string
-  /** 冻结的整屏截图（data URL），当遮罩背景 */
+  /** 冻结的整屏截图（data URL）：由渲染层主动来取 */
   imageDataUrl: string
   display: Display
+  log?: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
 export interface PickedRegion {
@@ -53,27 +56,38 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
     y: bounds.y,
     width: bounds.width,
     height: bounds.height,
+    // Windows：只有 fullscreen 才盖得住任务栏（普通无边框会被夹到工作区）
+    fullscreen: true,
     frame: false,
-    transparent: true,
     resizable: false,
     movable: false,
     minimizable: false,
     maximizable: false,
-    fullscreenable: false,
+    fullscreenable: true,
     skipTaskbar: true,
     hasShadow: false,
     alwaysOnTop: true,
     show: false,
-    enableLargerThanScreen: true,
+    backgroundColor: '#0b0c10',
     webPreferences: {
       preload: options.preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      // 遮罩要马上响应拖拽，不能被后台节流
+      backgroundThrottling: false
     }
   })
   win.setAlwaysOnTop(true, 'screen-saver')
   win.setMenuBarVisibility(false)
+
+  // 诊断：preload 挂了 / 页面没加载出来，都写进 main.log（否则界面上只剩一层空画布，没法查）
+  win.webContents.on('preload-error', (_event, path, error) => {
+    options.log?.('error', 'region preload failed', { path, error: String(error) })
+  })
+  win.webContents.on('did-fail-load', (_event, code, description) => {
+    options.log?.('error', 'region page failed to load', { code, description })
+  })
 
   const result = await new Promise<PickedRegion | null>((resolve) => {
     let settled = false
@@ -97,18 +111,24 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
       if (event.sender !== win.webContents) return
       finish(null)
     }
+    // 渲染层主动拉冻结帧：不依赖「主进程 push 时监听已挂好」的时序
+    const onImage = (event: Electron.IpcMainInvokeEvent): string | null =>
+      event.sender === win.webContents ? options.imageDataUrl : null
 
+    ipcMain.handle('region:image', onImage)
     ipcMain.handle('region:confirm', onConfirm)
     ipcMain.on('region:cancel', onCancel)
 
     win.once('closed', () => {
+      ipcMain.removeHandler('region:image')
       ipcMain.removeHandler('region:confirm')
       ipcMain.removeListener('region:cancel', onCancel)
       finish(null)
     })
 
     win.webContents.once('did-finish-load', () => {
-      win.webContents.send('region:image', options.imageDataUrl)
+      // fullscreen 偶尔会在加载过程中被还原成普通窗口：再钉一次边界
+      if (!win.isFullScreen()) win.setFullScreen(true)
       win.show()
       win.focus()
     })

@@ -16,7 +16,7 @@ interface RegionRect {
 }
 
 interface RegionApi {
-  onImage(handler: (dataUrl: string) => void): () => void
+  image(): Promise<string | null>
   confirm(rect: RegionRect): Promise<boolean>
   cancel(): void
 }
@@ -65,6 +65,14 @@ function render(): void {
   }
   ctx.fillStyle = `rgb(0 0 0 / ${DIM_ALPHA})`
   ctx.fillRect(0, 0, window.innerWidth, window.innerHeight)
+
+  if (!shot) {
+    // 冻结帧没拿到也要能用：至少蒙一层 + 告诉用户还能框（画布本身就是暗的）
+    ctx.fillStyle = 'rgb(255 255 255 / 55%)'
+    ctx.font = '14px system-ui, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.fillText('没拿到屏幕截图（仍可框选，但选区不会有画面）', window.innerWidth / 2, 48)
+  }
 
   if (!current) return
   const { x, y, width, height } = current
@@ -148,15 +156,28 @@ canvas.addEventListener('pointerup', (event) => {
   finish()
 })
 
-api?.onImage((dataUrl: string) => {
-  const image = new Image()
-  image.decoding = 'async'
-  image.onload = () => {
-    shot = image
-    render()
+/** 主动拉冻结帧（不靠 push，监听早晚都不会丢）；失败就只画暗层 */
+async function loadShot(): Promise<void> {
+  if (!api) return
+  try {
+    const dataUrl = await api.image()
+    if (!dataUrl) return
+    const image = new Image()
+    image.decoding = 'async'
+    image.onload = () => {
+      shot = image
+      render()
+    }
+    image.onerror = () => {
+      // 解码失败：保持暗层，别把整个遮罩搞没
+    }
+    image.src = dataUrl
+  } catch {
+    // 主进程没给（窗口已关 / IPC 出错）：保持暗层
   }
-  image.src = dataUrl
-})
+}
+
+void loadShot()
 
 resize()
 

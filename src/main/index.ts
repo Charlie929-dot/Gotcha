@@ -965,7 +965,8 @@ async function openRegionAsk(): Promise<void> {
       htmlPath: join(__dirname, '../renderer/region/index.html'),
       preloadPath: join(__dirname, '../preload/region.js'),
       imageDataUrl,
-      display
+      display,
+      log: (level, message, data) => captureLog(level, message, data)
     })
     if (!picked) return
     const crop = selectionToFrameCrop(

@@ -19,6 +19,7 @@ import {
   LlmNetworkError,
   LlmParseError,
   LlmTimeoutError,
+  summarizeErrorBody,
   type LlmAskLoopResult,
   type LlmClient,
   type LlmCompleteOptions,
@@ -521,7 +522,9 @@ export function buildChainAskLoopMessages(
     messages.push({
       role: 'assistant',
       content: '',
-      toolCalls: [{ id, name: turn.toolCall.name, arguments: turn.toolCall.arguments }]
+      toolCalls: [{ id, name: turn.toolCall.name, arguments: turn.toolCall.arguments }],
+      // 开 thinking 后，带 tools 的请求必须把历史各轮的 CoT 原样回传，否则第 2 轮起 400
+      ...(turn.reasoning !== undefined ? { reasoningContent: turn.reasoning } : {})
     })
     messages.push({
       role: 'tool',
@@ -533,12 +536,18 @@ export function buildChainAskLoopMessages(
 }
 
 /** LlmMessage → wire 格式：assistant 带 tool_calls / tool 消息翻成 OpenAI 形状 */
-function serializeMessages(messages: readonly LlmMessage[]): unknown[] {
+function serializeMessages(
+  messages: readonly LlmMessage[],
+  options: { reasoningContent?: boolean } = {}
+): unknown[] {
   return messages.map((message) => {
     if (message.role === 'assistant' && message.toolCalls) {
       return {
         role: 'assistant',
         content: message.content === '' ? null : message.content,
+        ...(options.reasoningContent === true && message.reasoningContent !== undefined
+          ? { reasoning_content: message.reasoningContent }
+          : {}),
         tool_calls: message.toolCalls.map((call) => ({
           id: call.id,
           type: 'function',
@@ -622,7 +631,7 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
   const fetchImpl = options.fetchImpl ?? fetch
   const sleep = options.sleep ?? abortableSleep
   if (!options.apiKey) throw new LlmError('缺少 API key', 'config')
-  const disableThinking = isDeepSeekEndpoint(baseUrl)
+  const deepSeekEndpoint = isDeepSeekEndpoint(baseUrl)
 
 /**
  * 一次请求的三种形状：
@@ -674,7 +683,9 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
           },
           body: JSON.stringify({
             model: options.model,
-            messages: serializeMessages(messages),
+            // reasoning_content 只在 DeepSeek 端点回传（开 thinking 后带 tools 的请求必须回传，
+            // 否则第 2 轮起 400）；严格 OpenAI 兼容网关会因未知字段 400，所以按端点过滤。
+            messages: serializeMessages(messages, { reasoningContent: deepSeekEndpoint }),
             // 工具轮不带 response_format：json_object 会禁止 tool_calls 轮输出；
             // 收尾轮反过来：不带 tools、发 response_format，逼模型给最终 JSON
             ...(mode === 'ask-loop'
@@ -685,7 +696,7 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
             stream: false,
             // 问记忆工具循环开 thinking（D55 ③：过程可见）；其余结构化输出仍关掉，
             // 避免 CoT 把 max_tokens 吃满（见 isDeepSeekEndpoint 注释）。非 DeepSeek 端点不发这个字段。
-            ...(disableThinking && !askMode ? { thinking: { type: 'disabled' } } : {})
+            ...(deepSeekEndpoint && !askMode ? { thinking: { type: 'disabled' } } : {})
           }),
           signal: controller.signal,
           // 不跟随重定向：避免 302 把带 Authorization 的请求带到别的地址
@@ -697,7 +708,21 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
         throw abortOrNetworkError()
       }
 
-      if (!response.ok) throw new LlmHttpError(response.status)
+      if (!response.ok) {
+        // 错误正文只进主进程日志、不进界面：400 的原因（缺 reasoning_content、
+        // messages 顺序不对……）只在正文里，看不到就只能靠猜。
+        let detail: string | undefined
+        try {
+          const text = await response.text()
+          const summarized = summarizeErrorBody(text)
+          detail = summarized === '' ? undefined : summarized
+        } catch (error) {
+          void error
+        }
+        if (externalSignal?.aborted) throw new LlmAbortError()
+        if (timedOut) throw new LlmTimeoutError()
+        throw new LlmHttpError(response.status, detail)
+      }
 
       // 超时定时器保持到响应体读完：防止响应头返回后 body 卡住、60s 超时失效
       let data: ChatCompletionResponse

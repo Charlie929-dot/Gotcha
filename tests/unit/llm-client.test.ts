@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  buildChainAskLoopPayload,
   buildCloudPayload,
   buildThemeAssignmentPayload,
   buildThemeNamingPayload
@@ -463,5 +464,95 @@ describe('P2 在线路径请求 · 新主题命名 / 模糊确认（S4）', () =
       ocr: '内容',
       candidate_theme_ids: [1, 2]
     })
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* 工具轮 CoT 回传（2026-10-29：不回传 reasoning_content → 第 2 轮 400） */
+/* ------------------------------------------------------------------ */
+
+const SYSTEM_TIME = '2026-10-29 01:00 周四'
+
+function loopPayload(turns: Array<{ reasoning?: string }> = [{}]) {
+  return buildChainAskLoopPayload({
+    question: '第一次用 dsh 是啥时候',
+    systemTime: SYSTEM_TIME,
+    freshness: { latestEvidenceTs: null, captureRunning: false },
+    turns: turns.map((turn) => ({
+      toolCall: { name: 'get_freshness', arguments: {} },
+      toolResult: { kind: 'get_freshness', freshness: { latestEvidenceTs: null, captureRunning: false } },
+      ...(turn.reasoning !== undefined ? { reasoning: turn.reasoning } : {})
+    }))
+  }).payload
+}
+
+describe('DeepSeek 客户端 · 工具轮 CoT 回传', () => {
+  it('DeepSeek 端点：带 tools 的请求把历史 CoT 作为 reasoning_content 发回去', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"answer":"查到了"}', reasoning_content: '第二轮想一下。' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 4 }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await client.completeAskLoop?.(loopPayload([{ reasoning: '先看数据边界。' }]))
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as {
+      tools?: unknown
+      messages: Array<{ role: string; content: string | null; reasoning_content?: string; tool_calls?: unknown[] }>
+    }
+    expect(body.tools).toBeDefined()
+    const assistant = body.messages.find((message) => message.role === 'assistant')
+    expect(assistant?.reasoning_content).toBe('先看数据边界。')
+    expect(assistant?.tool_calls).toHaveLength(1)
+    // 没给 CoT 的轮次不发空字段
+    expect(assistant?.content).toBeNull()
+  })
+
+  it('非 DeepSeek 端点不发 reasoning_content（严格网关会因未知字段 400）', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"answer":"查到了"}' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 4 }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch, { baseUrl: 'https://example.com/v1' })
+    await client.completeAskLoop?.(loopPayload([{ reasoning: '先看数据边界。' }]))
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as {
+      messages: Array<{ role: string; reasoning_content?: string }>
+    }
+    expect(body.messages.every((message) => message.reasoning_content === undefined)).toBe(true)
+  })
+
+  it('400 的错误正文进 detail（日志能看清原因），界面消息仍是 LLM HTTP 400', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { message: 'Missing reasoning_content in messages[2]', type: 'invalid_request_error' }
+          }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } }
+        )
+    )
+    const error = await makeClient(fetchImpl as unknown as typeof fetch)
+      .completeJson(payload())
+      .catch((err: unknown) => err)
+
+    expect(error).toBeInstanceOf(LlmHttpError)
+    expect((error as LlmHttpError).message).toBe('LLM HTTP 400')
+    expect((error as LlmHttpError).detail).toContain('Missing reasoning_content')
+    // 正文压成单行、有上限（不把多行错误原文原样塞进日志）
+    expect((error as LlmHttpError).detail).not.toContain('\n')
   })
 })

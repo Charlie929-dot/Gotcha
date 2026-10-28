@@ -162,12 +162,19 @@ export type RedactableAskLoopToolResult =
 export interface RedactableAskLoopTurn {
   toolCall: { name: string; arguments: Record<string, unknown> }
   toolResult: RedactableAskLoopToolResult
+  /**
+   * 这一轮模型给出的思维链（只有开 thinking 才有）。回传给模型时**原样**带回去：
+   * DeepSeek 在请求带 `tools` 时要求回传历史各轮 CoT，缺了就从第 2 轮起 400。
+   */
+  reasoning?: string
 }
 
 /** 策略处理后的工具调用（arguments 里的字符串叶子已过策略） */
 export interface CloudAskLoopTurn {
   readonly toolCall: { readonly name: string; readonly arguments: Record<string, unknown> }
   readonly toolResult: Record<string, unknown>
+  /** 同一轮的思维链（模型自己产出的，只回传给同一个模型，不落盘界面之外） */
+  readonly reasoning?: string
 }
 
 declare const chainAskLoopBrand: unique symbol
@@ -543,7 +550,12 @@ export function buildAskLoopPayload(
         name: guardToolName(policy, turn.toolCall.name),
         arguments: guardLoopArgs(policy, turn.toolCall.arguments)
       },
-      toolResult: view
+      toolResult: view,
+      // 思维链是模型基于**已脱敏**的工具结果产出的，原样回传（不回传会 400）；
+      // 不裁剪：DeepSeek 要求把 CoT 完整带回去。
+      ...(typeof turn.reasoning === 'string' && turn.reasoning !== ''
+        ? { reasoning: turn.reasoning }
+        : {})
     })
   }
 

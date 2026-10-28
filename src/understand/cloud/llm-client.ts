@@ -32,6 +32,13 @@ export interface LlmMessage {
   toolCalls?: readonly LlmToolCall[]
   /** role=tool 时：对应调用的 id */
   toolCallId?: string
+  /**
+   * role=assistant 这一轮的思维链（DeepSeek `reasoning_content` 原样回传）。
+   * 带 `tools` 的请求必须回传历史各轮的 CoT，否则网关从第 2 轮起直接 400
+   * （见 gotchas「DeepSeek thinking + tools 必须回传 reasoning_content」）。
+   * 非 DeepSeek 端点不发这个字段：严格网关会因未知参数 400。
+   */
+  reasoningContent?: string
 }
 
 export interface LlmUsage {
@@ -132,10 +139,25 @@ export class LlmError extends Error {
 }
 
 export class LlmHttpError extends LlmError {
-  constructor(readonly status: number) {
+  constructor(
+    readonly status: number,
+    /**
+     * 网关错误正文的前若干字（只进主进程日志，**不进界面**）。
+     * 用于排 400：「缺 reasoning_content」「messages 顺序不对」这类信息只在正文里。
+     */
+    readonly detail?: string
+  ) {
     super(`LLM HTTP ${status}`, 'http')
     this.name = 'LlmHttpError'
   }
+}
+
+/** 网关错误正文留痕上限：够看清原因，又不至于把日志撑大 */
+export const LLM_ERROR_DETAIL_MAX_CHARS = 300
+
+/** 网关错误正文 → 单行摘要（截断；调用方只写日志） */
+export function summarizeErrorBody(body: string): string {
+  return body.replace(/\s+/g, ' ').trim().slice(0, LLM_ERROR_DETAIL_MAX_CHARS)
 }
 
 export class LlmTimeoutError extends LlmError {

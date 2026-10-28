@@ -14,6 +14,8 @@
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-29（凌晨三）：**问记忆过程可见：开 thinking + CoT / 工具轨迹（D55 ③）**（`feat/ask-thinking-trace`）。DeepSeek 工具轮不再发 `thinking:disabled`（默认开启），`max_tokens` 从 2000 抬到 6000（CoT 先吃 token，2000 会把最终 JSON 截断）；`requestOnce` 解析 `reasoning_content`（兼容 `reasoning`）带回；工具循环每轮记 `trace.steps`（思考 + 工具调用摘要：命中几段 / 打开哪段 / 问答几条），随结果返回并落 `ask-history.jsonl`（旧行兼容、坏 trace 整行跳过），答案卡加「思考过程（N 轮）」折叠区；暂停续查的检查点也带 steps。闸门：`npm test` **1397 条（127 文件）全绿**、`npm run typecheck` 通过。**未验证**：真实 DeepSeek 在 tool_calls 轮是否返回 `reasoning_content`（本机未出网）；token 成本会随 CoT 上升。
+
 - 2026-10-29（凌晨二）：**问记忆：会话隔离 + 最近段指代 + 最早检索 + 默认新会话（D55 ②④）**（`fix/ask-context-scope`）。① `ask_history` 默认只查本会话（主进程按 `conversationId` 过滤、工具结果带 `session: current|other`；`scope:"all"` 才跨会话），提示词禁止把 other 说成「你刚才问的」；② 提问前最后一段（应用 / 标题 / 时刻）随载荷送模型当「这个界面 / 刚才那个」的指代线索（过脱敏，密码类 app 整条不出云；只当线索，引用仍要经检索）；③ `search_info` 加 `order:"oldest"`（纯过滤 `ORDER BY start_ts ASC`），「第一次 DSH」不再靠 from/to 二分逼近；④ 问记忆窗口打开默认新会话，顶部多「继续上一段」入口，不再静默接上最近会话；出云确认文案补「提问前最后一段窗口的应用与标题」。闸门：`npm test` **1394 条（127 文件）全绿**、`npm run typecheck` 通过。**未做**：thinking 与 CoT（D55 ③，下一批）。
 
 - 2026-10-29（凌晨）：**问记忆「查到了但不够」出口（D55 ①）**（`fix/ask-insufficient`）。起点是聊天记录复盘：10-29 00:17「我第一次打开这个界面是啥时候」9 轮 / 9 次工具调用 / 命中 40 段（去重 27），最终 0 引用；`parseChainReply` 判「引用全被剥空」把模型说明整段丢掉，界面只剩固定句「信息链里没找到」。改法：新增 `insufficient` 出口——模型写了说明但没给引用时保留（给了引用却全被白名单剥掉的仍按没找到收口，编造不放行），说明 + 0～3 条相关引用 + 最多 5 条「检索到的段」（只标相关、不当结论）；单发回退路径同口径；`ask-history.jsonl` 新增 `kind=insufficient` 与可选 `related`（旧行兼容，坏形状整行跳过）；界面把命中口径改成「命中 40 段（去重 27）」，没引用时列「检索到的段」可点开证据；提示词加第四种收尾形状，并把「不要罗列」放宽到「最多点 3 段」。闸门：`npm test` **1389 条（127 文件）全绿**、`npm run typecheck` 通过。**未做**：会话口径 / 最近段指代 / `order=oldest` / thinking 与 CoT（D55 ②③④，后续两批）。

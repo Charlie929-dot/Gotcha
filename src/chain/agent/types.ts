@@ -63,13 +63,51 @@ export interface ChainAskStats {
   toolCalls?: number
 }
 
+/** 「过程可见」里的一步工具调用（只存摘要，不存正文） */
+export interface ChainAskTraceTool {
+  name: string
+  /** 模型给的参数（keywords / from / to / app / order / segmentId …；就是问题里的词，不含正文） */
+  arguments: Record<string, unknown>
+  /** 结果的一句话摘要（命中几段 / 打开哪段 / 失败原因） */
+  summary: string
+}
+
+export interface ChainAskTraceStep {
+  /** 第几轮（从 1 开始） */
+  turn: number
+  /** 模型这一轮的思考（DeepSeek reasoning_content；没开 thinking / 网关没给就缺省） */
+  thinking?: string
+  /** 这一轮发起的工具调用（收尾轮为空） */
+  tools: ChainAskTraceTool[]
+}
+
+/**
+ * 一次问答的过程（D55 ③）：每轮思考 + 工具调用摘要。
+ * 只用于展示 / 落盘，不写回下一次请求；不含段正文。
+ */
+export interface ChainAskTrace {
+  steps: ChainAskTraceStep[]
+}
+
 export type ChainAskResult =
-  | { kind: 'answer'; answer: string; citations: ChainAskCitation[]; stats: ChainAskStats }
+  | {
+      kind: 'answer'
+      answer: string
+      citations: ChainAskCitation[]
+      stats: ChainAskStats
+      trace?: ChainAskTrace
+    }
   /**
    * 模型选择先向用户确认（缺关键信息 / 检索结果撑不起答案）：
    * 不硬凑回答，而是抛回一个问题 + 可点的候选，由用户补一句再问。
    */
-  | { kind: 'clarify'; question: string; options: string[]; stats: ChainAskStats }
+  | {
+      kind: 'clarify'
+      question: string
+      options: string[]
+      stats: ChainAskStats
+      trace?: ChainAskTrace
+    }
   /**
    * 检索轮数快用完、模型还想继续查：先停下来问用户一句「还要继续吗」。
    * `resumeId` 是主进程内存里的检查点句柄（不落盘）：选「继续」就带着它恢复循环
@@ -81,6 +119,7 @@ export type ChainAskResult =
       options: string[]
       stats: ChainAskStats
       resumeId?: string
+      trace?: ChainAskTrace
     }
   /**
    * 查到了相关段、但撑不起结论（2026-10-29）：模型给「查到了什么、为什么不够」，
@@ -95,6 +134,7 @@ export type ChainAskResult =
       /** 检索到、但没进引用的段（最多 5 条，按检索顺序），给人一个入口 */
       related: ChainAskRelatedSegment[]
       stats: ChainAskStats
+      trace?: ChainAskTrace
     }
   /**
    * 没命中 / 引用全被剥空：**不调 LLM 编话**，UI 直接展示 `NO_EVIDENCE_TEXT`。
@@ -110,8 +150,15 @@ export type ChainAskResult =
       citations?: ChainAskCitation[]
       /** 检索到、但没进引用的段（同 `insufficient`） */
       related?: ChainAskRelatedSegment[]
+      trace?: ChainAskTrace
     }
-  | { kind: 'error'; reason: ChainAskErrorReason; message: string; stats: ChainAskStats }
+  | {
+      kind: 'error'
+      reason: ChainAskErrorReason
+      message: string
+      stats: ChainAskStats
+      trace?: ChainAskTrace
+    }
 
 /** 续问时带上的上一轮对话（问题 + 最终答复 / 澄清问题），让「那上午呢」这类指代有处可落 */
 export interface ChainAskTurnContext {

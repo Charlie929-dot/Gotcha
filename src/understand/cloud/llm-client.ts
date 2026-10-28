@@ -49,6 +49,11 @@ export interface LlmAskLoopResult {
   toolCalls?: readonly LlmToolCall[]
   json?: unknown
   usage: LlmUsage
+  /**
+   * 模型这一轮的思考（DeepSeek `reasoning_content`；只有开了 thinking 才有）。
+   * 只用于「过程可见」（落盘 / 界面折叠展示），不写回下一次请求。
+   */
+  reasoning?: string
 }
 
 export interface LlmRepairContext {
@@ -167,11 +172,12 @@ export class LlmAbortError extends LlmError {
 }
 
 export type FakeLlmReply =
-  | { json: unknown; usage?: Partial<LlmUsage> }
+  | { json: unknown; usage?: Partial<LlmUsage>; reasoning?: string }
   /** 工具循环脚本：本轮让模型发起这些调用（arguments 缺省为空对象） */
   | {
       toolCalls: ReadonlyArray<{ id?: string; name: string; arguments?: Record<string, unknown> }>
       usage?: Partial<LlmUsage>
+      reasoning?: string
     }
   | Error
 
@@ -227,12 +233,17 @@ export class FakeLlmClient implements LlmClient {
       // 单发路径收到了脚本化的工具调用：视为结构错误，与真客户端的解析失败同路
       throw new LlmParseError('FakeLlmClient: 工具循环回复被单发路径消费')
     }
-    return { json: reply.json, usage: this.usageOf(reply) }
+    return {
+      json: reply.json,
+      usage: this.usageOf(reply),
+      ...(reply.reasoning !== undefined ? { reasoning: reply.reasoning } : {})
+    }
   }
 
   private takeLoop(options: LlmCompleteOptions): LlmAskLoopResult {
     const reply = this.takeReply(options)
-    if (!('toolCalls' in reply)) return { json: reply.json, usage: this.usageOf(reply) }
+    const reasoning = reply.reasoning !== undefined ? { reasoning: reply.reasoning } : {}
+    if (!('toolCalls' in reply)) return { json: reply.json, usage: this.usageOf(reply), ...reasoning }
     return {
       toolCalls: reply.toolCalls.map((call, index) => ({
         // 没给 id 就造一个确定性的：回填 tool 消息时能对上即可
@@ -240,7 +251,8 @@ export class FakeLlmClient implements LlmClient {
         name: call.name,
         arguments: call.arguments ?? {}
       })),
-      usage: this.usageOf(reply)
+      usage: this.usageOf(reply),
+      ...reasoning
     }
   }
 

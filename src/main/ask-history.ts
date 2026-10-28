@@ -14,7 +14,10 @@ import type {
   ChainAskCitation,
   ChainAskRelatedSegment,
   ChainAskResult,
-  ChainAskStats
+  ChainAskStats,
+  ChainAskTrace,
+  ChainAskTraceStep,
+  ChainAskTraceTool
 } from '../chain/agent/types'
 
 export const ASK_HISTORY_FILE = 'ask-history.jsonl'
@@ -46,6 +49,11 @@ export interface AskHistoryEntry {
   reason?: string
   /** `kind=error` 时的可读消息 */
   message?: string
+  /**
+   * 过程（D55 ③）：每轮思考 + 工具调用摘要。
+   * 老记录没有这个字段；只用于展示，不写回请求。
+   */
+  trace?: ChainAskTrace
   stats: ChainAskStats
 }
 
@@ -104,6 +112,38 @@ function isRelated(value: unknown): value is ChainAskRelatedSegment {
   )
 }
 
+/** 过程（D55 ③）：允许缺省；形状不对整行跳过（别让一条脏 trace 把整段对话读没） */
+function isTraceTool(value: unknown): value is ChainAskTraceTool {
+  if (typeof value !== 'object' || value === null) return false
+  const item = value as Record<string, unknown>
+  return (
+    typeof item.name === 'string' &&
+    item.name !== '' &&
+    typeof item.arguments === 'object' &&
+    item.arguments !== null &&
+    !Array.isArray(item.arguments) &&
+    typeof item.summary === 'string'
+  )
+}
+
+function isTraceStep(value: unknown): value is ChainAskTraceStep {
+  if (typeof value !== 'object' || value === null) return false
+  const step = value as Record<string, unknown>
+  return (
+    typeof step.turn === 'number' &&
+    Number.isFinite(step.turn) &&
+    (step.thinking === undefined || typeof step.thinking === 'string') &&
+    Array.isArray(step.tools) &&
+    step.tools.every(isTraceTool)
+  )
+}
+
+function isTrace(value: unknown): value is ChainAskTrace {
+  if (typeof value !== 'object' || value === null) return false
+  const trace = value as Record<string, unknown>
+  return Array.isArray(trace.steps) && trace.steps.every(isTraceStep)
+}
+
 /** 单行校验：坏行（旧格式 / 手改 / 写了一半）返回 null，读到就跳过、不整份作废 */
 export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
   if (typeof value !== 'object' || value === null) return null
@@ -131,6 +171,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
   if (data.conversationId !== undefined && (typeof data.conversationId !== 'string' || data.conversationId === '')) {
     return null
   }
+  if (data.trace !== undefined && !isTrace(data.trace)) return null
   if (data.kind === 'clarify') {
     if (!isClarify(data.clarify)) return null
   } else if (data.clarify !== undefined) {
@@ -150,6 +191,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
     ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
     ...(typeof data.message === 'string' ? { message: data.message } : {}),
     ...(typeof data.note === 'string' ? { note: data.note } : {}),
+    ...(isTrace(data.trace) ? { trace: data.trace } : {}),
     stats: data.stats
   }
 }
@@ -203,7 +245,9 @@ export function toHistoryEntry(
     question,
     stats: result.stats,
     ...(conversationId ? { conversationId } : {}),
-    ...(imagePath ? { imagePath } : {})
+    ...(imagePath ? { imagePath } : {}),
+    // 过程（D55 ③）：所有出口都带（暂停轮不落历史，最终结果会带完整 steps）
+    ...(result.trace ? { trace: result.trace } : {})
   }
   if (result.kind === 'answer') {
     return { ...base, kind: 'answer', answer: result.answer, citations: result.citations }

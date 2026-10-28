@@ -1215,6 +1215,55 @@ describe('工具循环 · schema 与执行器一致性', () => {
     // 收尾轮答复照常解析成 JSON（与普通轮同形）
     expect(result?.json).toMatchObject({ answer: '信息链里没找到' })
   })
+
+  it('工具轮开 thinking：reasoning_content 作为 reasoning 带回；max_tokens 抬到 6000', async () => {
+    const payload = buildChainAskLoopPayload({
+      question: '随便问问',
+      systemTime: SYSTEM_TIME,
+      freshness: NO_FRESHNESS,
+      turns: []
+    }).payload
+
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: '',
+                  reasoning_content: '先看看数据边界。',
+                  tool_calls: [{ id: 'c1', function: { name: 'get_freshness', arguments: '{}' } }]
+                }
+              }
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 20 }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+    )
+    const client = createDeepSeekClient({
+      baseUrl: 'https://api.deepseek.com',
+      model: 'deepseek-flash',
+      apiKey: 'test-key',
+      sleep: async () => {},
+      fetchImpl: fetchImpl as unknown as typeof fetch
+    })
+    const result = await client.completeAskLoop?.(payload)
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as {
+      thinking?: unknown
+      max_tokens?: number
+      tools?: unknown
+    }
+    // DeepSeek 工具轮不再显式关 thinking（默认开）；max_tokens 抬到 6000 免被 CoT 吃满
+    expect(body.thinking).toBeUndefined()
+    expect(body.max_tokens).toBe(6000)
+    expect(body.tools).toBeDefined()
+    expect(result?.reasoning).toBe('先看看数据边界。')
+    expect(result?.toolCalls?.[0]?.name).toBe('get_freshness')
+  })
 })
 
 /* ------------------------------------------------------------------ */

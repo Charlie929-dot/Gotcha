@@ -175,6 +175,7 @@
 | 菜单打开后鼠标移过去，球 600ms 后缩回 | 2026-10-28 真机反馈：菜单是独立窗口，鼠标从球移到菜单会离开球窗 → renderer 收到 `pointerleave` 进宽限 → 主进程游标兜底也认为「指针离开球」→ 球缩回，菜单悬空 | 菜单窗口开合必须报给球壳（`BallMenuOptions.onVisibilityChange` → `BallShell.setMenuOpen`），renderer 状态机加 `menuOpen`：打开期间忽略 `pointerleave` / `grace-expired` / `force-retract`，关闭后指针不在球上就进宽限；主进程 `checkCursor` 在菜单打开时不发强收。**失焦关闭也要报 `false`**，否则球会一直钉在展开态 |
 | 问记忆「命中 40 段」但回答卡只剩固定文案 | 2026-10-29 复盘 10-29 00:17 那轮：`parseChainReply` 在 citations 为空时直接返回 `no-citations`，循环层把整条说明丢掉、返回无 note 的 `no-evidence`，界面只能显示固定句；统计里 40 是各次 `search_info` 的累加、去重后只有 27 | 模型给了说明（没给引用）就保留成 `insufficient`：说明 + 0～3 条相关引用 + 最多 5 条「检索到的段」；只有**一条引用都没给**且本轮确实检索到段时才走这个口子（给了引用却全被白名单剥掉 = 编造，仍按没找到收口）；界面把 `hits` / `evidence` 分开显示，别让「命中很多」和「什么都没说」同时出现（D55 ①） |
 | `ask_history` 把全库问答当本会话 | 2026-10-29 复盘 10-29 00:17 那轮：工具只按时间过滤全库、摘要里连会话 id 都没有；模型把 00:09 / 00:11 别的会话的问题写成「再往前，你问过……」，看起来像上下文串了 | 默认只查本会话（主进程按 `conversationId` 过滤）；要跨会话必须显式 `scope:"all"`，每条带 `session`（current / other），提示词禁止混写（D55 ②） |
+| 开 thinking 后用默认 2000 `max_tokens` 会把最终 JSON 截断 | 2026-10-29 给工具循环开 thinking：DeepSeek V4 默认 thinking，CoT 先写、正文后写；`LLM_DEFAULTS.maxTokens = 2000` 在收尾轮容易 `finish_reason=length`、content 为空（代码注释里 2026-10-27 已记过一次同类） | 工具轮（`ask-loop` / `ask-loop-final`）单独把 `max_tokens` 抬到 6000；非工具轮仍显式关 thinking（结构化输出比 CoT 值钱）。**未验证**：真实 DeepSeek 在 tool_calls 轮是否返回 `reasoning_content` |
 
 ## 规则
 

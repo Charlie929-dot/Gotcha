@@ -14,6 +14,8 @@
 | M4 | 主动与解说（信号检索/弱提示/解说五区块） | ⬜ 未开工 |
 | M5 | 打磨合流（Obsidian/性能/隐私细节/打包） | ⬜ 未开工 |
 
+- 2026-10-28（晚）：**自由开发分支收口并入 main**（拍板人定，直推不走 PR；D50）。`vibe/docs-edit` 先快进并入 `vibe/free`（`3729e69`），再 **squash** 成 `a851f78` 落 `main`（134 文件 / +17 072 / −823）：性能优化 P0-1 / P0-3 / P0-4 与 P1-2~P1-6（`性能优化方案.md` §5.1–§5.16）、出云边界端口化（D49）、问记忆对话记录、两份立项方案移入 `docs/human` 并校订。`handover.md` 移出版本库（`.gitignore`，本地保留）；`vibe/docs-edit` 与 `vibe/free` 均已删，后续自由开发另开分支。验证：沿用 `94cc344` 的 `npm test` 1341 条 / 123 文件全绿 + `typecheck` + `build`，合并前未重跑（D47）。**未做**：P0-2 第二步（`capture.metadata_only` 仍 `0`，待真机开一天观察）、P1-1、P2-1~P2-5。
+
 - 2026-10-28：**两份立项方案移入 docs/human + 校订**。`记忆球-产品策划案.md` / `记忆球-产品技术方案.md` 从仓库根 `git mv` 到 `docs/human/`；新增 `docs/human/README.md` 复核表（策划案 11 项、技术方案 15 项 + 5 个共同缺口），两份文首加 2026-10-28 校订，正文就地修正 embedding bge-m3→bge-small、schema v5→v7+chain v4、`sensitive` 注释、单进程→多进程、sigma→Foam、键鼠钩子等；同步 `AGENTS.md` / `workflow.md` / 归档文档引用。纯文档，按 D47 免跑测试。
 
 - 2026-10-28：**出云安全边界化（D49）**（`vibe/docs-edit`）。`vibe/toolloop-sandbox` 改名 `vibe/free` 并推送；从 `vibe/free` 切 `vibe/docs-edit`，从 `main` 恢复 `AGENTS.md` + `docs/`。代码：问记忆载荷协议组装进 `src/chain/agent/payload.ts`（`AskOutbound` + `AskTextPolicy`），派生层协议进 `src/chain/derive/payload.ts`（`DeriveOutbound`），云端策略分别在 `understand/cloud/ask-outbound.ts` / `derive-outbound.ts`；核心 `ask.ts` / `loop.ts` / `tools.ts` / `derive/runner.ts` 不再 import `understand/cloud/redact`，旧导出保留兼容。新增 `docs/agent/cloud-boundary.md`（含其余掣肘项清单）与 `tests/unit/ask-outbound.test.ts`。验收：`npm run typecheck` 通过；`npx vitest run` 相关 7 个文件 **127 条全绿**；全量 `npm test` **1341 条（123 文件）全绿**、`npm run build` 通过。**未做**：本机模型路由（provider 是否本机尚未回传，组合根仍一律注入云端策略）。

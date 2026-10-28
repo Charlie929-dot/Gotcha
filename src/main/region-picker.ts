@@ -100,12 +100,25 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
   const hwnd = nativeHandle(win)
 
   /**
+   * 关掉边缘拖拽。**不能摘 WS_THICKFRAME**：真机探针显示这个无边框窗口根本没有该样式，
+   * 边缘 resize 是 Electron 自己回 `WM_NCHITTEST`（右下角回 HTBOTTOMRIGHT）。
+   * show + 铺满之后再 `setResizable(false)`：Electron 才不再回 resize 区，
+   * 且此时 min/max 钉在「全屏尺寸」，不会再被钳回工作区（实测 2026-10-28）。
+   */
+  const lockResize = (): boolean => {
+    if (win.isDestroyed()) return false
+    win.setResizable(false)
+    return win.isResizable() === false
+  }
+
+  /**
    * 盖满整屏 + 置于任务栏之上：顺序不能反（先定尺寸，再置顶）。
    * 置顶走原生一次 `SetWindowPos(HWND_TOPMOST)`（不抢焦点、不动尺寸）；没有原生模块才退回 Electron。
    */
   const coverScreen = (reason: 'initial' | 'blur'): void => {
     if (win.isDestroyed()) return
     win.setBounds(bounds, false)
+    const resizeLocked = lockResize()
     let nativeRaised = false
     if (grab && hwnd !== null) {
       try {
@@ -130,9 +143,19 @@ export async function pickRegion(options: PickRegionOptions): Promise<PickedRegi
       actual,
       display: bounds,
       covered,
-      topmost: nativeRaised ? 'native' : 'electron'
+      topmost: nativeRaised ? 'native' : 'electron',
+      resizeLocked
     })
   }
+
+  // 兜底：系统仍改了尺寸（DPI 切换 / 别的程序 SetWindowPos）就立刻铺回去
+  win.on('resize', () => {
+    if (win.isDestroyed()) return
+    const actual = win.getBounds()
+    if (actual.width !== bounds.width || actual.height !== bounds.height) {
+      win.setBounds(bounds, false)
+    }
+  })
 
   const result = await new Promise<PickedRegion | null>((resolve) => {
     let settled = false

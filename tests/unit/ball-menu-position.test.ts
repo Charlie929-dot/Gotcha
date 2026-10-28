@@ -40,37 +40,49 @@ describe('menuSize：按条目数算高', () => {
   })
 })
 
-describe('placeBallMenu：朝屏幕中心展开并夹回工作区', () => {
-  it('右边缘停靠：菜单放在球左侧，不越出右边界', () => {
+describe('placeBallMenu：朝屏幕中心展开、贴球角并夹回工作区', () => {
+  it('右边缘停靠：菜单放在球左侧，上沿贴球上沿（左上角），不越出右边界', () => {
     const ball = { x: 1472, y: 364, width: 64, height: 64 }
     const { x, y } = placeBallMenu(ball, MENU, WORK_AREA)
     expect(x).toBe(ball.x - MENU.width + MENU_OVERLAP)
     expect(x + MENU.width).toBeLessThanOrEqual(ball.x + ball.width)
-    expect(y).toBe(364 + 32 - 85)
+    // 不再垂直居中：上沿与球上沿齐平
+    expect(y).toBe(ball.y)
   })
 
-  it('左边缘停靠：菜单放在球右侧', () => {
+  it('左边缘停靠：菜单放在球右侧，同样贴上沿', () => {
     const ball = { x: 0, y: 300, width: 64, height: 64 }
-    const { x } = placeBallMenu(ball, MENU, WORK_AREA)
+    const { x, y } = placeBallMenu(ball, MENU, WORK_AREA)
     expect(x).toBe(ball.x + ball.width - MENU_OVERLAP)
+    expect(y).toBe(ball.y)
   })
 
-  it('顶部停靠：垂直方向夹回工作区上沿', () => {
+  it('顶部停靠：上沿贴工作区上沿', () => {
     const ball = { x: 700, y: 0, width: 64, height: 64 }
     expect(placeBallMenu(ball, MENU, WORK_AREA).y).toBe(0)
   })
 
-  it('底部停靠：不越出工作区下沿', () => {
+  it('底部停靠：上沿放不下时翻成下沿贴球下沿（左下 / 右下角）', () => {
     const ball = { x: 700, y: 800, width: 64, height: 64 }
     const { y } = placeBallMenu(ball, MENU, WORK_AREA)
+    // 菜单底边与球底边齐平，且不越出工作区
+    expect(y + MENU.height).toBe(ball.y + ball.height)
     expect(y + MENU.height).toBeLessThanOrEqual(WORK_AREA.height)
+  })
+
+  it('自由位靠近底部也翻转，不把菜单顶出下沿', () => {
+    const ball = { x: 700, y: 700, width: 64, height: 64 }
+    const { y } = placeBallMenu(ball, MENU, WORK_AREA)
+    expect(y + MENU.height).toBe(764)
+    expect(y).toBe(594)
   })
 
   it('第二块屏（负坐标工作区）也按屏幕中心判断方向', () => {
     const leftDisplay = { x: -1536, y: 0, width: 1536, height: 864 }
     const ball = { x: -1536, y: 400, width: 64, height: 64 }
-    const { x } = placeBallMenu(ball, MENU, leftDisplay)
+    const { x, y } = placeBallMenu(ball, MENU, leftDisplay)
     expect(x).toBe(-1536 + 64 - MENU_OVERLAP)
+    expect(y).toBe(400)
   })
 
   it('工作区比菜单还窄时贴住左沿，不返回负偏移', () => {

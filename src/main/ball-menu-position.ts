@@ -7,7 +7,9 @@
  * 规则：
  * - 水平方向朝**屏幕中心**那一侧展开：球在右半边就把菜单放在球左侧，反之放右侧；
  *   不这样做的话，贴边停靠的球会把菜单顶出工作区，只剩一半。
- * - 垂直方向与球心对齐，越界就夹回工作区（顶部 / 底部停靠时）。
+ * - 垂直方向**贴球角**：优先让菜单上沿对齐球上沿（球左上 / 右上角），下方放不下
+ *   就翻成菜单下沿对齐球下沿（左下 / 右下角），最后再夹回工作区。
+ *   不再与球心垂直居中对齐——菜单比球高得多，居中会变成「一条横在球旁边」。
  * - 允许和球重叠 `OVERLAP`，看起来像从球上长出来的。
  */
 
@@ -57,7 +59,16 @@ export function placeBallMenu(ball: Rect, menu: MenuSize, workArea: Rect): { x: 
     ? ball.x - menu.width + MENU_OVERLAP
     : ball.x + ball.width - MENU_OVERLAP
   const x = clamp(rawX, workArea.x, workArea.x + workArea.width - menu.width)
-  const rawY = ball.y + ball.height / 2 - menu.height / 2
-  const y = clamp(rawY, workArea.y, workArea.y + workArea.height - menu.height)
+
+  // 贴角：先试「上沿贴球上沿」，下方放不下（球靠近工作区底部）就翻成「下沿贴球下沿」。
+  // 注意判断用菜单真实高度，不用球心——球只有 64px，菜单通常高一倍以上。
+  const topAligned = ball.y
+  const bottomAligned = ball.y + ball.height - menu.height
+  const fitsBelow = topAligned + menu.height <= workArea.y + workArea.height
+  const y = clamp(
+    fitsBelow ? topAligned : bottomAligned,
+    workArea.y,
+    workArea.y + workArea.height - menu.height
+  )
   return { x: Math.round(x), y: Math.round(y) }
 }

@@ -1923,6 +1923,8 @@ if (primaryInstance) {
       devServerUrl: process.env['ELECTRON_RENDERER_URL'],
       htmlPath: join(__dirname, '../renderer/ball-menu/index.html'),
       preloadPath: join(__dirname, '../preload/ball-menu.js'),
+      // D54：菜单是独立窗口，打开时球收到 pointerleave 会缩回；由球壳钉住展开
+      onVisibilityChange: (open) => ballShell?.setMenuOpen(open),
       log: captureLog
     })
 

@@ -21,6 +21,12 @@ export interface BallMenuOptions {
   devServerUrl?: string
   htmlPath: string
   preloadPath: string
+  /**
+   * 菜单可见性变化（打开 / 关闭都报一次）。球壳据此在菜单打开期间钉住展开：
+   * 菜单是独立窗口，鼠标移过去时球会收到 `pointerleave`，不钉住就会缩回。
+   * 失焦关闭 / 选中动作 / 加载失败 / 程序关闭都必须落到 `open=false`。
+   */
+  onVisibilityChange?: (open: boolean) => void
   log(level: 'warn' | 'error', msg: string, data?: Record<string, unknown>): void
 }
 
@@ -50,6 +56,18 @@ export function createBallMenu(options: BallMenuOptions): BallMenuShell {
   let loaded = false
   let revealed = false
   let entries: TrayMenuEntry[] = []
+  /** 已经报给外部的可见性：只在变化时报，避免逐帧 show / hide 抖动 */
+  let reportedOpen = false
+
+  const reportOpen = (open: boolean): void => {
+    if (reportedOpen === open) return
+    reportedOpen = open
+    try {
+      options.onVisibilityChange?.(open)
+    } catch (error) {
+      options.log('warn', 'ball menu visibility callback failed', { error: String(error) })
+    }
+  }
 
   const pushEntries = (): void => {
     if (!win || win.isDestroyed() || !loaded) return
@@ -61,6 +79,7 @@ export function createBallMenu(options: BallMenuOptions): BallMenuShell {
     win.show()
     win.focus()
     pushEntries()
+    reportOpen(true)
   }
 
   const create = (): BrowserWindow => {
@@ -93,8 +112,10 @@ export function createBallMenu(options: BallMenuOptions): BallMenuShell {
 
     created.on('blur', () => {
       if (!created.isDestroyed()) created.hide()
+      reportOpen(false)
     })
     created.on('closed', () => {
+      reportOpen(false)
       if (win === created) {
         win = null
         loaded = false
@@ -108,9 +129,11 @@ export function createBallMenu(options: BallMenuOptions): BallMenuShell {
         revealed = true
         created.show()
         created.focus()
+        reportOpen(true)
       }
     })
     created.webContents.on('did-fail-load', (_event, code, desc) => {
+      reportOpen(false)
       options.log('warn', 'ball menu page failed to load', { code, desc })
     })
 
@@ -130,6 +153,7 @@ export function createBallMenu(options: BallMenuOptions): BallMenuShell {
   const close = (): void => {
     if (!win || win.isDestroyed()) return
     win.hide()
+    reportOpen(false)
   }
 
   const select = (id: string): void => {
@@ -181,6 +205,9 @@ export function createBallMenu(options: BallMenuOptions): BallMenuShell {
         width: menu.width,
         height: menu.height
       })
+      // 首次打开要等页面加载完才 show；先报「打开」把球钉住，避免加载那一下球先缩回。
+      // 加载失败 / 失焦 / 关闭都会报回 false。
+      reportOpen(true)
       if (loaded) reveal()
       // 首次打开：等 did-finish-load 里统一 show + push（避免白屏闪一下）
     },
@@ -194,6 +221,7 @@ export function createBallMenu(options: BallMenuOptions): BallMenuShell {
       win = null
       loaded = false
       revealed = false
+      reportOpen(false)
     }
   }
 }

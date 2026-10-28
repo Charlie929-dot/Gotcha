@@ -19,6 +19,9 @@
  * 自动缩回兜底（D16）：renderer 负责 600ms 宽限计时；主进程在展开 / 宽限期间每 50ms
  * 用 `screen.getCursorScreenPoint()` 检查真实指针，离开窗口安全区（64×64 + 8px）超过
  * 宽限 + 100ms 后发 `ball:force-retract`，保证丢事件时也能收回。
+ *
+ * 右键菜单打开期间（D54）：球钉住展开（`menuOpen`）——菜单是独立窗口，鼠标移过去时
+ * 球会收到 `pointerleave`，不钉住就会缩回；这期间也不发兜底强收。
  */
 
 import { BrowserWindow, ipcMain, screen, type IpcMainEvent, type IpcMainInvokeEvent, type Rectangle } from 'electron'
@@ -83,6 +86,8 @@ export interface BallShell {
   setStatus(status: CaptureStatus): void
   /** 角标：null 清除；页面重载后自动重放最近一条 */
   showNotice(notice: BallNotice | null): void
+  /** 右键菜单开合：打开期间钉住展开（D54），与 `ball-menu.ts` 的可见性回调配对 */
+  setMenuOpen(open: boolean): void
   reposition(): void
   dispose(): void
 }
@@ -229,14 +234,18 @@ export function createBallShell(options: BallShellOptions): BallShell {
 
   let pointerInside = false
   let interaction: BallRetractState = 'idle'
+  /** 右键菜单是否打开（D54）：打开期间不许穿透、不算离开、不发兜底强收 */
+  let menuOpen = false
   let watcher: ReturnType<typeof setInterval> | null = null
   let outsideSince: number | null = null
   let forceSent = false
 
-  /** 穿透开关：只有缩入态且指针不在球上时才恢复穿透（D16） */
+  /** 穿透开关：只有缩入态且指针不在球上、菜单也没开时才恢复穿透（D16 / D54） */
   const applyIgnore = (): void => {
     if (win.isDestroyed()) return
-    win.setIgnoreMouseEvents(!(pointerInside || interaction !== 'idle'), { forward: true })
+    win.setIgnoreMouseEvents(!(pointerInside || interaction !== 'idle' || menuOpen), {
+      forward: true
+    })
   }
 
   const stopWatcher = (): void => {
@@ -248,9 +257,9 @@ export function createBallShell(options: BallShellOptions): BallShell {
     forceSent = false
   }
 
-  /** 兜底：展开 / 宽限期间检查真实指针，离开安全区超时后强制缩回 */
+  /** 兜底：展开 / 宽限期间检查真实指针，离开安全区超时后强制缩回；菜单打开期间不判 */
   const checkCursor = (): void => {
-    if (win.isDestroyed() || !win.isVisible()) return
+    if (win.isDestroyed() || !win.isVisible() || menuOpen) return
     const decision = decideRetract({
       state: interaction,
       cursor: screen.getCursorScreenPoint(),
@@ -289,6 +298,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
     applyIgnore()
     pushStatus(options.getStatus())
     pushPlacement()
+    if (!win.isDestroyed()) win.webContents.send('ball:menu', menuOpen)
     pushNotice(latestNotice)
   })
 
@@ -459,6 +469,12 @@ export function createBallShell(options: BallShellOptions): BallShell {
     window: win,
     setStatus: (status) => pushStatus(status),
     showNotice: (notice) => pushNotice(notice),
+    setMenuOpen: (open) => {
+      if (menuOpen === open) return
+      menuOpen = open
+      if (!win.isDestroyed()) win.webContents.send('ball:menu', open)
+      applyIgnore()
+    },
     reposition,
     dispose: () => {
       screen.removeListener('display-added', reposition)

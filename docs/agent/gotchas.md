@@ -171,6 +171,8 @@
 | 球会不会被 WGC 拍进去（未定论） | 2026-10-28 抽查：球窗口（64 DIP）在 `ball.json` 记的右缘位置、截图像素里没找到球；但**没做「显示 vs 隐藏」对照**，`WDA_EXCLUDEFROMCAPTURE` 在 WGC 下是否生效仍未验证（旧结论只在 `desktopCapturer` 下验过） | 只影响选区截图（用户自己框的区域，球在图边缘最多算杂物）；常驻采集 / 证据图仍走 Chromium 流，不受影响。要结论就抓一次带球 / 藏球两张图做逐像素 diff，再写死 |
 | `Menu.popup()` 在 `focusable:false` 的球窗上点别处不消失 | 2026-10-28 真机：球右键菜单弹出来后，点桌面 / 别的窗口都收不掉，只能点菜单项或按 Esc。球窗实测 `exstyle=0x08280028`（含 `WS_EX_NOACTIVATE`）——原生弹出菜单要靠「所有者窗口在前台」才能靠点击外部收掉，非激活窗口调不起前台 | 别再试图给球窗临时加焦点：改成**独立可聚焦的自绘小窗**（`main/ball-menu.ts`），`blur` 即 `hide()`；点别处会先激活别的窗口 → blur → 关闭。菜单条目仍由 `buildTrayMenu()` 生成，别复制文案 |
 | 测球右键时「右键没反应」 | 2026-10-28 写验收脚本时踩到：球窗平时是 `WS_EX_TRANSPARENT`（穿透），`WindowFromPoint` 返回的是下层窗口；而且可见的只有半颗球（停靠缩进 32px），鼠标落在窗口矩形里但**不在球圆内**也不会展开 | 先 `SetCursorPos` 到球**可见那半颗**的中心（右停靠：窗口 left+54、top+32），再注入几次相对 `mouse_event(MOVE)`（`SetCursorPos` 本身不产生移动消息，Electron 的 forward 收不到），等 `exstyle` 的 `0x20`（TRANSPARENT）掉掉再右键。PowerShell 是 DPI-unaware，`GetWindowRect` / `SetCursorPos` 用的都是虚拟坐标（1920×1080@125% → 1536×864），别拿物理像素去点 |
+| 球右键菜单按球心垂直居中 → 菜单「横在球旁边」 | 2026-10-28 真机反馈：菜单 158px 高、球只有 64px，按球心居中放会上下各多出约 47px，看起来像一条横带挂在球旁，不像从球上长出来 | 垂直方向改成**贴角**：优先 `y = ball.y`（菜单上沿贴球上沿），`ball.y + menu.height` 超出工作区下沿就翻成 `y = ball.y + ball.height - menu.height`（下沿贴球下沿），最后再夹回工作区；水平方向仍朝屏幕中心那一侧。单测覆盖四角与翻转（`tests/unit/ball-menu-position.test.ts`） |
+| 菜单打开后鼠标移过去，球 600ms 后缩回 | 2026-10-28 真机反馈：菜单是独立窗口，鼠标从球移到菜单会离开球窗 → renderer 收到 `pointerleave` 进宽限 → 主进程游标兜底也认为「指针离开球」→ 球缩回，菜单悬空 | 菜单窗口开合必须报给球壳（`BallMenuOptions.onVisibilityChange` → `BallShell.setMenuOpen`），renderer 状态机加 `menuOpen`：打开期间忽略 `pointerleave` / `grace-expired` / `force-retract`，关闭后指针不在球上就进宽限；主进程 `checkCursor` 在菜单打开时不发强收。**失焦关闭也要报 `false`**，否则球会一直钉在展开态 |
 
 ## 规则
 

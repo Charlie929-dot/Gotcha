@@ -6,13 +6,14 @@
  * 托盘图标用内联 PNG（nativeImage），不新增依赖。
  *
  * D51（2026-10-28 拍板）：图谱窗口与时间线窗口的 UI 入口全部摘除——代码与数据保留，
- * 但用户在界面上再也打不开它们；菜单只剩「问记忆 / 记录开关 / 退出」。
+ * 但用户在界面上再也打不开它们；菜单只剩「问记忆 / 设置 / 记录开关 / 退出」。
+ * D53（2026-10-28 拍板）：设置抽屉迁进问记忆窗口，托盘与球右键各加一项「设置」直达。
  */
 
 import type { CaptureStatus } from './capture-controller'
 import type { MenuItemConstructorOptions } from 'electron'
 
-export type TrayMenuActionId = 'open-ask' | 'toggle-capture' | 'quit'
+export type TrayMenuActionId = 'open-ask' | 'open-settings' | 'toggle-capture' | 'quit'
 
 export interface TrayMenuAction {
   id: TrayMenuActionId
@@ -30,6 +31,8 @@ export type TrayMenuEntry = TrayMenuAction | TrayMenuSeparator
 export interface TrayMenuActions {
   /** 问记忆窗口（S3-lite） */
   openAsk(): void
+  /** 打开问记忆并展开设置抽屉（D53：图谱入口封存后，设置只剩这一个入口） */
+  openSettings(): void
   toggleCapture(): void
   quit(): void
 }
@@ -50,6 +53,7 @@ export function toggleEnabled(status: CaptureStatus): boolean {
 export function buildTrayMenu(status: CaptureStatus, actions: TrayMenuActions): TrayMenuEntry[] {
   return [
     { id: 'open-ask', label: '问记忆', enabled: true, click: actions.openAsk },
+    { id: 'open-settings', label: '设置', enabled: true, click: actions.openSettings },
     { type: 'separator' },
     {
       id: 'toggle-capture',

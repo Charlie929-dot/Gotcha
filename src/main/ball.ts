@@ -21,7 +21,7 @@
  * 宽限 + 100ms 后发 `ball:force-retract`，保证丢事件时也能收回。
  */
 
-import { BrowserWindow, Menu, ipcMain, screen, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron'
+import { BrowserWindow, ipcMain, screen, type IpcMainEvent, type IpcMainInvokeEvent, type Rectangle } from 'electron'
 import type { CaptureStatus } from './capture-controller'
 import {
   BALL_WINDOW_SIZE,
@@ -42,7 +42,7 @@ import {
   decideRetract,
   type BallRetractState
 } from './ball-retract'
-import { buildTrayMenu, toMenuTemplate } from './tray-menu'
+import { buildTrayMenu, type TrayMenuEntry } from './tray-menu'
 
 /**
  * 球上角标（m1b-plan §3 Phase 2）：
@@ -65,6 +65,14 @@ export interface BallShellOptions {
   openRegionAsk(): void
   /** 问记忆窗口（S3-lite） */
   openAsk(): void
+  /** 打开问记忆并展开设置（D53：设置只剩这一个入口） */
+  openSettings(): void
+  /**
+   * 右键菜单（自绘，D53 起不用原生 `Menu.popup`）：球窗 `focusable:false`，
+   * 原生菜单点别处收不掉。几何 / 窗口 / 失焦关闭都在 `ball-menu.ts`。
+   */
+  showMenu(entries: readonly TrayMenuEntry[], anchor: Rectangle): void
+  hideMenu(): void
   toggleCapture(): void
   quit(): void
   log(level: 'info' | 'warn' | 'error', msg: string, data?: Record<string, unknown>): void
@@ -355,6 +363,8 @@ export function createBallShell(options: BallShellOptions): BallShell {
 
   const onDragStart = (event: IpcMainEvent, point: unknown): void => {
     if (!ensureSender(event) || !isPointerPoint(point)) return
+    // 开始拖球时菜单必须让位：它是独立窗口，不会因为拖球自动失焦
+    options.hideMenu()
     const [x, y] = win.getPosition()
     drag = { offsetX: x - point.screenX, offsetY: y - point.screenY, lastMoveAt: 0 }
   }
@@ -402,12 +412,14 @@ export function createBallShell(options: BallShellOptions): BallShell {
 
   const onContextMenu = (event: IpcMainEvent): void => {
     if (!ensureSender(event)) return
-    const template = buildTrayMenu(options.getStatus(), {
+    // 菜单条目与托盘同一份（文案 / 顺序 / 禁用态只维护一处）
+    const entries = buildTrayMenu(options.getStatus(), {
       openAsk: options.openAsk,
+      openSettings: options.openSettings,
       toggleCapture: options.toggleCapture,
       quit: options.quit
-    }).map(toMenuTemplate)
-    Menu.buildFromTemplate(template).popup({ window: win })
+    })
+    options.showMenu(entries, win.getBounds())
   }
 
   const onCurrentStatus = (event: IpcMainInvokeEvent): CaptureStatus => {
@@ -452,6 +464,7 @@ export function createBallShell(options: BallShellOptions): BallShell {
       screen.removeListener('display-added', reposition)
       screen.removeListener('display-removed', reposition)
       screen.removeListener('display-metrics-changed', reposition)
+      options.hideMenu()
       stopWatcher()
       ipcMain.removeListener('ball:pointer-inside', onPointerInside)
       ipcMain.removeListener('ball:interaction-state', onInteractionState)

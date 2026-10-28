@@ -26,7 +26,9 @@ export default defineConfig({
           ask: resolve(__dirname, 'src/renderer/ask-preload.ts'),
           // 段二：选区遮罩 / 浮动输入框（各自的 preload 与页面一一对应）
           region: resolve(__dirname, 'src/renderer/region-preload.ts'),
-          'ask-popup': resolve(__dirname, 'src/renderer/ask-popup-preload.ts')
+          'ask-popup': resolve(__dirname, 'src/renderer/ask-popup-preload.ts'),
+          // 球右键菜单（自绘小窗；原生菜单在非激活球窗上收不掉，D53）
+          'ball-menu': resolve(__dirname, 'src/renderer/ball-menu-preload.ts')
         }
       }
     }
@@ -47,7 +49,9 @@ export default defineConfig({
           ask: resolve(__dirname, 'src/renderer/ask/ask.html'),
           // 段二：选区遮罩 + 中下方浮动输入框
           region: resolve(__dirname, 'src/renderer/region/index.html'),
-          askPopup: resolve(__dirname, 'src/renderer/ask-popup/index.html')
+          askPopup: resolve(__dirname, 'src/renderer/ask-popup/index.html'),
+          // 球右键菜单（自绘，独立小窗）
+          ballMenu: resolve(__dirname, 'src/renderer/ball-menu/index.html')
         }
       }
     }

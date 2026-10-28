@@ -13,11 +13,18 @@
  * - `ask:consent:set`  就地确认 / 撤销
  * - `ask:history`      全部对话记录（最新在前）
  * - `ask:history:clear` 清空对话记录
+ * - `ask:settings:get/save`、`ask:provider:models/key/keys`（D53）：
+ *   图谱入口封存后，供应商 / 密钥 / 出网确认只能在这里配。校验与图谱窗口**同一套**
+ *   （`graph-ipc.ts` 的字段规则直接复用），保存后副作用交给 `onSettingsSaved` 注入。
  */
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision, ChainAskTurnContext } from '../chain/agent/types'
 import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskHistoryEntry } from './ask-history'
+import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
+import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
+import type { ApiKeySource } from '../understand/cloud/providers'
+import type { FetchModelsResult } from '../understand/cloud/models'
 
 export interface AskConsentView {
   /** D24 一次性出网授权 */
@@ -63,6 +70,17 @@ export interface AskIpcDeps {
   history: () => AskHistoryEntry[]
   /** 清空历史 */
   clearHistory: () => void
+  /**
+   * D53：设置抽屉（供应商 / 密钥 / 出网确认）。
+   * 与图谱窗口共用主进程实现——两边校验、密钥落盘路径、热键重绑必须是同一套。
+   */
+  settings?: () => GraphSettingsView | { error: string }
+  saveSettings?: (patch: unknown) => GraphSettingsSaveResult
+  /** 保存成功后主进程接手副作用（重绑热键 / 按确认门启停），和 `graph:settings:save` 同口径 */
+  onSettingsSaved?: (settings: GraphSettingsView, previousConsent: boolean) => void
+  providerModels?: (input: ProviderModelsInput) => Promise<FetchModelsResult>
+  saveProviderKey?: (providerId: string, apiKey: string) => ProviderKeySaveResult
+  providerKeys?: () => Record<string, ApiKeySource>
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -281,6 +299,106 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask:consent:set failed', { error: String(error) })
           return null
+        }
+      }
+    ],
+    [
+      'ask:settings:get',
+      (event) => {
+        if (!ensureSender(event)) return { error: 'forbidden' }
+        try {
+          return deps.settings?.() ?? { error: 'unsupported' }
+        } catch (error) {
+          deps.log('error', 'ask settings read failed', { error: String(error) })
+          return { error: 'settings-read-failed' }
+        }
+      }
+    ],
+    [
+      'ask:settings:save',
+      (event, patch) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies GraphSettingsSaveResult
+        if (!deps.saveSettings) {
+          return { ok: false, error: '当前版本不支持保存设置' } satisfies GraphSettingsSaveResult
+        }
+        try {
+          // 必须在写库**之前**读旧确认门：保存后库里的值已经是新的（D24 漏洞的修法同 graph:settings:save）
+          const previous = deps.settings?.()
+          const previousConsent =
+            previous && !('error' in previous) ? previous.outboundConsent : false
+          const result = deps.saveSettings(patch)
+          if (result.ok) deps.onSettingsSaved?.(result.settings, previousConsent)
+          return result
+        } catch (error) {
+          deps.log('error', 'ask settings save failed', { error: String(error) })
+          return {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error)
+          } satisfies GraphSettingsSaveResult
+        }
+      }
+    ],
+    [
+      'ask:provider:models',
+      async (event, input) => {
+        if (!ensureSender(event)) {
+          return { ok: false, error: 'forbidden' } satisfies FetchModelsResult
+        }
+        if (
+          !isPlainObject(input) ||
+          typeof input.providerId !== 'string' ||
+          typeof input.baseUrl !== 'string' ||
+          (input.apiKey !== undefined && typeof input.apiKey !== 'string')
+        ) {
+          return { ok: false, error: '参数不合法' } satisfies FetchModelsResult
+        }
+        if (!deps.providerModels) {
+          return { ok: false, error: '当前版本不支持获取模型' } satisfies FetchModelsResult
+        }
+        try {
+          return await deps.providerModels({
+            providerId: input.providerId,
+            baseUrl: input.baseUrl,
+            ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {})
+          })
+        } catch (error) {
+          // 只记「失败了」，不记 URL / 密钥 / 响应正文
+          deps.log('warn', 'ask provider models fetch failed', { error: String(error) })
+          return { ok: false, error: '获取模型失败，请检查供应商配置' } satisfies FetchModelsResult
+        }
+      }
+    ],
+    [
+      'ask:provider:key',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies ProviderKeySaveResult
+        if (
+          !isPlainObject(input) ||
+          typeof input.providerId !== 'string' ||
+          typeof input.apiKey !== 'string'
+        ) {
+          return { ok: false, error: '参数不合法' } satisfies ProviderKeySaveResult
+        }
+        if (!deps.saveProviderKey) {
+          return { ok: false, error: '当前版本不支持保存密钥' } satisfies ProviderKeySaveResult
+        }
+        try {
+          return deps.saveProviderKey(input.providerId, input.apiKey)
+        } catch (error) {
+          deps.log('error', 'ask provider key save failed', { error: String(error) })
+          return { ok: false, error: '密钥保存失败' } satisfies ProviderKeySaveResult
+        }
+      }
+    ],
+    [
+      'ask:provider:keys',
+      (event) => {
+        if (!ensureSender(event)) return {}
+        try {
+          return deps.providerKeys?.() ?? {}
+        } catch (error) {
+          deps.log('error', 'ask provider key status failed', { error: String(error) })
+          return {}
         }
       }
     ],

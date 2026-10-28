@@ -10,6 +10,7 @@
     <header class="bar">
       <h1>问记忆</h1>
       <span id="status" class="status" data-kind="idle">就绪</span>
+      <button id="settings-open" class="ghost" type="button" title="供应商 / 出网确认">设置</button>
       <button id="new-chat" class="ghost" type="button" title="开一段新对话">＋ 新对话</button>
     </header>
 
@@ -69,6 +70,45 @@
           <pre id="evidence-text" class="evidence-text"></pre>
         </section>
       </div>
+    </div>
+
+    <!-- 设置抽屉（D53：图谱入口封存后，供应商 / 密钥 / 出网确认只能在这里配）。
+         面板实现与图谱页共用 src/renderer/graph/graph-settings-panel.ts，
+         这里只放问记忆用得上的三段；没有的元素整组跳过，不会被写空。 -->
+    <div id="drawer" class="drawer" hidden>
+      <aside class="drawer-panel" role="dialog" aria-label="设置">
+        <header class="drawer-head">
+          <h2>设置</h2>
+          <button id="settings-close" type="button" aria-label="关闭">×</button>
+        </header>
+        <form id="settings-form" class="drawer-form">
+          <section>
+            <h3>供应商</h3>
+            <p class="hint">
+              直接填写 API Key 即可（保存后立即生效）：密钥写入本机 userData/.env，不进设置库、
+              不写日志、不回显。同名环境变量存在时以环境变量为准。
+            </p>
+            <label>当前供应商<select id="set-active"></select></label>
+            <div id="set-providers" class="providers"></div>
+            <button id="set-add-provider" type="button">添加供应商</button>
+          </section>
+
+          <section>
+            <h3>出网</h3>
+            <label class="check"><input id="set-consent" type="checkbox" /> 已确认出网（D24）</label>
+            <p class="hint">
+              问记忆会把问题、命中的窗口文本和这段对话之前的几轮发给模型；原始截图与完整正文
+              永不离开本机。
+            </p>
+            <p id="usage" class="hint"></p>
+          </section>
+
+          <div class="form-actions">
+            <button id="settings-save" type="submit" class="primary">保存</button>
+            <span id="settings-msg" class="hint"></span>
+          </div>
+        </form>
+      </aside>
     </div>
 
     <script type="module" src="./ask.ts"></script>

@@ -19,6 +19,7 @@ import {
 import type { SegmentEvidence } from '../../chain/agent/evidence'
 import type { AskHistoryEntry } from '../../main/ask-history'
 import type { AskApi } from '../ask-preload'
+import { createSettingsPanel } from '../graph/graph-settings-panel'
 
 declare global {
   interface Window {
@@ -39,6 +40,8 @@ const questionInput = must<HTMLInputElement>('question')
 const submitButton = must<HTMLButtonElement>('submit')
 const stopButton = must<HTMLButtonElement>('stop')
 const newChatButton = must<HTMLButtonElement>('new-chat')
+const settingsButton = must<HTMLButtonElement>('settings-open')
+const drawerEl = must<HTMLElement>('drawer')
 const statusEl = must<HTMLSpanElement>('status')
 const consentBox = must<HTMLElement>('consent')
 const threadEl = must<HTMLElement>('thread')
@@ -744,6 +747,58 @@ must<HTMLButtonElement>('evidence-close').addEventListener('click', () => {
   evidenceBox.hidden = true
 })
 
+/* ------------------------------------------------------------------ */
+/* 设置抽屉（D53：供应商 / 密钥 / 出网确认 / 用量）                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 重新读一次出网状态：确认条与「没有可用的模型」都跟着设置走。
+ * 设置里刚填好 key / 勾上确认时，不用关窗口重开。
+ */
+async function refreshConsent(): Promise<void> {
+  if (!api) return
+  try {
+    const view = await api.consent()
+    if (!view) return
+    consentBox.hidden = view.consented
+    if (!view.clientReady) {
+      setStatus('error', `没有可用的模型（${view.clientReason ?? '未配置'}）`)
+      return
+    }
+    if (view.consented && statusEl.dataset.kind === 'error') setStatus('idle', '就绪')
+  } catch (error) {
+    setStatus('error', `读取状态失败：${String(error)}`)
+  }
+}
+
+/**
+ * 面板本身与图谱页共用（同一套主进程实现、同一批设置键）；问记忆页只有
+ * 供应商 / 出网 / 用量三段，缺的字段面板会自动跳过，不会写空别的页面设置。
+ */
+const settingsPanel = api
+  ? createSettingsPanel(document.body, api, () => {
+      void refreshConsent()
+    })
+  : null
+
+settingsButton.addEventListener('click', () => {
+  void settingsPanel?.open()
+})
+
+// 点遮罩空白处关抽屉；Esc 也关（面板自己不管关闭键）
+drawerEl.addEventListener('mousedown', (event) => {
+  if (event.target === drawerEl) settingsPanel?.close()
+})
+
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && settingsPanel?.isOpen()) settingsPanel.close()
+})
+
+// 托盘 / 球右键的「设置」：窗口打开即展开抽屉
+api?.onOpenSettings(() => {
+  void settingsPanel?.open()
+})
+
 void (async () => {
   questionInput.focus()
   renderThread()
@@ -759,16 +814,7 @@ void (async () => {
     renderThread()
     renderHistoryList()
   }
-  try {
-    const view = await api.consent()
-    if (!view) return
-    if (!view.consented) consentBox.hidden = false
-    if (!view.clientReady) {
-      setStatus('error', `没有可用的模型（${view.clientReason ?? '未配置'}）`)
-    }
-  } catch (error) {
-    setStatus('error', `读取状态失败：${String(error)}`)
-  }
+  await refreshConsent()
   // 选区问答的交接单：新开一条会话、带着截图直接问（不覆盖用户正在看的会话）
   api?.onPrefill((payload) => {
     if (busy) return

@@ -120,7 +120,9 @@ export function parseChainReply(
   if (text === '') return { ok: false, reason: 'shape', message: 'answer 为空' }
 
   const memories = parseMemoryCitations(json.memories, options.memoryMeta)
-  const raw = json.citations
+  // `citations` 可以省：只靠日记回答时模型偶尔漏掉这个键（实测 2026-10-29「我最近在想什么」
+  // 答得不成形，日志是「citations 不是数组」）。缺字段按空数组，非数组仍算结构不对。
+  const raw = json.citations === undefined ? [] : json.citations
   if (!Array.isArray(raw)) return { ok: false, reason: 'shape', message: 'citations 不是数组' }
 
   const seen = new Set<number>()

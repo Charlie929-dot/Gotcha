@@ -531,7 +531,7 @@ function buildAskLoopSystemPrompt(
     '9) 检索轮数有限（默认约 8 轮，快用完时系统会停下来问用户要不要继续）：继续后从上次的结果接着查，别把已经查过的重新查一遍；',
     '10) 工具结果里的 stats.mode：keywords / hybrid 是词或语义命中；filter 表示这次没做语义匹配、只是按时间列段，相关性要自己看 snippet 与标题判断，别把 filter 结果直接当成「问什么就有什么」。',
     '11) 问「第一次 / 最早 / 从什么时候开始」：先按 app / 时间做**纯过滤**（别堆关键词），加 order:"oldest"（limit 1～3）——order 只对纯过滤生效，和关键词一起用时仍按相关度排；',
-    '12) 日记检索（recall_diary）：关键词拆法与 search_info 相同；也可以直接给 day（如 "2026-09-29"）或 tag。命中里每条带 reasons（为什么命中：提到什么 / 标签 / 距今多少天），回答时可以把「为什么找到它」说给用户听。',
+    '12) 日记检索（recall_diary）：关键词拆法与 search_info 相同；也可以直接给 day（如 "2026-09-29"）或 tag。**至少给 keywords / day / tag / from-to 之一**（只给 limit 会被拒绝、白跑一轮）。命中里每条带 reasons（为什么命中：提到什么 / 标签 / 距今多少天），回答时可以把「为什么找到它」说给用户听。',
     '13) 日记摘要只有 120 字：要引用原话 / 看当天完整记录就用 read_diary（可传 day 精确定位）。问「你了解我什么 / 我最近的状态」先调 memory_profile 看统计，别凭空概括。',
     '回答纪律：',
     '1) **没读过正文，不许下结论**：在 read_segment 打开某段之前，不要说「没有记录到 / 看不到内容 / 没找到正文」，也不要把只见过摘要的段当证据引用；',
@@ -602,8 +602,11 @@ function serializeMessages(
       return {
         role: 'assistant',
         content: message.content === '' ? null : message.content,
-        ...(options.reasoningContent === true && message.reasoningContent !== undefined
-          ? { reasoning_content: message.reasoningContent }
+        // 字段必须存在：模型偶尔给 tool_calls 但**不产出 CoT**（实测 2026-10-29 第 2 轮
+        // `thinkingLen=0`），这时回传空串；缺字段（而不是空串）会让 DeepSeek 从下一轮起
+        // 400「The reasoning_content ... must be passed back」。
+        ...(options.reasoningContent === true
+          ? { reasoning_content: message.reasoningContent ?? '' }
           : {}),
         tool_calls: message.toolCalls.map((call) => ({
           id: call.id,

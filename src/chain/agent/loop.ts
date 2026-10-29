@@ -421,7 +421,11 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           })
         }
         if (outcome.result.kind === 'error') {
-          log('warn', 'chain ask loop: 工具执行失败', { tool: call.name })
+          // 错误摘要也进日志：只记工具名时，事后分不清是「参数不合法」还是「执行抛错」
+          log('warn', 'chain ask loop: 工具执行失败', {
+            tool: call.name,
+            message: outcome.result.message
+          })
         }
       }
       steps.push({
@@ -474,6 +478,12 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       memoryMeta: memoryWhitelist
     })
     if (!parsed.ok) {
+      // 不成形的具体原因（缺字段 / 结构不对）只进日志：界面只有固定文案，事后没法复盘
+      log('warn', 'chain ask loop: 答复不成形', {
+        reason: parsed.reason,
+        message: parsed.message,
+        turn: globalTurn
+      })
       settleUsage()
       if (parsed.reason === 'no-citations') {
         return withTrace({

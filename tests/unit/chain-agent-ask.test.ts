@@ -393,6 +393,22 @@ describe('问记忆：载荷脱敏与解析纪律', () => {
     })
   })
 
+  it('解析：只靠日记回答时 citations 可以省略（模型漏字段不该整次失败）', () => {
+    const memoryMeta = new Map([
+      [4460, { itemId: 4460, day: '2026-10-02', section: 'Diary', text: '完成比完美更重要' }]
+    ])
+    // 真机 2026-10-29：模型给了 memories、没给 citations → 旧实现报「citations 不是数组」
+    const parsed = parseChainReply(
+      { answer: '最近主要在说完成比完美更重要。', memories: [{ itemId: 4460, why: '10-02 的想法' }] },
+      new Map(),
+      { memoryMeta }
+    )
+    expect(parsed).toMatchObject({ ok: true, kind: 'answer', citations: [] })
+    if (!parsed.ok || parsed.kind !== 'answer') throw new Error('expected answer')
+    expect(parsed.memories).toHaveLength(1)
+    expect(parsed.memories[0]?.day).toBe('2026-10-02')
+  })
+
   it('解析：显式 insufficient + 引用 → 保留说明与引用', () => {
     const meta = new Map([[1, { segmentId: 1, at: 0, app: 'A', title: 'T' }]])
     const parsed = parseChainReply(

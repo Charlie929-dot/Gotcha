@@ -514,6 +514,32 @@ describe('DeepSeek 客户端 · 工具轮 CoT 回传', () => {
     expect(assistant?.content).toBeNull()
   })
 
+  it('模型这一轮没产出 CoT（tool_calls 但 reasoning 为空）时回传空串，不是缺字段', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"answer":"查到了"}' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 4 }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    // 真机复现（2026-10-29）：第 2 轮 thinkingLen=0，第 3 轮请求缺 reasoning_content → 400
+    await client.completeAskLoop?.(loopPayload([{}]))
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as {
+      messages: Array<{ role: string; reasoning_content?: string; tool_calls?: unknown[] }>
+    }
+    const assistant = body.messages.find((message) => message.role === 'assistant')
+    expect(assistant?.tool_calls).toHaveLength(1)
+    expect(assistant?.reasoning_content).toBe('')
+    // 「缺字段」和「空串」在 DeepSeek 是两种命运：前者 400，后者 200（已用真 key 探针确认）
+    expect(Object.hasOwn(assistant as object, 'reasoning_content')).toBe(true)
+  })
+
   it('非 DeepSeek 端点不发 reasoning_content（严格网关会因未知字段 400）', async () => {
     const fetchImpl = vi.fn(
       async () =>

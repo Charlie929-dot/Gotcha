@@ -121,12 +121,15 @@ function hitsText(stats: ChainAskStats): string {
     : `命中 ${stats.hits} 段`
 }
 
-function statsText(stats: ChainAskStats): string {
+function statsText(stats: ChainAskStats, memoryCount = 0): string {
   const parts: string[] = []
   if (stats.turns !== undefined) parts.push(`${stats.turns} 轮`)
   if (stats.toolCalls !== undefined) parts.push(`${stats.toolCalls} 次工具调用`)
   parts.push(hitsText(stats))
   if (stats.cited > 0) parts.push(`引用 ${stats.cited} 段`)
+  // 日记引用不占屏幕段：只靠日记回答时，引用数要单独说，否则一行「引用 0 段」和
+  // 下面 4 张日记卡片自相矛盾（2026-10-29 验收时踩到）
+  if (memoryCount > 0) parts.push(`日记引用 ${memoryCount} 条`)
   return parts.join(' · ')
 }
 
@@ -153,7 +156,12 @@ function statusOf(result: ChainAskResult): { kind: 'idle' | 'error'; text: strin
   if (result.kind === 'no-evidence') {
     return { kind: 'idle', text: `${hitsText(result.stats)}，但证据不足以回答` }
   }
-  return { kind: 'idle', text: `命中 ${result.stats.hits} 段，引用 ${result.citations.length} 段` }
+  const memoryCount = result.memories?.length ?? 0
+  const memoryText = memoryCount > 0 ? `，日记引用 ${memoryCount} 条` : ''
+  return {
+    kind: 'idle',
+    text: `命中 ${result.stats.hits} 段，引用 ${result.citations.length} 段${memoryText}`
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -200,7 +208,10 @@ function listConversations(): ConversationView[] {
 /* ------------------------------------------------------------------ */
 
 function entryLabel(entry: AskHistoryEntry): string {
-  if (entry.kind === 'answer') return `回答 · ${entry.citations.length} 段引用`
+  if (entry.kind === 'answer') {
+    const memories = entry.memories?.length ?? 0
+    return `回答 · ${entry.citations.length} 段引用${memories > 0 ? ` · ${memories} 条日记` : ''}`
+  }
   if (entry.kind === 'clarify') return '向你确认'
   if (entry.kind === 'insufficient') return '查到了，但不够'
   if (entry.kind === 'no-evidence') return '没找到'
@@ -454,14 +465,20 @@ function appendTrace(card: HTMLElement, trace: ChainAskTrace | undefined): void 
   if (fold) card.append(fold)
 }
 
-function assistantCard(className: string, label: string, at: number, stats: ChainAskStats): HTMLElement {
+function assistantCard(
+  className: string,
+  label: string,
+  at: number,
+  stats: ChainAskStats,
+  memoryCount = 0
+): HTMLElement {
   const wrap = element('div', 'msg assistant')
   const card = element('div', `card ${className}`)
   const head = element('div', 'card-head')
   const tag = element('span', 'card-label')
   tag.textContent = label
   const meta = element('span', 'muted')
-  meta.textContent = `${formatClock(at)} · ${statsText(stats)}`
+  meta.textContent = `${formatClock(at)} · ${statsText(stats, memoryCount)}`
   head.append(tag, meta)
   card.append(head)
   wrap.append(card)
@@ -473,7 +490,7 @@ function renderTurn(entry: AskHistoryEntry): void {
   appendUserBubble(entry.question, entry.imagePath)
 
   if (entry.kind === 'answer') {
-    const card = assistantCard('answer', '回答', entry.at, entry.stats)
+    const card = assistantCard('answer', '回答', entry.at, entry.stats, entry.memories?.length ?? 0)
     const text = element('p', 'answer-text')
     text.textContent = entry.answer ?? ''
     card.append(text)
@@ -488,7 +505,7 @@ function renderTurn(entry: AskHistoryEntry): void {
   }
 
   if (entry.kind === 'insufficient') {
-    const card = assistantCard('insufficient', '查到了，但不够', entry.at, entry.stats)
+    const card = assistantCard('insufficient', '查到了，但不够', entry.at, entry.stats, entry.memories?.length ?? 0)
     const text = element('p', 'answer-text muted')
     text.textContent = entry.answer ?? ''
     card.append(text)
@@ -532,7 +549,7 @@ function renderTurn(entry: AskHistoryEntry): void {
   }
 
   if (entry.kind === 'no-evidence') {
-    const card = assistantCard('empty', '没找到', entry.at, entry.stats)
+    const card = assistantCard('empty', '没找到', entry.at, entry.stats, entry.memories?.length ?? 0)
     const note = (entry.note ?? '').trim()
     // 模型给了「查到了什么、为什么还是答不了」的说明就显示出来；只重复固定文案时不重复画
     const hasNote =

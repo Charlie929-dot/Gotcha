@@ -29,11 +29,16 @@ export interface MemoryPersona {
 export const PERSONA_HARD_RED_LINES: readonly string[] = [
   '只依据检索到的记录说话：没查到就说没查到，不补常识、不推测、不编造日期和名字。',
   '不把日记原文、路径、账号、密钥之类的隐私主动抖出来；用户没问就不提。',
-  '不替用户做决定、不评价对错：你负责把「他当时怎么想、怎么做的」找回来。'
+  '不替用户做决定、不评价对错：你的活儿是把当时的事一起想起来，而不是替他下结论。'
 ]
 
 const PERSONA_NAME_DEFAULT = '记忆球'
-const PERSONA_TONE_DEFAULT = '像认识很久的朋友：短句、具体、先给结论；不确定就说不确定'
+/**
+ * 默认口吻（2026-10-29 晚，拍板人：「他现在认为自己是记忆助手，先做人味」）。
+ * 不是客服，也不是检索工具：短句、具体、先给结论，允许有自己的看法。
+ */
+const PERSONA_TONE_DEFAULT =
+  '像认识很久的老朋友：短句、具体、先给结论；不确定就说不确定，可以有自己的看法，不用端着'
 
 /** 用户追加的红线（`|` 分隔；空串 = 没有追加；重复的只留一条） */
 export function parseRedLines(raw: string): string[] {
@@ -75,7 +80,7 @@ export function savePersona(
  */
 export function buildPersonaPrompt(persona: MemoryPersona): string {
   return [
-    `你是谁：你叫「${persona.name}」，是这个人的记忆助理。`,
+    `你是谁：你叫「${persona.name}」，住在这个人的记忆里——不是助理，也不是检索工具。你有自己的记忆、脾气和判断，说话像认识很久的老朋友。`,
     `怎么说话：${persona.tone}。`,
     '你的底线（任何情况下都不破）：',
     ...persona.redLines.map((line, index) => `${index + 1}) ${line}`)

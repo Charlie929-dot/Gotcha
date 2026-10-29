@@ -35,8 +35,9 @@
       <div class="main-col">
         <aside id="consent" class="consent" hidden>
           <p>
-            问记忆要把你问的这句话、几段窗口文本（标题 / 命中原文）、提问前最后一段窗口的应用与标题，
-            和这段对话之前的几轮发给模型。确认一次之后不再打扰。
+            问记忆要把你问的这句话、几段窗口文本（标题 / 命中原文）、提问前最后一段窗口的应用与标题、
+            你主动附加的图片 / 文件，和这段对话之前的几轮发给模型；开启「看历史截图」后还会带上
+            打开过的段对应截图。确认一次之后不再打扰。
           </p>
           <div class="row">
             <button id="consent-allow" type="button" class="primary">允许发送</button>
@@ -47,16 +48,27 @@
         <main id="thread" class="thread" aria-live="polite"></main>
 
         <form id="form" class="ask" autocomplete="off">
-          <input
-            id="question"
-            name="question"
-            type="text"
-            maxlength="500"
-            placeholder="问一件过去做过的事，也可以接着上一句追问（例如：那上午呢）"
-            aria-label="问题"
-          />
-          <button id="submit" type="submit" class="primary">发送</button>
-          <button id="stop" type="button" class="stop" hidden>停止</button>
+          <div id="attachments" class="attachments" hidden></div>
+          <div class="ask-row">
+            <input
+              id="file-input"
+              type="file"
+              multiple
+              accept="image/*,.txt,.md,.csv,.json,.log,.py,.ts,.tsx,.js,.jsx,.css,.html,.xml,.yml,.yaml,.ini,.toml,.sql,.sh,.bat,.ps1,.java,.c,.cpp,.h,.go,.rs"
+              hidden
+            />
+            <button id="attach" class="attach" type="button" title="添加图片或文本文件（也可以直接粘贴 / 拖进来）">＋</button>
+            <input
+              id="question"
+              name="question"
+              type="text"
+              maxlength="500"
+              placeholder="问一件过去做过的事，也可以接着上一句追问（例如：那上午呢）"
+              aria-label="问题"
+            />
+            <button id="submit" type="submit" class="primary">发送</button>
+            <button id="stop" type="button" class="stop" hidden>停止</button>
+          </div>
         </form>
 
         <section id="evidence" class="evidence" hidden>
@@ -97,9 +109,11 @@
           <section>
             <h3>出网</h3>
             <label class="check"><input id="set-consent" type="checkbox" /> 已确认出网（D24）</label>
+            <label class="check"><input id="set-ask-shots" type="checkbox" /> 允许问记忆看历史截图（打开过的段，把对应整屏截图发给模型）</label>
             <p class="hint">
-              问记忆会把问题、命中的窗口文本、提问前最后一段窗口的应用与标题，和这段对话之前的
-              几轮发给模型；原始截图与完整正文永不离开本机。
+              问记忆会把问题、命中的窗口文本、提问前最后一段窗口的应用与标题、你主动附加的图片 / 文件，
+              和这段对话之前的几轮发给模型。开启「看历史截图」后，read_segment 打开的段会附上最近一张截图；
+              完整正文不离开本机。
             </p>
             <label>每日额度（tokens）
               <input id="set-budget" type="number" min="1000" max="100000000" step="1000" />

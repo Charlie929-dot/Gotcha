@@ -20,7 +20,7 @@ export const ASK_SHOT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 /** 送渲染层的单张上限：超过就不显示（不让一张大图把窗口拖死） */
 export const ASK_SHOT_MAX_BYTES = 8 * 1024 * 1024
 
-const SHOT_FILE_RE = /^shot-\d{10,}\.png$/
+const SHOT_FILE_RE = /^shot-\d{10,}(?:-\d+)?\.(?:png|jpg|jpeg|webp|gif)$/
 
 export function askShotsDir(userDataDir: string): string {
   return join(userDataDir, ASK_SHOTS_DIR)
@@ -55,12 +55,54 @@ export function isAskShotPath(userDataDir: string, path: string): boolean {
   return SHOT_FILE_RE.test(basename(target))
 }
 
+/**
+ * 用户上传的图片：data URL → 落盘成 `<userData>/ask-shots/shot-<ts>-<n>.<ext>`。
+ * 与选区截图同一目录、同一保留期（30 天），历史里靠路径回看。
+ * 只收图片 data URL；太大 / 解不出来返回 null（调用方如实报错，不静默丢）。
+ */
+export function saveAskUpload(
+  userDataDir: string,
+  dataUrl: string,
+  ts: number,
+  index: number
+): string | null {
+  const match = /^data:image\/(png|jpeg|webp|gif);base64,(.+)$/i.exec(dataUrl)
+  if (!match) return null
+  const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase()
+  let bytes: Buffer
+  try {
+    bytes = Buffer.from(match[2], 'base64')
+  } catch {
+    return null
+  }
+  if (bytes.length === 0 || bytes.length > ASK_SHOT_MAX_BYTES) return null
+  const dir = askShotsDir(userDataDir)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, `shot-${ts}-${Math.max(0, Math.trunc(index))}.${ext}`)
+  try {
+    writeFileSync(path, bytes)
+    return path
+  } catch {
+    return null
+  }
+}
+
 /** 截图 → data URL（窗口展示用）；读不到 / 太大 / 不是 PNG 都返回 null */
-export function readAskShotDataUrl(path: string): string | null {  try {
+export function readAskShotDataUrl(path: string): string | null {
+  try {
     if (!existsSync(path)) return null
     const stat = statSync(path)
     if (!stat.isFile() || stat.size <= 0 || stat.size > ASK_SHOT_MAX_BYTES) return null
-    return `data:image/png;base64,${readFileSync(path).toString('base64')}`
+    const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
+    const mime =
+      ext === 'jpg' || ext === 'jpeg'
+        ? 'image/jpeg'
+        : ext === 'webp'
+          ? 'image/webp'
+          : ext === 'gif'
+            ? 'image/gif'
+            : 'image/png'
+    return `data:${mime};base64,${readFileSync(path).toString('base64')}`
   } catch {
     return null
   }
@@ -81,7 +123,8 @@ export function pruneAskShots(
   let removed = 0
   for (const name of readdirSync(dir)) {
     if (!SHOT_FILE_RE.test(name)) continue
-    const ts = Number(name.slice('shot-'.length, -'.png'.length))
+    const stamp = /^shot-(\d{10,})/.exec(name)?.[1]
+    const ts = stamp === undefined ? Number.NaN : Number(stamp)
     if (!Number.isFinite(ts) || now - ts < maxAge) continue
     try {
       unlinkSync(join(dir, name))

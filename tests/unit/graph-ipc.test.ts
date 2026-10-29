@@ -42,6 +42,7 @@ function settingsView(overrides: Partial<GraphSettingsView> = {}): GraphSettings
     providersInvalid: false,
     hotkeys: { toggleCapture: 'Alt+P', openGraph: 'Alt+Space' },
     outboundConsent: false,
+    askHistoryShots: false,
     thresholds: { ...GRAPH_THRESHOLD_DEFAULTS },
     usage: { calls: 0, promptTokens: 0, completionTokens: 0 },
     ...overrides

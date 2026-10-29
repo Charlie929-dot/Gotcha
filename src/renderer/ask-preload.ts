@@ -9,7 +9,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision } from '../chain/agent/types'
 import type { SegmentEvidence } from '../chain/agent/evidence'
-import type { AskConsentView } from '../main/ask-ipc'
+import type { AskConsentView, AskAttachmentInput } from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
 import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
@@ -23,8 +23,14 @@ export interface AskApi {
    * 问一次记忆。`conversationId` 相同的提问会被当成同一会话的续问——
    * 主进程按它取之前几轮当上下文（不传则主进程现造一个）。
    * `imagePath` 是选区问答留存的截图（主进程只认 ask-shots 下的文件）。
+   * `attachments` 是用户随问题上传的图片 / 文本文件（图片 data URL、文本已截断）。
    */
-  query(question: string, conversationId?: string, imagePath?: string): Promise<ChainAskResult>
+  query(
+    question: string,
+    conversationId?: string,
+    imagePath?: string,
+    attachments?: readonly AskAttachmentInput[]
+  ): Promise<ChainAskResult>
   /**
    * 「还要继续查吗」的选择：continue = 再给一轮检索预算，stop = 按现有结果收尾。
    * `resumeId` 来自 `continue-ask` 结果；过期 / 重开窗口后失效。
@@ -67,11 +73,12 @@ export interface AskApi {
 }
 
 const api: AskApi = {
-  query: (question, conversationId, imagePath) =>
+  query: (question, conversationId, imagePath, attachments) =>
     ipcRenderer.invoke('ask:query', {
       question,
       ...(conversationId ? { conversationId } : {}),
-      ...(imagePath ? { imagePath } : {})
+      ...(imagePath ? { imagePath } : {}),
+      ...(attachments && attachments.length > 0 ? { attachments } : {})
     }) as Promise<ChainAskResult>,
   resume: (resumeId, decision) =>
     ipcRenderer.invoke('ask:resume', { resumeId, decision }) as Promise<ChainAskResult>,

@@ -110,6 +110,11 @@ export interface AskLoopContext {
   searchBatch?: (query: ChainSearchBatchQuery) => Promise<ChainSearchBatchResult>
   /** 日记记忆（第二本账）；不传 = 没有接入，三个记忆工具会如实报错 */
   diary?: DiaryToolDeps
+  /**
+   * read_segment 的截图读取（主进程注入）。**没开「历史截图出云」时不要传**：
+   * 核心拿不到图，读段就只回 UIA 文字。
+   */
+  readShot?: (path: string) => string | null
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 用默认的回忆助手口吻） */
   personaPrompt?: string
   /** 同一会话之前的几轮（续问）；没有就是新对话 */
@@ -120,6 +125,11 @@ export interface AskLoopContext {
   signal?: AbortSignal
   /** 选区问答：随本轮问题一起给模型看的截图（data URL；不脱敏，D51 之后的新入口） */
   image?: { readonly dataUrl: string }
+  /** 用户随本轮问题上传的图片 / 文本文件（用户主动提供，不过脱敏墙） */
+  attachments?: {
+    readonly images?: readonly string[]
+    readonly files?: readonly { readonly name: string; readonly text: string }[]
+  }
   /** 记账：整次循环结束后一次（含失败路径已消耗的量） */
   onUsage?: (usage: LlmUsage) => void
   /** 从暂停点恢复（`ask.ts` 按检查点回填）；暂停轮的 turns / 白名单 / 计数都在里面 */
@@ -212,7 +222,7 @@ function summarizeToolOutcome(
     case 'get_freshness':
       return '查了数据边界'
     case 'read_segment':
-      return `打开段 ${result.segmentId}`
+      return `打开段 ${result.segmentId}${result.shotCount ? '（含截图）' : ''}`
     case 'recall_diary':
       return `日记命中 ${result.hits.length} 条`
     case 'read_diary':
@@ -256,6 +266,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.readAskHistory ? { readAskHistory: ctx.readAskHistory } : {}),
     ...(ctx.searchBatch ? { searchBatch: ctx.searchBatch } : {}),
     ...(ctx.diary ? { diary: ctx.diary } : {}),
+    ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId)
   })
@@ -273,7 +284,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     freshness,
     turns: [],
     ...(ctx.history ? { history: ctx.history } : {}),
-    ...(ctx.recent ? { recent: ctx.recent } : {})
+    ...(ctx.recent ? { recent: ctx.recent } : {}),
+    ...(ctx.attachments ? { attachments: ctx.attachments } : {})
   })
   if (probe.questionBlocked) {
     return { kind: 'error', reason: 'question-blocked', message: '问题里含敏感内容，未出云', stats }
@@ -342,7 +354,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       freshness,
       turns,
       ...(ctx.history ? { history: ctx.history } : {}),
-      ...(ctx.recent ? { recent: ctx.recent } : {})
+      ...(ctx.recent ? { recent: ctx.recent } : {}),
+      ...(ctx.attachments ? { attachments: ctx.attachments } : {})
     })
     // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；
     // 用可见集合而不是「累加后删除被挡 id」，是避免粘性误删——同一段后续轮次
@@ -432,6 +445,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         turns.push({
           toolCall: { name: call.name, arguments: call.arguments },
           toolResult: outcome.result,
+          ...(outcome.images && outcome.images.length > 0 ? { images: outcome.images } : {}),
           // 同一轮的 CoT 挂在轮内每条 turn 上：载荷重建时要把它原样回传，
           // 否则 DeepSeek 带 tools 的第 2 轮起直接 400（trace 里那份是裁剪过的，不能拿来回传）
           ...(response.reasoning !== undefined && response.reasoning !== ''

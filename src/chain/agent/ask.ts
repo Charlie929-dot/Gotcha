@@ -87,6 +87,19 @@ export interface ChainAskOptions {
   readAskHistory?: (scope: 'conversation' | 'all') => readonly AskHistorySummary[]
   /** 日记记忆（第二本账）：不传 = 没接入，三个记忆工具会如实报错 */
   diary?: DiaryToolDeps
+  /**
+   * read_segment 的截图读取（主进程注入）。**没开「历史截图出云」时不要传**：
+   * 不传 = 读段只回 UIA 文字，截图不出云。
+   */
+  readShot?: (path: string) => string | null
+  /**
+   * 用户随本轮问题上传的图片（data URL）与文本文件（已截断）。
+   * 与选区截图同口径：用户主动提供，不过脱敏墙；出云门照旧在门口判定。
+   */
+  attachments?: {
+    readonly images?: readonly string[]
+    readonly files?: readonly { readonly name: string; readonly text: string }[]
+  }
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 默认回忆助手口吻） */
   personaPrompt?: string
   /** 同一会话之前的几轮（续问）；不传 = 新对话 */
@@ -245,6 +258,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         captureRunning: options.captureRunning ?? (() => false),
         ...(options.readAskHistory ? { readAskHistory: options.readAskHistory } : {}),
         ...(options.diary ? { diary: options.diary } : {}),
+        ...(options.readShot ? { readShot: options.readShot } : {}),
         ...(options.personaPrompt ? { personaPrompt: options.personaPrompt } : {}),
         ...(options.searchBatch ? { searchBatch: options.searchBatch } : {}),
         ...(options.history ? { history: options.history } : {}),
@@ -257,6 +271,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         },
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.imageDataUrl ? { image: { dataUrl: options.imageDataUrl } } : {}),
+        ...(options.attachments ? { attachments: options.attachments } : {}),
         ...(options.onUsage ? { onUsage: options.onUsage } : {}),
         log
       },
@@ -335,7 +350,10 @@ async function askOnce(
     }
   })
 
-  const built = options.outbound.buildAsk(asked, evidence, { textMaxChars: textChars })
+  const built = options.outbound.buildAsk(asked, evidence, {
+    textMaxChars: textChars,
+    ...(options.attachments ? { attachments: options.attachments } : {})
+  })
   if (built.questionBlocked) {
     return { kind: 'error', reason: 'question-blocked', message: '问题里含敏感内容，未出云', stats }
   }

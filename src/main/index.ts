@@ -24,7 +24,8 @@ import {
   isAskShotPath,
   pruneAskShots,
   readAskShotDataUrl,
-  saveAskShot
+  saveAskShot,
+  saveAskUpload
 } from './ask-shot'
 import { cropFrameToPng } from './ask-crop'
 import { openAskPopup } from './ask-popup'
@@ -1906,6 +1907,32 @@ if (primaryInstance) {
         }
       }
     })
+    /**
+     * 用户上传的图片落盘（历史回看用）：path 回填到 context.attachments 上；
+     * 写失败只记日志——这次提问照样带图（data URL 还在），只是历史里点不开。
+     */
+    const prepareAskUploads = (context: AskQueryContext): void => {
+      if (!context.attachments || context.attachments.length === 0) return
+      const root = app.getPath('userData')
+      const now = Date.now()
+      context.attachments.forEach((item, index) => {
+        if (item.kind !== 'image' || item.path || !item.dataUrl) return
+        const saved = saveAskUpload(root, item.dataUrl, now, index)
+        if (saved) item.path = saved
+        else captureLog('warn', 'ask upload save failed', { index })
+      })
+    }
+    /** 用户上传的附件 → 送云视图（图片 data URL + 文本文件；用户主动提供，不过脱敏墙） */
+    const askAttachmentsOf = (context: AskQueryContext): ChainAskOptions['attachments'] => {
+      const attachments = context.attachments ?? []
+      const images = attachments
+        .filter((item) => item.kind === 'image' && item.dataUrl)
+        .map((item) => item.dataUrl as string)
+      const files = attachments
+        .filter((item) => item.kind === 'file' && item.text)
+        .map((item) => ({ name: item.name ?? '文件', text: item.text as string }))
+      return images.length > 0 || files.length > 0 ? { images, files } : undefined
+    }
     const askOptionsFor = (db: ChainDb, context: AskQueryContext): ChainAskOptions => ({
       db,
       resolveClient,
@@ -1946,6 +1973,12 @@ if (primaryInstance) {
       ...(context.imagePath && isAskShotPath(app.getPath('userData'), context.imagePath)
         ? { imageDataUrl: readAskShotDataUrl(context.imagePath) ?? undefined }
         : {}),
+      // 用户上传的图片 / 文本文件（用户主动提供，与选区截图同口径不过脱敏墙）
+      ...(askAttachmentsOf(context) ? { attachments: askAttachmentsOf(context) } : {}),
+      // 历史截图出云（默认关，2026-10-29 拍板）：开了 read_segment 才带得出截图
+      ...(getSetting(db, GRAPH_SETTING_KEYS.askHistoryShots) === '1'
+        ? { readShot: (path: string) => readShotDataUrl(path) }
+        : {}),
       canSend: () => getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
       overBudget: () => {
         const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
@@ -1976,6 +2009,7 @@ if (primaryInstance) {
         // **必须在取 queryDb 之前**：同步要开写连接，会把只读连接关掉，
         // 先取再同步会拿到一个已经关闭的句柄。
         syncMemoryIfDue()
+        prepareAskUploads(context)
         const db = connections.queryDb()
         // A3 红线：没有库（从未采集）就不建库；时间轴上本来也没东西可找
         if (!db) {
@@ -1988,6 +2022,7 @@ if (primaryInstance) {
       },
       // 「还要继续查吗」→ 恢复暂停的循环（问题用检查点里的原话，续查通道不再传）
       resume: async (resumeId, decision, context) => {
+        prepareAskUploads(context)
         const db = connections.queryDb()
         if (!db) {
           return {
@@ -2010,10 +2045,10 @@ if (primaryInstance) {
         setSetting(writable, GRAPH_SETTING_KEYS.outboundConsent, consented ? '1' : '0')
         return askConsentView()
       },
-      record: (question, result, conversationId, imagePath) => {
+      record: (question, result, conversationId, imagePath, attachments) => {
         appendAskHistory(
           askHistoryPath,
-          toHistoryEntry(question, result, Date.now(), conversationId, imagePath)
+          toHistoryEntry(question, result, Date.now(), conversationId, imagePath, attachments)
         )
       },
       // 选区问答：历史里的截图路径 → data URL（渲染层读不了文件；只认 ask-shots 下的文件）

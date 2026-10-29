@@ -133,6 +133,12 @@ export interface AskToolDeps {
    */
   canReadSegment?: (segmentId: number) => boolean
   /**
+   * 段截图 → data URL（2026-10-29 拍板：OCR 不可信，读段只给 UIA 文字 + 截图）。
+   * 主进程注入；**用户没开「历史截图出云」时不要注入**——核心拿不到图就不附图。
+   * 归档 / 打包进容器的截图没有可直接读的文件，返回 null 即可。
+   */
+  readShot?: (path: string) => string | null
+  /**
    * 关键词批量检索的执行体（性能方案 §5.11）：主进程注入「进 worker 的那个」，
    * 测试 / 单发路径不传就退回进程内同步查。结果口径必须与 `searchChainSegmentsBatch` 一致。
    */
@@ -157,6 +163,11 @@ export interface AskToolOutcome {
    * 只有 read_segment 会填这个字段；检索命中不算「读过」。
    */
   read?: readonly SearchHitMeta[]
+  /**
+   * read_segment 带出的截图（data URL）：驱动层把图挂到该轮工具结果后面，
+   * 以 user 消息送给模型（DeepSeek 只允许 user 消息带图）。没有就是没开 / 没图。
+   */
+  images?: readonly string[]
 }
 
 /* ------------------------------------------------------------------ */
@@ -492,8 +503,8 @@ function clampReadOffset(value: unknown): number {
 }
 
 /**
- * 展开一段命中段的正文。search_info 只给 80 字摘要，地址栏 / URL / 完整 OCR 都在正文里，
- * 模型必须能自己「点开这一段」再回答——只给摘要等于让它猜。
+ * 展开一段命中段。2026-10-29 拍板：**永远不信任 OCR**——OCR 只用于检索命中，
+ * 读段时只回 UIA 文字（`source='uia'`）与该段最近一张截图；OCR 正文一律不回给模型。
  * 越权（不在 search_info 结果里的段）一律拒绝；脱敏在出云边界统一做。
  */
 function executeReadSegment(deps: AskToolDeps, args: Record<string, unknown>): AskToolOutcome {
@@ -511,13 +522,34 @@ function executeReadSegment(deps: AskToolDeps, args: Record<string, unknown>): A
   if (!detail) {
     return { result: { kind: 'error', message: '这一段已经读不到了（可能被保留期清掉）' }, segments: [] }
   }
-  const text = segmentBodyText(deps.db, rawId)
-  if (text === null) {
-    return { result: { kind: 'error', message: '这一段没有可读正文（可能只有截图）' }, segments: [] }
+  // OCR 只当检索用的线索，不当作读段的证据：只留 UIA 采到的界面文字。
+  const uiContents = detail.contents.filter((row) => row.source === 'uia')
+  const text = uiContents
+    .map((row) => row.text)
+    .filter((value) => value.trim() !== '')
+    .join('\n\n')
+
+  // 截图：只给最近一张（每张约 1024 token，多给是浪费）。没开「历史截图出云」时
+  // 主进程不会注入 readShot，这里自然拿不到图。
+  const images: string[] = []
+  if (deps.readShot) {
+    const shots = detail.shots.filter((row) => typeof row.path === 'string' && row.path !== '')
+    for (const shot of shots.slice(-1)) {
+      const url = deps.readShot(shot.path as string)
+      if (typeof url === 'string' && url.startsWith('data:image/')) images.push(url)
+    }
+  }
+  if (text === '' && images.length === 0) {
+    return {
+      result: {
+        kind: 'error',
+        message: '这一段没有可读的界面文字（UIA），也没有可看的截图'
+      },
+      segments: []
+    }
   }
   const segment = detail.segment
   // 定位顺序：显式 offset > query（在正文里找这一句）> 开头。
-  // 正文几万字时，从第 0 字读只能看到开头；模型要用 query / offset 自己决定看哪里。
   const query = optionalText(args.query, READ_QUERY_MAX_CHARS)
   const offset =
     args.offset !== undefined
@@ -534,9 +566,10 @@ function executeReadSegment(deps: AskToolDeps, args: Record<string, unknown>): A
       app: segment.app ?? '',
       title: segment.title_last ?? segment.title_first ?? '',
       text,
-      urls: extractUrls(detail.contents),
+      urls: extractUrls(uiContents),
       offset,
-      limit: clampReadLimit(args.limit)
+      limit: clampReadLimit(args.limit),
+      shotCount: images.length
     },
     segments: [],
     // 打开过 = 引用（DSH 式自动记录）：最终答复里不需要任何记号
@@ -547,7 +580,8 @@ function executeReadSegment(deps: AskToolDeps, args: Record<string, unknown>): A
         app: segment.app ?? '',
         title: segment.title_last ?? segment.title_first ?? ''
       }
-    ]
+    ],
+    ...(images.length > 0 ? { images } : {})
   }
 }
 

@@ -182,6 +182,10 @@
 | 开 thinking 后用默认 2000 `max_tokens` 会把最终 JSON 截断 | 2026-10-29 给工具循环开 thinking：DeepSeek V4 默认 thinking，CoT 先写、正文后写；`LLM_DEFAULTS.maxTokens = 2000` 在收尾轮容易 `finish_reason=length`、content 为空（代码注释里 2026-10-27 已记过一次同类） | 工具轮（`ask-loop` / `ask-loop-final`）单独把 `max_tokens` 抬到 6000；非工具轮仍显式关 thinking（结构化输出比 CoT 值钱）。**已确认**（2026-10-29 真机）：真实 DeepSeek 在 tool_calls 轮确实返回 `reasoning_content`——回传规则见上一条 |
 | 截图里看不到悬浮球 ≠ 球丢了（`setContentProtection`） | 2026-10-29 真机：用户报「球不见了」，我用 DXGI / GDI / PrintWindow 三种方式截屏都看不到球，但窗口枚举里它明明在（64×64、WS_EX_TOPMOST、DOM 也在），于是往「渲染坏了 / 被全屏盖住」方向查了很久 | `createBallShell` 里有一行 `win.setContentProtection(true)`（防采集自己拍到自己，§4.10 验证过）：**它让球对所有屏幕截图不可见**，人眼正常可见。以后判断「球在不在」不要用截图，改用窗口枚举 + `IsWindowVisible` + 窗口矩形是否落在 `workArea` 内；真要截图验证，临时注释掉这行再 build。附带的坑：dev 实例的 vite server 一死（5173 不再监听），二次启动会被单实例锁收掉，看起来像「启动不了 / 启动变慢」，实际是僵尸主进程占着锁 |
 
+| 问记忆「缩进 / 括号又没了」 | 2026-10-29 22:46 真机：`提取代码` 的 `.keys()` 变 `.keys`、缩进被压成一个空格，像是 D59 的清洗又回来了 | **先看跑的是哪份主进程**：`electron-vite dev` 只重建 `out/`，不会重启已启动的 Electron；当时进程仍是 21:41 起的旧实例（`Get-CimInstance Win32_Process` 看 `CreationDate`），22:43 的新 build 根本没加载。重启应用后复测；`out/main/index.js` 的 mtime 晚于源码 ≠ 已生效 |
+| DeepSeek 图片只能放 `user` 消息 | 2026-10-29 实测：`tool` 消息的 content 里塞 `image_url` → **400**；把图作为单独 `user` 消息夹在 tool 结果后面（包括多个 tool_calls 之间）→ 200，模型能读出图里的文字 | `read_segment` 的截图不要塞进 tool 结果；由 `buildChainAskLoopMessages` 在 tool 消息后补一条 `{role:'user', images}`。带 tools 的请求仍须回传历史 `reasoning_content`，否则 400 的错会是 reasoning 而不是图 |
+| OCR 糊 / 乱码被当证据 | 2026-10-29：vmware 段 UIA 只 106 字，OCR 265 字还是糊的；模型只能对着糊字说「OCR 糊了」 | 2026-10-29 拍板（D60）：**OCR 只用于检索命中**；`read_segment` 只回 `source='uia'` 的文字 + 最近一张截图，不再回 OCR 正文。截图默认不出云（`graph.ask_history_shots` 默认 0），开启后才附 |
+
 ## 规则
 
 - 同一个坑第二次出现，说明这里没记住——先补本文件，再修代码。

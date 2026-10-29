@@ -133,6 +133,8 @@ export function createSettingsPanel(
 
   /* ---- 出网确认（两类页面都有） ---- */
   const consentInput = opt<HTMLInputElement>(root, 'set-consent')
+  /** 问记忆 · 历史截图出云（只有问记忆页有这个开关；默认关） */
+  const askShotsInput = opt<HTMLInputElement>(root, 'set-ask-shots')
 
   const rows: ProviderRow[] = []
   /** 拉取过的模型清单：按 provider id 缓存，保存后重建行时仍能下拉 */
@@ -525,6 +527,7 @@ export function createSettingsPanel(
       thresholdInputs.edgeKInput.value = String(settings.thresholds.edgeTopK)
     }
     if (consentInput) consentInput.checked = settings.outboundConsent
+    if (askShotsInput) askShotsInput.checked = settings.askHistoryShots
     if (hotkeyToggleInput) hotkeyToggleInput.value = settings.hotkeys.toggleCapture
     if (hotkeyGraphInput) hotkeyGraphInput.value = settings.hotkeys.openGraph ?? ''
     if (usageEl) {
@@ -593,6 +596,7 @@ export function createSettingsPanel(
       if (dayHeatInput) payload.dayHeatMax = Number(dayHeatInput.value)
       if (scaleHintInput) payload.scaleHintMoments = Number(scaleHintInput.value)
       if (consentInput) payload.outboundConsent = consentInput.checked
+      if (askShotsInput) payload.askHistoryShots = askShotsInput.checked
 
       if (providersEl && activeSelect) {
         payload.providers = rows.map((row) => ({

@@ -44,13 +44,88 @@ export interface AskConsentView {
   clientReason?: string
 }
 
-/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区问答附带的截图路径） */
+/** 用户随问题上传的附件（渲染层已把图片压成 data URL、文本文件读成文本） */
+export interface AskAttachmentInput {
+  kind: 'image' | 'file'
+  /** 文件名（展示用；图片可能是「截图」） */
+  name?: string
+  /** kind=image：图片 data URL（只收 png/jpeg/webp/gif） */
+  dataUrl?: string
+  /** kind=file：文本内容（渲染层已截断；主进程再校验上限） */
+  text?: string
+}
+
+/** 附件在上下文里的形态：主进程落盘后补 `path`（历史回看用） */
+export interface AskQueryAttachment extends AskAttachmentInput {
+  path?: string
+}
+
+/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区截图 / 上传附件） */
 export interface AskQueryContext {
   conversationId: string
   history: readonly ChainAskTurnContext[]
   signal: AbortSignal
   /** 选区问答：随这条对话留存的截图（主进程校验后给绝对路径） */
   imagePath?: string
+  /** 用户上传的附件（图片 / 文本文件；主进程在提问前落盘图片并回填 path） */
+  attachments?: AskQueryAttachment[]
+}
+
+/** 附件上限：与渲染层一致（渲染层先挡一道，这里再挡一道） */
+export const ASK_ATTACH_IMAGE_MAX = 4
+export const ASK_ATTACH_FILE_MAX = 4
+const ASK_ATTACH_NAME_MAX_CHARS = 120
+const ASK_ATTACH_IMAGE_DATA_URL_MAX_CHARS = 6 * 1024 * 1024
+const ASK_ATTACH_FILE_TEXT_MAX_CHARS = 200_000
+const ASK_ATTACH_IMAGE_DATA_URL_RE = /^data:image\/(png|jpeg|webp|gif);base64,/i
+
+function parseAttachments(raw: unknown): AskQueryAttachment[] | null {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw) || raw.length === 0) return []
+  if (raw.length > ASK_ATTACH_IMAGE_MAX + ASK_ATTACH_FILE_MAX) return null
+  const out: AskQueryAttachment[] = []
+  let images = 0
+  let files = 0
+  for (const item of raw) {
+    if (!isPlainObject(item)) return null
+    const kind = item.kind
+    const name =
+      typeof item.name === 'string' ? item.name.trim().slice(0, ASK_ATTACH_NAME_MAX_CHARS) : undefined
+    if (kind === 'image') {
+      if (images >= ASK_ATTACH_IMAGE_MAX) return null
+      const dataUrl = item.dataUrl
+      if (typeof dataUrl !== 'string' || dataUrl.length > ASK_ATTACH_IMAGE_DATA_URL_MAX_CHARS) return null
+      if (!ASK_ATTACH_IMAGE_DATA_URL_RE.test(dataUrl)) return null
+      out.push({ kind: 'image', ...(name ? { name } : {}), dataUrl })
+      images += 1
+      continue
+    }
+    if (kind === 'file') {
+      if (files >= ASK_ATTACH_FILE_MAX) return null
+      const text = item.text
+      if (typeof text !== 'string' || text.length > ASK_ATTACH_FILE_TEXT_MAX_CHARS) return null
+      out.push({ kind: 'file', ...(name ? { name } : {}), text })
+      files += 1
+      continue
+    }
+    return null
+  }
+  return out
+}
+
+/** 附件 → 历史元信息（图片带 path 才能回看；文本只记字数，不落盘） */
+function historyAttachments(
+  attachments: readonly AskQueryAttachment[] | undefined
+): { kind: 'image' | 'file'; name?: string; path?: string; chars?: number }[] {
+  const out: { kind: 'image' | 'file'; name?: string; path?: string; chars?: number }[] = []
+  for (const item of attachments ?? []) {
+    if (item.kind === 'image') {
+      out.push({ kind: 'image', ...(item.name ? { name: item.name } : {}), ...(item.path ? { path: item.path } : {}) })
+    } else {
+      out.push({ kind: 'file', ...(item.name ? { name: item.name } : {}), chars: (item.text ?? '').length })
+    }
+  }
+  return out
 }
 
 export interface AskIpcDeps {
@@ -60,7 +135,13 @@ export interface AskIpcDeps {
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
   /** 成功走完一次提问就落一条历史（失败只记日志，不能影响回答）；`imagePath` 只有选区问答才有 */
-  record: (question: string, result: ChainAskResult, conversationId: string, imagePath?: string) => void
+  record: (
+    question: string,
+    result: ChainAskResult,
+    conversationId: string,
+    imagePath?: string,
+    attachments?: { kind: 'image' | 'file'; name?: string; path?: string; chars?: number }[]
+  ) => void
   /** 截图路径 → data URL（渲染层读不了文件）；路径非法 / 读不到返回 null */
   image?: (path: string) => string | null
   /**
@@ -147,7 +228,12 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
   /** 挂起的「还要继续吗」：resumeId → 原始问题 + 会话 + 截图（答案没出来前不落历史） */
   const pendingResume = new Map<
     string,
-    { question: string; conversationId: string; imagePath?: string }
+    {
+      question: string
+      conversationId: string
+      imagePath?: string
+      attachments?: AskQueryAttachment[]
+    }
   >()
 
   /**
@@ -158,8 +244,10 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     question: string,
     conversationId: string,
     result: ChainAskResult,
-    imagePath?: string
+    imagePath?: string,
+    attachments?: readonly AskQueryAttachment[]
   ): ChainAskResult => {
+    const recorded = historyAttachments(attachments)
     if (result.kind === 'continue-ask') {
       if (result.resumeId) {
         while (pendingResume.size >= PENDING_RESUME_MAX) {
@@ -167,14 +255,22 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           if (oldest === undefined) break
           pendingResume.delete(oldest)
         }
-        pendingResume.set(result.resumeId, { question, conversationId, ...(imagePath ? { imagePath } : {}) })
+        pendingResume.set(result.resumeId, {
+          question,
+          conversationId,
+          ...(imagePath ? { imagePath } : {}),
+          ...(recorded.length > 0 ? { attachments: [...attachments!] } : {})
+        })
       }
       return result
     }
     try {
-      // 不带图时只传三个参数：老测试 / 老调用方的入参形状保持不变
-      if (imagePath) deps.record(question, result, conversationId, imagePath)
-      else deps.record(question, result, conversationId)
+      // 不带图 / 附件时保持老调用形状
+      if (imagePath || recorded.length > 0) {
+        deps.record(question, result, conversationId, imagePath, recorded)
+      } else {
+        deps.record(question, result, conversationId)
+      }
     } catch (error) {
       deps.log('warn', 'ask history record failed', { error: String(error) })
     }
@@ -206,6 +302,8 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           typeof rawImage === 'string' && rawImage.length > 0 && rawImage.length <= 512
             ? rawImage
             : undefined
+        const attachments = parseAttachments(payload.attachments)
+        if (attachments === null) return failure('附件不合法（只收图片和文本文件，条数 / 大小有上限）')
 
         let history: readonly ChainAskTurnContext[] = []
         try {
@@ -222,9 +320,10 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             conversationId,
             history,
             signal: controller.signal,
-            ...(imagePath ? { imagePath } : {})
+            ...(imagePath ? { imagePath } : {}),
+            ...(attachments.length > 0 ? { attachments } : {})
           })
-          return settle(asked, conversationId, result, imagePath)
+          return settle(asked, conversationId, result, imagePath, attachments)
         } catch (error) {
           deps.log('error', 'ask:query failed', { error: String(error) })
           return failure('问记忆出错，看日志')
@@ -264,9 +363,18 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             conversationId: pending.conversationId,
             history,
             signal: controller.signal,
-            ...(pending.imagePath ? { imagePath: pending.imagePath } : {})
+            ...(pending.imagePath ? { imagePath: pending.imagePath } : {}),
+            ...(pending.attachments && pending.attachments.length > 0
+              ? { attachments: pending.attachments }
+              : {})
           })
-          return settle(pending.question, pending.conversationId, result, pending.imagePath)
+          return settle(
+            pending.question,
+            pending.conversationId,
+            result,
+            pending.imagePath,
+            pending.attachments
+          )
         } catch (error) {
           deps.log('error', 'ask:resume failed', { error: String(error) })
           return failure('续查出错，看日志')

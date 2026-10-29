@@ -28,6 +28,11 @@ export interface LlmMessage {
   content: string
   /** role=user 且带图时附在正文后（wire 层拼成 OpenAI 兼容的内容段数组） */
   imageUrl?: string
+  /**
+   * role=user 的多张图（用户上传的附件 / read_segment 带出的历史截图）。
+   * 与 `imageUrl` 合并；DeepSeek 只允许 user 消息带图，tool 消息带图会 400。
+   */
+  images?: readonly string[]
   /** role=assistant 调工具时附带（content 可为空串） */
   toolCalls?: readonly LlmToolCall[]
   /** role=tool 时：对应调用的 id */

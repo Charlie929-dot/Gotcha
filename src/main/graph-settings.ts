@@ -42,7 +42,12 @@ export const GRAPH_SETTING_KEYS = {
   scaleHintMoments: 'graph.scale_hint_moments',
   activeProvider: 'llm.active_provider',
   providers: 'llm.providers',
-  outboundConsent: 'graph.outbound_consent'
+  outboundConsent: 'graph.outbound_consent',
+  /**
+   * 问记忆 · 历史截图出云（2026-10-29 拍板：默认关）。
+   * 开 = read_segment 允许把该段最近一张截图发给模型；关 = 只回 UIA 文字。
+   */
+  askHistoryShots: 'graph.ask_history_shots'
 } as const
 
 /**
@@ -85,6 +90,8 @@ export interface GraphSettingsView {
   providersInvalid: boolean
   hotkeys: HotkeyBindings
   outboundConsent: boolean
+  /** 问记忆读段时是否允许把历史截图发给模型（默认关，2026-10-29 拍板） */
+  askHistoryShots: boolean
   /** 相似度阈值（§5.2；P3 才在设置面板暴露，这里先保证可读写/可标定） */
   thresholds: GraphThresholds
   usage: GraphUsageView
@@ -105,6 +112,7 @@ export interface GraphSettingsPatch {
   providers?: LlmProvider[]
   hotkeys?: Partial<HotkeyBindings>
   outboundConsent?: boolean
+  askHistoryShots?: boolean
   thresholds?: Partial<GraphThresholds>
 }
 
@@ -193,6 +201,7 @@ export function readGraphSettings(db: Db | null, now = Date.now()): GraphSetting
       providersInvalid: false,
       hotkeys: { ...DEFAULT_HOTKEYS },
       outboundConsent: false,
+      askHistoryShots: false,
       thresholds: { ...GRAPH_THRESHOLD_DEFAULTS },
       usage: { calls: 0, promptTokens: 0, completionTokens: 0 }
     }
@@ -223,6 +232,7 @@ export function readGraphSettings(db: Db | null, now = Date.now()): GraphSetting
       openGraph: getSetting(db, 'hotkey.open_graph').trim() || DEFAULT_HOTKEYS.openGraph
     },
     outboundConsent: getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
+    askHistoryShots: getSetting(db, GRAPH_SETTING_KEYS.askHistoryShots) === '1',
     thresholds: readGraphThresholds(db),
     usage: {
       calls: usage.calls,
@@ -268,6 +278,7 @@ function validatePatch(input: unknown): { ok: true; patch: GraphSettingsPatch } 
     'providers',
     'hotkeys',
     'outboundConsent',
+    'askHistoryShots',
     'thresholds'
   ]
   for (const key of Object.keys(input)) {
@@ -294,6 +305,12 @@ function validatePatch(input: unknown): { ok: true; patch: GraphSettingsPatch } 
       return { ok: false, error: 'outboundConsent 必须是布尔值' }
     }
     patch.outboundConsent = input.outboundConsent
+  }
+  if ('askHistoryShots' in input) {
+    if (typeof input.askHistoryShots !== 'boolean') {
+      return { ok: false, error: 'askHistoryShots 必须是布尔值' }
+    }
+    patch.askHistoryShots = input.askHistoryShots
   }
   for (const field of ['intervalMinutes', 'budgetTokensPerDay', 'batchMaxMoments', 'maxTokens', 'dayHeatMax', 'scaleHintMoments'] as const) {
     if (!(field in input)) continue
@@ -421,6 +438,9 @@ export function saveGraphSettings(db: Db, input: unknown, now = Date.now()): Gra
       }
       if (patch.outboundConsent !== undefined) {
         setSetting(db, GRAPH_SETTING_KEYS.outboundConsent, patch.outboundConsent ? '1' : '0')
+      }
+      if (patch.askHistoryShots !== undefined) {
+        setSetting(db, GRAPH_SETTING_KEYS.askHistoryShots, patch.askHistoryShots ? '1' : '0')
       }
       if (patch.intervalMinutes !== undefined) {
         setSetting(db, GRAPH_SETTING_KEYS.intervalMinutes, String(patch.intervalMinutes))

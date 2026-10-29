@@ -60,6 +60,10 @@ const historyList = must<HTMLUListElement>('history-list')
 const historyCount = must<HTMLSpanElement>('history-count')
 const historySearch = must<HTMLInputElement>('history-search')
 const historyClear = must<HTMLButtonElement>('history-clear')
+/* ---- 附件（图片 / 文本文件） ---- */
+const attachButton = must<HTMLButtonElement>('attach')
+const fileInput = must<HTMLInputElement>('file-input')
+const attachmentsEl = must<HTMLElement>('attachments')
 /* ---- 设置抽屉 · 个人记忆（日记目录 + 人设；保存即同步） ---- */
 const memoryStatusEl = must<HTMLElement>('memory-status')
 const memoryVaultInput = must<HTMLInputElement>('set-memory-vault')
@@ -85,6 +89,156 @@ let entries: AskHistoryEntry[] = []
 let activeConversationId: string | null = null
 let filter = ''
 let busy = false
+
+/* ------------------------------------------------------------------ */
+/* 附件（图片 / 文本文件）                                              */
+/* ------------------------------------------------------------------ */
+
+/** 待发送的附件：图片已压成 data URL；文本文件只留文本（原文件不落盘） */
+type PendingAttachment =
+  | { kind: 'image'; id: string; name: string; dataUrl: string }
+  | { kind: 'file'; id: string; name: string; text: string }
+
+const MAX_ATTACH_IMAGES = 4
+const MAX_ATTACH_FILES = 4
+/** 单个文本文件上限（200KB 原文件；抽出的文本再按下面总预算截） */
+const MAX_ATTACH_FILE_BYTES = 200 * 1024
+/** 单个文件送云文本上限；总预算在载荷层还有一道 30k */
+const MAX_ATTACH_FILE_CHARS = 30_000
+/** 图片长边上限：超过就缩，控制 token 与请求体 */
+const MAX_ATTACH_IMAGE_EDGE = 1600
+
+let pendingAttachments: PendingAttachment[] = []
+let attachSeq = 0
+
+function nextAttachId(): string {
+  attachSeq += 1
+  return `a${attachSeq}`
+}
+
+function clearAttachments(): void {
+  pendingAttachments = []
+  renderAttachments()
+}
+
+function renderAttachments(): void {
+  attachmentsEl.replaceChildren()
+  attachmentsEl.hidden = pendingAttachments.length === 0
+  for (const item of pendingAttachments) {
+    const chip = element('div', 'attachment')
+    if (item.kind === 'image') {
+      const image = element('img')
+      image.src = item.dataUrl
+      image.alt = item.name
+      chip.append(image)
+    }
+    const name = element('span', 'attachment-name')
+    name.textContent = item.kind === 'file' ? `${item.name}` : item.name || '截图'
+    name.title = name.textContent
+    const remove = element('button', 'attachment-remove')
+    remove.type = 'button'
+    remove.textContent = '×'
+    remove.title = '移除'
+    remove.addEventListener('click', () => {
+      pendingAttachments = pendingAttachments.filter((entry) => entry.id !== item.id)
+      renderAttachments()
+    })
+    chip.append(name, remove)
+    attachmentsEl.append(chip)
+  }
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/')
+}
+
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'md', 'markdown', 'csv', 'json', 'log', 'py', 'ts', 'tsx', 'js', 'jsx', 'css', 'html',
+  'htm', 'xml', 'yml', 'yaml', 'ini', 'toml', 'sql', 'sh', 'bat', 'ps1', 'java', 'c', 'cpp', 'h',
+  'go', 'rs', 'env', 'gitignore', 'conf', 'cfg'
+])
+
+function isTextFile(file: File): boolean {
+  if (file.type.startsWith('text/')) return true
+  if (file.type === 'application/json') return true
+  const ext = file.name.includes('.') ? file.name.split('.').pop()?.toLowerCase() ?? '' : ''
+  return ext !== '' && TEXT_EXTENSIONS.has(ext)
+}
+
+/** 图片 → data URL；大图缩到长边 1600（PNG 保持 PNG，截图文字不糊） */
+async function readImage(file: File): Promise<string> {
+  const raw = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error ?? new Error('读取失败'))
+    reader.readAsDataURL(file)
+  })
+  if (file.size <= 1_500_000) return raw
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const node = new Image()
+    node.onload = () => resolve(node)
+    node.onerror = () => reject(new Error('图片解码失败'))
+    node.src = raw
+  })
+  const scale = Math.min(1, MAX_ATTACH_IMAGE_EDGE / Math.max(image.width, image.height))
+  if (scale >= 1) return raw
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(image.width * scale))
+  canvas.height = Math.max(1, Math.round(image.height * scale))
+  const context = canvas.getContext('2d')
+  if (!context) return raw
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  // 截图里的字用 PNG 才不糊；照片类用 JPEG 压体积
+  const png = file.type === 'image/png' || file.name.toLowerCase().endsWith('.png')
+  return canvas.toDataURL(png ? 'image/png' : 'image/jpeg', 0.86)
+}
+
+async function addFiles(files: readonly File[]): Promise<void> {
+  for (const file of files) {
+    const imageCount = pendingAttachments.filter((item) => item.kind === 'image').length
+    const fileCount = pendingAttachments.filter((item) => item.kind === 'file').length
+    if (isImageFile(file)) {
+      if (imageCount >= MAX_ATTACH_IMAGES) {
+        setStatus('error', `最多带 ${MAX_ATTACH_IMAGES} 张图片`)
+        continue
+      }
+      if (file.size > 20 * 1024 * 1024) {
+        setStatus('error', `图片太大：${file.name}`)
+        continue
+      }
+      try {
+        const dataUrl = await readImage(file)
+        if (dataUrl.startsWith('data:image/')) {
+          pendingAttachments.push({ kind: 'image', id: nextAttachId(), name: file.name || '截图', dataUrl })
+        }
+      } catch {
+        setStatus('error', `读不了这张图：${file.name}`)
+      }
+      continue
+    }
+    if (!isTextFile(file)) {
+      setStatus('error', `只收图片和文本文件：${file.name}`)
+      continue
+    }
+    if (fileCount >= MAX_ATTACH_FILES) {
+      setStatus('error', `最多带 ${MAX_ATTACH_FILES} 个文件`)
+      continue
+    }
+    if (file.size > MAX_ATTACH_FILE_BYTES) {
+      setStatus('error', `文件太大（上限 200KB）：${file.name}`)
+      continue
+    }
+    try {
+      const text = (await file.text()).slice(0, MAX_ATTACH_FILE_CHARS)
+      if (text.trim() !== '') {
+        pendingAttachments.push({ kind: 'file', id: nextAttachId(), name: file.name, text })
+      }
+    } catch {
+      setStatus('error', `读不了这个文件：${file.name}`)
+    }
+  }
+  renderAttachments()
+}
 
 function setStatus(kind: 'idle' | 'busy' | 'error', text: string): void {
   statusEl.dataset.kind = kind
@@ -327,11 +481,47 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
-function appendUserBubble(text: string, imagePath?: string): void {
+/** 附件在界面上的视图（历史记录给 path；刚发送的 pending 给 dataUrl） */
+type AttachmentView = {
+  kind: 'image' | 'file'
+  name?: string
+  path?: string
+  dataUrl?: string
+  text?: string
+  chars?: number
+}
+
+function appendUserBubble(
+  text: string,
+  imagePath?: string,
+  attachments?: readonly AttachmentView[]
+): void {
   const wrap = element('div', 'msg user')
   const bubble = element('div', 'bubble')
   bubble.textContent = text
   if (imagePath) appendShotThumb(bubble, imagePath)
+  if (attachments && attachments.length > 0) {
+    const list = element('div', 'attach-list')
+    for (const item of attachments) {
+      if (item.kind === 'image') {
+        if (item.path) {
+          appendShotThumb(list, item.path)
+        } else if (item.dataUrl) {
+          const image = element('img', 'shot-thumb')
+          image.src = item.dataUrl
+          image.alt = item.name ?? '图片'
+          image.loading = 'lazy'
+          image.addEventListener('click', () => image.classList.toggle('zoomed'))
+          list.append(image)
+        }
+        continue
+      }
+      const chip = element('span', 'attach-file')
+      chip.textContent = item.name ?? '文件'
+      list.append(chip)
+    }
+    if (list.childElementCount > 0) bubble.append(list)
+  }
   wrap.append(bubble)
   threadEl.append(wrap)
 }
@@ -504,7 +694,7 @@ function assistantCard(
 }
 
 function renderTurn(entry: AskHistoryEntry): void {
-  appendUserBubble(entry.question, entry.imagePath)
+  appendUserBubble(entry.question, entry.imagePath, entry.attachments)
 
   if (entry.kind === 'answer') {
     const card = assistantCard('answer', '回答', entry.at, entry.stats, entry.memories?.length ?? 0)
@@ -632,8 +822,12 @@ function renderThread(): void {
 /** 当前线程（用于把用户刚问的一句立刻画出来，不等历史落盘） */
 let currentThreadEntries: AskHistoryEntry[] = []
 
-function appendPending(question: string, imagePath?: string): void {
-  appendUserBubble(question, imagePath)
+function appendPending(
+  question: string,
+  imagePath?: string,
+  attachments?: readonly AttachmentView[]
+): void {
+  appendUserBubble(question, imagePath, attachments)
   const wrap = element('div', 'msg assistant')
   const card = element('div', 'card pending')
   const text = element('p', 'muted')
@@ -812,9 +1006,15 @@ function setBusy(next: boolean): void {
   submitButton.disabled = next
   stopButton.hidden = !next
   newChatButton.disabled = next
+  attachButton.disabled = next
+  questionInput.disabled = next
 }
 
-async function ask(question: string, imagePath?: string): Promise<void> {
+async function ask(
+  question: string,
+  imagePath?: string,
+  attachments?: readonly AttachmentView[]
+): Promise<void> {
   if (busy) return
   if (!api) {
     setStatus('error', '窗口没接上主进程（preload 缺失）')
@@ -824,12 +1024,29 @@ async function ask(question: string, imagePath?: string): Promise<void> {
   if (currentThreadEntries.length === 0) threadEl.replaceChildren()
 
   setupBusy()
-  appendPending(question, imagePath)
+  appendPending(question, imagePath, attachments)
   questionInput.value = ''
   const conversationId = activeConversationId
+  // 附件随这一次问题发送；发出去之后就不再重复带（追问不重发旧图 / 旧文件）
+  const apiAttachments = (attachments ?? [])
+    .map((item) =>
+      item.kind === 'image' && item.dataUrl
+        ? { kind: 'image' as const, name: item.name, dataUrl: item.dataUrl }
+        : item.kind === 'file' && item.text
+          ? { kind: 'file' as const, name: item.name, text: item.text }
+          : null
+    )
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+  pendingAttachments = []
+  renderAttachments()
 
   try {
-    const result = await api.query(question, conversationId, imagePath)
+    const result = await api.query(
+      question,
+      conversationId,
+      imagePath,
+      apiAttachments.length > 0 ? apiAttachments : undefined
+    )
     if (result.kind === 'continue-ask') {
       // 这一问还没落历史：保留刚画的问题气泡，只把等待卡换成「还要继续吗」
       renderContinueCard(result)
@@ -871,7 +1088,31 @@ form.addEventListener('submit', (event) => {
     setStatus('error', '问题不能为空')
     return
   }
-  void ask(question)
+  const attachments = pendingAttachments.slice()
+  void ask(question, undefined, attachments)
+})
+
+/* 附件入口：点按钮选文件、直接粘贴图片、把文件拖进输入区 */
+attachButton.addEventListener('click', () => fileInput.click())
+fileInput.addEventListener('change', () => {
+  const files = Array.from(fileInput.files ?? [])
+  fileInput.value = ''
+  if (files.length > 0) void addFiles(files)
+})
+questionInput.addEventListener('paste', (event) => {
+  const files = Array.from(event.clipboardData?.files ?? [])
+  if (files.length > 0) {
+    event.preventDefault()
+    void addFiles(files)
+  }
+})
+form.addEventListener('dragover', (event) => {
+  event.preventDefault()
+})
+form.addEventListener('drop', (event) => {
+  event.preventDefault()
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  if (files.length > 0) void addFiles(files)
 })
 
 stopButton.addEventListener('click', () => {
@@ -887,6 +1128,7 @@ newChatButton.addEventListener('click', () => {
   renderThread()
   renderHistoryList()
   questionInput.value = ''
+  clearAttachments()
   questionInput.focus()
   setStatus('idle', '新对话')
 })

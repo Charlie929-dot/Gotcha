@@ -14,6 +14,8 @@
  * 时间（能解析出 `HH:mm` 才带）、标签（`#tag`）与双链（`[[名字]]`）。
  */
 
+import { parseMarks } from './marks'
+
 /** 一条记忆的类别：日记 / 待办 / 引用 / 其它笔记 */
 export type MemoryItemKind = 'diary' | 'task' | 'quote' | 'note'
 
@@ -21,7 +23,7 @@ export interface ParsedMemoryItem {
   dayKey: string
   section: string
   kind: MemoryItemKind
-  /** 清洗后的正文（已去 markdown 符号、已折叠空白） */
+  /** 清洗后的正文（已去 markdown 符号、已折叠空白；**作者标记保留在正文里**） */
   text: string
   /** 条目时刻（本地毫秒时间戳；只有能解析出 `- HH:mm` 的日记块才有） */
   ts: number | null
@@ -34,6 +36,15 @@ export interface ParsedMemoryItem {
   refs: string[]
   /** 待办是否完成（只有 kind=task 有意义） */
   done?: boolean
+  /**
+   * 这一条是谁写的：行尾 `[❤️]()` = ta，否则是用户（`marks.ts`，D57）。
+   * 只在本层保留 —— 落库只存原文，读的时候按 `text` 重新解析，不新增列。
+   */
+  author: 'user' | 'ta'
+  /** ta 对这条的评论（非空 `[❤️](正文)`） */
+  comments: string[]
+  /** 用户对 ta 评论的回复（`[💬](正文)`） */
+  replies: string[]
 }
 
 export interface ParsedDailyNote {
@@ -42,6 +53,12 @@ export interface ParsedDailyNote {
   items: ParsedMemoryItem[]
   /** 被丢弃的行数（模板噪音 / 导航 / 空行），只用于诊断 */
   skippedLines: number
+}
+
+/** 作者 / 评论 / 回复：直接按标记契约推导，不猜语义 */
+function markFields(text: string): Pick<ParsedMemoryItem, 'author' | 'comments' | 'replies'> {
+  const parsed = parseMarks(text)
+  return { author: parsed.author, comments: parsed.comments, replies: parsed.replies }
 }
 
 /** `2026-10-28.md` → 日期；不是这种名字就返回 null（后面再用 frontmatter 兜底） */
@@ -191,6 +208,7 @@ function parseTaskItems(section: Section, dayKey: string): ParsedMemoryItem[] {
         lineEnd: current.lineEnd,
         tags: extractTags(text),
         refs: extractRefs(text),
+        ...markFields(text),
         done: current.done
       })
     }
@@ -237,7 +255,8 @@ function parseDiaryItems(section: Section, dayKey: string): ParsedMemoryItem[] {
         lineStart: current.lineStart,
         lineEnd: current.lineEnd,
         tags: extractTags(text),
-        refs: extractRefs(text)
+        refs: extractRefs(text),
+        ...markFields(text)
       })
     }
     current = null
@@ -287,7 +306,8 @@ function parseParagraphItems(section: Section, dayKey: string): ParsedMemoryItem
         lineStart: block.lineStart,
         lineEnd: block.lineEnd,
         tags: extractTags(text),
-        refs: extractRefs(text)
+        refs: extractRefs(text),
+        ...markFields(text)
       })
     }
     block = null

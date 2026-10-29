@@ -244,7 +244,7 @@ ask-ipc(ask:query) → askChain
 | 3 | 向量回想 | `mem_vectors`，本地 bge 索引日记/对话/观测，每轮 top 6–8 + 时间衰减 + MMR；CoT 不做 | 复用 `embedding-host`；现在 `recall_diary` 是纯关键词打分 |
 | 4 | 任务记忆 + 调度 | `routine.md` + `mem_tasks`，30s 查到期；`schedule_task` 等工具；调用后 follow-up review；10 分钟合流窗口 | **完全新增**；现有 scheduler 只有采集 2s / 保留期 6h |
 | 5 | 夜报 / 周报 / 成长 | 23:30 读当天日记 → 评论 0–2 → 写自己；周日 22:00 reflect 更新 `self.md` / observations | 现在只有 `mem_observations(source='stats')` 统计观测，无写入路径 |
-| 6 | 写入安全 / 标记契约 | ta 自己写的行走 `[❤️]()` 空评论格式，评论 `[❤️](正文)`、回复 `[💬](正文)`；备份 + 原子写 + mtime 冲突重试 + read 门白名单 | `vault.ts` **只解析不写**；解析器还不认识标记 |
+| 6 | 写入安全 / 标记契约 | ta 自己写的行走 `[❤️]()` 空评论格式，评论 `[❤️](正文)`、回复 `[💬](正文)`；备份 + 原子写 + mtime 冲突重试 + read 门白名单 | 已落地纯本地一半：`marks.ts` 解析标记、`write.ts` 只追加 / 插评论 / 备份 / 原子写（`vault.ts` 自身仍不写盘）；read 门白名单待工具层 |
 
 ### 10.2 数据模型（v10）
 
@@ -277,7 +277,7 @@ mem_reflections(day_key, status, started_at, wrote_at, error, model)   -- 夜报
 | 4 | 写入 | vault 解析 + 只读同步 | 备份 / 原子写 / 冲突重试 / 只追加 | **最高风险项**（碰用户正文）；先副本 vault 验收再碰真日记 |
 | 5 | 出网 | 只有显式提问（+ 派生），过同一端口 | 夜报/周报/任务/review 无人值守出网 | 全部走同一端口 + 同意门 + 日账；还要定后台任务的额度优先级 |
 | 6 | 合流 | 无全局队列；ask 是窗口内一次请求 | 单 runtime 队列，用户优先、任务让路、10 分钟窗口 | 需要新的一致层；现有 resume 检查点不能替代队列 |
-| 7 | 标记契约 | `parseDailyNote` 只产条目，不认识 `[❤️]`/`[💬]`；目标是 `src/memory/marks.ts` 解析 + `write.ts` 原子重写 | 行内线程解析 + 原子重写 | uid 含正文/起始行，插评论会改行号 → uid 稳定性要重新设计（标记留在 `text` 里、`text_norm` 去标记，正文按原样重解析） |
+| 7 | 标记契约 | `marks.ts` 认 `[❤️]()` / `[❤️](正文)` / `[💬]`，`write.ts` 已有只追加 / 插评论 / 备份 / 冲突重试；uid 由正文推导，标记留在 `text`、`text_norm` 仍含标记 | 行内线程解析 + 原子重写 | uid 含正文/起始行，插评论会改行号 → 后续要定「插评论后 uid 换不换」（现口径：换，按新文本重解析）|
 | 8 | Obsidian CLI | 未接；本机 1.10.6 < 要求 1.12.4 | 仅生成当天模板，失败跳过 | 升级与 spike 均未做（文档标未验证）；中文卡住 / 抢焦点是已知问题 |
 | 9 | 文档口径 | decisions 已补 **D57**（v0.3 十条 + 上午五条拍板）；信息链契约不动（个人记忆是另一套系统） | 接个人记忆前先定口径（AGENTS 第 12 条） | 口子已定；夜报 / 周报 / 任务的无人值守出网仍要过同一端口 + 同意门 + 日账（未实现） |
 | 10 | 版本号漂移 | db v9 / chain v4 / 契约 v0.10 / 代码注释 v0.5 | — | 实施前对齐一次，别把 v10 迁移和契约修订混在一起 |
@@ -298,7 +298,7 @@ OutboundPort         // 已是 AskOutbound，夜报/周报复用
 
 核心只依赖端口；脱敏 / 文件系统 / 时钟都在组合根或 `src/memory/`。顺序建议：
 
-1. 纯本地、零 LLM：作者/线程解析、`routine.md` 解析、快照拼装、备份/原子写/冲突重试；
+1. ✅ 纯本地、零 LLM：作者/线程解析（`marks.ts`）、写入器（`write.ts`：备份 / 原子写 / 冲突重试）已落地；`routine.md` 解析、快照拼装未做；
 2. 固定钟 + 假 LLM 跑通调度器与夜报（`fake-llm` / `fake-embedding` 现成）；
 3. 向量索引 + 回想；
 4. perceive/act 接真模型（此时才有新增出网调用，需先过同意门）；
@@ -323,6 +323,7 @@ OutboundPort         // 已是 AskOutbound，夜报/周报复用
 | 截图 / 内容 / 保留期 | `src/main/chain-shot.ts`、`chain-content.ts`、`chain-retention.ts` |
 | 派生 | `src/chain/derive/runner.ts` |
 | 日记解析 / 同步 / 召回 / 人设 | `src/memory/{vault,store,persona,schema}.ts` |
+| 日记标记 / 写入（只追加 / 插评论 / 备份） | `src/memory/{marks,write}.ts` |
 | 表结构 | `src/db/schema.ts` + `src/db/migrations.ts`、`src/chain/schema.ts`、`src/memory/schema.ts` |
 | 设计稿 | `docs/agent/llm-call.md` |
 

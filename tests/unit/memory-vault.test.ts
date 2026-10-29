@@ -126,6 +126,25 @@ describe('parseDailyNote', () => {
     const parsed = parseDailyNote('2026-09-29.md', duplicated)!
     expect(parsed.items.filter((item) => item.text.startsWith('研究ai使用'))).toHaveLength(1)
   })
+
+  it('作者标记：ta 自己写的行 / 评论 / 回复都从标记推导', () => {
+    const note = [
+      '# Diary',
+      '- 08:40 今天早上有点困。[❤️](那就别硬撑，午休二十分钟？)[💬](好，我中午睡。)',
+      '- 23:30 今天你大部分时间都在改记忆球。 [❤️]()',
+      ''
+    ].join('\n')
+    const parsed = parseDailyNote('2026-10-29.md', note)!
+    expect(parsed.items).toHaveLength(2)
+    const [userLine, taLine] = parsed.items
+    expect(userLine.author).toBe('user')
+    expect(userLine.comments).toEqual(['那就别硬撑，午休二十分钟？'])
+    expect(userLine.replies).toEqual(['好，我中午睡。'])
+    // 原始标记留在 text 里（落库后按 text 重新解析，§10）
+    expect(userLine.text).toContain('[❤️](那就别硬撑，午休二十分钟？)')
+    expect(taLine.author).toBe('ta')
+    expect(taLine.comments).toEqual([])
+  })
 })
 
 describe('cleanItemText / 日期工具', () => {

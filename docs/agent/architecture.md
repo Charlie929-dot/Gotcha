@@ -241,7 +241,7 @@ ask-ipc(ask:query) → askChain
 | - | - | - | - |
 | 1 | 本体论 / 四类记忆 | episodic / semantic / procedural / identity；屏幕是「世界」不是本体 | 新增概念层；现有 `persona` 只是 identity 的一半 |
 | 2 | perceive → act | 每次任务 / 线程的第一次调用先产 300–500 字自状态；快照 8–10k 字 | **替代**现在「每轮重发大 system」 |
-| 3 | 向量回想 | `mem_vectors`，本地 bge 索引日记/对话/观测，每轮 top 6–8 + 时间衰减 + MMR；CoT 不做 | 复用 `embedding-host`；现在 `recall_diary` 是纯关键词打分 |
+| 3 | 向量回想 | `mem_vectors`，本地 bge 索引日记/对话/观测，每轮 top 6–8 + 时间衰减 + MMR；CoT 不做 | 排序层已落地（`recall.ts`：余弦 / 90 天半衰期 / 去重 / MMR / `textHash`）；**表与增量索引未做**，现在 `recall_diary` 仍是纯关键词打分 |
 | 4 | 任务记忆 + 调度 | `routine.md` + `mem_tasks`，30s 查到期；`schedule_task` 等工具；调用后 follow-up review；10 分钟合流窗口 | **完全新增**；现有 scheduler 只有采集 2s / 保留期 6h |
 | 5 | 夜报 / 周报 / 成长 | 23:30 读当天日记 → 评论 0–2 → 写自己；周日 22:00 reflect 更新 `self.md` / observations | 现在只有 `mem_observations(source='stats')` 统计观测，无写入路径 |
 | 6 | 写入安全 / 标记契约 | ta 自己写的行走 `[❤️]()` 空评论格式，评论 `[❤️](正文)`、回复 `[💬](正文)`；备份 + 原子写 + mtime 冲突重试 + read 门白名单 | 已落地纯本地一半：`marks.ts` 解析标记、`write.ts` 只追加 / 插评论 / 备份 / 原子写（`vault.ts` 自身仍不写盘）；read 门白名单待工具层 |

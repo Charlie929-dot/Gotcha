@@ -40,6 +40,7 @@ import {
 import {
   MEM_DELETED_DDL,
   MEM_DELETED_DAY_INDEX_DDL,
+  MEM_VECTORS_DDL,
   MEM_ITEMS_DDL,
   MEM_ITEMS_DAY_INDEX_DDL,
   MEM_ITEMS_SOURCE_INDEX_DDL,
@@ -265,6 +266,21 @@ export const migrations: Migration[] = [
     down(db) {
       db.exec('DROP INDEX IF EXISTS idx_mem_deleted_day')
       db.exec('DROP TABLE IF EXISTS mem_deleted')
+    }
+  },
+  {
+    /**
+     * v10：个人记忆向量（`mem_vectors`）。
+     *
+     * 日记 / 对话 / 观测的本地 embedding（`llm-call.md` §4，D57）；派生数据、可整表重建，
+     * 所以 down 直接删表不丢用户内容。索引任务见 `src/memory/vectors.ts`。
+     */
+    version: 10,
+    up(db) {
+      db.exec(MEM_VECTORS_DDL)
+    },
+    down(db) {
+      db.exec('DROP TABLE IF EXISTS mem_vectors')
     }
   }
 ]

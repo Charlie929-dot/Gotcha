@@ -389,12 +389,13 @@ CREATE TABLE mem_reflections (
 ```
 
 - `mem_items` 不变；评论/回复从 text 解析；author 由 `[❤️](…)` 标记推导（无标记 = 用户，空评论 = ta 自己写的行）。
+- **v10 已落地**（2026-10-29）：`mem_vectors` 随迁移建好，索引任务见 `src/memory/vectors.ts`；`mem_tasks` / `mem_reflections` 仍未建（第 6 步）。
 - `mem_observations` 增加 L3 写入（`source='reflect'`，`status` active/superseded）。
 - `mem_thoughts` 暂不做。
 
 ## 11. 测试 / 验收
 
-> 解析 / 写入 / 评论三组用例已随第 2 步落地：`tests/unit/memory-marks.test.ts`（17 条）、`tests/unit/memory-write.test.ts`（17 条）、`tests/unit/memory-vault.test.ts` 的标记用例；其余各组仍待实现。
+> 解析 / 写入 / 评论三组用例已随第 2 步落地：`tests/unit/memory-marks.test.ts`（17 条）、`tests/unit/memory-write.test.ts`（17 条）、`tests/unit/memory-vault.test.ts` 的标记用例；向量组随第 3 步落地（`memory-recall.test.ts` 10 条 + `memory-vectors.test.ts` 10 条 + 迁移 v10 用例）；其余各组仍待实现。
 
 - 单测：
   - 解析：`[❤️]()` 空评论作者、用户行尾裸 ❤️ 不误判、`[❤️]`/`[💬]` 顺序、`<...>`、多评论线程、CRLF/BOM。
@@ -420,7 +421,7 @@ CREATE TABLE mem_reflections (
 
 1. v0.2 设计（本文，现为 v0.3）。
 2. ✅ **解析 + 写入 + 评论 + 备份 + 测试（不依赖 LLM）**（2026-10-29）：`src/memory/marks.ts`（`[❤️]()` / `[❤️](评论)` / `[💬]` 解析、作者判定、线程、格式化）、`src/memory/write.ts`（`appendDiary` / `appendPlan` / `insertComment`，备份 + 原子写 + mtime/size 冲突重试 + BOM/CRLF 保留）、`vault.ts` 条目带 `author/comments/replies`（不落库、读时重解析）。**未接**：工具层与 UI（等 §12 第 4 步）、真日记写入（第 7 步）。
-3. 🟡 **向量索引 + 回想（一半）**：排序层已落地 `src/memory/recall.ts`（余弦 + 90 天半衰期 + `dedupeKey` 去重 + MMR，`textHash` 指纹），**未做**：`mem_vectors` 表（v10）、sync 后增量索引、孤儿清理、组合根接线。
+3. ✅ **向量索引 + 回想**（2026-10-29）：排序层 `src/memory/recall.ts`（余弦 + 90 天半衰期 + `dedupeKey` 去重 + MMR + `textHash`）；索引层 `src/memory/vectors.ts` + schema **v10** 的 `mem_vectors`（增量按 `text_hash`、孤儿按「`item_id` 不在 `mem_items`」清、坏维度跳过）；组合根在同步有变化后**后台排一次**（5s 防抖、一次 200 条、最多 20 档、复用 chain 的 bge 会话）。**未接**：`recall_diary` / act 的注入（第 4 步），`conversation` / `observation` / `self` 的向量还没写。
 4. perceive/act 第一次调用 + 快照。
 5. **体验关口**：真机感受 perceive/act 手感、调提示词；手感对了再进下一步（2026-10-29 拍板）。
 6. 任务记忆 + 调度器 + `schedule_task` + follow-up review。

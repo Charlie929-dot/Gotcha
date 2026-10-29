@@ -107,3 +107,25 @@ CREATE TABLE IF NOT EXISTS mem_deleted (
 export const MEM_DELETED_DAY_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_mem_deleted_day ON mem_deleted(day_key);
 `
+
+/**
+ * 向量（v10）：日记 / 对话 / 观测 / self 的本地 embedding。
+ *
+ * 设计见 `docs/agent/llm-call.md` §4（D57）：本地 bge-small 算，**零出网**；
+ * `text_hash` 是正文指纹 —— 正文没变就不重算，换了模型则按 `model` 各存一份（同一模型覆盖）。
+ *
+ * 派生数据，可整表重建：孤儿（条目已删 / 正文变了换 uid）由索引任务按
+ * 「`item_id` 不在 `mem_items` 里」清掉；`dim` 不入库，读的时候按当前模型维度校验
+ * （长度对不上的坏行跳过，不报错）。
+ */
+export const MEM_VECTORS_DDL = `
+CREATE TABLE IF NOT EXISTS mem_vectors (
+  item_type  TEXT NOT NULL,
+  item_id    TEXT NOT NULL,
+  model      TEXT NOT NULL,
+  vector     BLOB NOT NULL,
+  text_hash  TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (item_type, item_id, model)
+);
+`

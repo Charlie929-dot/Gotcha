@@ -241,7 +241,7 @@ ask-ipc(ask:query) → askChain
 | - | - | - | - |
 | 1 | 本体论 / 四类记忆 | episodic / semantic / procedural / identity；屏幕是「世界」不是本体 | 新增概念层；现有 `persona` 只是 identity 的一半 |
 | 2 | perceive → act | 每次任务 / 线程的第一次调用先产 300–500 字自状态；快照 8–10k 字 | **替代**现在「每轮重发大 system」 |
-| 3 | 向量回想 | `mem_vectors`，本地 bge 索引日记/对话/观测，每轮 top 6–8 + 时间衰减 + MMR；CoT 不做 | 排序层已落地（`recall.ts`：余弦 / 90 天半衰期 / 去重 / MMR / `textHash`）；**表与增量索引未做**，现在 `recall_diary` 仍是纯关键词打分 |
+| 3 | 向量回想 | `mem_vectors`，本地 bge 索引日记/对话/观测，每轮 top 6–8 + 时间衰减 + MMR；CoT 不做 | 已落地：`recall.ts` 排序 + `vectors.ts` 增量索引（schema v10，组合根后台排队）；**act / `recall_diary` 还没接向量路**，`recall_diary` 仍是关键词打分 |
 | 4 | 任务记忆 + 调度 | `routine.md` + `mem_tasks`，30s 查到期；`schedule_task` 等工具；调用后 follow-up review；10 分钟合流窗口 | **完全新增**；现有 scheduler 只有采集 2s / 保留期 6h |
 | 5 | 夜报 / 周报 / 成长 | 23:30 读当天日记 → 评论 0–2 → 写自己；周日 22:00 reflect 更新 `self.md` / observations | 现在只有 `mem_observations(source='stats')` 统计观测，无写入路径 |
 | 6 | 写入安全 / 标记契约 | ta 自己写的行走 `[❤️]()` 空评论格式，评论 `[❤️](正文)`、回复 `[💬](正文)`；备份 + 原子写 + mtime 冲突重试 + read 门白名单 | 已落地纯本地一半：`marks.ts` 解析标记、`write.ts` 只追加 / 插评论 / 备份 / 原子写（`vault.ts` 自身仍不写盘）；read 门白名单待工具层 |
@@ -254,6 +254,8 @@ mem_tasks(id, uid, title, instruction, kind, due_at, recurrence,
           next_due_at, status, source, last_run_at, surfaced_at, ...)  -- pending→due→coalesced/surfaced→done/skipped
 mem_reflections(day_key, status, started_at, wrote_at, error, model)   -- 夜报幂等
 ```
+
+`mem_vectors` **已随 schema v10 落地**（2026-10-29）；`mem_tasks` / `mem_reflections` 仍是设计（第 6 步）。
 
 `mem_items` 不变（作者由 `[❤️](…)` 推导：空正文 = ta 自己写的行，带正文 = 评论；用户行尾裸 ❤️ 不算标记）；`mem_observations` 增 `source='reflect'` 与
 `status` active/superseded；`mem_thoughts` 暂不做。
@@ -272,7 +274,7 @@ mem_reflections(day_key, status, started_at, wrote_at, error, model)   -- 夜报
 | # | 差距 | 现状 | 方案要求 | 风险 / 建议 |
 | - | - | - | - | - |
 | 1 | 第一次调用 | 无 perceive，每轮重发大 system | 两段式 + 8–10k 快照 | 多一次 LLM 调用（成本/延迟）；建议先「本地拼快照」再决定要不要模型压缩 |
-| 2 | 记忆向量 | `recall_diary` 关键词打分 | `mem_vectors` + 余弦 + MMR | 基建现成（bge 512、host 进程），缺索引维护与删除清理 |
+| 2 | 记忆向量 | `recall_diary` 关键词打分；`mem_vectors` + 后台增量索引已落地 | `mem_vectors` + 余弦 + MMR；act 注入 | 基建现成（bge 512、host 进程）；真机 2 382 条 / 120 天副本上全量索引 5 档 202 ms（假 32 维），真 bge 待重启后看 `main.log` |
 | 3 | 调度器 | 只有采集 / 保留期 / 旧管线 runtime | 30s 查到期、重启不重复、错过 30 分钟不补 | 需与采集开关解耦；24/7 依赖开机自启（待拍板） |
 | 4 | 写入 | vault 解析 + 只读同步 | 备份 / 原子写 / 冲突重试 / 只追加 | **最高风险项**（碰用户正文）；先副本 vault 验收再碰真日记 |
 | 5 | 出网 | 只有显式提问（+ 派生），过同一端口 | 夜报/周报/任务/review 无人值守出网 | 全部走同一端口 + 同意门 + 日账；还要定后台任务的额度优先级 |
@@ -300,7 +302,7 @@ OutboundPort         // 已是 AskOutbound，夜报/周报复用
 
 1. ✅ 纯本地、零 LLM：作者/线程解析（`marks.ts`）、写入器（`write.ts`：备份 / 原子写 / 冲突重试）已落地；`routine.md` 解析、快照拼装未做；
 2. 固定钟 + 假 LLM 跑通调度器与夜报（`fake-llm` / `fake-embedding` 现成）；
-3. 向量索引 + 回想；
+3. ✅ 向量索引 + 回想（2026-10-29）：`mem_vectors`（v10）+ 增量索引 + 孤儿清理 + 后台排队已落地；act 注入待第 4 步；
 4. perceive/act 接真模型（此时才有新增出网调用，需先过同意门）；
 5. 周报 reflect、`self.md`；
 6. Obsidian CLI spike（用户升级后）；
@@ -324,6 +326,7 @@ OutboundPort         // 已是 AskOutbound，夜报/周报复用
 | 派生 | `src/chain/derive/runner.ts` |
 | 日记解析 / 同步 / 召回 / 人设 | `src/memory/{vault,store,persona,schema}.ts` |
 | 日记标记 / 写入（只追加 / 插评论 / 备份） | `src/memory/{marks,write}.ts` |
+| 日记向量（索引 / 回想排序） | `src/memory/{vectors,recall}.ts` |
 | 表结构 | `src/db/schema.ts` + `src/db/migrations.ts`、`src/chain/schema.ts`、`src/memory/schema.ts` |
 | 设计稿 | `docs/agent/llm-call.md` |
 

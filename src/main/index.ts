@@ -6,6 +6,7 @@ import log from 'electron-log/main'
 import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { getNumberSetting, getSetting, setSetting } from '../db/settings'
 import { previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
+import { indexDiaryVectors, pruneOrphanVectors } from '../memory/vectors'
 import { buildPersonaPrompt, readPersona, resolveVaultDir } from '../memory/persona'
 import {
   applyMemoryPatch,
@@ -1722,10 +1723,50 @@ if (primaryInstance) {
         const result = syncVault(writable, vaultDir)
         if (result.added > 0 || result.updated > 0 || result.removed > 0) {
           captureLog('info', 'memory sync', { dir: vaultDir, ...result })
+          // 条目变了才排向量索引：正文没变的那部分靠 text_hash 跳过，不重算
+          scheduleMemoryVectors()
         }
       } catch (error) {
         captureLog('warn', 'memory sync failed', { dir: vaultDir, error: String(error) })
       }
+    }
+    /**
+     * 个人记忆向量索引（`llm-call.md` §4 / D57）：**后台串行队列**，一次 200 条、算完再排下一档，
+     * 不阻塞启动与同步。embedder 复用 chain profile（同一份 bge 模型；多开一个 ONNX 会话白占内存），
+     * 模型缺失时 `loadChainEmbedder()` 返回 null，这里直接什么都不做（只关向量，不关记忆）。
+     */
+    let memoryVectorTimer: ReturnType<typeof setTimeout> | null = null
+    let memoryVectorRunning = false
+    const runMemoryVectorIndex = async (): Promise<void> => {
+      if (memoryVectorRunning) return
+      memoryVectorRunning = true
+      try {
+        const embedder = await loadChainEmbedder()
+        if (embedder === null) return
+        const { db } = connections.ensureWritable()
+        const pruned = pruneOrphanVectors(db)
+        let embedded = 0
+        // 有上限的连续档：一晚上几千条也只跑 20 档（4000 条），剩下的下次同步再续
+        for (let round = 0; round < 20; round += 1) {
+          const result = await indexDiaryVectors(db, embedder, { limit: 200 })
+          embedded += result.embedded
+          if (result.embedded === 0 || result.remaining <= 0) break
+        }
+        if (embedded > 0 || pruned > 0) {
+          captureLog('info', 'memory vectors indexed', { embedded, pruned })
+        }
+      } catch (error) {
+        captureLog('warn', 'memory vectors failed', { error: String(error) })
+      } finally {
+        memoryVectorRunning = false
+      }
+    }
+    const scheduleMemoryVectors = (): void => {
+      if (memoryVectorTimer !== null) return
+      memoryVectorTimer = setTimeout(() => {
+        memoryVectorTimer = null
+        void runMemoryVectorIndex()
+      }, 5_000)
     }
     /**
      * 个人记忆设置（日记目录 + 人设）：读 = 现读 settings；存 = 校验 → 落库 → **立即同步**。
@@ -1760,6 +1801,8 @@ if (primaryInstance) {
       try {
         const result = syncVault(db, view.resolvedDir)
         captureLog('info', 'memory sync', { dir: view.resolvedDir, ...result })
+        // 保存设置 = 立即同步（用户口径）→ 顺手排向量索引，新写的日记也能被回想
+        if (result.added > 0 || result.updated > 0 || result.removed > 0) scheduleMemoryVectors()
         // 同步后统计会变（新增 / 删除），视图重读一次再回给界面
         return { ok: true, view: buildMemorySettingsView(db), sync: result, syncedDir: view.resolvedDir }
       } catch (error) {

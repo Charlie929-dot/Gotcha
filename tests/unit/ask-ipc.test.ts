@@ -470,3 +470,73 @@ describe('ask IPC：设置抽屉（D53）', () => {
     expect(handler(deps, 'ask:provider:keys')(SENDER_OK as never)).toEqual({})
   })
 })
+
+describe('ask IPC：个人记忆设置（日记目录 + 人设）', () => {
+  const view = {
+    vaultDir: 'D:\\vault',
+    resolvedDir: 'D:\\vault',
+    dirSource: 'setting',
+    personaName: '记忆球',
+    personaTone: 't',
+    redLines: [],
+    hardRedLines: [],
+    stats: {}
+  } as never
+
+  it('读 / 存：越权拒绝；成功原样回传；保存即同步的结果一起回来', () => {
+    const saveResult = {
+      ok: true as const,
+      view,
+      sync: { scanned: 1, unchanged: 0, skipped: 0, added: 1, updated: 0, removed: 0, items: 1 },
+      syncedDir: 'D:\\vault'
+    }
+    const memorySettings = vi.fn(() => view)
+    const saveMemorySettings = vi.fn(() => saveResult)
+    const deps = buildDeps({ memorySettings, saveMemorySettings })
+
+    const read = handler(deps, 'ask:memory:get')
+    expect(read({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never)).toEqual({
+      error: 'forbidden'
+    })
+    expect(read(SENDER_OK as never)).toBe(view)
+
+    const save = handler(deps, 'ask:memory:save')
+    expect(save({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, {})).toEqual({
+      ok: false,
+      error: 'forbidden'
+    })
+    expect(saveMemorySettings).not.toHaveBeenCalled()
+    expect(save(SENDER_OK as never, { vaultDir: 'D:\\vault' })).toBe(saveResult)
+    expect(saveMemorySettings).toHaveBeenCalledWith({ vaultDir: 'D:\\vault' })
+  })
+
+  it('没接能力 / 抛错都变成可读结果，不抛回渲染层', () => {
+    expect(handler(buildDeps(), 'ask:memory:get')(SENDER_OK as never)).toEqual({
+      error: 'unsupported'
+    })
+    expect(handler(buildDeps(), 'ask:memory:save')(SENDER_OK as never, {})).toEqual({
+      ok: false,
+      error: '当前版本不支持保存个人记忆设置'
+    })
+
+    const brokenRead = handler(
+      buildDeps({
+        memorySettings: () => {
+          throw new Error('db gone')
+        }
+      }),
+      'ask:memory:get'
+    )
+    expect(brokenRead(SENDER_OK as never)).toEqual({ error: 'memory-settings-read-failed' })
+
+    const brokenSave = handler(
+      buildDeps({
+        saveMemorySettings: () => {
+          throw new Error('db gone')
+        }
+      }),
+      'ask:memory:save'
+    )
+    expect(brokenSave(SENDER_OK as never, {})).toEqual({ ok: false, error: '保存失败' })
+  })
+})

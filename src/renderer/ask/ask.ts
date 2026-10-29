@@ -21,6 +21,7 @@ import {
 } from '../../chain/agent/types'
 import type { SegmentEvidence } from '../../chain/agent/evidence'
 import type { AskHistoryEntry } from '../../main/ask-history'
+import type { MemorySettingsView } from '../../main/memory-settings'
 import type { AskApi } from '../ask-preload'
 import { createSettingsPanel } from '../graph/graph-settings-panel'
 
@@ -58,6 +59,14 @@ const historyList = must<HTMLUListElement>('history-list')
 const historyCount = must<HTMLSpanElement>('history-count')
 const historySearch = must<HTMLInputElement>('history-search')
 const historyClear = must<HTMLButtonElement>('history-clear')
+/* ---- 设置抽屉 · 个人记忆（日记目录 + 人设；保存即同步） ---- */
+const memoryStatusEl = must<HTMLElement>('memory-status')
+const memoryVaultInput = must<HTMLInputElement>('set-memory-vault')
+const memoryNameInput = must<HTMLInputElement>('set-persona-name')
+const memoryToneInput = must<HTMLInputElement>('set-persona-tone')
+const memoryRedlinesInput = must<HTMLTextAreaElement>('set-persona-redlines')
+const memorySaveButton = must<HTMLButtonElement>('memory-save')
+const memoryMsg = must<HTMLElement>('memory-msg')
 
 /** 列表一次最多画多少条会话（永久保留，记录可能很多；搜索用来缩小范围） */
 const HISTORY_RENDER_LIMIT = 200
@@ -962,9 +971,102 @@ const settingsPanel = api
     })
   : null
 
-settingsButton.addEventListener('click', () => {
+/* ------------------------------------------------------------------ */
+/* 设置抽屉 · 个人记忆（日记目录 + 人设）                              */
+/* ------------------------------------------------------------------ */
+
+const DIR_SOURCE_TEXT: Record<MemorySettingsView['dirSource'], string> = {
+  env: '环境变量 GOTCHA_MEMORY_VAULT',
+  setting: '设置里的目录',
+  auto: '自动探测（日记最多的位置）',
+  none: '没有找到'
+}
+
+function fillMemorySettings(view: MemorySettingsView): void {
+  memoryVaultInput.value = view.vaultDir
+  memoryNameInput.value = view.personaName
+  memoryToneInput.value = view.personaTone
+  memoryRedlinesInput.value = view.redLines.join('\n')
+  const dir = view.resolvedDir ?? '（没有）'
+  const stats = view.stats
+  const range =
+    stats.firstDay !== null && stats.lastDay !== null ? ` · ${stats.firstDay} → ${stats.lastDay}` : ''
+  memoryStatusEl.textContent = `当前目录：${dir}（${DIR_SOURCE_TEXT[view.dirSource]}）· 索引 ${stats.items} 条 / ${stats.days} 天${range}`
+  memoryStatusEl.dataset.source = view.dirSource
+}
+
+/** 读一次记忆设置并回填（开抽屉 / 保存后都走这里） */
+async function refreshMemorySettings(note = ''): Promise<void> {
+  if (!api) return
+  memoryMsg.textContent = note
+  memoryMsg.style.color = ''
+  try {
+    const view = await api.memorySettings()
+    if ('error' in view) {
+      memoryStatusEl.textContent =
+        view.error === 'db-unavailable'
+          ? '还没有记忆库（同步一次日记或开始采集后可用）'
+          : '读取个人记忆设置失败'
+      return
+    }
+    fillMemorySettings(view)
+  } catch (error) {
+    memoryStatusEl.textContent = `读取个人记忆设置失败：${String(error)}`
+  }
+}
+
+function openSettingsDrawer(): void {
   void settingsPanel?.open()
-})
+  void refreshMemorySettings()
+}
+
+if (api) {
+  memorySaveButton.addEventListener('click', async () => {
+    if (busy) {
+      // 同步要开写连接（会短暂关掉只读连接），别在回答进行中动库
+      memoryMsg.textContent = '等这次回答结束再保存（同步会短暂占用数据库）'
+      memoryMsg.style.color = 'var(--error)'
+      return
+    }
+    memorySaveButton.disabled = true
+    memoryMsg.textContent = '保存中…'
+    memoryMsg.style.color = ''
+    try {
+      const redLines = memoryRedlinesInput.value
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+      const result = await api.saveMemorySettings({
+        vaultDir: memoryVaultInput.value.trim(),
+        personaName: memoryNameInput.value,
+        personaTone: memoryToneInput.value,
+        redLines
+      })
+      if (!result.ok) {
+        memoryMsg.textContent = `没有保存：${result.error}`
+        memoryMsg.style.color = 'var(--error)'
+        return
+      }
+      if (result.view) fillMemorySettings(result.view)
+      if (result.sync) {
+        const sync = result.sync
+        memoryMsg.textContent = `已保存并同步：${result.syncedDir}（${sync.scanned} 篇 / 新增 ${sync.added} / 删除 ${sync.removed} / 共 ${sync.items} 条）`
+      } else if (result.syncError) {
+        memoryMsg.textContent = `设置已保存，但同步失败：${result.syncError}`
+        memoryMsg.style.color = 'var(--error)'
+      } else {
+        memoryMsg.textContent = '已保存；没有可同步的日记目录（留空 = 自动找）'
+      }
+    } catch (error) {
+      memoryMsg.textContent = `保存失败：${String(error)}`
+      memoryMsg.style.color = 'var(--error)'
+    } finally {
+      memorySaveButton.disabled = false
+    }
+  })
+}
+
+settingsButton.addEventListener('click', openSettingsDrawer)
 
 // 点遮罩空白处关抽屉；Esc 也关（面板自己不管关闭键）
 drawerEl.addEventListener('mousedown', (event) => {
@@ -977,7 +1079,7 @@ window.addEventListener('keydown', (event) => {
 
 // 托盘 / 球右键的「设置」：窗口打开即展开抽屉
 api?.onOpenSettings(() => {
-  void settingsPanel?.open()
+  openSettingsDrawer()
 })
 
 void (async () => {

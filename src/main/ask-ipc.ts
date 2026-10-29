@@ -22,6 +22,7 @@ import type { ChainAskResult, ChainAskResumeDecision, ChainAskTurnContext } from
 import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskHistoryEntry } from './ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
+import type { MemorySettingsSaveResult, MemorySettingsView } from './memory-settings'
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
@@ -81,6 +82,12 @@ export interface AskIpcDeps {
   providerModels?: (input: ProviderModelsInput) => Promise<FetchModelsResult>
   saveProviderKey?: (providerId: string, apiKey: string) => ProviderKeySaveResult
   providerKeys?: () => Record<string, ApiKeySource>
+  /**
+   * 个人记忆（vibe/free）：日记目录 + 人设。保存后主进程**立即同步**日记目录
+   * （用户选的口径：保存即同步），同步结果随返回值一起回界面。
+   */
+  memorySettings?: () => MemorySettingsView | { error: string }
+  saveMemorySettings?: (patch: unknown) => MemorySettingsSaveResult
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -335,6 +342,33 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             ok: false,
             error: error instanceof Error ? error.message : String(error)
           } satisfies GraphSettingsSaveResult
+        }
+      }
+    ],
+    [
+      'ask:memory:get',
+      (event) => {
+        if (!ensureSender(event)) return { error: 'forbidden' }
+        try {
+          return deps.memorySettings?.() ?? { error: 'unsupported' }
+        } catch (error) {
+          deps.log('error', 'ask memory settings read failed', { error: String(error) })
+          return { error: 'memory-settings-read-failed' }
+        }
+      }
+    ],
+    [
+      'ask:memory:save',
+      (event, patch) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.saveMemorySettings) {
+          return { ok: false, error: '当前版本不支持保存个人记忆设置' }
+        }
+        try {
+          return deps.saveMemorySettings(patch)
+        } catch (error) {
+          deps.log('error', 'ask memory settings save failed', { error: String(error) })
+          return { ok: false, error: '保存失败' }
         }
       }
     ],

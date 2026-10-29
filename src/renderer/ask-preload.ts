@@ -12,6 +12,7 @@ import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskConsentView } from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
+import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
@@ -48,6 +49,9 @@ export interface AskApi {
   providerModels(input: ProviderModelsInput): Promise<FetchModelsResult>
   saveProviderKey(providerId: string, apiKey: string): Promise<ProviderKeySaveResult>
   providerKeys(): Promise<Record<string, ApiKeySource>>
+  /* ---- 个人记忆（日记目录 + 人设；保存即同步） ---- */
+  memorySettings(): Promise<MemorySettingsView | { error: string }>
+  saveMemorySettings(patch: unknown): Promise<MemorySettingsSaveResult>
   /** 托盘 / 球右键的「设置」：打开窗口就展开抽屉 */
   onOpenSettings(handler: () => void): () => void
 }
@@ -79,6 +83,10 @@ const api: AskApi = {
     ipcRenderer.invoke('ask:provider:key', { providerId, apiKey }) as Promise<ProviderKeySaveResult>,
   providerKeys: () =>
     ipcRenderer.invoke('ask:provider:keys') as Promise<Record<string, ApiKeySource>>,
+  memorySettings: () =>
+    ipcRenderer.invoke('ask:memory:get') as Promise<MemorySettingsView | { error: string }>,
+  saveMemorySettings: (patch) =>
+    ipcRenderer.invoke('ask:memory:save', patch) as Promise<MemorySettingsSaveResult>,
   onOpenSettings: (handler) => {
     const listener = (): void => handler()
     ipcRenderer.on('ask:open-settings', listener)

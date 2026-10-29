@@ -110,6 +110,30 @@
             <p id="usage" class="hint"></p>
           </section>
 
+          <section>
+            <h3>个人记忆</h3>
+            <p class="hint" id="memory-status">读取中…</p>
+            <label>日记目录（留空 = 自动找；环境变量 GOTCHA_MEMORY_VAULT 优先）
+              <input id="set-memory-vault" type="text" placeholder="D:\Github\charlie_vault\daily" />
+            </label>
+            <label>名字
+              <input id="set-persona-name" type="text" maxlength="20" placeholder="记忆球" />
+            </label>
+            <label>口吻（一句话）
+              <input id="set-persona-tone" type="text" maxlength="120" placeholder="像认识很久的朋友：短句、具体、先给结论" />
+            </label>
+            <label>追加红线（每行一条，最多 8 条；写死的三条删不掉）
+              <textarea id="set-persona-redlines" rows="3" placeholder="别提比赛成绩&#10;别用感叹号"></textarea>
+            </label>
+            <div class="memory-actions">
+              <button id="memory-save" type="button" class="primary">保存并同步</button>
+              <span id="memory-msg" class="hint"></span>
+            </div>
+            <p class="hint">
+              保存后会立即增量同步日记目录（只清理本次目录下消失的文件）；人设改动从下一次提问开始生效。
+            </p>
+          </section>
+
           <div class="form-actions">
             <button id="settings-save" type="submit" class="primary">保存</button>
             <span id="settings-msg" class="hint"></span>

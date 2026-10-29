@@ -680,6 +680,23 @@ button.stop {
   border-color: var(--accent);
 }
 
+#settings-form textarea {
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  resize: vertical;
+  min-height: 56px;
+}
+
+#settings-form textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 #settings-form input[type='checkbox'] {
   accent-color: var(--accent);
 }
@@ -837,4 +854,23 @@ button.stop {
   margin-top: 14px;
   background: var(--bg);
   border-top: 1px solid var(--line);
+}
+
+/* 个人记忆的保存行：不是抽屉底部的「保存」栏，别套 .form-actions（sticky 会把按钮挤成三行） */
+.memory-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 0 2px;
+}
+
+.memory-actions button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.memory-actions .hint {
+  flex: 1 1 220px;
+  margin: 0;
 }

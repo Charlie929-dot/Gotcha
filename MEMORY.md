@@ -41,7 +41,8 @@ src/chain/agent/
   payload.ts   三种新工具结果的出云组装（逐字段过脱敏策略）
 src/understand/cloud/deepseek.ts  工具 schema + system 纪律 + 人设注入点
 src/main/index.ts                 启动 / 提问前增量同步、工具依赖注入、persona
-src/renderer/ask/                  「日记引用」卡片（日期 + 原文片段 + why）
+src/main/memory-settings.ts       设置抽屉（日记目录 + 人设）的校验与视图；保存后由 index.ts 立即同步
+src/renderer/ask/                  「日记引用」卡片（日期 + 原文片段 + why）+ 设置抽屉「个人记忆」一节
 scripts/memory-cli.mts + memory.mjs  CLI（ingest / recall / day / profile / persona）
 ```
 
@@ -126,9 +127,13 @@ npm run memory -- persona set redlines "别提比赛成绩|别用感叹号"
 ```
 
 应用内：
+- **设置抽屉 → 个人记忆**（2026-10-29 新增，替代 CLI 改配置）：日记目录（手填，留空 = 自动找；
+  环境变量优先时状态行会注明）＋ 名字 / 口吻 ＋ 追加红线（**每行一条**，最多 8 条）。
+  **保存即同步**：按钮旁直接回「N 篇 / 新增 / 删除 / 共几条」，不用再记 CLI；
 - 启动后 2s、以及每次提问前（节流 60s）自动增量同步；目录不存在就什么都不做（不为没开的功能够建库）；
-- 日记目录查找顺序：`GOTCHA_MEMORY_VAULT` → settings `memory.vault_dir`（`ingest` 会写）→
+- 日记目录查找顺序：`GOTCHA_MEMORY_VAULT` → settings `memory.vault_dir`（`ingest` / 设置抽屉会写）→
   `%USERPROFILE%\charlie_vault\daily` 与 `D:\Github\charlie_vault\daily` 里**日记最多的那个**；
+- 人设保存后从**下一次提问**开始生效（每次提问现读 settings，不用重启）；
 - 问「我最近在想什么 / 我为什么放弃 X / 我以前怎么看周深」→ 模型应该走 `recall_diary` / `read_diary`，
   回答卡下面出现「日记引用（N 条）」。
 
@@ -159,6 +164,17 @@ scanned 171 · skipped 51（模板 / 空日记）· added 2382 · items 2382
    assistant(tool_calls) 都发 `reasoning_content`，缺失写空串」（真 key 探针：缺字段 400 / 空串 200）。
 2. 只靠日记回答时模型偶尔漏 `citations` 键 → 误报「答得不成形」；解析层缺省当空数组。
 
+**设置抽屉验收（2026-10-29 11:36–11:39，真机）**：
+- 打开抽屉即显示「当前目录：D:\Github\charlie_vault\daily（设置里的目录）· 索引 2382 条 / 120 天」；
+- 填一个不存在的目录 → 红色「没有保存：日记目录不存在：…」，设置与库都没变（校验在落库前）；
+- 填临时目录（1 篇）→ 点「保存并同步」→ `memory sync {"scanned":1,"added":1,"items":2383}`，
+  按钮旁回「已保存并同步：…（1 篇 / 新增 1 / 删除 0 / 共 2383 条）」，状态行同步更新；
+- 切回原目录并同时改名「小记」、追加两条红线（多行）→ 同步 `171 unchanged`；
+  `memory.persona_redlines` 落成 `别提成绩|别用感叹号`（多行 → `|` 存储）；
+- 验收后已用 `forget` 清掉临时目录那 1 条、人设恢复默认（名字 记忆球 / 红线空）。
+  注意：**换目录不会删除另一个目录的记忆**（只清本次目录下消失的文件），所以切目录后
+  旧目录条目仍留在库里，要清就用 `npm run memory -- forget <旧目录>`。
+
 ---
 
 ## 9. 明确没做（下一阶段）
@@ -168,5 +184,5 @@ scanned 171 · skipped 51（模板 / 空日记）· added 2382 · items 2382
 2. **向量召回**：日记还没进 bge 会话；关键词召回在 2 千条量级够用，上万条再说。
 3. **冲突消解**：`mem_observations.status` 已留 `superseded`，但「去年讨厌数学 / 今年想学好」这类
    互相打架的记忆还没有自动取代规则。
-4. **UI 管理页**：现在只有 CLI + 问记忆里的引用卡片；编辑人设要走 `npm run memory -- persona`。
+4. **记忆管理页**：设置抽屉只管「目录 + 人设」；浏览 / 编辑 / 删除单条日记仍走 CLI 与 `forget`。
 5. **多来源**：只接了日记目录，B站 / 邮件 / 文件还没进来（参考 bili-scroll 的定时轮 + 只读工具面）。

@@ -91,6 +91,14 @@ function countNotes(dir: string): number {
   }
 }
 
+/** 目录是从哪来的（设置抽屉里要如实显示，别让用户以为「设置里那个」一定生效） */
+export type VaultDirSource = 'env' | 'setting' | 'auto' | 'none'
+
+export interface VaultDirResolution {
+  dir: string | null
+  source: VaultDirSource
+}
+
 /**
  * 日记目录候选（按优先级）：
  * 1）`GOTCHA_MEMORY_VAULT`（显式指定，最高优先）；
@@ -100,13 +108,19 @@ function countNotes(dir: string): number {
  * 为什么第 3 条要按数量挑：本机同时有 `D:\Github\charlie_vault`（171 篇）和
  * `%USERPROFILE%\charlie_vault`（6 篇旧副本），按目录顺序挑会挑到旧副本，
  * 然后把另一边的记忆当成「源文件已删除」清掉（真实事故，见 store.ts 的同步范围注释）。
+ *
+ * 返回 `source` 给设置抽屉显示「当前生效的是哪一个、为什么」。
  */
-export function resolveVaultDir(db: Db | null): string | null {
+export function resolveVaultDirWithSource(db: Db | null): VaultDirResolution {
   const fromEnv = process.env.GOTCHA_MEMORY_VAULT?.trim()
-  if (fromEnv !== undefined && fromEnv !== '' && existsSync(fromEnv)) return fromEnv
+  if (fromEnv !== undefined && fromEnv !== '' && existsSync(fromEnv)) {
+    return { dir: fromEnv, source: 'env' }
+  }
   if (db !== null) {
     const fromSetting = getSetting(db, 'memory.vault_dir').trim()
-    if (fromSetting !== '' && existsSync(fromSetting)) return fromSetting
+    if (fromSetting !== '' && existsSync(fromSetting)) {
+      return { dir: fromSetting, source: 'setting' }
+    }
   }
   const home = process.env.USERPROFILE?.trim()
   const candidates = [
@@ -122,5 +136,10 @@ export function resolveVaultDir(db: Db | null): string | null {
       bestCount = count
     }
   }
-  return best
+  return best === null ? { dir: null, source: 'none' } : { dir: best, source: 'auto' }
+}
+
+/** 只要目录（老调用方；来源见 `resolveVaultDirWithSource`） */
+export function resolveVaultDir(db: Db | null): string | null {
+  return resolveVaultDirWithSource(db).dir
 }

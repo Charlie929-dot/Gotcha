@@ -7,6 +7,12 @@ import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { getNumberSetting, getSetting, setSetting } from '../db/settings'
 import { previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
 import { buildPersonaPrompt, readPersona, resolveVaultDir } from '../memory/persona'
+import {
+  applyMemoryPatch,
+  buildMemorySettingsView,
+  parseMemoryPatch,
+  type MemorySettingsSaveResult
+} from './memory-settings'
 import type { DiaryToolDeps } from '../chain/agent/tools'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
@@ -1720,6 +1726,55 @@ if (primaryInstance) {
         captureLog('warn', 'memory sync failed', { dir: vaultDir, error: String(error) })
       }
     }
+    /**
+     * 个人记忆设置（日记目录 + 人设）：读 = 现读 settings；存 = 校验 → 落库 → **立即同步**。
+     * 用户口径（2026-10-29）：没有单独的「重新同步」按钮，保存就同步。
+     * 同步失败不回滚设置（目录本身已校验存在，失败通常是读文件 / 库问题），如实回错误。
+     */
+    const readMemorySettings = (): ReturnType<typeof buildMemorySettingsView> | { error: string } => {
+      const db = connections.queryDb()
+      // 从没建过库：不为了「看一眼设置」建库（A3），让界面显示不可用
+      if (!db) return { error: 'db-unavailable' }
+      return buildMemorySettingsView(db)
+    }
+    const saveMemorySettings = (patch: unknown): MemorySettingsSaveResult => {
+      const parsed = parseMemoryPatch(patch)
+      if (!parsed.ok) return { ok: false, error: parsed.error }
+      let db: Db
+      try {
+        db = connections.ensureWritable().db
+      } catch (error) {
+        captureLog('warn', 'memory settings save: db unavailable', { error: String(error) })
+        return { ok: false, error: '数据库暂不可用，设置没有保存' }
+      }
+      try {
+        ensureChainSchema(db)
+        applyMemoryPatch(db, parsed.patch)
+      } catch (error) {
+        captureLog('error', 'memory settings save failed', { error: String(error) })
+        return { ok: false, error: '保存设置失败' }
+      }
+      const view = buildMemorySettingsView(db)
+      if (view.resolvedDir === null) return { ok: true, view, sync: null, syncedDir: null }
+      try {
+        const result = syncVault(db, view.resolvedDir)
+        captureLog('info', 'memory sync', { dir: view.resolvedDir, ...result })
+        // 同步后统计会变（新增 / 删除），视图重读一次再回给界面
+        return { ok: true, view: buildMemorySettingsView(db), sync: result, syncedDir: view.resolvedDir }
+      } catch (error) {
+        captureLog('warn', 'memory sync failed', {
+          dir: view.resolvedDir,
+          error: String(error)
+        })
+        return {
+          ok: true,
+          view,
+          sync: null,
+          syncedDir: view.resolvedDir,
+          syncError: String(error)
+        }
+      }
+    }
     const askConsentView = (): AskConsentView => {
       const db = connections.queryDb()
       const consented = db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
@@ -1934,6 +1989,9 @@ if (primaryInstance) {
       },
       saveProviderKey: (providerId, apiKey) => saveProviderKey(providerId, apiKey),
       providerKeys: () => providerKeyStatus(),
+      // 个人记忆（vibe/free）：日记目录 + 人设；保存后立即同步日记目录
+      memorySettings: readMemorySettings,
+      saveMemorySettings,
       log: (level, message, data) => captureLog(level, message, data)
     })
 

@@ -92,6 +92,42 @@ function guardAttachments(
   return { images, files }
 }
 
+/** 开场注入的「此刻」事实上限：一两句话，撑大反而像旁白 */
+const OPENING_FACTS_MAX_CHARS = 300
+/** 开场最多带几条「想到的」：与工具召回同量级，多了会变成塞满上下文 */
+export const ASK_LOOP_OPENING_REMEMBERED_MAX = 3
+
+/**
+ * 开场注入 → 送云视图。逐段过策略：
+ * - facts 是本地算的（时间 / 计数 / 日期），过一遍只为口径统一；
+ * - 日记片段是用户正文：命中阻断规则整条丢，不连坐。
+ */
+function guardOpening(
+  policy: AskTextPolicy,
+  opening: RedactableAskOpening | undefined
+): CloudAskOpening | undefined {
+  if (!opening) return undefined
+  let facts: string | undefined
+  if (opening.facts !== undefined && opening.facts.trim() !== '') {
+    const guarded = guardText(policy, opening.facts, OPENING_FACTS_MAX_CHARS)
+    if (!guarded.blocked) facts = guarded.text
+  }
+  const remembered: Array<{ day: string; snippet: string }> = []
+  for (const hit of opening.remembered ?? []) {
+    const day = guardText(policy, hit.day, 20)
+    if (day.blocked) continue
+    const snippet = guardText(policy, hit.snippet, ASK_LOOP_DIARY_SNIPPET_MAX_CHARS)
+    if (snippet.blocked) continue
+    remembered.push({ day: day.text, snippet: snippet.text })
+    if (remembered.length >= ASK_LOOP_OPENING_REMEMBERED_MAX) break
+  }
+  if (facts === undefined && remembered.length === 0) return undefined
+  return {
+    ...(facts !== undefined ? { facts } : {}),
+    ...(remembered.length > 0 ? { remembered } : {})
+  }
+}
+
 /** 问记忆（S1）里的单段证据 */
 export interface CloudChainAskEvidence {
   readonly segmentId: number
@@ -200,6 +236,32 @@ export interface RedactableAskLoopHistoryEntry {
 export interface RedactableAskLoopConversationTurn {
   question: string
   answer: string
+}
+
+/**
+ * 开场注入（2026-10-29 深夜七，D61）：「此刻」每轮注入，「想到的」只在新对话第一问出现。
+ *
+ * - `facts`：本地算出来的「此刻」事实（时间 / 今天说过几句 / 上次多久前 / 日记记到哪天），
+ *   不含用户正文；由主进程用确定规则算，不是模型推测。
+ * - `remembered`：按问题关键词本地回想到的日记片段——**联想，不是证据**；
+ *   想核对要让它自己 `recall_diary` / `read_diary`（引用仍只由「真的打开过」生成）。
+ *
+ * 两段都按屏幕 / 日记文本同口径过策略：命中断阻断就整条丢，半截被打码也照实带出去。
+ */
+export interface RedactableRememberedHit {
+  day: string
+  snippet: string
+}
+
+export interface RedactableAskOpening {
+  facts?: string
+  remembered?: readonly RedactableRememberedHit[]
+}
+
+/** 过策略后的开场注入（送云视图） */
+export interface CloudAskOpening {
+  readonly facts?: string
+  readonly remembered?: readonly { readonly day: string; readonly snippet: string }[]
 }
 
 /**
@@ -326,6 +388,8 @@ export interface ChainAskLoopPayload {
   readonly history: readonly { readonly question: string; readonly answer: string }[]
   /** 提问前最后一段证据（指代线索；已过策略，阻断则缺省） */
   readonly recent?: AskRecentSegment
+  /** 开场注入（新对话第一问才出现；见 `RedactableAskOpening`） */
+  readonly opening?: CloudAskOpening
   /** 用户随本轮问题上传的附件（图片 / 文本文件；没有就不出现） */
   readonly attachments?: CloudAskAttachments
   readonly [chainAskLoopBrand]: true
@@ -340,6 +404,8 @@ export interface ChainAskLoopBuildInput {
   history?: readonly RedactableAskLoopConversationTurn[]
   /** 提问前最后一段证据（应用 / 标题 / 时刻；送云前过策略） */
   recent?: AskRecentSegment
+  /** 开场注入（新对话第一问；送云前逐段过策略） */
+  opening?: RedactableAskOpening
   /** 用户随本轮问题上传的附件（用户主动提供，不过脱敏墙） */
   attachments?: RedactableAskAttachments
 }
@@ -615,6 +681,7 @@ export function buildAskLoopPayload(
 ): ChainAskLoopBuildResult {
   const asked = guardText(policy, input.question, ASK_QUESTION_MAX_CHARS)
   const attachments = guardAttachments(input.attachments)
+  const opening = guardOpening(policy, input.opening)
 
   // 历史轮：问题与答复都是上一轮的屏幕文本（再送一次要再过策略）；阻断就整轮丢掉
   const history: Array<{ question: string; answer: string }> = []
@@ -807,6 +874,7 @@ export function buildAskLoopPayload(
       turns,
       history,
       ...(recent ? { recent } : {}),
+      ...(opening ? { opening } : {}),
       ...(attachments ? { attachments } : {})
     } as unknown as ChainAskLoopPayload,
     questionBlocked: asked.blocked,

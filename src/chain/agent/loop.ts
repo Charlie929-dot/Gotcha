@@ -33,7 +33,8 @@ import type {
   AskOutbound,
   AskRecentSegment,
   RedactableAskLoopToolResult,
-  RedactableAskLoopTurn
+  RedactableAskLoopTurn,
+  RedactableAskOpening
 } from './payload'
 import {
   LlmAbortError,
@@ -117,6 +118,11 @@ export interface AskLoopContext {
   readShot?: (path: string) => string | null
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 用默认的回忆助手口吻） */
   personaPrompt?: string
+  /**
+   * 开场注入：「此刻」事实（每轮现算）+ 第一问的「想到的」日记片段。
+   * 由组合根给出；载荷层统一过策略后再送云。
+   */
+  opening?: RedactableAskOpening
   /** 同一会话之前的几轮（续问）；没有就是新对话 */
   history?: readonly ChainAskTurnContext[]
   /** 提问前最后一段证据（指代线索；不是证据） */
@@ -355,6 +361,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       turns,
       ...(ctx.history ? { history: ctx.history } : {}),
       ...(ctx.recent ? { recent: ctx.recent } : {}),
+      ...(ctx.opening ? { opening: ctx.opening } : {}),
       ...(ctx.attachments ? { attachments: ctx.attachments } : {})
     })
     // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；

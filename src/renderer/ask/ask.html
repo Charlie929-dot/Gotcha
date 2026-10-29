@@ -36,8 +36,9 @@
         <aside id="consent" class="consent" hidden>
           <p>
             问记忆要把你问的这句话、几段窗口文本（标题 / 命中原文）、提问前最后一段窗口的应用与标题、
-            你主动附加的图片 / 文件，和这段对话之前的几轮发给模型；开启「看历史截图」后还会带上
-            打开过的段对应截图。确认一次之后不再打扰。
+            你主动附加的图片 / 文件，和这段对话之前的几轮发给模型；新对话的第一问还会带上「此刻」
+            （当前时间、今天说过几句、上次说话多久前、日记记到哪天）和按你的问题想起的几条日记片段（只是联想）；
+            开启「看历史截图」后还会带上打开过的段对应截图。确认一次之后不再打扰。
           </p>
           <div class="row">
             <button id="consent-allow" type="button" class="primary">允许发送</button>
@@ -63,7 +64,7 @@
               name="question"
               type="text"
               maxlength="500"
-              placeholder="问一件过去做过的事，也可以接着上一句追问（例如：那上午呢）"
+              placeholder="想聊点什么，或者找找以前的事（也能接着追问）"
               aria-label="问题"
             />
             <button id="submit" type="submit" class="primary">发送</button>
@@ -112,8 +113,9 @@
             <label class="check"><input id="set-ask-shots" type="checkbox" /> 允许问记忆看历史截图（打开过的段，把对应整屏截图发给模型）</label>
             <p class="hint">
               问记忆会把问题、命中的窗口文本、提问前最后一段窗口的应用与标题、你主动附加的图片 / 文件，
-              和这段对话之前的几轮发给模型。开启「看历史截图」后，read_segment 打开的段会附上最近一张截图；
-              完整正文不离开本机。
+              和这段对话之前的几轮发给模型。新对话的第一问会多带一段「此刻」（时间、今天说过几句、间隔、
+              日记记到哪天）和按问题想起的几条日记片段；开启「看历史截图」后，read_segment 打开的段会附上
+              最近一张截图；完整正文不离开本机。
             </p>
             <label>每日额度（tokens）
               <input id="set-budget" type="number" min="1000" max="100000000" step="1000" />
@@ -131,7 +133,7 @@
               <input id="set-memory-vault" type="text" placeholder="D:\Github\charlie_vault\daily" />
             </label>
             <label>名字
-              <input id="set-persona-name" type="text" maxlength="20" placeholder="记忆球" />
+              <input id="set-persona-name" type="text" maxlength="20" placeholder="贴心大肥鱼" />
             </label>
             <label>口吻（一句话）
               <input id="set-persona-tone" type="text" maxlength="120" placeholder="像认识很久的朋友：短句、具体、先给结论" />

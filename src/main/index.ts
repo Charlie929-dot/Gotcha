@@ -5,7 +5,8 @@ import Database from 'better-sqlite3'
 import log from 'electron-log/main'
 import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { getNumberSetting, getSetting, setSetting } from '../db/settings'
-import { previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
+import { memoryStats, previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
+import { buildSituation, splitRecallKeywords } from '../memory/opening'
 import { indexDiaryVectors, countPendingVectors, pruneOrphanVectors } from '../memory/vectors'
 import { buildPersonaPrompt, readPersona, resolveVaultDir } from '../memory/persona'
 import {
@@ -86,7 +87,7 @@ import { createDeterministicFakeEmbedder, type DeterministicFakeEmbedder } from 
 import { createGraphWindow } from './graph-window'
 import { createAskWindow } from './ask-window'
 import { askChain, type ChainAskOptions } from '../chain/agent/ask'
-import type { AskRecentSegment } from '../chain/agent/payload'
+import type { AskRecentSegment, RedactableAskOpening } from '../chain/agent/payload'
 import type { ChainDb } from '../chain/store'
 import { querySegments } from '../chain/store'
 import { ensureChainSchema } from '../chain/schema'
@@ -1933,7 +1934,52 @@ if (primaryInstance) {
         .map((item) => ({ name: item.name ?? '文件', text: item.text as string }))
       return images.length > 0 || files.length > 0 ? { images, files } : undefined
     }
-    const askOptionsFor = (db: ChainDb, context: AskQueryContext): ChainAskOptions => ({
+    /**
+     * 开场注入（D61）：
+     * - 「此刻」= 本地确定规则（时间 / 今天说过几句 / 上次多久前 / 日记记到哪天），**每轮都重算**
+     *   （时间会走，旧数字会变成假话），不调模型；
+     * - 「想到的」= 只在新对话第一问按问题关键词本地回想 3 条日记（联想，不是证据；引用仍只由
+     *   read_diary 生成）；续问不重新联想，避免同一条记忆每轮换一个说法。
+     * 两段都随载荷过脱敏墙（云端策略在边界）。
+     */
+    const askOpeningFor = (
+      db: ChainDb,
+      question: string,
+      context: AskQueryContext
+    ): RedactableAskOpening => {
+      const now = Date.now()
+      const facts = buildSituation({
+        now,
+        talkTimes: readAskHistory(askHistoryPath).map((entry) => entry.at),
+        lastDiaryDay: memoryStats(db).lastDay
+      })
+      const firstTurn = question.trim() !== '' && (context.history?.length ?? 0) === 0
+      const keywords = firstTurn ? splitRecallKeywords(question) : []
+      const remembered =
+        keywords.length === 0
+          ? []
+          : diaryToolsFor(db)
+              .recall({ keywords, limit: 3 })
+              .map((hit) => ({
+                day: hit.day,
+                snippet: hit.text.replace(/\s+/gu, ' ').trim().slice(0, 120)
+              }))
+              .filter((hit) => hit.snippet !== '')
+      // 只记日期不记正文：排查「开场有没有生效」用，别把日记写进日志
+      captureLog('info', 'ask opening', {
+        facts,
+        rememberedDays: remembered.map((hit) => hit.day)
+      })
+      return {
+        facts,
+        ...(remembered.length > 0 ? { remembered } : {})
+      }
+    }
+    const askOptionsFor = (
+      db: ChainDb,
+      context: AskQueryContext,
+      opening?: RedactableAskOpening
+    ): ChainAskOptions => ({
       db,
       resolveClient,
       outbound: askOutbound,
@@ -1966,6 +2012,8 @@ if (primaryInstance) {
       // 个人记忆（第二本账）：日记条目 + 「关于我」统计；人设是本地配置，只拼在 system 最前面
       diary: diaryToolsFor(db),
       personaPrompt: buildPersonaPrompt(readPersona(db)),
+      // 新对话第一问：给 ta 一点「此刻」和「想到的」（D61）；续问/老对话不带
+      ...(opening !== undefined ? { opening } : {}),
       // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
       history: context.history,
       signal: context.signal,
@@ -2018,7 +2066,7 @@ if (primaryInstance) {
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
           }
         }
-        return askChain(askOptionsFor(db, context), question)
+        return askChain(askOptionsFor(db, context, askOpeningFor(db, question, context)), question)
       },
       // 「还要继续查吗」→ 恢复暂停的循环（问题用检查点里的原话，续查通道不再传）
       resume: async (resumeId, decision, context) => {
@@ -2031,7 +2079,10 @@ if (primaryInstance) {
           }
         }
         return askChain(
-          { ...askOptionsFor(db, context), resume: { id: resumeId, decision } },
+          {
+            ...askOptionsFor(db, context, askOpeningFor(db, '', context)),
+            resume: { id: resumeId, decision }
+          },
           ''
         )
       },

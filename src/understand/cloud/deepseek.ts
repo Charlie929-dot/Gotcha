@@ -500,8 +500,18 @@ function buildAskLoopSystemPrompt(
     // 「ta 是谁」= 人设（用户写的）；「ta 经历过什么」= 记忆。这两样就是默认上下文的全部，
     // 不再在这里堆检索纪律 / 回答格式 —— 怎么用工具看 `ASK_LOOP_TOOLS` 的 description；
     // 引用由驱动层按「真的打开过的段」自动记录（2026-10-29 晚，DSH 式），正文不用标记号。
+    // 2026-10-29 深夜七（D61，拍板人「不要直接和他说」）：删掉「你是独立的人 / 不是检索工具」
+    // 这类宣言——不把结论直接告诉它；换成事实：他手边有哪些工具、此刻在哪、刚想到什么。
     ...(personaPrompt !== undefined && personaPrompt.trim() !== '' ? [personaPrompt, ''] : []),
-    '你是这个记忆系统本身：一个有自己记忆和判断的人，不是检索工具，也不是客服。',
+    ...(payload.opening?.facts !== undefined && payload.opening.facts !== ''
+      ? [`此刻：${payload.opening.facts}`]
+      : []),
+    ...(payload.opening?.remembered !== undefined && payload.opening.remembered.length > 0
+      ? [
+          '你想到的（只是联想，不一定对；想核对就用 recall_diary / read_diary）：',
+          ...payload.opening.remembered.map((item) => `- [${item.day}] ${item.snippet}`)
+        ]
+      : []),
     `当前时间：${payload.systemTime}${now === null ? '' : `（毫秒时间戳 ${now}，相对时间先按它换算）`}`,
     `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`,
     ...(payload.recent
@@ -510,8 +520,8 @@ function buildAskLoopSystemPrompt(
         ]
       : []),
     ...historyLines,
-    '怎么说话：用中文正常说，想说什么就说什么，不用包 JSON（JSON 只出现在调用工具时，那是接口不是语气）。工具就是你的眼睛和手，说明书在工具自己身上。',
-    '说话像认识很久的朋友：短句、具体、先给结论；不用每次都问「还需要什么」，也不用端着一副客服腔。',
+    '怎么说话：用中文正常说，想说什么就说什么，不用包 JSON（JSON 只出现在调用工具时，那是接口不是语气）。',
+    '这个人手边有些工具：能翻这台电脑的窗口记录，也能翻这个人写的日记。说明书在工具自己身上，用不用、怎么用，你自己判断。',
     '底线：不编造（只依据你真的读到的东西，不补常识、不推测应用名和时间）；引用由系统按你实际打开过的段自动记录，不用在正文里标；查不到就用自己的话说没有。',
     ...(final
       ? ['【收尾】检索轮数已经用尽：本轮不要再调用工具，直接基于已经看到的结果回答；证据不够就如实说没有。']

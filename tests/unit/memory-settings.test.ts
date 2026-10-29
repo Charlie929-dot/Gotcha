@@ -105,7 +105,7 @@ describe('applyMemoryPatch + buildMemorySettingsView', () => {
     applyMemoryPatch(db, { personaName: '小记' })
     expect(buildMemorySettingsView(db).vaultDir).toBe(dir)
     applyMemoryPatch(db, { personaName: '' })
-    expect(buildMemorySettingsView(db).personaName).toBe('记忆球')
+    expect(buildMemorySettingsView(db).personaName).toBe('贴心大肥鱼')
   })
 
   it('环境变量优先于设置里的目录（source 如实上报）', () => {

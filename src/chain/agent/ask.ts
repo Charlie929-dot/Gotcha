@@ -25,7 +25,7 @@ import {
 } from '../query'
 import { getSegmentDetail, type ChainDb } from '../store'
 import type { LlmClient, LlmUsage } from '../../understand/cloud/llm-client'
-import type { AskOutbound, AskRecentSegment, RedactableChainAskEvidence } from './payload'
+import type { AskOutbound, AskRecentSegment, RedactableAskOpening, RedactableChainAskEvidence } from './payload'
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
 import type { AskHistorySummary, DiaryToolDeps } from './tools'
@@ -102,6 +102,11 @@ export interface ChainAskOptions {
   }
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 默认回忆助手口吻） */
   personaPrompt?: string
+  /**
+   * 开场注入：「此刻」事实每轮刷新（由调用方现算），「想到的」日记片段只在
+   * 新对话第一问出现；续查时片段从检查点沿用。没传 = 这个客户端不看这些。
+   */
+  opening?: RedactableAskOpening
   /** 同一会话之前的几轮（续问）；不传 = 新对话 */
   history?: readonly ChainAskTurnContext[]
   /**
@@ -145,6 +150,8 @@ const ASK_RESUME_MAX = 8
 interface PendingAskLoop {
   question: string
   state: AskLoopResumeState
+  /** 第一问的「此刻 / 想到的」：恢复后 system 不能凭空变少一段（2026-10-29 D61） */
+  opening?: RedactableAskOpening
   at: number
 }
 
@@ -158,7 +165,8 @@ function rememberPendingAskLoop(
   id: string,
   question: string,
   state: AskLoopResumeState,
-  now: number
+  now: number,
+  opening?: RedactableAskOpening
 ): void {
   for (const [key, entry] of pendingAskLoops) {
     if (now - entry.at > ASK_RESUME_TTL_MS) pendingAskLoops.delete(key)
@@ -168,7 +176,12 @@ function rememberPendingAskLoop(
     if (oldest === undefined) break
     pendingAskLoops.delete(oldest)
   }
-  pendingAskLoops.set(id, { question, state, at: now })
+  pendingAskLoops.set(id, {
+    question,
+    state,
+    ...(opening !== undefined ? { opening } : {}),
+    at: now
+  })
 }
 
 /** 测试用：清掉未消费的检查点，避免跨用例串状态 */
@@ -260,6 +273,19 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.diary ? { diary: options.diary } : {}),
         ...(options.readShot ? { readShot: options.readShot } : {}),
         ...(options.personaPrompt ? { personaPrompt: options.personaPrompt } : {}),
+        // 开场注入：「此刻」每轮用调用方给的新值（时间会走）；第一问「想到的」从检查点续上，
+        // 续查不重新联想（同一条记忆不该每轮换说法）
+        ...((): { opening?: RedactableAskOpening } => {
+          const remembered = pending?.opening?.remembered
+          const opening: RedactableAskOpening | undefined =
+            options.opening !== undefined
+              ? {
+                  ...options.opening,
+                  ...(remembered !== undefined && remembered.length > 0 ? { remembered } : {})
+                }
+              : pending?.opening
+          return opening !== undefined ? { opening } : {}
+        })(),
         ...(options.searchBatch ? { searchBatch: options.searchBatch } : {}),
         ...(options.history ? { history: options.history } : {}),
         ...(options.recent ? { recent: options.recent } : {}),
@@ -284,7 +310,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         return { kind: 'no-evidence', stats: result.stats }
       }
       const id = newResumeId()
-      rememberPendingAskLoop(id, asked, paused.state, Date.now())
+      rememberPendingAskLoop(id, asked, paused.state, Date.now(), options.opening)
       return { ...result, resumeId: id }
     }
     return result

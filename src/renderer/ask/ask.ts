@@ -788,10 +788,10 @@ function renderEmptyThread(): void {
   threadEl.replaceChildren()
   const hint = element('div', 'thread-empty')
   const title = element('p', 'thread-empty-title')
-  title.textContent = '问一件过去做过的事'
+  title.textContent = '想说什么都行'
   const body = element('p', 'muted')
   body.textContent =
-    '比如「下午那个编译错误最后怎么解决的」。同一段对话里可以接着追问（「那上午呢」），我会带着前面的上下文继续查。'
+    '想找以前的事就直接问，比如「下午那个编译错误最后怎么解决的」；想聊两句也可以。同一段对话里能接着追问（「那上午呢」）。'
   hint.append(title, body)
   threadEl.append(hint)
 }

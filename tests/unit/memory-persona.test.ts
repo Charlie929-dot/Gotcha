@@ -32,7 +32,7 @@ afterEach(() => {
 describe('persona', () => {
   it('默认：名字 / 口吻 / 三条写死的红线', () => {
     const persona = readPersona(db)
-    expect(persona.name).toBe('记忆球')
+    expect(persona.name).toBe('贴心大肥鱼')
     expect(persona.tone).toContain('朋友')
     expect(persona.redLines).toEqual([...PERSONA_HARD_RED_LINES])
   })
@@ -54,12 +54,19 @@ describe('persona', () => {
     expect(readPersona(db).redLines).toHaveLength(3 + 8)
   })
 
-  it('prompt 里带名字、口吻与逐条红线（编号从 1 开始）', () => {
+  it('prompt 只给事实：名字、口吻、逐条红线（编号从 1 开始）', () => {
     const prompt = buildPersonaPrompt(readPersona(db))
-    expect(prompt).toContain('记忆球')
-    expect(prompt).toContain('怎么说话')
+    expect(prompt).toContain('贴心大肥鱼')
+    expect(prompt).toContain('你说话的样子')
     expect(prompt).toContain('1) ')
     expect(prompt).toContain('3) ')
+  })
+
+  it('prompt 不写「你是谁」的宣言（D61：独立靠处境长出来，不直接告诉它）', () => {
+    const prompt = buildPersonaPrompt(readPersona(db))
+    for (const slogan of ['不是助理', '不是检索工具', '有自己的记忆', '脾气']) {
+      expect(prompt).not.toContain(slogan)
+    }
   })
 
   it('parseRedLines：空串 / 全空白 → 没有追加', () => {

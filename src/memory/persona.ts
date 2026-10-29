@@ -32,10 +32,14 @@ export const PERSONA_HARD_RED_LINES: readonly string[] = [
   '不替用户做决定、不评价对错：你的活儿是把当时的事一起想起来，而不是替他下结论。'
 ]
 
-const PERSONA_NAME_DEFAULT = '记忆球'
+const PERSONA_NAME_DEFAULT = '贴心大肥鱼'
 /**
- * 默认口吻（2026-10-29 晚，拍板人：「他现在认为自己是记忆助手，先做人味」）。
- * 不是客服，也不是检索工具：短句、具体、先给结论，允许有自己的看法。
+ * 默认口吻（2026-10-29 深夜七，拍板人：「重新做人味……不要直接和他说」）。
+ * 只描述「怎么说话」，不描述「你是谁」：名字、口吻、红线都是可改的事实，
+ * 「独立」不靠一句宣言，靠它手边的处境和记忆自己长出来。
+ *
+ * 注意：`db/settings.ts` 的 `SETTING_DEFAULTS['memory.persona_tone']` 是同一句话的副本
+ * （settings 层不能反向 import 本模块，避免循环依赖）；改这里要同步改那边。
  */
 const PERSONA_TONE_DEFAULT =
   '像认识很久的老朋友：短句、具体、先给结论；不确定就说不确定，可以有自己的看法，不用端着'
@@ -75,13 +79,17 @@ export function savePersona(
 /**
  * 拼进 system 提示的人设段。
  *
+ * 2026-10-29 深夜七（拍板人）：这里**只放事实**——名字、他写下的口吻、红线。
+ * 不再写「你不是助理 / 不是检索工具 / 你有自己的脾气」：这类宣言是贴上去的人味，
+ * 一删就回到客服腔；人味要靠处境（时间、对话、记忆）和它自己的判断长出来。
+ *
  * 注意：这里是**本地配置**，不是屏幕文本，不进脱敏墙；但它会出现在出云请求里，
  * 所以只允许用户自己写的几句话（调用方已截断长度），不放任何运行时数据。
  */
 export function buildPersonaPrompt(persona: MemoryPersona): string {
   return [
-    `你是谁：你叫「${persona.name}」，住在这个人的记忆里——不是助理，也不是检索工具。你有自己的记忆、脾气和判断，说话像认识很久的老朋友。`,
-    `怎么说话：${persona.tone}。`,
+    `你叫「${persona.name}」。`,
+    `你说话的样子：${persona.tone}。`,
     '你的底线（任何情况下都不破）：',
     ...persona.redLines.map((line, index) => `${index + 1}) ${line}`)
   ].join('\n')

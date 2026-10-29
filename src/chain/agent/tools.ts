@@ -12,6 +12,10 @@
  * 不给「打开这一段」的工具，模型只能对摘要下结论（真实记录里因此误报「没有链接」）。
  * 只能展开 search_info 返回过、且没被脱敏整条挡下的段。
  *
+ * 2026-10-29 补个人记忆（第二本账）：`recall_diary` / `read_diary` / `memory_profile`。
+ * 日记条目按 itemId 走**独立白名单**（`AskToolOutcome.memories`），与屏幕段 id 不混用；
+ * 最终答复里的 `memories[]` 由 `parse.ts` 按这份白名单校验，编造的一律剥掉。
+ *
  * 只回**摘要**不回正文全文（snippet ≤80 字），正文证据等最终引用时由
  * `readSegmentEvidence()` 反查——工具结果小，循环轮数多也不至于把 token 撑爆。
  * 不设 present-info 工具：最终 JSON 的 citations 就是呈现指令。
@@ -56,6 +60,57 @@ export interface AskHistorySummary {
   session?: 'current' | 'other'
 }
 
+/* ------------------------------------------------------------------ */
+/* 个人记忆（日记 = 第二本账）的工具依赖                                */
+/* ------------------------------------------------------------------ */
+
+/** 日记召回的一条命中（`text` 是原文，工具层负责截成 snippet 再送云） */
+export interface DiaryHitView {
+  itemId: number
+  day: string
+  section: string
+  kind: string
+  text: string
+  tags: readonly string[]
+  refs: readonly string[]
+  reasons: readonly string[]
+}
+
+/** 打开某一天：拼接后的全文 + 当天条目（条目 id 用于最终引用） */
+export interface DiaryDayView {
+  day: string
+  text: string
+  items: readonly { itemId: number; section: string; text: string }[]
+}
+
+/** 「关于我」：统计 + 观测（当前只有统计型，不装心理分析） */
+export interface DiaryProfileView {
+  stats: Record<string, number | string | null>
+  observations: readonly { topic: string; statement: string }[]
+}
+
+/** 主进程注入的日记记忆实现（测试可用内存库直接接） */
+export interface DiaryToolDeps {
+  recall(query: {
+    keywords: string[]
+    day?: string
+    from?: number
+    to?: number
+    tag?: string
+    limit: number
+  }): readonly DiaryHitView[]
+  readDay(day: string): DiaryDayView | null
+  profile(): DiaryProfileView
+}
+
+/** 日记引用的白名单元数据（模型最终给的 itemId 必须落在这里面） */
+export interface MemoryCitationMeta {
+  itemId: number
+  day: string
+  section: string
+  text: string
+}
+
 /** 模型发起的一次工具调用（客户端已把 JSON 参数解析成对象） */
 export interface AskToolCall {
   name: string
@@ -82,6 +137,11 @@ export interface AskToolDeps {
    * 测试 / 单发路径不传就退回进程内同步查。结果口径必须与 `searchChainSegmentsBatch` 一致。
    */
   searchBatch?: (query: ChainSearchBatchQuery) => Promise<ChainSearchBatchResult>
+  /**
+   * 日记记忆（第二本账）。不传 = 这台机器上没配日记目录：
+   * 三个记忆工具会如实报「没有接入」，而不是假装查过。
+   */
+  diary?: DiaryToolDeps
 }
 
 export interface AskToolOutcome {
@@ -89,6 +149,8 @@ export interface AskToolOutcome {
   result: RedactableAskLoopToolResult
   /** search_info 命中的段：引用白名单与 citation meta 的唯一来源 */
   segments: readonly SearchHitMeta[]
+  /** recall_diary / read_diary 给过的日记条目：memories 引用的白名单 */
+  memories?: readonly MemoryCitationMeta[]
 }
 
 /* ------------------------------------------------------------------ */
@@ -475,6 +537,147 @@ function executeReadSegment(deps: AskToolDeps, args: Record<string, unknown>): A
 }
 
 /* ------------------------------------------------------------------ */
+/* 个人记忆（日记）：recall_diary / read_diary / memory_profile         */
+/* ------------------------------------------------------------------ */
+
+/** 日记召回的摘要长度：与 search_info 的 80 字同量级，要看细节必须 read_diary */
+const DIARY_SNIPPET_CHARS = 120
+const DIARY_KEYWORDS_MAX = 8
+const DIARY_KEYWORD_CHARS = 50
+const DIARY_LIMIT_DEFAULT = 6
+const DIARY_LIMIT_MAX = 20
+const DAY_KEY_RE = /^\d{4}-\d{2}-\d{2}$/
+
+function parseDayKey(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return DAY_KEY_RE.test(trimmed) ? trimmed : undefined
+}
+
+interface RecallDiaryArgs {
+  keywords: string[]
+  day?: string
+  from?: number
+  to?: number
+  tag?: string
+  limit: number
+}
+
+/**
+ * 参数归一：日记是「按天 / 按词 / 按标签」三选一以上的查询。
+ * 什么条件都不给 → null（报参数不合法），避免模型拿空查询把整库按时间倒出来。
+ */
+function parseRecallDiaryArgs(args: Record<string, unknown>): RecallDiaryArgs | null {
+  const keywords = (Array.isArray(args.keywords) ? args.keywords : [])
+    .filter((keyword): keyword is string => typeof keyword === 'string')
+    .map((keyword) => keyword.trim().slice(0, DIARY_KEYWORD_CHARS))
+    .filter((keyword) => keyword !== '')
+    .slice(0, DIARY_KEYWORDS_MAX)
+  const day = parseDayKey(args.day)
+  const tag = optionalText(args.tag, FILTER_CHARS)
+  const from = optionalNumber(args.from)
+  const to = optionalNumber(args.to)
+  if (from !== undefined && to !== undefined && to < from) return null
+  if (keywords.length === 0 && day === undefined && tag === undefined && from === undefined && to === undefined) {
+    return null
+  }
+  return {
+    keywords,
+    ...(day !== undefined ? { day } : {}),
+    ...(tag !== undefined ? { tag } : {}),
+    ...(from !== undefined ? { from } : {}),
+    ...(to !== undefined ? { to } : {}),
+    limit: clampLimit(args.limit, DIARY_LIMIT_DEFAULT, DIARY_LIMIT_MAX)
+  }
+}
+
+function requireDiary(deps: AskToolDeps): DiaryToolDeps | null {
+  return deps.diary ?? null
+}
+
+function executeRecallDiary(deps: AskToolDeps, args: RecallDiaryArgs): AskToolOutcome {
+  const diary = requireDiary(deps)
+  if (!diary) {
+    return { result: { kind: 'error', message: '这台机器上没有接入日记记忆（个人记忆）' }, segments: [] }
+  }
+  const hits = diary.recall(args)
+  const memories: MemoryCitationMeta[] = []
+  const views = hits.map((hit) => {
+    memories.push({ itemId: hit.itemId, day: hit.day, section: hit.section, text: hit.text })
+    return {
+      itemId: hit.itemId,
+      day: hit.day,
+      kind: hit.kind,
+      snippet: hit.text.replace(/\s+/gu, ' ').trim().slice(0, DIARY_SNIPPET_CHARS),
+      tags: hit.tags,
+      refs: hit.refs,
+      reasons: hit.reasons
+    }
+  })
+  return {
+    result: {
+      kind: 'recall_diary',
+      freshness: currentFreshness(deps),
+      hits: views,
+      stats: { mode: args.keywords.length > 0 ? 'keywords' : 'filter', candidates: hits.length }
+    },
+    segments: [],
+    memories
+  }
+}
+
+function executeReadDiary(deps: AskToolDeps, args: Record<string, unknown>): AskToolOutcome {
+  const diary = requireDiary(deps)
+  if (!diary) {
+    return { result: { kind: 'error', message: '这台机器上没有接入日记记忆（个人记忆）' }, segments: [] }
+  }
+  const day = parseDayKey(args.day)
+  if (day === undefined) {
+    return { result: { kind: 'error', message: 'read_diary 需要 day（格式 2026-09-29）' }, segments: [] }
+  }
+  const view = diary.readDay(day)
+  if (view === null) {
+    return { result: { kind: 'error', message: `这一天没有日记条目：${day}` }, segments: [] }
+  }
+  const memories: MemoryCitationMeta[] = view.items.map((item) => ({
+    itemId: item.itemId,
+    day,
+    section: item.section,
+    text: item.text
+  }))
+  return {
+    result: {
+      kind: 'read_diary',
+      freshness: currentFreshness(deps),
+      day,
+      text: view.text,
+      items: view.items,
+      offset: clampReadOffset(args.offset),
+      limit: clampReadLimit(args.limit)
+    },
+    segments: [],
+    memories
+  }
+}
+
+function executeMemoryProfile(deps: AskToolDeps): AskToolOutcome {
+  const diary = requireDiary(deps)
+  if (!diary) {
+    return { result: { kind: 'error', message: '这台机器上没有接入日记记忆（个人记忆）' }, segments: [] }
+  }
+  const view = diary.profile()
+  return {
+    result: {
+      kind: 'memory_profile',
+      freshness: currentFreshness(deps),
+      stats: view.stats,
+      observations: view.observations
+    },
+    segments: []
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 执行器入口                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -514,6 +717,22 @@ export function createAskToolExecutor(deps: AskToolDeps): {
         }
         if (call.name === 'read_segment') {
           return executeReadSegment(deps, call.arguments)
+        }
+        if (call.name === 'recall_diary') {
+          const args = parseRecallDiaryArgs(call.arguments)
+          if (args === null) {
+            return {
+              result: { kind: 'error', message: 'recall_diary 参数不合法（需要 keywords / day / tag / from-to 之一）' },
+              segments: []
+            }
+          }
+          return executeRecallDiary(deps, args)
+        }
+        if (call.name === 'read_diary') {
+          return executeReadDiary(deps, call.arguments)
+        }
+        if (call.name === 'memory_profile') {
+          return executeMemoryProfile(deps)
         }
         return { result: { kind: 'error', message: `未知工具：${call.name}` }, segments: [] }
       } catch {

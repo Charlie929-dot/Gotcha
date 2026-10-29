@@ -53,7 +53,7 @@ import {
   type ChainAskTraceTool,
   type ChainAskTurnContext
 } from './types'
-import { createAskToolExecutor, type AskHistorySummary } from './tools'
+import { createAskToolExecutor, type AskHistorySummary, type DiaryToolDeps, type MemoryCitationMeta } from './tools'
 import type { ChainDb } from '../store'
 import type { ChainSearchBatchQuery, ChainSearchBatchResult } from '../query'
 
@@ -81,6 +81,8 @@ export interface AskLoopResumeState {
   stats: ChainAskStats
   /** 暂停前已经发生的思考 / 工具步骤（恢复后继续累积） */
   steps: readonly ChainAskTraceStep[]
+  /** 暂停前给模型看过的日记条目（恢复后 memories 引用仍要能过白名单） */
+  memoryWhitelist?: ReadonlyMap<number, MemoryCitationMeta>
 }
 
 export interface AskLoopContext {
@@ -99,6 +101,10 @@ export interface AskLoopContext {
   readAskHistory?: (scope: 'conversation' | 'all') => readonly AskHistorySummary[]
   /** 关键词批量检索的执行体（主进程注入 worker 版；不传 = 进程内同步查） */
   searchBatch?: (query: ChainSearchBatchQuery) => Promise<ChainSearchBatchResult>
+  /** 日记记忆（第二本账）；不传 = 没有接入，三个记忆工具会如实报错 */
+  diary?: DiaryToolDeps
+  /** 人设提示（本地配置，拼在 system 最前面；不传 = 用默认的回忆助手口吻） */
+  personaPrompt?: string
   /** 同一会话之前的几轮（续问）；没有就是新对话 */
   history?: readonly ChainAskTurnContext[]
   /** 提问前最后一段证据（指代线索；不是证据） */
@@ -175,6 +181,12 @@ function summarizeToolOutcome(
       return '查了数据边界'
     case 'read_segment':
       return `打开段 ${result.segmentId}`
+    case 'recall_diary':
+      return `日记命中 ${result.hits.length} 条`
+    case 'read_diary':
+      return `打开 ${result.day} 的日记`
+    case 'memory_profile':
+      return '看了「关于我」的统计'
     default:
       return `失败：${result.message}`
   }
@@ -192,6 +204,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
 
   /// 引用白名单：search_info 返回过、且脱敏后仍然给模型看过的段（read_segment 的越权门）
   const whitelist = new Map<number, CitationMeta>(resume?.whitelist ?? [])
+  /// 日记引用白名单：recall_diary / read_diary 给过的条目（memories 的越权门）
+  const memoryWhitelist = new Map<number, MemoryCitationMeta>(resume?.memoryWhitelist ?? [])
 
   /** 过程（D55 ③）：每轮思考 + 工具调用摘要；恢复时先继承暂停前的步骤 */
   const steps: ChainAskTraceStep[] = resume ? [...resume.steps] : []
@@ -205,6 +219,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.embedQuestion ? { embed: ctx.embedQuestion } : {}),
     ...(ctx.readAskHistory ? { readAskHistory: ctx.readAskHistory } : {}),
     ...(ctx.searchBatch ? { searchBatch: ctx.searchBatch } : {}),
+    ...(ctx.diary ? { diary: ctx.diary } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId)
   })
@@ -311,7 +326,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       response = await ctx.client.completeAskLoop(built.payload, {
         allowTools,
         ...(ctx.signal ? { signal: ctx.signal } : {}),
-        ...(ctx.image ? { image: ctx.image } : {})
+        ...(ctx.image ? { image: ctx.image } : {}),
+        ...(ctx.personaPrompt ? { personaPrompt: ctx.personaPrompt } : {})
       })
     } catch (error) {
       // 用户点「停止」：不算失败，如实回 aborted
@@ -393,6 +409,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         for (const meta of outcome.segments) {
           whitelist.set(meta.segmentId, meta)
         }
+        for (const meta of outcome.memories ?? []) {
+          memoryWhitelist.set(meta.itemId, meta)
+        }
         // 检索是主进程同步执行的，耗时直接等于「点下去没反应」的时长。
         // 慢的才记一条（性能方案 §4.4 的 search_ms 观测点），别给每次工具调用刷日志。
         if (outcome.result.kind === 'search_info' && toolMs >= 100) {
@@ -423,7 +442,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           turnsUsed: globalTurn,
           grants,
           stats: { ...stats, hits: hitsShown, evidence: whitelist.size, turns: globalTurn, toolCalls: toolCallCount },
-          steps: [...steps]
+          steps: [...steps],
+          memoryWhitelist: new Map(memoryWhitelist)
         })
         log('info', 'chain ask loop: 轮数用尽，等用户决定是否继续', {
           turns: globalTurn,
@@ -449,7 +469,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     const parsed = parseChainReply(response.json, whitelist, {
       // 「关于对话本身」的答案不引用屏幕段：只有本会话有上文、或真的查过 ask_history 时才放行，
       // 避免模型把普通问题也降级成无引用的自由发挥。
-      allowConversationAnswer: (ctx.history?.length ?? 0) > 0 || usedAskHistory
+      allowConversationAnswer: (ctx.history?.length ?? 0) > 0 || usedAskHistory,
+      // 日记引用的白名单：本轮 recall_diary / read_diary 实际给模型看过的条目
+      memoryMeta: memoryWhitelist
     })
     if (!parsed.ok) {
       settleUsage()
@@ -486,6 +508,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         kind: 'insufficient',
         answer: parsed.answer,
         citations: parsed.citations,
+        ...(parsed.memories.length > 0 ? { memories: parsed.memories } : {}),
         related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
       })
@@ -516,6 +539,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       kind: 'answer',
       answer: parsed.answer,
       citations: parsed.citations,
+      ...(parsed.memories.length > 0 ? { memories: parsed.memories } : {}),
       stats: withLoopDiag(globalTurn, toolCallCount)
     })
   }

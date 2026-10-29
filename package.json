@@ -21,6 +21,7 @@
     "perf:sample": "node scripts/perf/runtime-sample.mjs",
     "perf:suite": "vitest run --config tests/perf/vitest.perf.config.ts",
     "setting": "node scripts/setting.mjs",
+    "memory": "node scripts/memory.mjs",
     "check:embedding-worker": "node scripts/check-embedding-worker.mjs",
     "check:search-worker": "node scripts/check-search-worker.mjs",
     "check:mirror-coverage": "node scripts/perf/mirror-coverage.mjs"
@@ -53,3 +54,4 @@
     "onnxruntime-node": "^1.30.0"
   }
 }
+

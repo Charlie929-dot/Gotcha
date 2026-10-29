@@ -28,7 +28,7 @@ import type { LlmClient, LlmUsage } from '../../understand/cloud/llm-client'
 import type { AskOutbound, AskRecentSegment, RedactableChainAskEvidence } from './payload'
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
-import type { AskHistorySummary } from './tools'
+import type { AskHistorySummary, DiaryToolDeps } from './tools'
 import {
   EVIDENCE_TEXT_CHARS,
   type ChainAskRelatedSegment,
@@ -85,6 +85,10 @@ export interface ChainAskOptions {
   captureRunning?: () => boolean
   /** 循环用：最近问答记录（ask_history 工具的数据源；默认只查本会话，`all` 才跨会话） */
   readAskHistory?: (scope: 'conversation' | 'all') => readonly AskHistorySummary[]
+  /** 日记记忆（第二本账）：不传 = 没接入，三个记忆工具会如实报错 */
+  diary?: DiaryToolDeps
+  /** 人设提示（本地配置，拼在 system 最前面；不传 = 默认回忆助手口吻） */
+  personaPrompt?: string
   /** 同一会话之前的几轮（续问）；不传 = 新对话 */
   history?: readonly ChainAskTurnContext[]
   /**
@@ -240,6 +244,8 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         now: options.now ?? (() => Date.now()),
         captureRunning: options.captureRunning ?? (() => false),
         ...(options.readAskHistory ? { readAskHistory: options.readAskHistory } : {}),
+        ...(options.diary ? { diary: options.diary } : {}),
+        ...(options.personaPrompt ? { personaPrompt: options.personaPrompt } : {}),
         ...(options.searchBatch ? { searchBatch: options.searchBatch } : {}),
         ...(options.history ? { history: options.history } : {}),
         ...(options.recent ? { recent: options.recent } : {}),

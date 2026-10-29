@@ -5,6 +5,9 @@ import Database from 'better-sqlite3'
 import log from 'electron-log/main'
 import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { getNumberSetting, getSetting, setSetting } from '../db/settings'
+import { previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
+import { buildPersonaPrompt, readPersona, resolveVaultDir } from '../memory/persona'
+import type { DiaryToolDeps } from '../chain/agent/tools'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
@@ -77,6 +80,7 @@ import { askChain, type ChainAskOptions } from '../chain/agent/ask'
 import type { AskRecentSegment } from '../chain/agent/payload'
 import type { ChainDb } from '../chain/store'
 import { querySegments } from '../chain/store'
+import { ensureChainSchema } from '../chain/schema'
 import {
   searchChainSegmentsBatch,
   type ChainSearchBatchQuery,
@@ -1691,6 +1695,31 @@ if (primaryInstance) {
     // 问记忆（S3-lite）：只读链库 + 出云确认门（D24）+ 日账（D22）
     // 对话记录：显式提问 / 清空才写盘（A3 口径不变），文件在 userData 下
     const askHistoryPath = join(app.getPath('userData'), ASK_HISTORY_FILE)
+    /**
+     * 日记增量同步（第二本账）。节流 60s：问一次记忆最多 stat 一遍日记目录。
+     * 只有这里会开写连接（`mem_items` 是唯一写入点）；检索路径仍走只读连接。
+     * 目录不存在（没配日记）就什么都不做——不为了一个没开的功能够建库。
+     */
+    let memorySyncedAt = 0
+    const syncMemoryIfDue = (): void => {
+      const now = Date.now()
+      if (now - memorySyncedAt < 60_000) return
+      const vaultDir = resolveVaultDir(connections.queryDb())
+      if (vaultDir === null) return
+      memorySyncedAt = now
+      try {
+        const { db: writable } = connections.ensureWritable()
+        // 日记住进的是同一个 memory.db：顺手把信息链表建好（幂等）。
+        // 否则「只开过日记、从没采集过」的库在问记忆时会缺 chain_segment（freshness / 检索都会炸）。
+        ensureChainSchema(writable)
+        const result = syncVault(writable, vaultDir)
+        if (result.added > 0 || result.updated > 0 || result.removed > 0) {
+          captureLog('info', 'memory sync', { dir: vaultDir, ...result })
+        }
+      } catch (error) {
+        captureLog('warn', 'memory sync failed', { dir: vaultDir, error: String(error) })
+      }
+    }
     const askConsentView = (): AskConsentView => {
       const db = connections.queryDb()
       const consented = db ? getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1' : false
@@ -1715,6 +1744,52 @@ if (primaryInstance) {
         at: row.start_ts
       }
     }
+    /**
+     * 日记记忆（第二本账）给工具循环的实现：查询走当前连接（通常只读），
+     * 只有同步（`syncMemoryIfDue`）会开写连接 —— 走过来问的记忆不该顺手改库。
+     */
+    const diaryToolsFor = (db: ChainDb): DiaryToolDeps => ({
+      recall: (query) =>
+        recallMemory(db, { ...query, now: Date.now() }).hits.map((hit) => ({
+          itemId: hit.id,
+          day: hit.day_key,
+          section: hit.section,
+          kind: hit.kind,
+          text: hit.text,
+          tags: hit.tags,
+          refs: hit.refs,
+          reasons: hit.reasons
+        })),
+      readDay: (day) => {
+        const view = readMemoryDay(db, day)
+        if (view === null) return null
+        return {
+          day,
+          text: view.text,
+          items: view.items.map((item) => ({ itemId: item.id, section: item.section, text: item.text }))
+        }
+      },
+      profile: () => {
+        const view = previewMemoryProfile(db)
+        const stats = view.stats
+        return {
+          // 工具结果是送云的：这里只给几个数字与短字符串，不把整张统计表塞进去
+          stats: {
+            items: stats.items,
+            days: stats.days,
+            firstDay: stats.firstDay,
+            lastDay: stats.lastDay,
+            streakDays: stats.streakDays,
+            tasksOpen: stats.tasks.open,
+            tasksDone: stats.tasks.done,
+            topTags: stats.topTags.slice(0, 5).map((tag) => `#${tag.tag}`).join(' '),
+            topRefs: stats.topRefs.slice(0, 5).map((ref) => ref.ref).join(' '),
+            note: '统计口径：按 mem_items 的条目 / 天数 / 待办勾选现算'
+          },
+          observations: view.observations
+        }
+      }
+    })
     const askOptionsFor = (db: ChainDb, context: AskQueryContext): ChainAskOptions => ({
       db,
       resolveClient,
@@ -1745,6 +1820,9 @@ if (primaryInstance) {
       // 指代线索：提问前最后一段（不是证据；引用仍要经 search_info / read_segment）
       recent: latestSegmentHint(db),
       searchBatch: runSearchBatch,
+      // 个人记忆（第二本账）：日记条目 + 「关于我」统计；人设是本地配置，只拼在 system 最前面
+      diary: diaryToolsFor(db),
+      personaPrompt: buildPersonaPrompt(readPersona(db)),
       // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
       history: context.history,
       signal: context.signal,
@@ -1778,6 +1856,10 @@ if (primaryInstance) {
     disposeAskIpc = registerAskIpc({
       getWindow: () => askWindow,
       ask: async (question, context) => {
+        // 先把日记目录的增量同步进来（节流；失败只记日志，不挡住提问）。
+        // **必须在取 queryDb 之前**：同步要开写连接，会把只读连接关掉，
+        // 先取再同步会拿到一个已经关闭的句柄。
+        syncMemoryIfDue()
         const db = connections.queryDb()
         // A3 红线：没有库（从未采集）就不建库；时间轴上本来也没东西可找
         if (!db) {
@@ -1854,6 +1936,9 @@ if (primaryInstance) {
       providerKeys: () => providerKeyStatus(),
       log: (level, message, data) => captureLog(level, message, data)
     })
+
+    // 启动后在后台同步一遍日记（不阻塞窗口；第一次问记忆时通常已经就绪）
+    setTimeout(syncMemoryIfDue, 2_000)
 
     disposeGraphIpc = registerGraphIpc({
       getGraphWindow: () => graphWindow,
@@ -2014,3 +2099,4 @@ if (primaryInstance) {
     if (!launchCapture && readResumeOnStart()) scheduleStartupResume()
   })
 }
+

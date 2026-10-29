@@ -28,6 +28,23 @@ export interface ChainAskRelatedSegment {
   title: string
 }
 
+/**
+ * 日记引用（个人记忆 · 第二本账）：
+ * 屏幕引用靠 segmentId 指回窗口段，日记引用靠 itemId 指回 `mem_items` 的一行。
+ * 带 `snippet` 是为了前端**不用再查库**就能把「原文长什么样」摆出来——
+ * 日记是我们自己的数据，没有屏幕截图那种隐私分级。
+ */
+export interface ChainAskMemoryCitation {
+  itemId: number
+  /** `yyyy-mm-dd`（日记的文件名日期） */
+  day: string
+  section: string
+  /** 模型给的一句「这条为什么相关」（≤200 字） */
+  why: string
+  /** 原文片段（≤160 字，服务端截断） */
+  snippet: string
+}
+
 /** 送云前的一段证据（已脱敏、已截断） */
 export interface ChainAskEvidence {
   segmentId: number
@@ -94,6 +111,8 @@ export type ChainAskResult =
       kind: 'answer'
       answer: string
       citations: ChainAskCitation[]
+      /** 日记引用（0–4 条）；与屏幕引用可以同时存在 */
+      memories?: ChainAskMemoryCitation[]
       stats: ChainAskStats
       trace?: ChainAskTrace
     }
@@ -131,6 +150,7 @@ export type ChainAskResult =
       kind: 'insufficient'
       answer: string
       citations: ChainAskCitation[]
+      memories?: ChainAskMemoryCitation[]
       /** 检索到、但没进引用的段（最多 5 条，按检索顺序），给人一个入口 */
       related: ChainAskRelatedSegment[]
       stats: ChainAskStats
@@ -148,6 +168,7 @@ export type ChainAskResult =
       stats: ChainAskStats
       note?: string
       citations?: ChainAskCitation[]
+      memories?: ChainAskMemoryCitation[]
       /** 检索到、但没进引用的段（同 `insufficient`） */
       related?: ChainAskRelatedSegment[]
       trace?: ChainAskTrace
@@ -204,3 +225,4 @@ export const EVIDENCE_TEXT_CHARS = 500
 
 /** 回答正文上限（字符），超了截断而不是失败 */
 export const ANSWER_MAX_CHARS = 1_200
+

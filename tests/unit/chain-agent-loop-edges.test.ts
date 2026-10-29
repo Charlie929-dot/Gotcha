@@ -1107,7 +1107,7 @@ describe('工具循环 · 客户端能力路由', () => {
 /* ------------------------------------------------------------------ */
 
 describe('工具循环 · schema 与执行器一致性', () => {
-  it('wire 层的三个工具名都能被执行器认；search_info 的参数与执行器解析的一一对应', async () => {
+  it('wire 层的七个工具名都能被执行器认；search_info 的参数与执行器解析的一一对应', async () => {
     seedOne(1, 'Firefox', at(0), 'LNK1104 的记录')
     const payload = buildChainAskLoopPayload({
       question: '随便问问',
@@ -1146,7 +1146,10 @@ describe('工具循环 · schema 与执行器一致性', () => {
       'search_info',
       'get_freshness',
       'read_segment',
-      'ask_history'
+      'ask_history',
+      'recall_diary',
+      'read_diary',
+      'memory_profile'
     ])
     // search_info 的参数名必须与执行器解析的键完全一致（多一个 = 模型给了没人读，少一个 = 模型给不了）
     expect(Object.keys(body.tools[0].function.parameters.properties).sort()).toEqual([

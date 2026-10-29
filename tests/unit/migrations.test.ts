@@ -43,7 +43,7 @@ describe('migrations · :memory: 库', () => {
     try {
       expect(getSchemaVersion(db)).toBe(0)
       expect(applyMigrations(db)).toBe(LATEST)
-      expect(LATEST).toBe(7)
+      expect(LATEST).toBe(8)
 
       db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
       // 第二次跑同一套迁移：不应抛错、版本不倒退、已有数据不丢

@@ -128,6 +128,34 @@ export interface RedactableAskLoopConversationTurn {
   answer: string
 }
 
+/**
+ * 日记召回的一条命中（个人记忆 · 第二本账）。
+ * `day` 是日记文件名日期（本地可读，不带时间戳）；`snippet` 是原文片段。
+ */
+export interface RedactableDiaryHit {
+  itemId: number
+  day: string
+  kind: string
+  snippet: string
+  tags: readonly string[]
+  refs: readonly string[]
+  /** 为什么命中（提到 X / 标签 / 距今多少天）；模型要能向用户解释「为什么给这几条」 */
+  reasons: readonly string[]
+}
+
+/** 打开某一天后返回的条目（供模型引用；只有 itemId 能在最终 memories 里被承认） */
+export interface RedactableDiaryItem {
+  itemId: number
+  section: string
+  text: string
+}
+
+/** 「关于我」的一条观测（当前只有统计型，来源写死在 `source`） */
+export interface RedactableDiaryObservation {
+  topic: string
+  statement: string
+}
+
 /** 一次工具结果的待组装视图：按 kind 决定哪些字段是屏幕文本 */
 export type RedactableAskLoopToolResult =
   | {
@@ -157,6 +185,30 @@ export type RedactableAskLoopToolResult =
     }
   /** 执行器兜底：参数不合法 / 未知工具 / 执行抛错（message 是固定文案或已过策略的工具名） */
   | { kind: 'error'; message: string }
+  /** 日记召回（个人记忆 · 第二本账；与屏幕段检索并列） */
+  | {
+      kind: 'recall_diary'
+      freshness: AskLoopFreshness
+      hits: readonly RedactableDiaryHit[]
+      stats: { mode: string; candidates: number }
+    }
+  /** 打开某一天：返回该天的条目与拼接后的全文（模型可据此引用具体 itemId） */
+  | {
+      kind: 'read_diary'
+      freshness: AskLoopFreshness
+      day: string
+      text: string
+      items: readonly RedactableDiaryItem[]
+      offset: number
+      limit: number
+    }
+  /** 「关于我」：条目 / 天数 / 待办 / 高频话题（全部是统计，不是心理分析） */
+  | {
+      kind: 'memory_profile'
+      freshness: AskLoopFreshness
+      stats: Record<string, number | string | null>
+      observations: readonly RedactableDiaryObservation[]
+    }
 
 /** 循环里的一次往返：模型发起的调用 + 执行器给出的摘要 */
 export interface RedactableAskLoopTurn {
@@ -253,6 +305,10 @@ const ASK_LOOP_URL_MAX_CHARS = 400
 /** read_segment 一次送云的正文字符范围（模型可用 offset 继续翻） */
 export const ASK_LOOP_READ_MIN_CHARS = 1
 export const ASK_LOOP_READ_MAX_CHARS = 6000
+/** 日记召回一条最多给多少字：和 search_info 的 80 字摘要同量级（模型要细节必须 read_diary） */
+export const ASK_LOOP_DIARY_SNIPPET_MAX_CHARS = 120
+/** 日记引用里原文片段的上限（最终答复的 memories[].snippet） */
+export const ASK_LOOP_DIARY_QUOTE_MAX_CHARS = 160
 
 /* ------------------------------------------------------------------ */
 /* 组装辅助                                                            */
@@ -537,6 +593,72 @@ export function buildAskLoopPayload(
           totalChars: full.length,
           truncated: offset + limit < full.length
         }
+        break
+      }
+      case 'recall_diary': {
+        const hits: Array<{
+          itemId: number
+          day: string
+          kind: string
+          snippet: string
+          tags: string[]
+          refs: string[]
+          reasons: string[]
+        }> = []
+        for (const hit of result.hits) {
+          const snippet = guardText(policy, hit.snippet, ASK_LOOP_DIARY_SNIPPET_MAX_CHARS)
+          if (snippet.blocked) continue
+          hits.push({
+            itemId: hit.itemId,
+            day: hit.day,
+            kind: hit.kind,
+            snippet: snippet.text,
+            tags: guardLoopNames(policy, hit.tags),
+            refs: guardLoopNames(policy, hit.refs),
+            reasons: guardLoopNames(policy, hit.reasons)
+          })
+        }
+        view = { kind: 'recall_diary', freshness: result.freshness, hits, stats: result.stats }
+        break
+      }
+      case 'read_diary': {
+        const text = guardText(policy, result.text, Number.MAX_SAFE_INTEGER)
+        if (text.blocked) {
+          view = { kind: 'error', message: '这一天的日记包含敏感内容，不能展开' }
+          break
+        }
+        const full = text.text
+        const offset = Math.min(full.length, Math.max(0, Math.trunc(result.offset)))
+        const limit = Math.min(
+          ASK_LOOP_READ_MAX_CHARS,
+          Math.max(ASK_LOOP_READ_MIN_CHARS, Math.trunc(result.limit))
+        )
+        const items: Array<{ itemId: number; section: string; text: string }> = []
+        for (const item of result.items) {
+          const itemText = guardText(policy, item.text, ASK_LOOP_DIARY_SNIPPET_MAX_CHARS * 3)
+          if (itemText.blocked) continue
+          items.push({ itemId: item.itemId, section: item.section, text: itemText.text })
+        }
+        view = {
+          kind: 'read_diary',
+          freshness: result.freshness,
+          day: result.day,
+          text: full.slice(offset, offset + limit),
+          items,
+          offset,
+          totalChars: full.length,
+          truncated: offset + limit < full.length
+        }
+        break
+      }
+      case 'memory_profile': {
+        const observations: Array<{ topic: string; statement: string }> = []
+        for (const item of result.observations) {
+          const statement = guardText(policy, item.statement, ASK_LOOP_DIARY_QUOTE_MAX_CHARS * 2)
+          if (statement.blocked) continue
+          observations.push({ topic: item.topic, statement: statement.text })
+        }
+        view = { kind: 'memory_profile', freshness: result.freshness, stats: result.stats, observations }
         break
       }
       default: {

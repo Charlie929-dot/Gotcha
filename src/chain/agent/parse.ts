@@ -16,8 +16,10 @@ import {
   MAX_CITATIONS,
   MAX_CLARIFY_OPTIONS,
   NO_EVIDENCE_TEXT,
-  type ChainAskCitation
+  type ChainAskCitation,
+  type ChainAskMemoryCitation
 } from './types'
+import type { MemoryCitationMeta } from './tools'
 
 /** 引用时要从命中段行补的事实 */
 export interface CitationMeta {
@@ -30,13 +32,25 @@ export interface CitationMeta {
 }
 
 export type ParseChainReplyResult =
-  | { ok: true; kind: 'answer'; answer: string; citations: ChainAskCitation[] }
+  | {
+      ok: true
+      kind: 'answer'
+      answer: string
+      citations: ChainAskCitation[]
+      memories: ChainAskMemoryCitation[]
+    }
   /**
    * 查到了相关段、但撑不起结论：说明留下，引用 0–3 条（不当结论）。
    * 2026-10-29：以前 citations 为空就把整段说明丢掉、界面只剩固定文案，
    * 拍板人明确要求「命中很多却一句话都不说」不能再出现。
    */
-  | { ok: true; kind: 'insufficient'; answer: string; citations: ChainAskCitation[] }
+  | {
+      ok: true
+      kind: 'insufficient'
+      answer: string
+      citations: ChainAskCitation[]
+      memories: ChainAskMemoryCitation[]
+    }
   | { ok: true; kind: 'clarify'; question: string; options: string[] }
   | { ok: false; reason: 'shape' | 'no-citations'; message: string }
 
@@ -48,6 +62,11 @@ export interface ParseChainReplyOptions {
    * 由循环层按「本会话有上文 / 真的查过 ask_history」决定是否放开。
    */
   allowConversationAnswer?: boolean
+  /**
+   * 日记引用白名单（recall_diary / read_diary 给过的条目）。
+   * 不传 = 这一轮没有日记记忆可用，模型给的 memories 一律剥掉。
+   */
+  memoryMeta?: ReadonlyMap<number, MemoryCitationMeta>
 }
 
 const WHY_MAX_CHARS = 200
@@ -100,6 +119,7 @@ export function parseChainReply(
   const text = answer.trim()
   if (text === '') return { ok: false, reason: 'shape', message: 'answer 为空' }
 
+  const memories = parseMemoryCitations(json.memories, options.memoryMeta)
   const raw = json.citations
   if (!Array.isArray(raw)) return { ok: false, reason: 'shape', message: 'citations 不是数组' }
 
@@ -117,11 +137,12 @@ export function parseChainReply(
     citations.push({ segmentId: id, at: known.at, app: known.app, title: known.title, why })
   }
 
-  if (citations.length === 0) {
+  const hasAnyCitation = citations.length > 0 || memories.length > 0
+  if (!hasAnyCitation) {
     // 「关于对话本身」的答案（你刚才问过什么）没有屏幕段可引：模型显式标 conversation:true
     // 且循环层确认有对话上下文时才放行，其余仍按「引用全被剥空」处理。
     if (options.allowConversationAnswer === true && json.conversation === true) {
-      return { ok: true, kind: 'answer', answer: truncate(text, ANSWER_MAX_CHARS), citations: [] }
+      return { ok: true, kind: 'answer', answer: truncate(text, ANSWER_MAX_CHARS), citations: [], memories: [] }
     }
     // 只剩一句固定文案、什么也没说：维持「没找到」，UI 用固定文案（证据即沉默）。
     if (isBareNoEvidence(text)) {
@@ -131,14 +152,56 @@ export function parseChainReply(
     // 只有「一条引用都没给」、且本轮**确实检索到了段**时，才把说明当成「查到了但不够」——
     // 说明不是结论，UI 会标成「相关但不足」，并列出检索到的段。
     if (raw.length === 0 && meta.size > 0) {
-      return { ok: true, kind: 'insufficient', answer: truncate(text, ANSWER_MAX_CHARS), citations: [] }
+      return { ok: true, kind: 'insufficient', answer: truncate(text, ANSWER_MAX_CHARS), citations: [], memories: [] }
     }
     return { ok: false, reason: 'no-citations', message: '引用全被剥空' }
   }
   if (json.insufficient === true) {
-    return { ok: true, kind: 'insufficient', answer: truncate(text, ANSWER_MAX_CHARS), citations }
+    return {
+      ok: true,
+      kind: 'insufficient',
+      answer: truncate(text, ANSWER_MAX_CHARS),
+      citations,
+      memories
+    }
   }
-  return { ok: true, kind: 'answer', answer: truncate(text, ANSWER_MAX_CHARS), citations }
+  return { ok: true, kind: 'answer', answer: truncate(text, ANSWER_MAX_CHARS), citations, memories }
+}
+
+/** 一次答复最多几条日记引用（和屏幕引用一样，只留真正支撑结论的） */
+const MAX_MEMORIES = 4
+/** 日记引用里原文片段的上限 */
+const MEMORY_QUOTE_MAX_CHARS = 160
+
+/**
+ * 日记引用：`memories:[{itemId,why}]`。itemId 必须落在本轮 recall_diary / read_diary
+ * 给过的条目里（白名单），编造 / 重复 / 没接日记库时整条丢弃。
+ */
+function parseMemoryCitations(
+  raw: unknown,
+  meta: ReadonlyMap<number, MemoryCitationMeta> | undefined
+): ChainAskMemoryCitation[] {
+  if (!Array.isArray(raw) || meta === undefined) return []
+  const out: ChainAskMemoryCitation[] = []
+  const seen = new Set<number>()
+  for (const item of raw) {
+    if (out.length >= MAX_MEMORIES) break
+    if (!isRecord(item)) continue
+    const id = item.itemId
+    if (typeof id !== 'number' || !Number.isInteger(id)) continue
+    const known = meta.get(id)
+    if (!known || seen.has(id)) continue
+    seen.add(id)
+    const why = typeof item.why === 'string' ? truncate(item.why.trim(), WHY_MAX_CHARS) : ''
+    out.push({
+      itemId: id,
+      day: known.day,
+      section: known.section,
+      why,
+      snippet: truncate(known.text.replace(/\s+/gu, ' ').trim(), MEMORY_QUOTE_MAX_CHARS)
+    })
+  }
+  return out
 }
 
 /** 是否只有一句「信息链里没找到」（允许句末标点），没有任何补充说明 */

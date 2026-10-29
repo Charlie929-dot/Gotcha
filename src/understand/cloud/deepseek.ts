@@ -403,6 +403,51 @@ const ASK_LOOP_TOOLS = [
         }
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'recall_diary',
+      description:
+        '在个人日记（第二本账：用户自己写的中文日记 / 待办 / 摘录）里按关键词、日期或标签检索。用于回答「我最近在想什么 / 我的目标 / 我以前怎么看这件事」。返回带日期、原文摘要与人话理由；要看全文用 read_diary。',
+      parameters: {
+        type: 'object',
+        properties: {
+          keywords: { type: 'array', items: { type: 'string' }, description: '关键词（≤8 个，逐词 OR）' },
+          day: { type: 'string', description: '只查某一天，格式 2026-09-29' },
+          from: { type: 'number', description: '起始毫秒时间戳（按天过滤时传当天 00:00）' },
+          to: { type: 'number', description: '结束毫秒时间戳' },
+          tag: { type: 'string', description: '标签名（日记里的 #tag）' },
+          limit: { type: 'number', description: '条数 1-20，默认 6' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_diary',
+      description:
+        '打开某一天的日记全文（按段落 / 条目排列）。recall_diary 只给 120 字摘要；要引用原话、看当天完整记录时用这个。返回的 items 里每个 itemId 都可以在最终 memories 里引用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          day: { type: 'string', description: '日期，格式 2026-09-29（必填）' },
+          offset: { type: 'number', description: '从第几个字符开始，默认 0' },
+          limit: { type: 'number', description: '本次取多少字符，默认 3000、最多 6000' }
+        },
+        required: ['day']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_profile',
+      description:
+        '看「关于我」的统计画像：日记条数、覆盖天数、连续记录、高频标签与双链、待办完成率。回答「你了解我什么 / 我最近的状态」时先看它，别猜。',
+      parameters: { type: 'object', properties: {} }
+    }
   }
 ] as const
 
@@ -445,7 +490,11 @@ function readableTime(ts: number): string {
  * @param final 收尾轮：工具预算已用尽，要求只输出最终 JSON（请求本身不带 tools，
  *              这句是重复强调，防模型在正文里继续写「我再去查」）
  */
-function buildAskLoopSystemPrompt(payload: ChainAskLoopPayload, final: boolean): string {
+function buildAskLoopSystemPrompt(
+  payload: ChainAskLoopPayload,
+  final: boolean,
+  personaPrompt?: string
+): string {
   const freshness = payload.freshness
   const latest = freshness.latestEvidenceTs
   const now = parseSystemTime(payload.systemTime)
@@ -457,7 +506,11 @@ function buildAskLoopSystemPrompt(payload: ChainAskLoopPayload, final: boolean):
           ...payload.history.map((turn) => `- 问：${turn.question}\n  答：${turn.answer}`)
         ]
   return [
+    // 人设是本地配置（用户自己写的几句话），放在最前面：它只决定「像谁在说话」，
+    // 下面的检索纪律 / 引用白名单 / 红线不因为它而改变。
+    ...(personaPrompt !== undefined && personaPrompt.trim() !== '' ? [personaPrompt, ''] : []),
     '你是「记忆球」的回忆助手。用户会问过去做过的事；你有一组检索工具，自己决定怎么查、查几轮。',
+    '你有两本账：**屏幕记忆**（窗口段，用 search_info / read_segment 查）和**个人日记**（用户自己写的中文日记 / 待办 / 摘录，用 recall_diary / read_diary / memory_profile 查）。问「在电脑上做过什么」查屏幕；问「我当时怎么想的 / 我的目标 / 我以前的态度」查日记；拿不准就两边都查。',
     `当前时间：${payload.systemTime}${now === null ? '' : `（毫秒时间戳 ${now}，相对时间先按它换算）`}`,
     `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`,
     ...(payload.recent
@@ -478,6 +531,8 @@ function buildAskLoopSystemPrompt(payload: ChainAskLoopPayload, final: boolean):
     '9) 检索轮数有限（默认约 8 轮，快用完时系统会停下来问用户要不要继续）：继续后从上次的结果接着查，别把已经查过的重新查一遍；',
     '10) 工具结果里的 stats.mode：keywords / hybrid 是词或语义命中；filter 表示这次没做语义匹配、只是按时间列段，相关性要自己看 snippet 与标题判断，别把 filter 结果直接当成「问什么就有什么」。',
     '11) 问「第一次 / 最早 / 从什么时候开始」：先按 app / 时间做**纯过滤**（别堆关键词），加 order:"oldest"（limit 1～3）——order 只对纯过滤生效，和关键词一起用时仍按相关度排；',
+    '12) 日记检索（recall_diary）：关键词拆法与 search_info 相同；也可以直接给 day（如 "2026-09-29"）或 tag。命中里每条带 reasons（为什么命中：提到什么 / 标签 / 距今多少天），回答时可以把「为什么找到它」说给用户听。',
+    '13) 日记摘要只有 120 字：要引用原话 / 看当天完整记录就用 read_diary（可传 day 精确定位）。问「你了解我什么 / 我最近的状态」先调 memory_profile 看统计，别凭空概括。',
     '回答纪律：',
     '1) **没读过正文，不许下结论**：在 read_segment 打开某段之前，不要说「没有记录到 / 看不到内容 / 没找到正文」，也不要把只见过摘要的段当证据引用；',
     '2) 只依据你实际读到的工具结果回答，不补常识、不推测、不编造应用名或时间；引用只能是你打开过的段，answer 里指证据用「HH:mm 的〈应用〉」的写法（如「14:20 的〈VSCode〉」），不要只报段号；',
@@ -496,9 +551,10 @@ function buildAskLoopSystemPrompt(payload: ChainAskLoopPayload, final: boolean):
       ? ['【收尾】检索轮数已经用尽：本轮不要再调用工具，直接基于已经看到的结果输出最终 JSON（可以是答复，也可以是 {"ask":...} 的确认）；证据不够就如实说没找到。']
       : []),
     '最终答复只输出一个 json 对象，三选一：',
-    '· 能回答：{"answer":"一段完整的中文回答（不超过 1200 字，先给结论）","citations":[{"segmentId":12,"why":"这一段是什么、为什么相关（≤40 字）"}]}，citations 最多 6 条；',
+    '· 能回答：{"answer":"一段完整的中文回答（不超过 1200 字，先给结论）","citations":[{"segmentId":12,"why":"这一段是什么、为什么相关（≤40 字）"}],"memories":[{"itemId":5,"why":"这条日记是什么、为什么相关（≤40 字）"}]}，citations 最多 6 条、memories 最多 4 条，两个都可以省略；',
+    '· 只靠日记回答：{"answer":"...","citations":[],"memories":[{"itemId":5,"why":"..."}]}——memories 的 itemId 必须是 recall_diary / read_diary 返回过的，编造的会被剥掉；',
     '· 回答对话本身（「你问过我什么」这类，没有屏幕段可引）：{"answer":"...","citations":[],"conversation":true}；',
-    '· 查到了相关段、但撑不起结论：{"answer":"查到了什么、为什么不够","citations":[{"segmentId":12,"why":"..."}],"insufficient":true}，citations 0～3 条；真的一段相关的都没有才用「信息链里没找到」；',
+    '· 查到了相关段 / 日记、但撑不起结论：{"answer":"查到了什么、为什么不够","citations":[{"segmentId":12,"why":"..."}],"insufficient":true}，citations 0～3 条；真的一段相关的都没有才用「信息链里没找到」；',
     '· 要先确认：{"ask":"要确认的问题","options":["候选1","候选2"]}。'
   ].join('\n')
 }
@@ -511,10 +567,11 @@ function buildAskLoopSystemPrompt(payload: ChainAskLoopPayload, final: boolean):
 export function buildChainAskLoopMessages(
   payload: ChainAskLoopPayload,
   options: { final?: boolean } = {},
-  image?: { readonly dataUrl: string }
+  image?: { readonly dataUrl: string },
+  personaPrompt?: string
 ): LlmMessage[] {
   const messages: LlmMessage[] = [
-    { role: 'system', content: buildAskLoopSystemPrompt(payload, options.final === true) },
+    { role: 'system', content: buildAskLoopSystemPrompt(payload, options.final === true, personaPrompt) },
     { role: 'user', ...userContent(JSON.stringify({ question: payload.question }), image) }
   ]
   payload.turns.forEach((turn, index) => {
@@ -908,7 +965,7 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
     ): Promise<LlmAskLoopResult> {
       const allowTools = callOptions.allowTools !== false
       return (await callWithRetry(
-        () => buildChainAskLoopMessages(payload, { final: !allowTools }, callOptions.image),
+        () => buildChainAskLoopMessages(payload, { final: !allowTools }, callOptions.image, callOptions.personaPrompt),
         callOptions,
         allowTools ? 'ask-loop' : 'ask-loop-final'
       )) as LlmAskLoopResult

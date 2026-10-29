@@ -12,6 +12,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type {
   ChainAskCitation,
+  ChainAskMemoryCitation,
   ChainAskRelatedSegment,
   ChainAskResult,
   ChainAskStats,
@@ -37,6 +38,8 @@ export interface AskHistoryEntry {
   kind: 'answer' | 'no-evidence' | 'insufficient' | 'error' | 'clarify'
   answer?: string
   citations: ChainAskCitation[]
+  /** 日记引用（个人记忆 · 第二本账）；老记录没有这个字段 */
+  memories?: ChainAskMemoryCitation[]
   /** 检索到、但没进引用的段（`insufficient` / `no-evidence` 才有；只为给界面一个入口） */
   related?: ChainAskRelatedSegment[]
   /** 选区问答：随这条对话留存的截图路径（`<userData>/ask-shots/shot-*.png`；过期清掉后读不到，界面如实降级） */
@@ -87,8 +90,22 @@ function isCitation(value: unknown): value is ChainAskCitation {
   )
 }
 
-function isClarify(value: unknown): value is { question: string; options: string[] } {
+/** 日记引用：itemId 指回 `mem_items`；day / snippet 只用于展示，字段缺了就整条丢 */
+function isMemoryCitation(value: unknown): value is ChainAskMemoryCitation {
   if (typeof value !== 'object' || value === null) return false
+  const item = value as Record<string, unknown>
+  return (
+    typeof item.itemId === 'number' &&
+    Number.isInteger(item.itemId) &&
+    item.itemId > 0 &&
+    typeof item.day === 'string' &&
+    typeof item.section === 'string' &&
+    typeof item.why === 'string' &&
+    typeof item.snippet === 'string'
+  )
+}
+
+function isClarify(value: unknown): value is { question: string; options: string[] } {  if (typeof value !== 'object' || value === null) return false
   const clarify = value as Record<string, unknown>
   return (
     typeof clarify.question === 'string' &&
@@ -157,6 +174,9 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
   if (data.related !== undefined && (!Array.isArray(data.related) || !data.related.every(isRelated))) {
     return null
   }
+  if (data.memories !== undefined && (!Array.isArray(data.memories) || !data.memories.every(isMemoryCitation))) {
+    return null
+  }
   if (!isStats(data.stats)) return null
   if ((data.kind === 'answer' || data.kind === 'insufficient') && typeof data.answer !== 'string') {
     return null
@@ -186,6 +206,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
     ...(typeof data.imagePath === 'string' ? { imagePath: data.imagePath } : {}),
     ...(typeof data.answer === 'string' ? { answer: data.answer } : {}),
     citations: data.citations,
+    ...(Array.isArray(data.memories) ? { memories: data.memories as ChainAskMemoryCitation[] } : {}),
     ...(Array.isArray(data.related) ? { related: data.related as ChainAskRelatedSegment[] } : {}),
     ...(isClarify(data.clarify) ? { clarify: data.clarify } : {}),
     ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
@@ -250,7 +271,13 @@ export function toHistoryEntry(
     ...(result.trace ? { trace: result.trace } : {})
   }
   if (result.kind === 'answer') {
-    return { ...base, kind: 'answer', answer: result.answer, citations: result.citations }
+    return {
+      ...base,
+      kind: 'answer',
+      answer: result.answer,
+      citations: result.citations,
+      ...(result.memories && result.memories.length > 0 ? { memories: result.memories } : {})
+    }
   }
   if (result.kind === 'insufficient') {
     return {
@@ -258,6 +285,7 @@ export function toHistoryEntry(
       kind: 'insufficient',
       answer: result.answer,
       citations: result.citations,
+      ...(result.memories && result.memories.length > 0 ? { memories: result.memories } : {}),
       ...(result.related.length > 0 ? { related: result.related } : {})
     }
   }
@@ -292,6 +320,7 @@ export function toHistoryEntry(
     ...base,
     kind: 'no-evidence',
     citations: result.citations ?? [],
+    ...(result.memories && result.memories.length > 0 ? { memories: result.memories } : {}),
     ...(result.note ? { note: result.note } : {}),
     ...(result.related && result.related.length > 0 ? { related: result.related } : {})
   }

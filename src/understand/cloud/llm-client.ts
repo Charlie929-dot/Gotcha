@@ -90,6 +90,12 @@ export interface LlmCompleteOptions {
    * 出网确认门（D24）照旧在 `askChain` 门口判定。
    */
   image?: { readonly dataUrl: string }
+  /**
+   * 人设提示（本地配置：名字 / 口吻 / 红线）。
+   * 只拼在工具循环的 system 最前面，**不进 branded 载荷**——它不是屏幕内容，
+   * 出云确认门仍按整次请求在 `askChain` 门口判定。
+   */
+  personaPrompt?: string
 }
 
 export interface LlmClient {

@@ -12,6 +12,7 @@ import {
   NO_EVIDENCE_TEXT,
   type ChainAskCitation,
   type ChainAskErrorReason,
+  type ChainAskMemoryCitation,
   type ChainAskRelatedSegment,
   type ChainAskResult,
   type ChainAskResumeDecision,
@@ -349,8 +350,41 @@ function citationList(citations: ChainAskCitation[]): HTMLElement {
   return list
 }
 
-/** 检索到、但没进引用的段：给一个可点开的入口，别让「命中了很多」变成一句空话 */
-function relatedList(related: ChainAskRelatedSegment[]): HTMLElement {
+/**
+ * 日记引用（个人记忆 · 第二本账）：直接摆日期 + 原文片段，不做点开动作。
+ * 日记没有截图、也没有「段证据」可读，把原文摊开就是最好的核对方式；
+ * 用户能一眼判断「它是不是真记得我写过这句」。
+ */
+function memoryList(memories: ChainAskMemoryCitation[]): HTMLElement {
+  const list = element('ul', 'citations memories')
+  for (const memory of memories) {
+    const li = element('li')
+    const box = element('div', 'memory-card')
+    const title = element('span', 'citation-title')
+    title.textContent = `${memory.day}${memory.section ? ` · ${memory.section}` : ''}`
+    const snippet = element('p', 'memory-snippet')
+    snippet.textContent = memory.snippet
+    box.append(title, snippet)
+    if (memory.why) {
+      const why = element('span', 'citation-why')
+      why.textContent = memory.why
+      box.append(why)
+    }
+    li.append(box)
+    list.append(li)
+  }
+  return list
+}
+
+/** 日记引用小节：没有就不画（不占位、不显示「0 条」） */
+function appendMemories(card: HTMLElement, memories: ChainAskMemoryCitation[] | undefined): void {
+  if (!memories || memories.length === 0) return
+  const title = element('h2', 'section-title')
+  title.textContent = `日记引用（${memories.length} 条）`
+  card.append(title, memoryList(memories))
+}
+
+/** 检索到、但没进引用的段：给一个可点开的入口，别让「命中了很多」变成一句空话 */function relatedList(related: ChainAskRelatedSegment[]): HTMLElement {
   const list = element('ul', 'citations related')
   for (const item of related) {
     const li = element('li')
@@ -448,6 +482,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `引用（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    appendMemories(card, entry.memories)
     appendTrace(card, entry.trace)
     return
   }
@@ -462,6 +497,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `相关证据（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    appendMemories(card, entry.memories)
     appendRelated(card, entry.related, entry.citations.length > 0)
     appendTrace(card, entry.trace)
     return
@@ -511,6 +547,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `相关证据（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    appendMemories(card, entry.memories)
     appendRelated(card, entry.related, entry.citations.length > 0)
     appendTrace(card, entry.trace)
     return

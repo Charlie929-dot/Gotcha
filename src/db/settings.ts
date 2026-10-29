@@ -33,7 +33,12 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'graph.theme_secondary_max': '2',
   'graph.edge_min_sim': '0.64',
   'graph.edge_top_k': '4',
-  'graph.edge_mutual': '1'
+  'graph.edge_mutual': '1',
+  // 个人记忆（日记 = 第二本账）：目录留空 = 自动找（见 memory/persona.ts resolveVaultDir）
+  'memory.vault_dir': '',
+  'memory.persona_name': '记忆球',
+  'memory.persona_tone': '像认识很久的朋友：短句、具体、先给结论；不确定就说不确定',
+  'memory.persona_redlines': ''
 }
 
 export function getSetting(db: Db, key: string): string {

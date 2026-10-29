@@ -1,4 +1,4 @@
-# 已知坑（Gotchas）
+﻿# 已知坑（Gotchas）
 
 > `AGENTS.md` 的外链细节。踩到一个补一行，带现象和对策。
 
@@ -178,6 +178,7 @@
 | 在 DSH 会话里 `npm run dev` 起 Gotcha 报 `electron.app` undefined | 2026-10-29 验收时踩到：`electron-vite dev` 提示 `starting electron app...` 后立刻 `TypeError: Cannot read properties of undefined (reading 'getPath') at out/main/index.js`，退出码 1。进程环境里带着 `ELECTRON_RUN_AS_NODE=1`（agent / 终端继承来的），electron 二进制于是按 node 跑，`require('electron')` 拿到的是路径字符串而不是 API | 起 dev 前先 `Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue`；要直接验收问记忆可加 `$env:GOTCHA_ASK_ON_START='1'`（`main/index.ts` 里有这个开关，启动即开问记忆窗）。真机验收完记得确认 `out/main/index.js` 的改动时间晚于你最后改的源码——dev 实例有时不会自动重建 |
 | 开 thinking 的工具循环第 2 轮起就 400（缺 `reasoning_content`） | 2026-10-29 真机：问「你知道的我第一次用 dsh 是啥时候」，第 1 轮正常给出 CoT + 2 次 `search_info`，**第 2 轮请求直接 `LLM HTTP 400`**（`main.log` 两次都是 `turn:2`，界面只剩错误卡）。DeepSeek 文档（Thinking Mode › Tool Calls）：请求带 `tools` 时，历史各轮的 `reasoning_content` 必须原样回传，否则 400；不带 `tools` 时不需要（传了也被忽略）。PR #102 之前所有请求都发 `thinking:{type:'disabled'}`，所以这个坑一直没暴露；一开 thinking 就必踩 | 工具轮把每轮 CoT 存进 `RedactableAskLoopTurn.reasoning`（**整段、不裁剪**），载荷重建时挂到 assistant 消息的 `reasoningContent`，wire 层只对 `*.deepseek.com` 发 `reasoning_content`（严格 OpenAI 兼容网关会因未知字段 400）。注意：界面 `trace.steps` 里那份是裁剪到 4000 字的**另一份**，不能拿来回传。400 的错误正文现在进 `LlmHttpError.detail` 并写进主进程日志的 `detail` 字段——排这类问题先看日志，别只看「LLM HTTP 400」 |
 | 开 thinking 后用默认 2000 `max_tokens` 会把最终 JSON 截断 | 2026-10-29 给工具循环开 thinking：DeepSeek V4 默认 thinking，CoT 先写、正文后写；`LLM_DEFAULTS.maxTokens = 2000` 在收尾轮容易 `finish_reason=length`、content 为空（代码注释里 2026-10-27 已记过一次同类） | 工具轮（`ask-loop` / `ask-loop-final`）单独把 `max_tokens` 抬到 6000；非工具轮仍显式关 thinking（结构化输出比 CoT 值钱）。**已确认**（2026-10-29 真机）：真实 DeepSeek 在 tool_calls 轮确实返回 `reasoning_content`——回传规则见上一条 |
+| 截图里看不到悬浮球 ≠ 球丢了（`setContentProtection`） | 2026-10-29 真机：用户报「球不见了」，我用 DXGI / GDI / PrintWindow 三种方式截屏都看不到球，但窗口枚举里它明明在（64×64、WS_EX_TOPMOST、DOM 也在），于是往「渲染坏了 / 被全屏盖住」方向查了很久 | `createBallShell` 里有一行 `win.setContentProtection(true)`（防采集自己拍到自己，§4.10 验证过）：**它让球对所有屏幕截图不可见**，人眼正常可见。以后判断「球在不在」不要用截图，改用窗口枚举 + `IsWindowVisible` + 窗口矩形是否落在 `workArea` 内；真要截图验证，临时注释掉这行再 build。附带的坑：dev 实例的 vite server 一死（5173 不再监听），二次启动会被单实例锁收掉，看起来像「启动不了 / 启动变慢」，实际是僵尸主进程占着锁 |
 
 ## 规则
 

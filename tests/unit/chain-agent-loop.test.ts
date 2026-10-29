@@ -733,10 +733,15 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(result.stats).toMatchObject({ toolCalls: firstBatch })
   })
 
-  it('解析失败（结构不对）：unparseable，不静默当空结果', async () => {
+  it('自由文本（不是 JSON）当答复收下；对象但缺 answer 仍算结构不对', async () => {
     seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: 'LNK1104 的记录' })
-    const client = new FakeLlmClient([searchCall({ keywords: ['LNK1104'] }), { json: '不是对象' }])
-    const result = await askChain(buildDeps(client), 'LNK1104')
+    const freeText = new FakeLlmClient([searchCall({ keywords: ['LNK1104'] }), { json: '我记得你查过这个。' }])
+    const answer = await askChain(buildDeps(freeText), 'LNK1104')
+    expect(answer.kind).toBe('answer')
+    if (answer.kind === 'answer') expect(answer.answer).toContain('查过这个')
+
+    const badShape = new FakeLlmClient([searchCall({ keywords: ['LNK1104'] }), { json: { foo: 1 } }])
+    const result = await askChain(buildDeps(badShape), 'LNK1104')
     expect(result.kind).toBe('error')
     if (result.kind !== 'error') return
     expect(result.reason).toBe('unparseable')

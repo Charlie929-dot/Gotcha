@@ -44,7 +44,7 @@ import {
 } from '../../understand/cloud/llm-client'
 import type { ChainAskClientResolution, ChainAskLog } from './ask'
 import { readChainFreshness } from './freshness'
-import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
+import { isNoEvidenceAnswer, parseChainReply, parseChainReplyText, type CitationMeta } from './parse'
 import {
   type ChainAskResult,
   type ChainAskRelatedSegment,
@@ -325,6 +325,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     try {
       response = await ctx.client.completeAskLoop(built.payload, {
         allowTools,
+        // 最终答复允许自由文本（2026-10-29 拍板：不再逼模型填 JSON）；工具轮仍走协议
+        ...(allowTools ? {} : { freeText: true }),
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         ...(ctx.image ? { image: ctx.image } : {}),
         ...(ctx.personaPrompt ? { personaPrompt: ctx.personaPrompt } : {})
@@ -470,13 +472,26 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     const rawCitations = (response.json as { citations?: unknown } | null)?.citations
     stats.cited = Array.isArray(rawCitations) ? rawCitations.length : 0
 
-    const parsed = parseChainReply(response.json, whitelist, {
+    /**
+     * 2026-10-29 拍板：**不再强制模型填 JSON**。模型直接说话（中文回答、聊天、拒绝编造）
+     * 也认：`parseChainReplyText` 只从 `[[段 12]]` / `[[日记 7]]` 记号里取引用，
+     * 没有记号就是「这段话没有引用」。JSON 老路保留，模型愿意给结构化答复也照吃。
+     */
+    const parseOptions = {
       // 「关于对话本身」的答案不引用屏幕段：只有本会话有上文、或真的查过 ask_history 时才放行，
       // 避免模型把普通问题也降级成无引用的自由发挥。
       allowConversationAnswer: (ctx.history?.length ?? 0) > 0 || usedAskHistory,
       // 日记引用的白名单：本轮 recall_diary / read_diary 实际给模型看过的条目
       memoryMeta: memoryWhitelist
-    })
+    }
+    const parsed =
+      typeof response.json === 'string'
+        ? parseChainReplyText(response.json, whitelist, parseOptions)
+        : parseChainReply(response.json, whitelist, parseOptions)
+    // 自由文本路径没有原始 citations 字段，按解析后真正留下的条数记；JSON 路径沿用原始条数（含被剥掉的）
+    if (parsed.ok && parsed.kind !== 'clarify' && typeof response.json === 'string') {
+      stats.cited = parsed.citations.length
+    }
     if (!parsed.ok) {
       // 不成形的具体原因（缺字段 / 结构不对）只进日志：界面只有固定文案，事后没法复盘
       log('warn', 'chain ask loop: 答复不成形', {

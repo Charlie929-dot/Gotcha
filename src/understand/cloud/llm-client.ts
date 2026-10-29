@@ -85,6 +85,14 @@ export interface LlmCompleteOptions {
    */
   allowTools?: boolean
   /**
+   * 允许最终答复是**自由文本**（2026-10-29 拍板：不再逼模型填 JSON）。
+   *
+   * `true` 时收尾轮不发 `response_format`，模型直接说人话也照收（解析层从
+   * `[[段 12]]` / `[[日记 7]]` 记号里取引用）；结构化 JSON 仍然兼容。
+   * 只对 `completeAskLoop` 生效。
+   */
+  freeText?: boolean
+  /**
    * 选区问答：随本轮问题一起给模型看的截图（`data:image/...;base64,...`）。
    * **不走脱敏**——这是用户在界面上自己框的图（拍板 2026-10-28），不是从记忆库里翻出来的文本；
    * 出网确认门（D24）照旧在 `askChain` 门口判定。

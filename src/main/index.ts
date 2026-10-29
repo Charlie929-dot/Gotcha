@@ -1738,6 +1738,8 @@ if (primaryInstance) {
      */
     let memoryVectorTimer: ReturnType<typeof setTimeout> | null = null
     let memoryVectorRunning = false
+    /** 记忆功能在这一刻进入可用状态（首轮向量索引要避让启动那几十秒） */
+    const memoryStartedAt = Date.now()
     const runMemoryVectorIndex = async (): Promise<void> => {
       if (memoryVectorRunning) return
       memoryVectorRunning = true
@@ -1753,25 +1755,35 @@ if (primaryInstance) {
         const embedder = await loadChainEmbedder()
         if (embedder === null) return
         let embedded = 0
-        // 有上限的连续档：升级后第一次可能要补几千条，一次最多 20 档（4000 条），剩下的下次同步再续
-        for (let round = 0; round < 20; round += 1) {
-          const result = await indexDiaryVectors(db, embedder, { limit: 200 })
+        let remaining = pending
+        // 小口吃：一次 50 条、最多 10 档（500 条），档与档之间让出 300ms ——
+        // 真 bge 在 4 线程上跑，一次 200 条会把采集 / 聊天的 CPU 抢掉（2026-10-29 真机反馈「启动变慢」）。
+        // 升级后首次全量 2 382 条大约分 5 次同步跑完，不再一口气占满。
+        for (let round = 0; round < 10; round += 1) {
+          const result = await indexDiaryVectors(db, embedder, { limit: 50 })
           embedded += result.embedded
+          remaining = result.remaining
           if (result.embedded === 0 || result.remaining <= 0) break
+          await new Promise((resolve) => setTimeout(resolve, 300))
         }
         captureLog('info', 'memory vectors indexed', { embedded, pruned, pending })
+        // 还没补完（升级后首次要跑几轮）：60s 后再来一轮，别等下一次有人提问才继续
+        if (remaining > 0) scheduleMemoryVectors(60_000)
       } catch (error) {
         captureLog('warn', 'memory vectors failed', { error: String(error) })
       } finally {
         memoryVectorRunning = false
       }
     }
-    const scheduleMemoryVectors = (): void => {
+    const scheduleMemoryVectors = (gapMs?: number): void => {
       if (memoryVectorTimer !== null) return
+      // 启动后的第一轮压到 60s 之后：先让球、托盘、采集稳住，别在最需要响应的时候去算向量
+      const delay =
+        gapMs ?? Math.max(5_000, 60_000 - (Date.now() - memoryStartedAt))
       memoryVectorTimer = setTimeout(() => {
         memoryVectorTimer = null
         void runMemoryVectorIndex()
-      }, 5_000)
+      }, delay)
     }
     /**
      * 个人记忆设置（日记目录 + 人设）：读 = 现读 settings；存 = 校验 → 落库 → **立即同步**。

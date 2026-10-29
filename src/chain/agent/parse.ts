@@ -175,6 +175,71 @@ const MAX_MEMORIES = 4
 /** 日记引用里原文片段的上限 */
 const MEMORY_QUOTE_MAX_CHARS = 160
 
+/** 自由文本里标屏幕引用：`[[段 12]]`；日记条目：`[[日记 7]]` */
+const SEGMENT_MARK_RE = /\[\[\s*段\s*(\d+)\s*\]\]/gu
+const MEMORY_MARK_RE = /\[\[\s*日记\s*(\d+)\s*\]\]/gu
+
+/**
+ * 自由文本答复（2026-10-29 拍板：**不再强制模型填 JSON**）。
+ *
+ * ta 想怎么说话就怎么说话；只有「引用了哪一段」需要机器能认出来，所以约定两个轻记号：
+ * `[[段 12]]` / `[[日记 7]]`。没写记号就是「这段话没有引用」——聊天、寒暄、问时间都允许。
+ *
+ * 仍然保留的底线（不是格式限制，是不许编造）：记号里的 id 必须在本次命中白名单里，
+ * 编造的整条丢掉；只写了「信息链里没找到」这一句的，仍按没找到收口。
+ */
+export function parseChainReplyText(
+  raw: string,
+  meta: ReadonlyMap<number, CitationMeta>,
+  options: ParseChainReplyOptions = {}
+): ParseChainReplyResult {
+  const text = raw.trim()
+  if (text === '') return { ok: false, reason: 'shape', message: '答复为空' }
+
+  const seenSegments = new Set<number>()
+  const citations: ChainAskCitation[] = []
+  const seenMemories = new Set<number>()
+  const memories: ChainAskMemoryCitation[] = []
+
+  const body = text
+    .replace(SEGMENT_MARK_RE, (_whole, idRaw: string) => {
+      const id = Number(idRaw)
+      const known = meta.get(id)
+      if (known !== undefined && !seenSegments.has(id) && citations.length < MAX_CITATIONS) {
+        seenSegments.add(id)
+        citations.push({ segmentId: id, at: known.at, app: known.app, title: known.title, why: '' })
+      }
+      return ''
+    })
+    .replace(MEMORY_MARK_RE, (_whole, idRaw: string) => {
+      const id = Number(idRaw)
+      const known = options.memoryMeta?.get(id)
+      if (known !== undefined && !seenMemories.has(id) && memories.length < MAX_MEMORIES) {
+        seenMemories.add(id)
+        memories.push({
+          itemId: id,
+          day: known.day,
+          section: known.section,
+          why: '',
+          snippet: truncate(known.text.replace(/\s+/gu, ' ').trim(), MEMORY_QUOTE_MAX_CHARS)
+        })
+      }
+      return ''
+    })
+    .replace(/[（(]\s*[)）]/gu, '')
+    .replace(/[ \t]{2,}/gu, ' ')
+    .replace(/\s+([，。、；：！？])/gu, '$1')
+    .trim()
+
+  const hasAnyCitation = citations.length > 0 || memories.length > 0
+  // 只剩一句「信息链里没找到」且没有任何引用：这是真没找到，不是回答
+  if (!hasAnyCitation && isBareNoEvidence(body)) {
+    return { ok: false, reason: 'no-citations', message: '只说了没找到' }
+  }
+  const answer = truncate(body === '' ? text : body, ANSWER_MAX_CHARS)
+  return { ok: true, kind: 'answer', answer, citations, memories }
+}
+
 /**
  * 日记引用：`memories:[{itemId,why}]`。itemId 必须落在本轮 recall_diary / read_diary
  * 给过的条目里（白名单），编造 / 重复 / 没接日记库时整条丢弃。

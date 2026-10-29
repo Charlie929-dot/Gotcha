@@ -6,7 +6,7 @@ import log from 'electron-log/main'
 import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { getNumberSetting, getSetting, setSetting } from '../db/settings'
 import { previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
-import { indexDiaryVectors, pruneOrphanVectors } from '../memory/vectors'
+import { indexDiaryVectors, countPendingVectors, pruneOrphanVectors } from '../memory/vectors'
 import { buildPersonaPrompt, readPersona, resolveVaultDir } from '../memory/persona'
 import {
   applyMemoryPatch,
@@ -110,7 +110,7 @@ import {
   type ThemeOnlineRuntime
 } from './theme-online-runtime'
 import { embeddingModelCandidates, pickEmbeddingModelDir } from '../understand/embedding/paths'
-import type { Embedder } from '../understand/embedding/types'
+import { EMBEDDING_MODEL_NAME, type Embedder } from '../understand/embedding/types'
 import { isModelReady } from '../understand/embedding/session'
 import {
   registerGraphIpc,
@@ -1723,9 +1723,10 @@ if (primaryInstance) {
         const result = syncVault(writable, vaultDir)
         if (result.added > 0 || result.updated > 0 || result.removed > 0) {
           captureLog('info', 'memory sync', { dir: vaultDir, ...result })
-          // 条目变了才排向量索引：正文没变的那部分靠 text_hash 跳过，不重算
-          scheduleMemoryVectors()
         }
+        // 每次同步后都排一次（没变化时只做一次指纹比对，不加载模型）：
+        // 升级到 v10 后 `mem_vectors` 是空的，哪怕日记一个字没改也要补索引
+        scheduleMemoryVectors()
       } catch (error) {
         captureLog('warn', 'memory sync failed', { dir: vaultDir, error: String(error) })
       }
@@ -1741,20 +1742,24 @@ if (primaryInstance) {
       if (memoryVectorRunning) return
       memoryVectorRunning = true
       try {
+        const { db } = connections.ensureWritable()
+        // 先清孤儿再判断要不要算：只查一次指纹，不用为「没有待索引」加载模型（模型加载要几秒）
+        const pruned = pruneOrphanVectors(db)
+        const pending = countPendingVectors(db, EMBEDDING_MODEL_NAME)
+        if (pending === 0) {
+          if (pruned > 0) captureLog('info', 'memory vectors pruned', { pruned })
+          return
+        }
         const embedder = await loadChainEmbedder()
         if (embedder === null) return
-        const { db } = connections.ensureWritable()
-        const pruned = pruneOrphanVectors(db)
         let embedded = 0
-        // 有上限的连续档：一晚上几千条也只跑 20 档（4000 条），剩下的下次同步再续
+        // 有上限的连续档：升级后第一次可能要补几千条，一次最多 20 档（4000 条），剩下的下次同步再续
         for (let round = 0; round < 20; round += 1) {
           const result = await indexDiaryVectors(db, embedder, { limit: 200 })
           embedded += result.embedded
           if (result.embedded === 0 || result.remaining <= 0) break
         }
-        if (embedded > 0 || pruned > 0) {
-          captureLog('info', 'memory vectors indexed', { embedded, pruned })
-        }
+        captureLog('info', 'memory vectors indexed', { embedded, pruned, pending })
       } catch (error) {
         captureLog('warn', 'memory vectors failed', { error: String(error) })
       } finally {
@@ -1801,8 +1806,8 @@ if (primaryInstance) {
       try {
         const result = syncVault(db, view.resolvedDir)
         captureLog('info', 'memory sync', { dir: view.resolvedDir, ...result })
-        // 保存设置 = 立即同步（用户口径）→ 顺手排向量索引，新写的日记也能被回想
-        if (result.added > 0 || result.updated > 0 || result.removed > 0) scheduleMemoryVectors()
+        // 保存设置 = 立即同步（用户口径）→ 顺手排向量索引（内部按指纹判断要不要真算）
+        scheduleMemoryVectors()
         // 同步后统计会变（新增 / 删除），视图重读一次再回给界面
         return { ok: true, view: buildMemorySettingsView(db), sync: result, syncedDir: view.resolvedDir }
       } catch (error) {

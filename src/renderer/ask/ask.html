@@ -36,7 +36,8 @@
         <aside id="consent" class="consent" hidden>
           <p>
             问记忆要把你问的这句话、几段窗口文本（标题 / 命中原文）、提问前最后一段窗口的应用与标题、
-            你主动附加的图片 / 文件，和这段对话之前的几轮发给模型；新对话的第一问还会带上「此刻」
+            你主动附加的图片 / 文件，和这段对话之前的几轮发给模型；具体发什么取决于顶部模式
+            （问记忆 / 聊天 / 提问）。新对话的第一问还会带上「此刻」
             （当前时间、今天说过几句、上次说话多久前、日记记到哪天）和按你的问题想起的几条日记片段（只是联想）；
             开启「看历史截图」后还会带上打开过的段对应截图。确认一次之后不再打扰。
           </p>
@@ -45,6 +46,20 @@
             <button id="consent-deny" type="button">不出网</button>
           </div>
         </aside>
+
+        <div class="ask-modes" role="group" aria-label="模式">
+          <span class="muted">模式</span>
+          <button type="button" class="mode-btn" data-mode="memory" title="屏幕记忆 + 日记，不带人格卡">问记忆</button>
+          <button type="button" class="mode-btn" data-mode="chat" title="人格卡 + 日记，不翻电脑记录">聊天</button>
+          <button type="button" class="mode-btn" data-mode="plain" title="不带工具、不带人格卡">提问</button>
+          <button type="button" id="mode-extra-toggle" class="ghost" aria-expanded="false" title="自由组合开关">组合</button>
+          <div id="mode-extra" class="mode-extra" hidden>
+            <label class="check"><input id="mode-screen" type="checkbox" /> 屏幕记忆</label>
+            <label class="check"><input id="mode-diary" type="checkbox" /> 日记</label>
+            <label class="check"><input id="mode-card" type="checkbox" /> 人格卡</label>
+          </div>
+          <span id="mode-note" class="muted"></span>
+        </div>
 
         <main id="thread" class="thread" aria-live="polite"></main>
 
@@ -113,9 +128,10 @@
             <label class="check"><input id="set-ask-shots" type="checkbox" /> 允许问记忆看历史截图（打开过的段，把对应整屏截图发给模型）</label>
             <p class="hint">
               问记忆会把问题、命中的窗口文本、提问前最后一段窗口的应用与标题、你主动附加的图片 / 文件，
-              和这段对话之前的几轮发给模型。新对话的第一问会多带一段「此刻」（时间、今天说过几句、间隔、
-              日记记到哪天）和按问题想起的几条日记片段；开启「看历史截图」后，read_segment 打开的段会附上
-              最近一张截图；完整正文不离开本机。
+              和这段对话之前的几轮发给模型。发送内容随顶部模式变：问记忆 = 屏幕记忆 + 日记；聊天 = 人格卡 +
+              日记（不翻电脑记录）；提问 = 只有问题和对话。新对话的第一问会多带一段「此刻」（时间、今天说过几句、
+              间隔、日记记到哪天）和按问题想起的几条日记片段；开启「看历史截图」后，read_segment 打开的段会附上
+              最近一张截图；完整正文不离开本机。启用的人格卡全文也会随聊天提问发给模型。
             </p>
             <label>每日额度（tokens）
               <input id="set-budget" type="number" min="1000" max="100000000" step="1000" />
@@ -174,6 +190,29 @@
                 删除只把这条从记忆里拿掉，不改你写的日记原文，之后同步也不会带回来；删错了点「撤销删除」放回。
               </p>
             </div>
+          </section>
+
+          <section>
+            <h3>人格卡</h3>
+            <p class="hint" id="persona-card-status">读取中…</p>
+            <label>启用的卡（聊天模式用；「不使用」= 走上面的名字 / 口吻）
+              <select id="set-persona-card"></select>
+            </label>
+            <div class="row">
+              <button id="persona-card-open" type="button" class="ghost">在文件夹中打开</button>
+              <label class="ghost file-pick">
+                导入 .md
+                <input id="persona-card-file" type="file" accept=".md,text/markdown,text/plain" hidden />
+              </label>
+            </div>
+            <label>预览（只读）
+              <textarea id="persona-card-preview" rows="6" readonly placeholder="选一张卡后在这里看全文"></textarea>
+            </label>
+            <p id="persona-card-msg" class="hint"></p>
+            <p class="hint">
+              卡启用时名字 / 口吻让位（卡里写什么就是什么），三条写死的底线仍压在最上面、冲突时以底线为准；
+              整张卡会随聊天模式的每次提问发给模型。卡片就是 <code>persona-cards/</code> 里的 .md，也可以直接把文件放进去。
+            </p>
           </section>
 
           <div class="form-actions">

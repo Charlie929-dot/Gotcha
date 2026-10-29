@@ -20,6 +20,14 @@ import {
   type ChainAskTrace
 } from '../../chain/agent/types'
 import type { SegmentEvidence } from '../../chain/agent/evidence'
+import {
+  ASK_MODE_PRESETS,
+  DEFAULT_ASK_MODE,
+  askModePresetOf,
+  normalizeAskMode,
+  type AskModeConfig,
+  type AskModePreset
+} from '../../chain/agent/mode'
 import type { AskHistoryEntry } from '../../main/ask-history'
 import type { MemorySettingsView } from '../../main/memory-settings'
 import type { MemoryListItemView } from '../../main/memory-admin'
@@ -79,6 +87,21 @@ const memoryListMsg = must<HTMLElement>('memory-list-msg')
 const memoryItemsEl = must<HTMLUListElement>('memory-items')
 const memoryMoreButton = must<HTMLButtonElement>('memory-more')
 const memoryUndoButton = must<HTMLButtonElement>('memory-undo')
+/* ---- 模式条（D62：问记忆 / 聊天 / 提问 + 组合开关） ---- */
+const modeButtons = [...document.querySelectorAll<HTMLButtonElement>('.mode-btn')]
+const modeExtraToggle = must<HTMLButtonElement>('mode-extra-toggle')
+const modeExtra = must<HTMLElement>('mode-extra')
+const modeScreenInput = must<HTMLInputElement>('mode-screen')
+const modeDiaryInput = must<HTMLInputElement>('mode-diary')
+const modeCardInput = must<HTMLInputElement>('mode-card')
+const modeNote = must<HTMLElement>('mode-note')
+/* ---- 设置抽屉 · 人格卡（D62） ---- */
+const personaCardSelect = must<HTMLSelectElement>('set-persona-card')
+const personaCardPreview = must<HTMLTextAreaElement>('persona-card-preview')
+const personaCardFileInput = must<HTMLInputElement>('persona-card-file')
+const personaCardOpenButton = must<HTMLButtonElement>('persona-card-open')
+const personaCardStatus = must<HTMLElement>('persona-card-status')
+const personaCardMsg = must<HTMLElement>('persona-card-msg')
 
 /** 列表一次最多画多少条会话（永久保留，记录可能很多；搜索用来缩小范围） */
 const HISTORY_RENDER_LIMIT = 200
@@ -89,6 +112,64 @@ let entries: AskHistoryEntry[] = []
 let activeConversationId: string | null = null
 let filter = ''
 let busy = false
+
+/* ------------------------------------------------------------------ */
+/* 模式（D62）：问记忆 / 聊天 / 提问 + 组合开关                          */
+/* ------------------------------------------------------------------ */
+
+const MODE_STORAGE_KEY = 'gotcha.ask.mode'
+const PRESET_LABEL: Record<AskModePreset, string> = {
+  memory: '问记忆',
+  chat: '聊天',
+  plain: '提问'
+}
+
+function loadAskMode(): AskModeConfig {
+  try {
+    const raw = localStorage.getItem(MODE_STORAGE_KEY)
+    if (raw === null) return { ...DEFAULT_ASK_MODE }
+    return normalizeAskMode(JSON.parse(raw))
+  } catch {
+    return { ...DEFAULT_ASK_MODE }
+  }
+}
+
+let askMode: AskModeConfig = loadAskMode()
+/** 当前启用的人格卡文件名（设置抽屉读到后回填；只用于提示「选了卡但没启用」） */
+let activePersonaCard = ''
+
+/** 模式条 / 开关 / 提示一起刷新（切模式、读设置后都走这里） */
+function applyModeUI(): void {
+  const preset = askModePresetOf(askMode)
+  for (const button of modeButtons) {
+    button.classList.toggle('active', button.dataset.mode === preset)
+  }
+  modeScreenInput.checked = askMode.screen
+  modeDiaryInput.checked = askMode.diary
+  modeCardInput.checked = askMode.card
+  const parts = [
+    askMode.screen ? '屏幕记忆开' : '屏幕记忆关',
+    askMode.diary ? '日记开' : '日记关'
+  ]
+  if (askMode.card) {
+    parts.push(activePersonaCard !== '' ? `人格卡：${activePersonaCard}` : '人格卡（还没选卡）')
+  } else {
+    parts.push('人格卡关')
+  }
+  modeNote.textContent = `${preset === null ? '组合' : PRESET_LABEL[preset]} · ${parts.join(' · ')}`
+}
+
+function setAskMode(next: AskModeConfig): void {
+  askMode = normalizeAskMode(next)
+  try {
+    localStorage.setItem(MODE_STORAGE_KEY, JSON.stringify(askMode))
+  } catch {
+    // 存不了只影响下次打开窗口的默认值，不影响这次提问
+  }
+  applyModeUI()
+  // 下一条消息才生效：已经发出去的那几轮上下文不重写（Q2 选 A）
+  setStatus('idle', `模式：${modeNote.textContent ?? ''}（下一条生效）`)
+}
 
 /* ------------------------------------------------------------------ */
 /* 附件（图片 / 文本文件）                                              */
@@ -1045,7 +1126,8 @@ async function ask(
       question,
       conversationId,
       imagePath,
-      apiAttachments.length > 0 ? apiAttachments : undefined
+      apiAttachments.length > 0 ? apiAttachments : undefined,
+      askMode
     )
     if (result.kind === 'continue-ask') {
       // 这一问还没落历史：保留刚画的问题气泡，只把等待卡换成「还要继续吗」
@@ -1188,6 +1270,36 @@ must<HTMLButtonElement>('evidence-close').addEventListener('click', () => {
 })
 
 /* ------------------------------------------------------------------ */
+/* 模式条（D62）：预设按钮 + 组合开关                                   */
+/* ------------------------------------------------------------------ */
+
+for (const button of modeButtons) {
+  button.addEventListener('click', () => {
+    const preset = button.dataset.mode as AskModePreset | undefined
+    if (preset === undefined || !(preset in ASK_MODE_PRESETS)) return
+    setAskMode({ ...ASK_MODE_PRESETS[preset] })
+  })
+}
+
+modeExtraToggle.addEventListener('click', () => {
+  const open = modeExtra.hidden
+  modeExtra.hidden = !open
+  modeExtraToggle.setAttribute('aria-expanded', String(open))
+})
+
+for (const input of [modeScreenInput, modeDiaryInput, modeCardInput]) {
+  input.addEventListener('change', () => {
+    setAskMode({
+      screen: modeScreenInput.checked,
+      diary: modeDiaryInput.checked,
+      card: modeCardInput.checked
+    })
+  })
+}
+
+applyModeUI()
+
+/* ------------------------------------------------------------------ */
 /* 设置抽屉（D53：供应商 / 密钥 / 出网确认 / 用量）                     */
 /* ------------------------------------------------------------------ */
 
@@ -1243,6 +1355,50 @@ function fillMemorySettings(view: MemorySettingsView): void {
     stats.firstDay !== null && stats.lastDay !== null ? ` · ${stats.firstDay} → ${stats.lastDay}` : ''
   memoryStatusEl.textContent = `当前目录：${dir}（${DIR_SOURCE_TEXT[view.dirSource]}）· 索引 ${stats.items} 条 / ${stats.days} 天${range}`
   memoryStatusEl.dataset.source = view.dirSource
+
+  // 人格卡（D62）：下拉 = 不使用 + 目录里的卡；启用的卡文件被删了也回显（带「文件不存在」）
+  activePersonaCard = view.activeCard
+  personaCardSelect.replaceChildren()
+  const none = document.createElement('option')
+  none.value = ''
+  none.textContent = '不使用（走上面的名字 / 口吻）'
+  personaCardSelect.append(none)
+  for (const card of view.cards) {
+    const option = document.createElement('option')
+    option.value = card.name
+    option.textContent = `${card.title || card.name}（${card.chars} 字）`
+    personaCardSelect.append(option)
+  }
+  if (view.activeCard !== '' && !view.cards.some((card) => card.name === view.activeCard)) {
+    const missing = document.createElement('option')
+    missing.value = view.activeCard
+    missing.textContent = `${view.activeCard}（文件不存在）`
+    personaCardSelect.append(missing)
+  }
+  personaCardSelect.value = view.activeCard
+  personaCardStatus.textContent =
+    view.cardDir === ''
+      ? '当前环境读不到卡片目录'
+      : view.cards.length > 0
+        ? `卡片目录：${view.cardDir}（${view.cards.length} 张）`
+        : `还没有卡片。点「导入 .md」，或把 .md 放进 ${view.cardDir}`
+  personaCardPreview.value = ''
+  void refreshPersonaCardPreview()
+  applyModeUI()
+}
+
+/** 预览当前选中的卡（只读；读不到就是空） */
+async function refreshPersonaCardPreview(): Promise<void> {
+  const name = personaCardSelect.value
+  if (!api || name === '') {
+    personaCardPreview.value = ''
+    return
+  }
+  try {
+    personaCardPreview.value = (await api.personaCard(name)) ?? ''
+  } catch {
+    personaCardPreview.value = ''
+  }
 }
 
 /** 读一次记忆设置并回填（开抽屉 / 保存后都走这里） */
@@ -1315,6 +1471,62 @@ if (api) {
       memoryMsg.style.color = 'var(--error)'
     } finally {
       memorySaveButton.disabled = false
+    }
+  })
+}
+
+if (api) {
+  // 人格卡（D62）：切换 / 导入即启用；文本由渲染层读好，主进程按上限校验
+  personaCardSelect.addEventListener('change', async () => {
+    void refreshPersonaCardPreview()
+    const name = personaCardSelect.value
+    personaCardMsg.style.color = ''
+    personaCardMsg.textContent = '切换中…'
+    try {
+      const result = await api!.saveMemorySettings({ personaCard: name })
+      if (!result.ok) {
+        personaCardMsg.textContent = `没有切换：${result.error}`
+        personaCardMsg.style.color = 'var(--error)'
+        return
+      }
+      personaCardMsg.textContent =
+        name === '' ? '已停用（回到名字 / 口吻）' : `已启用：${name}（从下一次聊天生效）`
+      if (result.view) fillMemorySettings(result.view)
+    } catch (error) {
+      personaCardMsg.textContent = `切换失败：${String(error)}`
+      personaCardMsg.style.color = 'var(--error)'
+    }
+  })
+
+  personaCardFileInput.addEventListener('change', async () => {
+    const file = personaCardFileInput.files?.[0]
+    // 选同一个文件两次也要触发：先把 input 清空
+    personaCardFileInput.value = ''
+    if (!file) return
+    personaCardMsg.style.color = ''
+    personaCardMsg.textContent = `导入中：${file.name}…`
+    try {
+      const text = await file.text()
+      const result = await api!.savePersonaCard(file.name.replace(/\.md$/i, ''), text)
+      if (!result.ok) {
+        personaCardMsg.textContent = `没有导入：${result.error}`
+        personaCardMsg.style.color = 'var(--error)'
+        return
+      }
+      personaCardMsg.textContent = `已导入并启用：${file.name}（从下一次聊天生效）`
+      if (result.view) fillMemorySettings(result.view)
+    } catch (error) {
+      personaCardMsg.textContent = `导入失败：${String(error)}`
+      personaCardMsg.style.color = 'var(--error)'
+    }
+  })
+
+  personaCardOpenButton.addEventListener('click', async () => {
+    try {
+      const ok = await api!.openPersonaCardDir()
+      personaCardMsg.textContent = ok ? '已在文件资源管理器里打开' : '打不开卡片目录'
+    } catch (error) {
+      personaCardMsg.textContent = `打不开卡片目录：${String(error)}`
     }
   })
 }
@@ -1535,6 +1747,8 @@ void (async () => {
   await refreshHistory()
   // 默认新会话（D55 ②）：不静默接上最近一段；要接着问就点顶部「继续上一段」或左栏记录
   await refreshConsent()
+  // 读一次人设 / 卡库：模式条的「人格卡：xx」要显示真实启用的卡（读不到就显示未选卡）
+  void refreshMemorySettings()
   // 选区问答的交接单：新开一条会话、带着截图直接问（不覆盖用户正在看的会话）
   api?.onPrefill((payload) => {
     if (busy) return

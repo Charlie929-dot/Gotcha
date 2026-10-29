@@ -22,6 +22,7 @@
  */
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision, ChainAskTurnContext } from '../chain/agent/types'
+import { normalizeAskMode, type AskModeConfig } from '../chain/agent/mode'
 import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskHistoryEntry } from './ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
@@ -60,11 +61,13 @@ export interface AskQueryAttachment extends AskAttachmentInput {
   path?: string
 }
 
-/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区截图 / 上传附件） */
+/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区截图 / 上传附件 / 模式） */
 export interface AskQueryContext {
   conversationId: string
   history: readonly ChainAskTurnContext[]
   signal: AbortSignal
+  /** 这次用的模式（D62）：决定给哪些工具、注不注入人格卡；缺省由主进程按「问记忆」处理 */
+  mode?: AskModeConfig
   /** 选区问答：随这条对话留存的截图（主进程校验后给绝对路径） */
   imagePath?: string
   /** 用户上传的附件（图片 / 文本文件；主进程在提问前落盘图片并回填 path） */
@@ -178,6 +181,14 @@ export interface AskIpcDeps {
   memorySettings?: () => MemorySettingsView | { error: string }
   saveMemorySettings?: (patch: unknown) => MemorySettingsSaveResult
   /**
+   * 人格卡（D62）：保存一张卡（导入 / 覆盖）→ 更新后的视图；文本由渲染层读好，
+   * 主进程再按上限校验（不静默截断）。读取单张卡给预览用。
+   */
+  savePersonaCard?: (name: string, text: string) => { ok: boolean; error?: string; view?: MemorySettingsView }
+  readPersonaCard?: (name: string) => string | null
+  /** 在文件资源管理器里打开卡片目录（目录不存在时先建） */
+  openPersonaCardDir?: () => boolean
+  /**
    * 设置抽屉「记忆条目」：浏览（关键词 / 日期前缀 / 类别，分页）、删除单条（进回收站）、撤销。
    * 删除与撤销都走写连接，回答进行中拒绝（handler 里按在途提问判定）。
    */
@@ -231,6 +242,7 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     {
       question: string
       conversationId: string
+      mode: AskModeConfig
       imagePath?: string
       attachments?: AskQueryAttachment[]
     }
@@ -244,6 +256,7 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     question: string,
     conversationId: string,
     result: ChainAskResult,
+    mode: AskModeConfig,
     imagePath?: string,
     attachments?: readonly AskQueryAttachment[]
   ): ChainAskResult => {
@@ -258,6 +271,7 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         pendingResume.set(result.resumeId, {
           question,
           conversationId,
+          mode,
           ...(imagePath ? { imagePath } : {}),
           ...(recorded.length > 0 ? { attachments: [...attachments!] } : {})
         })
@@ -304,6 +318,9 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             : undefined
         const attachments = parseAttachments(payload.attachments)
         if (attachments === null) return failure('附件不合法（只收图片和文本文件，条数 / 大小有上限）')
+        // 模式（D62）：不是对象就拒（不静默猜），对象里缺的字段按关处理
+        if (payload.mode !== undefined && !isPlainObject(payload.mode)) return failure('模式不合法')
+        const mode = normalizeAskMode(payload.mode)
 
         let history: readonly ChainAskTurnContext[] = []
         try {
@@ -320,10 +337,11 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             conversationId,
             history,
             signal: controller.signal,
+            mode,
             ...(imagePath ? { imagePath } : {}),
             ...(attachments.length > 0 ? { attachments } : {})
           })
-          return settle(asked, conversationId, result, imagePath, attachments)
+          return settle(asked, conversationId, result, mode, imagePath, attachments)
         } catch (error) {
           deps.log('error', 'ask:query failed', { error: String(error) })
           return failure('问记忆出错，看日志')
@@ -363,6 +381,7 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             conversationId: pending.conversationId,
             history,
             signal: controller.signal,
+            mode: pending.mode,
             ...(pending.imagePath ? { imagePath: pending.imagePath } : {}),
             ...(pending.attachments && pending.attachments.length > 0
               ? { attachments: pending.attachments }
@@ -372,6 +391,7 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             pending.question,
             pending.conversationId,
             result,
+            pending.mode,
             pending.imagePath,
             pending.attachments
           )
@@ -608,6 +628,53 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask provider key status failed', { error: String(error) })
           return {}
+        }
+      }
+    ],
+    [
+      'ask:memory:card:save',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (
+          !isPlainObject(input) ||
+          typeof input.name !== 'string' ||
+          typeof input.text !== 'string'
+        ) {
+          return { ok: false, error: '参数不合法' }
+        }
+        if (!deps.savePersonaCard) return { ok: false, error: '当前版本不支持人格卡' }
+        try {
+          return deps.savePersonaCard(input.name, input.text)
+        } catch (error) {
+          deps.log('error', 'ask persona card save failed', { error: String(error) })
+          return { ok: false, error: '保存人格卡失败' }
+        }
+      }
+    ],
+    [
+      'ask:memory:card:get',
+      (event, name) => {
+        if (!ensureSender(event)) return null
+        if (typeof name !== 'string' || name.length === 0 || name.length > 120) return null
+        if (!deps.readPersonaCard) return null
+        try {
+          return deps.readPersonaCard(name)
+        } catch (error) {
+          deps.log('warn', 'ask persona card read failed', { error: String(error) })
+          return null
+        }
+      }
+    ],
+    [
+      'ask:memory:card:open',
+      (event) => {
+        if (!ensureSender(event)) return false
+        if (!deps.openPersonaCardDir) return false
+        try {
+          return deps.openPersonaCardDir()
+        } catch (error) {
+          deps.log('warn', 'ask persona card dir open failed', { error: String(error) })
+          return false
         }
       }
     ],

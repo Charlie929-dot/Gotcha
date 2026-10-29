@@ -9,20 +9,43 @@
  * - `memory.persona_name`    名字（默认「记忆球」）
  * - `memory.persona_tone`    说话方式（一句话，用户可改）
  * - `memory.persona_redlines` 额外红线（`|` 分隔，追加在默认三条之后）
+ * - `memory.persona_card`    启用的人格卡（`<userData>/persona-cards/` 里的 .md 文件名；空 = 不用卡）
  * - `memory.vault_dir`       日记目录（留空 = 自动找）
+ *
+ * 人格卡（2026-10-30 拍板 D62）：卡是用户自己写的整份提示词（可以很长），**整张原样注入**，
+ * 不做小节裁剪。卡启用时名字 / 口吻让位——卡里写什么就是什么，避免默认口吻和卡打架。
  */
 
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { Db } from '../db'
 import { getSetting, setSetting } from '../db/settings'
+
+/** 人格卡上限：整张卡会随每次提问发给模型，太长会把上下文和账单一起撑爆 */
+export const PERSONA_CARD_MAX_CHARS = 8_000
+/** 卡文件名（不含扩展名）长度上限 */
+export const PERSONA_CARD_NAME_MAX_CHARS = 40
+/** 卡片目录（相对 `<userData>`） */
+export const PERSONA_CARD_DIRNAME = 'persona-cards'
 
 export interface MemoryPersona {
   name: string
   tone: string
   /** 默认三条 + 用户追加的 */
   redLines: string[]
+  /** 启用的人格卡（文件名 + 全文）；没启用 / 文件读不到时为 null */
+  card: { name: string; text: string } | null
+}
+
+/** 卡片列表里的一条（设置抽屉用；不读全文，只给字数与标题） */
+export interface PersonaCardInfo {
+  /** 文件名（含 `.md`），也是 `memory.persona_card` 存的值 */
+  name: string
+  /** 正文长度（字符数） */
+  chars: number
+  /** 第一行 `# 标题`（没有就用第一行非空文本），最多 60 字 */
+  title: string
 }
 
 /** 写死的三条底线：不编造 / 不泄露 / 不越权。任何配置都不能删掉它们。 */
@@ -56,11 +79,127 @@ export function parseRedLines(raw: string): string[] {
   return lines
 }
 
-export function readPersona(db: Db): MemoryPersona {
+/* ------------------------------------------------------------------ */
+/* 人格卡（D62）：<userData>/persona-cards/*.md                         */
+/* ------------------------------------------------------------------ */
+
+const CARD_NAME_BAD_CHARS = /[\\/:*?"<>|\u0000-\u001f]/
+
+/** 卡片目录（不存在不会创建；读列表时按「没有卡」处理） */
+export function personaCardDir(userDataDir: string): string {
+  return join(userDataDir, PERSONA_CARD_DIRNAME)
+}
+
+/**
+ * 把用户给的卡名归一：去空白、去 `.md` 后缀、挡路径分隔符与非法字符。
+ * 不合法返回 null（调用方报错，不悄悄改名）。卡名就是文件名，不允许子目录。
+ */
+export function sanitizePersonaCardName(raw: string): string | null {
+  let name = raw.trim()
+  if (name.toLowerCase().endsWith('.md')) name = name.slice(0, -3).trim()
+  if (name === '' || name.length > PERSONA_CARD_NAME_MAX_CHARS) return null
+  if (name.startsWith('.') || CARD_NAME_BAD_CHARS.test(name)) return null
+  return name
+}
+
+/** 卡片文件名（含扩展名） */
+export function personaCardFileName(raw: string): string | null {
+  const name = sanitizePersonaCardName(raw)
+  return name === null ? null : `${name}.md`
+}
+
+/** 卡的第一行标题：`# xxx` 优先，其次第一行非空文本（≤60 字） */
+function cardTitle(text: string): string {
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    const heading = /^#{1,6}\s+(.+)$/.exec(trimmed)
+    return (heading ? heading[1] : trimmed).trim().slice(0, 60)
+  }
+  return ''
+}
+
+/** 列出目录里的卡（读不了 = 空列表；按名字排序，最多 200 张） */
+export function listPersonaCards(userDataDir: string): PersonaCardInfo[] {
+  const dir = personaCardDir(userDataDir)
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+      .filter((name) => name.toLowerCase().endsWith('.md'))
+      .filter((name) => sanitizePersonaCardName(name) !== null)
+      .sort((a, b) => a.localeCompare(b, 'zh-CN'))
+  } catch {
+    return []
+  }
+  const cards: PersonaCardInfo[] = []
+  for (const name of names.slice(0, 200)) {
+    try {
+      const text = readFileSync(join(dir, name), 'utf8')
+      cards.push({ name, chars: text.length, title: cardTitle(text) })
+    } catch {
+      // 读不了的单张跳过：目录里有坏文件不该让整个设置抽屉打不开
+    }
+  }
+  return cards
+}
+
+/** 读一张卡；名字不合法 / 文件不存在 / 读失败都返回 null */
+export function readPersonaCard(userDataDir: string, name: string): string | null {
+  const file = personaCardFileName(name)
+  if (file === null) return null
+  try {
+    const text = readFileSync(join(personaCardDir(userDataDir), file), 'utf8').trim()
+    return text === '' ? null : text
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 存一张卡（导入 / 覆盖）。**不静默截断**：空内容 / 超上限直接报错。
+ * 返回保存后的文件名（含 `.md`），调用方通常接着把它设为启用卡。
+ */
+export function savePersonaCard(
+  userDataDir: string,
+  rawName: string,
+  text: string
+): { ok: true; name: string } | { ok: false; error: string } {
+  const file = personaCardFileName(rawName)
+  if (file === null) {
+    return {
+      ok: false,
+      error: `卡名不合法（不能为空、不能带 \\ / : * ? " < > |，最多 ${PERSONA_CARD_NAME_MAX_CHARS} 字）`
+    }
+  }
+  const content = text.trim()
+  if (content === '') return { ok: false, error: '卡片内容是空的' }
+  if (content.length > PERSONA_CARD_MAX_CHARS) {
+    return {
+      ok: false,
+      error: `卡片太长（现在 ${content.length} 字，上限 ${PERSONA_CARD_MAX_CHARS} 字）`
+    }
+  }
+  try {
+    mkdirSync(personaCardDir(userDataDir), { recursive: true })
+    writeFileSync(join(personaCardDir(userDataDir), file), `${content}\n`, 'utf8')
+    return { ok: true, name: file }
+  } catch (error) {
+    return { ok: false, error: `写卡片失败：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+export function readPersona(db: Db, options: { userDataDir?: string } = {}): MemoryPersona {
+  const cardName = getSetting(db, 'memory.persona_card').trim()
+  let card: MemoryPersona['card'] = null
+  if (cardName !== '' && options.userDataDir !== undefined) {
+    const text = readPersonaCard(options.userDataDir, cardName)
+    if (text !== null) card = { name: cardName, text }
+  }
   return {
     name: getSetting(db, 'memory.persona_name').trim() || PERSONA_NAME_DEFAULT,
     tone: getSetting(db, 'memory.persona_tone').trim() || PERSONA_TONE_DEFAULT,
-    redLines: [...PERSONA_HARD_RED_LINES, ...parseRedLines(getSetting(db, 'memory.persona_redlines'))]
+    redLines: [...PERSONA_HARD_RED_LINES, ...parseRedLines(getSetting(db, 'memory.persona_redlines'))],
+    card
   }
 }
 
@@ -83,14 +222,23 @@ export function savePersona(
  * 不再写「你不是助理 / 不是检索工具 / 你有自己的脾气」：这类宣言是贴上去的人味，
  * 一删就回到客服腔；人味要靠处境（时间、对话、记忆）和它自己的判断长出来。
  *
+ * 2026-10-30（D62）：启用人格卡时，卡全文排在最前面，名字 / 口吻让位（卡里写什么就是什么）；
+ * 三条写死红线永远在最后，且明说冲突时以红线为准——卡是性格，不是免罪符。
+ *
  * 注意：这里是**本地配置**，不是屏幕文本，不进脱敏墙；但它会出现在出云请求里，
- * 所以只允许用户自己写的几句话（调用方已截断长度），不放任何运行时数据。
+ * 所以只放用户自己写的文本（保存时已限长），不放任何运行时数据。
  */
 export function buildPersonaPrompt(persona: MemoryPersona): string {
+  const head: string[] = []
+  if (persona.card !== null) {
+    head.push(persona.card.text, '', '以上是你的性格设定。')
+  } else {
+    head.push(`你叫「${persona.name}」。`, `你说话的样子：${persona.tone}。`)
+  }
   return [
-    `你叫「${persona.name}」。`,
-    `你说话的样子：${persona.tone}。`,
-    '你的底线（任何情况下都不破）：',
+    ...head,
+    '',
+    '你的底线（任何情况下都不破；和上面的设定冲突时以这里为准）：',
     ...persona.redLines.map((line, index) => `${index + 1}) ${line}`)
   ].join('\n')
 }

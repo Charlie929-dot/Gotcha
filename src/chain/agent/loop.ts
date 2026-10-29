@@ -119,6 +119,11 @@ export interface AskLoopContext {
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 用默认的回忆助手口吻） */
   personaPrompt?: string
   /**
+   * 这次给哪些工具组（D62 模式）。不传 = 两组都开。
+   * 两组都关 = 单轮请求：不跑工具预算、不带 tools、不产生收尾轮。
+   */
+  tools?: { screen: boolean; diary: boolean }
+  /**
    * 开场注入：「此刻」事实（每轮现算）+ 第一问的「想到的」日记片段。
    * 由组合根给出；载荷层统一过策略后再送云。
    */
@@ -306,11 +311,14 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   /** 已经批过的「继续查」次数：每次把轮数 / 调用数预算翻一倍窗口 */
   let grants =
     resume && ctx.resumeDecision === 'continue' ? resume.grants + 1 : resume?.grants ?? 0
+  /** 工具组（D62）：两组都关 = 单轮请求，不跑预算、不等待续查 */
+  const toolGroups = ctx.tools ?? { screen: true, diary: true }
+  const toolsAvailable = toolGroups.screen || toolGroups.diary
   /** 本轮（含恢复前）还能调工具的全局轮数 / 调用次数 */
-  const toolTurnBudget = ASK_LOOP_MAX_TOOL_TURNS * (1 + grants)
-  const toolCallBudget = ASK_LOOP_MAX_TOOL_CALLS * (1 + grants)
-  /** 本地循环上限：全局预算 + 收尾轮 - 已经用掉的轮数 */
-  const localTurnLimit = Math.max(1, toolTurnBudget + 1 - turnsUsed)
+  const toolTurnBudget = toolsAvailable ? ASK_LOOP_MAX_TOOL_TURNS * (1 + grants) : 0
+  const toolCallBudget = toolsAvailable ? ASK_LOOP_MAX_TOOL_CALLS * (1 + grants) : 0
+  /** 本地循环上限：全局预算 + 收尾轮 - 已经用掉的轮数；无工具时只有一轮 */
+  const localTurnLimit = toolsAvailable ? Math.max(1, toolTurnBudget + 1 - turnsUsed) : 1
   /** 本轮是否查过问答记录：决定「关于对话本身」的答案能否不带屏幕引用 */
   let usedAskHistory = resume?.usedAskHistory ?? false
 
@@ -352,8 +360,11 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     }
     // 收尾轮：不再给工具，逼模型用已看到的段作答（不带 tools 的请求也不可能回 tool_calls）。
     // 用户选「先按现在的结果回答」时，恢复后的第一轮就是这个收尾轮。
+    // 无工具模式（D62）一开始就没有工具，也不该走「轮数用尽」的收尾语义。
     const allowTools =
-      globalTurn <= toolTurnBudget && !(turn === 1 && ctx.resumeDecision === 'stop')
+      toolsAvailable &&
+      globalTurn <= toolTurnBudget &&
+      !(turn === 1 && ctx.resumeDecision === 'stop')
     const built = ctx.outbound.buildLoop({
       question,
       systemTime,
@@ -385,7 +396,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         ...(allowTools ? {} : { freeText: true }),
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         ...(ctx.image ? { image: ctx.image } : {}),
-        ...(ctx.personaPrompt ? { personaPrompt: ctx.personaPrompt } : {})
+        ...(ctx.personaPrompt ? { personaPrompt: ctx.personaPrompt } : {}),
+        // 工具组必须每轮都传：两组都关时客户端要据此摘掉「数据边界 / 工具」段
+        toolGroups
       })
     } catch (error) {
       // 用户点「停止」：不算失败，如实回 aborted

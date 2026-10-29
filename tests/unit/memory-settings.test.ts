@@ -11,8 +11,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDatabase, type Db } from '../../src/db'
-import { setSetting } from '../../src/db/settings'
-import { PERSONA_HARD_RED_LINES } from '../../src/memory/persona'
+import { getSetting, setSetting } from '../../src/db/settings'
+import { PERSONA_HARD_RED_LINES, savePersonaCard } from '../../src/memory/persona'
 import {
   applyMemoryPatch,
   buildMemorySettingsView,
@@ -131,5 +131,37 @@ describe('applyMemoryPatch + buildMemorySettingsView', () => {
     const view = buildMemorySettingsView(db)
     expect(view.vaultDir).toContain('gotcha-vault-gone-xyz')
     expect(view.resolvedDir).not.toBe(view.vaultDir)
+  })
+})
+
+describe('人格卡（D62）', () => {
+  it('启用卡：只能是卡片目录里真实存在的文件；空串 = 停用', () => {
+    expect(parseMemoryPatch({ personaCard: '' }, { userDataDir: dir })).toEqual({
+      ok: true,
+      patch: { personaCard: '' }
+    })
+    expect(
+      parseMemoryPatch({ personaCard: '女儿版.md' }, { userDataDir: dir })
+    ).toMatchObject({ ok: false, error: expect.stringContaining('没有这张人格卡') })
+    expect(parseMemoryPatch({ personaCard: '女儿版.md' })).toMatchObject({ ok: false })
+    expect(parseMemoryPatch({ personaCard: 'a/b' }, { userDataDir: dir })).toMatchObject({
+      ok: false,
+      error: '人格卡文件名不合法'
+    })
+    savePersonaCard(dir, '女儿版', '# 鲸鱼娘\n\n我是小鲸鱼。')
+    expect(parseMemoryPatch({ personaCard: '女儿版' }, { userDataDir: dir })).toEqual({
+      ok: true,
+      patch: { personaCard: '女儿版.md' }
+    })
+  })
+
+  it('视图带卡库与启用的卡；保存后 settings 里有值', () => {
+    savePersonaCard(dir, '女儿版', '# 鲸鱼娘\n\n正文')
+    applyMemoryPatch(db, { personaCard: '女儿版.md' })
+    expect(getSetting(db, 'memory.persona_card')).toBe('女儿版.md')
+    const view = buildMemorySettingsView(db, { userDataDir: dir })
+    expect(view.activeCard).toBe('女儿版.md')
+    expect(view.cards.map((card) => card.name)).toEqual(['女儿版.md'])
+    expect(view.cardDir).toContain('persona-cards')
   })
 })

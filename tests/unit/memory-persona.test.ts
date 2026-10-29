@@ -5,18 +5,25 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { openDatabase, type Db } from '../../src/db'
+import { setSetting } from '../../src/db/settings'
 import {
   buildPersonaPrompt,
+  listPersonaCards,
+  PERSONA_CARD_MAX_CHARS,
   PERSONA_HARD_RED_LINES,
   parseRedLines,
+  personaCardDir,
   readPersona,
+  readPersonaCard,
   resolveVaultDir,
-  savePersona
+  sanitizePersonaCardName,
+  savePersona,
+  savePersonaCard
 } from '../../src/memory/persona'
 
 let db: Db
@@ -72,6 +79,70 @@ describe('persona', () => {
   it('parseRedLines：空串 / 全空白 → 没有追加', () => {
     expect(parseRedLines('')).toEqual([])
     expect(parseRedLines('  |  | ')).toEqual([])
+  })
+})
+
+describe('人格卡（D62）', () => {
+  let userData: string
+
+  beforeEach(() => {
+    userData = mkdtempSync(join(tmpdir(), 'gotcha-persona-card-'))
+  })
+
+  afterEach(() => {
+    rmSync(userData, { recursive: true, force: true })
+  })
+
+  it('卡名归一：去 .md、挡路径分隔符与非法字符、限长', () => {
+    expect(sanitizePersonaCardName('  女儿版.md ')).toBe('女儿版')
+    expect(sanitizePersonaCardName('a/b')).toBeNull()
+    expect(sanitizePersonaCardName('..')).toBeNull()
+    expect(sanitizePersonaCardName('.hidden')).toBeNull()
+    expect(sanitizePersonaCardName('x'.repeat(41))).toBeNull()
+  })
+
+  it('存 → 列 → 读：标题取第一行 #，字数如实', () => {
+    const saved = savePersonaCard(userData, '女儿版', '# 鲸鱼娘\n\n我是小鲸鱼。')
+    expect(saved).toEqual({ ok: true, name: '女儿版.md' })
+    const cards = listPersonaCards(userData)
+    expect(cards).toHaveLength(1)
+    expect(cards[0]).toMatchObject({ name: '女儿版.md', title: '鲸鱼娘' })
+    expect(readPersonaCard(userData, '女儿版.md')).toContain('我是小鲸鱼')
+  })
+
+  it('空卡 / 超长卡直接报错（不静默截断）', () => {
+    expect(savePersonaCard(userData, '空', '   ')).toMatchObject({ ok: false })
+    const tooLong = savePersonaCard(userData, '长', '好'.repeat(PERSONA_CARD_MAX_CHARS + 1))
+    expect(tooLong).toMatchObject({ ok: false, error: expect.stringContaining(String(PERSONA_CARD_MAX_CHARS)) })
+    expect(listPersonaCards(userData)).toHaveLength(0)
+  })
+
+  it('启用的卡：全文进 prompt，名字 / 口吻让位，红线仍压在最上面', () => {
+    savePersonaCard(userData, '女儿版', '# 鲸鱼娘\n\n我是爸爸的小鲸鱼。')
+    setSetting(db, 'memory.persona_card', '女儿版.md')
+    const persona = readPersona(db, { userDataDir: userData })
+    expect(persona.card?.text).toContain('爸爸的小鲸鱼')
+    const prompt = buildPersonaPrompt(persona)
+    expect(prompt).toContain('我是爸爸的小鲸鱼')
+    expect(prompt).not.toContain('你叫「贴心大肥鱼」')
+    expect(prompt).not.toContain('你说话的样子')
+    expect(prompt).toContain('和上面的设定冲突时以这里为准')
+    for (const line of PERSONA_HARD_RED_LINES) expect(prompt).toContain(line)
+    // 三条红线仍在最后
+    expect(prompt.trimEnd().endsWith('3) ' + PERSONA_HARD_RED_LINES[2])).toBe(true)
+  })
+
+  it('设置里指向的卡被删了：回落到名字 / 口吻，不炸', () => {
+    setSetting(db, 'memory.persona_card', 'gone.md')
+    const persona = readPersona(db, { userDataDir: userData })
+    expect(persona.card).toBeNull()
+    expect(buildPersonaPrompt(persona)).toContain('你叫「贴心大肥鱼」')
+  })
+
+  it('目录里有坏文件：列表跳过，不影响其它卡', () => {
+    mkdirSync(personaCardDir(userData), { recursive: true })
+    writeFileSync(join(personaCardDir(userData), '好卡.md'), '# 好卡\n正文', 'utf8')
+    expect(listPersonaCards(userData).map((card) => card.name)).toEqual(['好卡.md'])
   })
 })
 

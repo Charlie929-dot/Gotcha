@@ -9,15 +9,20 @@
  * 与「保存即同步」的调用顺序一起放在那里。这样本模块可以只依赖内存库做单测。
  */
 import { existsSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 
 import type { Db } from '../db'
 import { getSetting, setSetting } from '../db/settings'
 import {
   PERSONA_HARD_RED_LINES,
   parseRedLines,
+  personaCardDir,
+  personaCardFileName,
+  listPersonaCards,
   readPersona,
   resolveVaultDirWithSource,
   savePersona,
+  type PersonaCardInfo,
   type VaultDirSource
 } from '../memory/persona'
 import { memoryStats, type MemoryStats } from '../memory/store'
@@ -45,6 +50,12 @@ export interface MemorySettingsView {
   redLines: string[]
   /** 写死的三条（界面只读展示，任何配置都删不掉） */
   hardRedLines: string[]
+  /** 人格卡库（D62）：目录里现有的 .md（只给文件名 / 字数 / 标题，不读全文） */
+  cards: PersonaCardInfo[]
+  /** 启用的卡文件名（'' = 不用卡）；文件被删了也原样回显，界面据此提示 */
+  activeCard: string
+  /** 卡片目录（「在文件夹中打开」用） */
+  cardDir: string
   stats: MemoryStats
 }
 
@@ -75,11 +86,18 @@ export interface MemorySettingsPatch {
   personaTone?: string
   /** 每行一条（界面是多行文本；存库时用 `|` 拼成 person.ts 的格式） */
   redLines?: string[]
+  /** 启用人格卡：文件名（含 `.md`）；空串 = 停用 */
+  personaCard?: string
 }
 
 export type ParseMemoryPatchResult =
   | { ok: true; patch: MemorySettingsPatch }
   | { ok: false; error: string }
+
+/** 校验 / 保存卡时用的环境（测试传临时目录；主进程传 `<userData>`） */
+export interface MemorySettingsEnv {
+  userDataDir?: string
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -93,7 +111,7 @@ function textField(value: unknown): string | undefined {
  * 校验并归一一次保存。**不做静默修正**：目录不存在 / 名字太长 / 红线超条数都直接报错，
  * 让界面把原因原样显示出来（设置抽屉的既有纪律）。
  */
-export function parseMemoryPatch(raw: unknown): ParseMemoryPatchResult {
+export function parseMemoryPatch(raw: unknown, env: MemorySettingsEnv = {}): ParseMemoryPatchResult {
   if (!isPlainObject(raw)) return { ok: false, error: '参数不合法' }
   const patch: MemorySettingsPatch = {}
 
@@ -153,13 +171,32 @@ export function parseMemoryPatch(raw: unknown): ParseMemoryPatchResult {
     patch.redLines = lines
   }
 
+  if (raw.personaCard !== undefined) {
+    if (typeof raw.personaCard !== 'string') return { ok: false, error: '人格卡必须是文件名' }
+    const value = raw.personaCard.trim()
+    if (value === '') {
+      patch.personaCard = ''
+    } else {
+      const file = personaCardFileName(value)
+      if (file === null) return { ok: false, error: '人格卡文件名不合法' }
+      if (env.userDataDir === undefined) {
+        return { ok: false, error: '当前环境不支持人格卡' }
+      }
+      if (!existsSync(join(personaCardDir(env.userDataDir), file))) {
+        return { ok: false, error: `没有这张人格卡：${file}` }
+      }
+      patch.personaCard = file
+    }
+  }
+
   if (Object.keys(patch).length === 0) return { ok: false, error: '没有要保存的改动' }
   return { ok: true, patch }
 }
 
-/** 写入 settings（目录 + 人设）；调用方负责随后同步与日志 */
+/** 写入 settings（目录 + 人设 + 启用的人格卡）；调用方负责随后同步与日志 */
 export function applyMemoryPatch(db: Db, patch: MemorySettingsPatch): void {
   if (patch.vaultDir !== undefined) setSetting(db, 'memory.vault_dir', patch.vaultDir)
+  if (patch.personaCard !== undefined) setSetting(db, 'memory.persona_card', patch.personaCard)
   if (
     patch.personaName !== undefined ||
     patch.personaTone !== undefined ||
@@ -173,10 +210,11 @@ export function applyMemoryPatch(db: Db, patch: MemorySettingsPatch): void {
   }
 }
 
-/** 组装视图：设置里的原值 + 实际生效目录 + 人设 + 统计（全部现读，不缓存） */
-export function buildMemorySettingsView(db: Db): MemorySettingsView {
+/** 组装视图：设置里的原值 + 实际生效目录 + 人设 / 卡库 + 统计（全部现读，不缓存） */
+export function buildMemorySettingsView(db: Db, env: MemorySettingsEnv = {}): MemorySettingsView {
   const resolution = resolveVaultDirWithSource(db)
-  const persona = readPersona(db)
+  const persona = readPersona(db, env)
+  const activeCard = getSetting(db, 'memory.persona_card').trim()
   return {
     vaultDir: getSetting(db, 'memory.vault_dir').trim(),
     resolvedDir: resolution.dir,
@@ -185,6 +223,9 @@ export function buildMemorySettingsView(db: Db): MemorySettingsView {
     personaTone: persona.tone,
     redLines: parseRedLines(getSetting(db, 'memory.persona_redlines')),
     hardRedLines: [...PERSONA_HARD_RED_LINES],
+    cards: env.userDataDir === undefined ? [] : listPersonaCards(env.userDataDir),
+    activeCard,
+    cardDir: env.userDataDir === undefined ? '' : personaCardDir(env.userDataDir),
     stats: memoryStats(db)
   }
 }

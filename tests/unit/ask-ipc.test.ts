@@ -627,3 +627,66 @@ describe('ask IPC：记忆条目（浏览 / 删除 / 撤销）', () => {
     expect(memoryDelete).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('ask IPC：模式（D62）', () => {
+  const noEvidence: ChainAskResult = {
+    kind: 'no-evidence',
+    stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 }
+  }
+
+  it('模式不是对象：直接拒，不静默猜', async () => {
+    const ask = vi.fn(async (): Promise<ChainAskResult> => noEvidence)
+    const query = handler(buildDeps({ ask }), 'ask:query')
+    for (const mode of ['chat', 42, null, ['chat']]) {
+      expect(await query(SENDER_OK as never, { question: '问', mode })).toMatchObject({
+        kind: 'error',
+        message: '模式不合法'
+      })
+    }
+    expect(ask).not.toHaveBeenCalled()
+  })
+
+  it('不传模式 = 问记忆（老调用方行为不变）', async () => {
+    const ask = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => noEvidence)
+    await handler(buildDeps({ ask }), 'ask:query')(SENDER_OK as never, { question: '问' })
+    expect(ask.mock.calls[0]![1].mode).toEqual({ screen: true, diary: true, card: false })
+  })
+
+  it('聊天 / 组合模式原样交给主进程（缺字段按关）', async () => {
+    const ask = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => noEvidence)
+    const query = handler(buildDeps({ ask }), 'ask:query')
+    await query(SENDER_OK as never, { question: '问', mode: { screen: false, diary: true, card: true } })
+    expect(ask.mock.calls[0]![1].mode).toEqual({ screen: false, diary: true, card: true })
+    await query(SENDER_OK as never, { question: '问', mode: { card: true } })
+    expect(ask.mock.calls[1]![1].mode).toEqual({ screen: false, diary: false, card: true })
+  })
+
+  it('续查沿用暂停时的模式（不会从聊天悄悄变回问记忆）', async () => {
+    const paused: ChainAskResult = {
+      kind: 'continue-ask',
+      question: '还要接着查吗？',
+      options: ['继续查'],
+      stats: { hits: 1, evidence: 1, cited: 0, questionChars: 2 },
+      resumeId: 'rabc123'
+    }
+    const resume = vi.fn(async (): Promise<ChainAskResult> => noEvidence)
+    const handlers = createAskIpcHandlers(
+      buildDeps({
+        ask: async () => paused,
+        resume,
+        conversationHistory: () => []
+      })
+    )
+    await handlers.get('ask:query')!(SENDER_OK as never, {
+      question: '问',
+      conversationId: 'conv-1',
+      mode: { screen: false, diary: true, card: true }
+    })
+    await handlers.get('ask:resume')!(SENDER_OK as never, { resumeId: 'rabc123', decision: 'continue' })
+    expect(resume).toHaveBeenCalledWith(
+      'rabc123',
+      'continue',
+      expect.objectContaining({ mode: { screen: false, diary: true, card: true } })
+    )
+  })
+})

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage, screen } from 'electron'
+import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import Database from 'better-sqlite3'
@@ -8,7 +8,7 @@ import { getNumberSetting, getSetting, setSetting } from '../db/settings'
 import { memoryStats, previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
 import { buildSituation, splitRecallKeywords } from '../memory/opening'
 import { indexDiaryVectors, countPendingVectors, pruneOrphanVectors } from '../memory/vectors'
-import { buildPersonaPrompt, readPersona, resolveVaultDir } from '../memory/persona'
+import { buildPersonaPrompt, personaCardDir, readPersona, readPersonaCard, resolveVaultDir, savePersonaCard } from '../memory/persona'
 import {
   applyMemoryPatch,
   buildMemorySettingsView,
@@ -17,6 +17,7 @@ import {
 } from './memory-settings'
 import { buildMemoryListView, deleteMemoryView, parseMemoryListQuery, restoreMemoryView } from './memory-admin'
 import type { DiaryToolDeps } from '../chain/agent/tools'
+import { askToolGroupsOf, asksMemoryContext, DEFAULT_ASK_MODE } from '../chain/agent/mode'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
@@ -1796,10 +1797,10 @@ if (primaryInstance) {
       const db = connections.queryDb()
       // 从没建过库：不为了「看一眼设置」建库（A3），让界面显示不可用
       if (!db) return { error: 'db-unavailable' }
-      return buildMemorySettingsView(db)
+      return buildMemorySettingsView(db, { userDataDir: app.getPath('userData') })
     }
     const saveMemorySettings = (patch: unknown): MemorySettingsSaveResult => {
-      const parsed = parseMemoryPatch(patch)
+      const parsed = parseMemoryPatch(patch, { userDataDir: app.getPath('userData') })
       if (!parsed.ok) return { ok: false, error: parsed.error }
       let db: Db
       try {
@@ -1815,7 +1816,7 @@ if (primaryInstance) {
         captureLog('error', 'memory settings save failed', { error: String(error) })
         return { ok: false, error: '保存设置失败' }
       }
-      const view = buildMemorySettingsView(db)
+      const view = buildMemorySettingsView(db, { userDataDir: app.getPath('userData') })
       if (view.resolvedDir === null) return { ok: true, view, sync: null, syncedDir: null }
       try {
         const result = syncVault(db, view.resolvedDir)
@@ -1823,7 +1824,12 @@ if (primaryInstance) {
         // 保存设置 = 立即同步（用户口径）→ 顺手排向量索引（内部按指纹判断要不要真算）
         scheduleMemoryVectors()
         // 同步后统计会变（新增 / 删除），视图重读一次再回给界面
-        return { ok: true, view: buildMemorySettingsView(db), sync: result, syncedDir: view.resolvedDir }
+        return {
+          ok: true,
+          view: buildMemorySettingsView(db, { userDataDir: app.getPath('userData') }),
+          sync: result,
+          syncedDir: view.resolvedDir
+        }
       } catch (error) {
         captureLog('warn', 'memory sync failed', {
           dir: view.resolvedDir,
@@ -1946,7 +1952,10 @@ if (primaryInstance) {
       db: ChainDb,
       question: string,
       context: AskQueryContext
-    ): RedactableAskOpening => {
+    ): RedactableAskOpening | undefined => {
+      const mode = context.mode ?? DEFAULT_ASK_MODE
+      // 纯提问模式（无工具、无卡）：不带「此刻 / 想到的」，否则它会显得知道你的记忆
+      if (!asksMemoryContext(mode)) return undefined
       const now = Date.now()
       const facts = buildSituation({
         now,
@@ -1954,7 +1963,8 @@ if (primaryInstance) {
         lastDiaryDay: memoryStats(db).lastDay
       })
       const firstTurn = question.trim() !== '' && (context.history?.length ?? 0) === 0
-      const keywords = firstTurn ? splitRecallKeywords(question) : []
+      // 「想到的」要翻日记：这次没开日记工具（自定义勾选）就不联想，免得给了片段又查不了
+      const keywords = firstTurn && mode.diary ? splitRecallKeywords(question) : []
       const remembered =
         keywords.length === 0
           ? []
@@ -1979,76 +1989,95 @@ if (primaryInstance) {
       db: ChainDb,
       context: AskQueryContext,
       opening?: RedactableAskOpening
-    ): ChainAskOptions => ({
-      db,
-      resolveClient,
-      outbound: askOutbound,
-      embedQuestion: async (text) => {
-        const embedder = await loadChainEmbedder()
-        if (!embedder) return null
-        const [vector] = await embedder.embed([text])
-        return vector ?? null
-      },
-      // 工具循环注入：固定钟、采集运行态、问答历史（freshness / ask_history 工具的数据源）
-      now: () => Date.now(),
-      captureRunning: () => controller.status() === 'running',
-      // ask_history 默认只查本会话（D55 ②）：以前把全库问答倒给模型，别的会话的问题会被写成
-      // 「你刚才问的」。要跨会话必须显式 scope:"all"，每条带 session 标记。
-      readAskHistory: (scope) => {
-        const current = (entry: { conversationId?: string; id: string }): boolean =>
-          (entry.conversationId ?? entry.id) === context.conversationId
-        return readAskHistory(askHistoryPath)
-          .filter((entry) => scope === 'all' || current(entry))
-          .map((entry) => ({
-            at: entry.at,
-            question: entry.question,
-            kind: entry.kind,
-            session: (current(entry) ? 'current' : 'other') as 'current' | 'other'
-          }))
-      },
+    ): ChainAskOptions => {
+      const mode = context.mode ?? DEFAULT_ASK_MODE
+      const groups = askToolGroupsOf(mode)
+      // 人设：有屏幕记忆或有卡时都注入（卡启用 → 卡全文；卡没启用 → 名字 / 口吻 / 红线）。
+      // 纯提问模式不带人设，免得它把「问个技术问题」也演成角色。
+      const personaPrompt =
+        groups.screen || mode.card
+          ? buildPersonaPrompt(readPersona(db, { userDataDir: app.getPath('userData') }))
+          : undefined
       // 指代线索：提问前最后一段（不是证据；引用仍要经 search_info / read_segment）
-      recent: latestSegmentHint(db),
-      searchBatch: runSearchBatch,
-      // 个人记忆（第二本账）：日记条目 + 「关于我」统计；人设是本地配置，只拼在 system 最前面
-      diary: diaryToolsFor(db),
-      personaPrompt: buildPersonaPrompt(readPersona(db)),
-      // 新对话第一问：给 ta 一点「此刻」和「想到的」（D61）；续问/老对话不带
-      ...(opening !== undefined ? { opening } : {}),
-      // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
-      history: context.history,
-      signal: context.signal,
-      // 选区问答：截图随本轮问题送给模型。路径只接受 ask-shots 下的文件（用户在界面上自己框的图，不脱敏）
-      ...(context.imagePath && isAskShotPath(app.getPath('userData'), context.imagePath)
-        ? { imageDataUrl: readAskShotDataUrl(context.imagePath) ?? undefined }
-        : {}),
-      // 用户上传的图片 / 文本文件（用户主动提供，与选区截图同口径不过脱敏墙）
-      ...(askAttachmentsOf(context) ? { attachments: askAttachmentsOf(context) } : {}),
-      // 历史截图出云（默认关，2026-10-29 拍板）：开了 read_segment 才带得出截图
-      ...(getSetting(db, GRAPH_SETTING_KEYS.askHistoryShots) === '1'
-        ? { readShot: (path: string) => readShotDataUrl(path) }
-        : {}),
-      canSend: () => getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
-      overBudget: () => {
-        const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
-        if (budget <= 0) return false
-        const usage = readUsage(db, Date.now())
-        return usage.promptTokens + usage.completionTokens >= budget
-      },
-      onUsage: (usage) => {
-        try {
-          // 显式提问是用户动作：允许打开写连接记账（D22 日账）
-          const writable = connections.ensureWritable().db
-          recordUsage(writable, Date.now(), {
-            calls: 1,
-            promptTokens: usage.promptTokens,
-            completionTokens: usage.completionTokens
-          })
-        } catch (error) {
-          captureLog('warn', 'ask usage record failed', { error: String(error) })
-        }
-      },
-      log: (level, message, data) => captureLog(level, message, data)
-    })
+      const recent = groups.screen ? latestSegmentHint(db) : undefined
+      return {
+        db,
+        resolveClient,
+        outbound: askOutbound,
+        embedQuestion: async (text) => {
+          const embedder = await loadChainEmbedder()
+          if (!embedder) return null
+          const [vector] = await embedder.embed([text])
+          return vector ?? null
+        },
+        // 工具循环注入：固定钟、采集运行态、问答历史（freshness / ask_history 工具的数据源）
+        now: () => Date.now(),
+        captureRunning: () => controller.status() === 'running',
+        // 没有屏幕工具就不接问答记录 / 检索：模型拿不到，也就不会「查到」不该查的
+        ...(groups.screen
+          ? {
+              // ask_history 默认只查本会话（D55 ②）：以前把全库问答倒给模型，别的会话的问题会被写成
+              // 「你刚才问的」。要跨会话必须显式 scope:"all"，每条带 session 标记。
+              readAskHistory: (scope: 'conversation' | 'all') => {
+                const current = (entry: { conversationId?: string; id: string }): boolean =>
+                  (entry.conversationId ?? entry.id) === context.conversationId
+                return readAskHistory(askHistoryPath)
+                  .filter((entry) => scope === 'all' || current(entry))
+                  .map((entry) => ({
+                    at: entry.at,
+                    question: entry.question,
+                    kind: entry.kind,
+                    session: (current(entry) ? 'current' : 'other') as 'current' | 'other'
+                  }))
+              },
+              // 指代线索：提问前最后一段（不是证据；引用仍要经 search_info / read_segment）
+              ...(recent !== undefined ? { recent } : {}),
+              searchBatch: runSearchBatch
+            }
+          : {}),
+        // 个人记忆（第二本账）：日记条目 + 「关于我」统计；人设是本地配置，只拼在 system 最前面
+        ...(groups.diary ? { diary: diaryToolsFor(db) } : {}),
+        ...(personaPrompt !== undefined ? { personaPrompt } : {}),
+        // 这次给哪些工具组（D62）：链层据此决定单轮 / 工具循环
+        tools: groups,
+        // 新对话第一问：给 ta 一点「此刻」和「想到的」（D61）；续问/老对话不带
+        ...(opening !== undefined ? { opening } : {}),
+        // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
+        history: context.history,
+        signal: context.signal,
+        // 选区问答：截图随本轮问题送给模型。路径只接受 ask-shots 下的文件（用户在界面上自己框的图，不脱敏）
+        ...(context.imagePath && isAskShotPath(app.getPath('userData'), context.imagePath)
+          ? { imageDataUrl: readAskShotDataUrl(context.imagePath) ?? undefined }
+          : {}),
+        // 用户上传的图片 / 文本文件（用户主动提供，与选区截图同口径不过脱敏墙）
+        ...(askAttachmentsOf(context) ? { attachments: askAttachmentsOf(context) } : {}),
+        // 历史截图出云（默认关，2026-10-29 拍板）：开了 read_segment 才带得出截图
+        ...(groups.screen && getSetting(db, GRAPH_SETTING_KEYS.askHistoryShots) === '1'
+          ? { readShot: (path: string) => readShotDataUrl(path) }
+          : {}),
+        canSend: () => getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) === '1',
+        overBudget: () => {
+          const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
+          if (budget <= 0) return false
+          const usage = readUsage(db, Date.now())
+          return usage.promptTokens + usage.completionTokens >= budget
+        },
+        onUsage: (usage) => {
+          try {
+            // 显式提问是用户动作：允许打开写连接记账（D22 日账）
+            const writable = connections.ensureWritable().db
+            recordUsage(writable, Date.now(), {
+              calls: 1,
+              promptTokens: usage.promptTokens,
+              completionTokens: usage.completionTokens
+            })
+          } catch (error) {
+            captureLog('warn', 'ask usage record failed', { error: String(error) })
+          }
+        },
+        log: (level, message, data) => captureLog(level, message, data)
+      }
+    }
 
     disposeAskIpc = registerAskIpc({
       getWindow: () => askWindow,
@@ -2139,6 +2168,33 @@ if (primaryInstance) {
       // 个人记忆（vibe/free）：日记目录 + 人设；保存后立即同步日记目录
       memorySettings: readMemorySettings,
       saveMemorySettings,
+      // 人格卡（D62）：导入即启用；写卡不碰库，启用卡要写 settings（回答中拒绝开写连接）
+      savePersonaCard: (name, text) => {
+        const root = app.getPath('userData')
+        const saved = savePersonaCard(root, name, text)
+        if (!saved.ok) return { ok: false, error: saved.error }
+        try {
+          const db = connections.ensureWritable().db
+          ensureChainSchema(db)
+          setSetting(db, 'memory.persona_card', saved.name)
+          return { ok: true, view: buildMemorySettingsView(db, { userDataDir: root }) }
+        } catch (error) {
+          captureLog('warn', 'persona card activate failed', { error: String(error) })
+          return { ok: false, error: '卡片已保存，但没能切换过去（数据库暂不可用）' }
+        }
+      },
+      readPersonaCard: (name) => readPersonaCard(app.getPath('userData'), name),
+      openPersonaCardDir: () => {
+        const dir = personaCardDir(app.getPath('userData'))
+        try {
+          mkdirSync(dir, { recursive: true })
+          void shell.openPath(dir)
+          return true
+        } catch (error) {
+          captureLog('warn', 'persona card dir open failed', { error: String(error) })
+          return false
+        }
+      },
       // 记忆条目（浏览 / 删除 / 撤销）：浏览走只读连接；删除与撤销走写连接，
       // 回答进行中由 ask-ipc 拒绝（开写连接会关掉正在读的只读连接）
       memoryList: (query) => {

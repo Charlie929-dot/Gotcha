@@ -103,6 +103,11 @@ export interface ChainAskOptions {
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 默认回忆助手口吻） */
   personaPrompt?: string
   /**
+   * 这次问答给哪些工具组（D62 模式）。不传 = 两组都开（老行为）。
+   * 两组都关时循环只发一次请求、不带 tools（提问 / 纯聊天），不再有收尾轮。
+   */
+  tools?: { screen: boolean; diary: boolean }
+  /**
    * 开场注入：「此刻」事实每轮刷新（由调用方现算），「想到的」日记片段只在
    * 新对话第一问出现；续查时片段从检查点沿用。没传 = 这个客户端不看这些。
    */
@@ -273,6 +278,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.diary ? { diary: options.diary } : {}),
         ...(options.readShot ? { readShot: options.readShot } : {}),
         ...(options.personaPrompt ? { personaPrompt: options.personaPrompt } : {}),
+        ...(options.tools ? { tools: options.tools } : {}),
         // 开场注入：「此刻」每轮用调用方给的新值（时间会走）；第一问「想到的」从检查点续上，
         // 续查不重新联想（同一条记忆不该每轮换说法）
         ...((): { opening?: RedactableAskOpening } => {

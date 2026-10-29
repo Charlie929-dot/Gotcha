@@ -8,6 +8,7 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision } from '../chain/agent/types'
+import type { AskModeConfig } from '../chain/agent/mode'
 import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskConsentView, AskAttachmentInput } from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
@@ -29,7 +30,8 @@ export interface AskApi {
     question: string,
     conversationId?: string,
     imagePath?: string,
-    attachments?: readonly AskAttachmentInput[]
+    attachments?: readonly AskAttachmentInput[],
+    mode?: AskModeConfig
   ): Promise<ChainAskResult>
   /**
    * 「还要继续查吗」的选择：continue = 再给一轮检索预算，stop = 按现有结果收尾。
@@ -59,6 +61,14 @@ export interface AskApi {
   /* ---- 个人记忆（日记目录 + 人设；保存即同步） ---- */
   memorySettings(): Promise<MemorySettingsView | { error: string }>
   saveMemorySettings(patch: unknown): Promise<MemorySettingsSaveResult>
+  /* ---- 人格卡（D62）：导入 / 预览 / 打开卡片目录 ---- */
+  savePersonaCard(name: string, text: string): Promise<{
+    ok: boolean
+    error?: string
+    view?: MemorySettingsView
+  }>
+  personaCard(name: string): Promise<string | null>
+  openPersonaCardDir(): Promise<boolean>
   /* ---- 个人记忆 · 条目浏览 / 删除 / 撤销（设置抽屉「记忆条目」） ---- */
   memoryList(query: {
     search?: string
@@ -73,12 +83,13 @@ export interface AskApi {
 }
 
 const api: AskApi = {
-  query: (question, conversationId, imagePath, attachments) =>
+  query: (question, conversationId, imagePath, attachments, mode) =>
     ipcRenderer.invoke('ask:query', {
       question,
       ...(conversationId ? { conversationId } : {}),
       ...(imagePath ? { imagePath } : {}),
-      ...(attachments && attachments.length > 0 ? { attachments } : {})
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      ...(mode ? { mode } : {})
     }) as Promise<ChainAskResult>,
   resume: (resumeId, decision) =>
     ipcRenderer.invoke('ask:resume', { resumeId, decision }) as Promise<ChainAskResult>,
@@ -104,6 +115,14 @@ const api: AskApi = {
     ipcRenderer.invoke('ask:memory:get') as Promise<MemorySettingsView | { error: string }>,
   saveMemorySettings: (patch) =>
     ipcRenderer.invoke('ask:memory:save', patch) as Promise<MemorySettingsSaveResult>,
+  savePersonaCard: (name, text) =>
+    ipcRenderer.invoke('ask:memory:card:save', { name, text }) as Promise<{
+      ok: boolean
+      error?: string
+      view?: MemorySettingsView
+    }>,
+  personaCard: (name) => ipcRenderer.invoke('ask:memory:card:get', name) as Promise<string | null>,
+  openPersonaCardDir: () => ipcRenderer.invoke('ask:memory:card:open') as Promise<boolean>,
   memoryList: (query) => ipcRenderer.invoke('ask:memory:list', query) as Promise<MemoryListView>,
   memoryDelete: (id) => ipcRenderer.invoke('ask:memory:delete', { id }) as Promise<MemoryDeleteView>,
   memoryRestore: (uid) =>

@@ -109,6 +109,11 @@ export interface LlmCompleteOptions {
    * 出云确认门仍按整次请求在 `askChain` 门口判定。
    */
   personaPrompt?: string
+  /**
+   * 工具循环给哪些工具组（D62 模式）：`screen` = 屏幕记忆工具，`diary` = 日记工具。
+   * 缺省两组都开（老行为）。两组都关时：不带 tools、不写「数据边界 / 工具」段。
+   */
+  toolGroups?: { screen: boolean; diary: boolean }
 }
 
 export interface LlmClient {

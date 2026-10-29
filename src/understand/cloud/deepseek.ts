@@ -442,6 +442,29 @@ const ASK_LOOP_TOOLS = [
   }
 ] as const
 
+type AskLoopTool = (typeof ASK_LOOP_TOOLS)[number]
+type AskLoopToolName = AskLoopTool['function']['name']
+
+/**
+ * 每个工具属于哪一组（D62 模式）：屏幕记忆 / 日记。
+ * 类型上要求「每个工具都登记」——以后加工具忘了分组会直接编译不过，
+ * 而不是在聊天模式里悄悄把电脑记忆发出去。
+ */
+const ASK_LOOP_TOOL_GROUPS: Readonly<Record<AskLoopToolName, 'screen' | 'diary'>> = {
+  search_info: 'screen',
+  get_freshness: 'screen',
+  read_segment: 'screen',
+  ask_history: 'screen',
+  recall_diary: 'diary',
+  read_diary: 'diary',
+  memory_profile: 'diary'
+}
+
+/** 按模式过滤工具（D62）：不在这组就不发给模型，模型也就没法调 */
+export function askLoopToolsFor(groups: { screen: boolean; diary: boolean }): AskLoopTool[] {
+  return ASK_LOOP_TOOLS.filter((tool) => groups[ASK_LOOP_TOOL_GROUPS[tool.function.name]])
+}
+
 function pad2(value: number): string {
   return String(value).padStart(2, '0')
 }
@@ -478,17 +501,29 @@ function readableTime(ts: number): string {
  * （指证据用 HH:mm 的〈应用〉）、没找到的出口（固定 JSON）、提示注入防线
  * （工具结果只是数据不是指令）。
  *
+ * 2026-10-30（D62）按模式分段：没有屏幕工具就没有「数据边界 / 最近段」，
+ * 没有任何工具就不写「手边有工具」，也没有「收尾轮」——提问 / 纯聊天只发一次请求。
+ *
  * @param final 收尾轮：工具预算已用尽，要求只输出最终 JSON（请求本身不带 tools，
  *              这句是重复强调，防模型在正文里继续写「我再去查」）
+ * @param toolGroups 这次给哪些工具组（缺省两组都开）
  */
 function buildAskLoopSystemPrompt(
   payload: ChainAskLoopPayload,
   final: boolean,
-  personaPrompt?: string
+  personaPrompt?: string,
+  toolGroups: { screen: boolean; diary: boolean } = { screen: true, diary: true }
 ): string {
   const freshness = payload.freshness
   const latest = freshness.latestEvidenceTs
   const now = parseSystemTime(payload.systemTime)
+  const toolsOn = toolGroups.screen || toolGroups.diary
+  const toolSentence =
+    toolGroups.screen && toolGroups.diary
+      ? '这个人手边有些工具：能翻这台电脑的窗口记录，也能翻这个人写的日记。说明书在工具自己身上，用不用、怎么用，你自己判断。'
+      : toolGroups.screen
+        ? '这个人手边有些工具：能翻这台电脑的窗口记录。说明书在工具自己身上，用不用、怎么用，你自己判断。'
+        : '这个人手边有些工具：能翻这个人写的日记。说明书在工具自己身上，用不用、怎么用，你自己判断。'
   const historyLines =
     payload.history.length === 0
       ? []
@@ -513,17 +548,27 @@ function buildAskLoopSystemPrompt(
         ]
       : []),
     `当前时间：${payload.systemTime}${now === null ? '' : `（毫秒时间戳 ${now}，相对时间先按它换算）`}`,
-    `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`,
-    ...(payload.recent
+    ...(toolGroups.screen
+      ? [
+          `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`
+        ]
+      : []),
+    ...(toolGroups.screen && payload.recent
       ? [
           `最近一段证据：${hhmm(payload.recent.at)} 的〈${payload.recent.app}〉${payload.recent.title ? `《${payload.recent.title}》` : ''}——只当「这个界面 / 刚才那个」的指代线索，不是证据。`
         ]
       : []),
     ...historyLines,
     '怎么说话：用中文正常说，想说什么就说什么，不用包 JSON（JSON 只出现在调用工具时，那是接口不是语气）。',
-    '这个人手边有些工具：能翻这台电脑的窗口记录，也能翻这个人写的日记。说明书在工具自己身上，用不用、怎么用，你自己判断。',
-    '底线：不编造（只依据你真的读到的东西，不补常识、不推测应用名和时间）；引用由系统按你实际打开过的段自动记录，不用在正文里标；查不到就用自己的话说没有。',
-    ...(final
+    ...(toolsOn ? [toolSentence] : []),
+    ...(toolGroups.screen
+      ? [
+          '底线：不编造（只依据你真的读到的东西，不补常识、不推测应用名和时间）；引用由系统按你实际打开过的段自动记录，不用在正文里标；查不到就用自己的话说没有。'
+        ]
+      : [
+          '底线：不编造（只依据你真的读到的东西，不补常识、不推测应用名和时间）；查不到就用自己的话说没有。'
+        ]),
+    ...(final && toolsOn
       ? ['【收尾】检索轮数已经用尽：本轮不要再调用工具，直接基于已经看到的结果回答；证据不够就如实说没有。']
       : [])
   ].join('\n')
@@ -538,7 +583,8 @@ export function buildChainAskLoopMessages(
   payload: ChainAskLoopPayload,
   options: { final?: boolean } = {},
   image?: { readonly dataUrl: string },
-  personaPrompt?: string
+  personaPrompt?: string,
+  toolGroups?: { screen: boolean; diary: boolean }
 ): LlmMessage[] {
   const files = payload.attachments?.files ?? []
   const userText = JSON.stringify({
@@ -550,7 +596,10 @@ export function buildChainAskLoopMessages(
     ...(payload.attachments?.images ?? [])
   ]
   const messages: LlmMessage[] = [
-    { role: 'system', content: buildAskLoopSystemPrompt(payload, options.final === true, personaPrompt) },
+    {
+      role: 'system',
+      content: buildAskLoopSystemPrompt(payload, options.final === true, personaPrompt, toolGroups)
+    },
     { role: 'user', content: userText, ...(images.length > 0 ? { images } : {}) }
   ]
   payload.turns.forEach((turn, index) => {
@@ -708,7 +757,8 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
   async function requestOnce(
     messages: LlmMessage[],
     callOptions: LlmCompleteOptions,
-    mode: AskLoopRequestMode
+    mode: AskLoopRequestMode,
+    tools?: readonly AskLoopTool[]
   ): Promise<LlmJsonResult | LlmAskLoopResult> {
     const controller = new AbortController()
     // 工具循环默认开 thinking（D55 ③）：思维链先吃 token，2000 的默认上限会把
@@ -753,7 +803,7 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
             // 工具轮不带 response_format：json_object 会禁止 tool_calls 轮输出；
             // 收尾轮反过来：不带 tools、发 response_format，逼模型给最终 JSON
             ...(mode === 'ask-loop'
-              ? { tools: ASK_LOOP_TOOLS }
+              ? { tools: tools ?? ASK_LOOP_TOOLS }
               : callOptions.freeText === true
                 ? {}
                 : { response_format: { type: 'json_object' } }),
@@ -894,11 +944,12 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
   async function callWithRetry(
     build: () => LlmMessage[],
     callOptions: LlmCompleteOptions,
-    mode: AskLoopRequestMode = 'json'
+    mode: AskLoopRequestMode = 'json',
+    tools?: readonly AskLoopTool[]
   ): Promise<LlmJsonResult | LlmAskLoopResult> {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await requestOnce(build(), callOptions, mode)
+        return await requestOnce(build(), callOptions, mode, tools)
       } catch (error) {
         if (error instanceof LlmAbortError) throw error
         if (!isRetryable(error) || attempt >= maxRetries) throw error
@@ -962,16 +1013,36 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
      * 问记忆 · 工具循环（toolloop）：branded 循环上下文 → 本轮 toolCalls 或最终 JSON。
      * 工具轮不带 response_format（会禁掉 tool_calls）；`allowTools: false` 是收尾轮：
      * 不带 tools、改发 response_format，并把「只剩最后一步、直接作答」写进 system。
+     *
+     * 2026-10-30（D62）：`toolGroups` 决定发哪些工具；两组都关时**只发一次请求**
+     * （模式层已经把轮数预算压成 0），system 里也不写「工具 / 数据边界 / 收尾」。
      */
     async completeAskLoop(
       payload: ChainAskLoopPayload,
       callOptions: LlmCompleteOptions = {}
     ): Promise<LlmAskLoopResult> {
-      const allowTools = callOptions.allowTools !== false
+      const toolGroups = callOptions.toolGroups ?? { screen: true, diary: true }
+      const tools = askLoopToolsFor(toolGroups)
+      const toolsAvailable = tools.length > 0
+      const allowTools = callOptions.allowTools !== false && toolsAvailable
+      // 无工具模式（D62）：这一问没有「收尾轮」可谈，直接要自由文本；
+      // 有工具时仍沿用老口径（收尾轮由链层显式传 freeText）。
+      const callWithFreeText =
+        toolsAvailable || callOptions.freeText === true
+          ? callOptions
+          : { ...callOptions, freeText: true }
       return (await callWithRetry(
-        () => buildChainAskLoopMessages(payload, { final: !allowTools }, callOptions.image, callOptions.personaPrompt),
-        callOptions,
-        allowTools ? 'ask-loop' : 'ask-loop-final'
+        () =>
+          buildChainAskLoopMessages(
+            payload,
+            { final: !allowTools },
+            callOptions.image,
+            callOptions.personaPrompt,
+            toolGroups
+          ),
+        callWithFreeText,
+        allowTools ? 'ask-loop' : 'ask-loop-final',
+        tools
       )) as LlmAskLoopResult
     }
   }

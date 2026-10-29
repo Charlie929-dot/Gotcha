@@ -57,6 +57,11 @@ export type ParseChainReplyResult =
 /** 解析选项（只在「关于对话本身」的答案上放开无引用，见下） */
 export interface ParseChainReplyOptions {
   /**
+   * 允许 `{"answer":"...","citations":[]}` 这种无引用答复（2026-10-29 晚，DSH 式）：
+   * 引用改由工具侧「真正打开过的段」自动带出，模型不写 citations 也不该算没找到。
+   */
+  allowNoCitations?: boolean
+  /**
    * 允许 `{"answer":"...","citations":[],"conversation":true}`：
    * 回答的是「你刚才问了什么」这类对话本身，没有屏幕段可引，不该按「没找到」处理。
    * 由循环层按「本会话有上文 / 真的查过 ask_history」决定是否放开。
@@ -147,8 +152,30 @@ export function parseChainReply(
       return { ok: true, kind: 'answer', answer: truncate(text, ANSWER_MAX_CHARS), citations: [], memories: [] }
     }
     // 只剩一句固定文案、什么也没说：维持「没找到」，UI 用固定文案（证据即沉默）。
-    if (isBareNoEvidence(text)) {
+    // allowNoCitations（循环路径）时交给上层按「已读」归一，避免把已读段丢掉。
+    if (isBareNoEvidence(text) && options.allowNoCitations !== true) {
       return { ok: false, reason: 'no-citations', message: '引用全被剥空' }
+    }
+    // 模型自己标了「查到了但不够」：即使没有引用也保留说明（循环层会补上已读段）。
+    if (json.insufficient === true) {
+      return {
+        ok: true,
+        kind: 'insufficient',
+        answer: truncate(text, ANSWER_MAX_CHARS),
+        citations: [],
+        memories: []
+      }
+    }
+    // 2026-10-29 晚（DSH 式）：引用由工具侧「真正打开过的段」自动带出，
+    // 模型没写 citations 不再算「没找到」——只要正文不是固定文案，就是正常答复。
+    if (options.allowNoCitations === true) {
+      return {
+        ok: true,
+        kind: 'answer',
+        answer: truncate(text, ANSWER_MAX_CHARS),
+        citations: [],
+        memories: []
+      }
     }
     // 给了引用却全被白名单剥掉 = 编造 / 指错段：仍按「没找到」收口，不把无依据的正文放出来。
     // 只有「一条引用都没给」、且本轮**确实检索到了段**时，才把说明当成「查到了但不够」——
@@ -180,64 +207,39 @@ const SEGMENT_MARK_RE = /\[\[\s*段\s*(\d+)\s*\]\]/gu
 const MEMORY_MARK_RE = /\[\[\s*日记\s*(\d+)\s*\]\]/gu
 
 /**
- * 自由文本答复（2026-10-29 拍板：**不再强制模型填 JSON**）。
+ * 自由文本答复（2026-10-29 晚，DSH 式）。
  *
- * ta 想怎么说话就怎么说话；只有「引用了哪一段」需要机器能认出来，所以约定两个轻记号：
- * `[[段 12]]` / `[[日记 7]]`。没写记号就是「这段话没有引用」——聊天、寒暄、问时间都允许。
+ * 引用不再由模型在正文里标：`read_segment` / `read_diary` 打开过什么，驱动层自动记录，
+ * 最终结果由那份「已读」带出。正文里残留的旧记号（`[[段 12]]` / `[[日记 7]]`）
+ * 只从显示里剥掉，不参与引用；也不再做「空括号 / 连续空格」的全局清洗
+ * （那会把 `.keys()` 和代码缩进改坏）。
  *
- * 仍然保留的底线（不是格式限制，是不许编造）：记号里的 id 必须在本次命中白名单里，
- * 编造的整条丢掉；只写了「信息链里没找到」这一句的，仍按没找到收口。
+ * 只写「信息链里没找到」这一句的，仍按没找到收口（由循环层判定）。
  */
-export function parseChainReplyText(
-  raw: string,
-  meta: ReadonlyMap<number, CitationMeta>,
-  options: ParseChainReplyOptions = {}
-): ParseChainReplyResult {
+export function parseChainReplyText(raw: string): ParseChainReplyResult {
   const text = raw.trim()
   if (text === '') return { ok: false, reason: 'shape', message: '答复为空' }
 
-  const seenSegments = new Set<number>()
-  const citations: ChainAskCitation[] = []
-  const seenMemories = new Set<number>()
-  const memories: ChainAskMemoryCitation[] = []
-
   const body = text
-    .replace(SEGMENT_MARK_RE, (_whole, idRaw: string) => {
-      const id = Number(idRaw)
-      const known = meta.get(id)
-      if (known !== undefined && !seenSegments.has(id) && citations.length < MAX_CITATIONS) {
-        seenSegments.add(id)
-        citations.push({ segmentId: id, at: known.at, app: known.app, title: known.title, why: '' })
-      }
-      return ''
-    })
-    .replace(MEMORY_MARK_RE, (_whole, idRaw: string) => {
-      const id = Number(idRaw)
-      const known = options.memoryMeta?.get(id)
-      if (known !== undefined && !seenMemories.has(id) && memories.length < MAX_MEMORIES) {
-        seenMemories.add(id)
-        memories.push({
-          itemId: id,
-          day: known.day,
-          section: known.section,
-          why: '',
-          snippet: truncate(known.text.replace(/\s+/gu, ' ').trim(), MEMORY_QUOTE_MAX_CHARS)
-        })
-      }
-      return ''
-    })
-    .replace(/[（(]\s*[)）]/gu, '')
-    .replace(/[ \t]{2,}/gu, ' ')
+    // 先拆掉包在旧记号外面的括号，再删记号（避免清出空括号）
+    .replace(/[（(]\s*(\[\[\s*段\s*\d+\s*\]\]|\[\[\s*日记\s*\d+\s*\]\])\s*[)）]/gu, '$1')
+    .replace(SEGMENT_MARK_RE, '')
+    .replace(MEMORY_MARK_RE, '')
     .replace(/\s+([，。、；：！？])/gu, '$1')
     .trim()
 
-  const hasAnyCitation = citations.length > 0 || memories.length > 0
-  // 只剩一句「信息链里没找到」且没有任何引用：这是真没找到，不是回答
-  if (!hasAnyCitation && isBareNoEvidence(body)) {
-    return { ok: false, reason: 'no-citations', message: '只说了没找到' }
+  return {
+    ok: true,
+    kind: 'answer',
+    answer: truncate(body === '' ? text : body, ANSWER_MAX_CHARS),
+    citations: [],
+    memories: []
   }
-  const answer = truncate(body === '' ? text : body, ANSWER_MAX_CHARS)
-  return { ok: true, kind: 'answer', answer, citations, memories }
+}
+
+/** 日记引用里的原文片段（去空白、截断；自动引用也用它） */
+export function memorySnippet(text: string): string {
+  return truncate(text.replace(/\s+/gu, ' ').trim(), MEMORY_QUOTE_MAX_CHARS)
 }
 
 /**
@@ -265,7 +267,7 @@ function parseMemoryCitations(
       day: known.day,
       section: known.section,
       why,
-      snippet: truncate(known.text.replace(/\s+/gu, ' ').trim(), MEMORY_QUOTE_MAX_CHARS)
+      snippet: memorySnippet(known.text)
     })
   }
   return out

@@ -151,6 +151,12 @@ export interface AskToolOutcome {
   segments: readonly SearchHitMeta[]
   /** recall_diary / read_diary 给过的日记条目：memories 引用的白名单 */
   memories?: readonly MemoryCitationMeta[]
+  /**
+   * read_segment 真正打开过的段（2026-10-29 晚，拍板改 DSH 式）：
+   * 最终引用不再靠模型在正文里写 `[[段 N]]`，而是由驱动层把「已读」自动带出。
+   * 只有 read_segment 会填这个字段；检索命中不算「读过」。
+   */
+  read?: readonly SearchHitMeta[]
 }
 
 /* ------------------------------------------------------------------ */
@@ -532,7 +538,16 @@ function executeReadSegment(deps: AskToolDeps, args: Record<string, unknown>): A
       offset,
       limit: clampReadLimit(args.limit)
     },
-    segments: []
+    segments: [],
+    // 打开过 = 引用（DSH 式自动记录）：最终答复里不需要任何记号
+    read: [
+      {
+        segmentId: rawId,
+        at: segment.start_ts,
+        app: segment.app ?? '',
+        title: segment.title_last ?? segment.title_first ?? ''
+      }
+    ]
   }
 }
 

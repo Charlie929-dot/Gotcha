@@ -328,7 +328,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'search_info',
       description:
-        '检索屏幕记忆段。时间一律传毫秒时间戳（先按系统提示里的当前时间换算）；keywords 是把问题拆开的关键词，逐词 OR 合并；semantic 是语义弱信号的完整短语。每条命中带 segmentId：要引用它就在答复里写 `[[段 <segmentId>]]`（只标你真正打开读过的段）。',
+        '检索屏幕记忆段。时间一律传毫秒时间戳（先按系统提示里的当前时间换算）；keywords 是把问题拆开的关键词，逐词 OR 合并；semantic 是语义弱信号的完整短语。每条命中带 segmentId；要看全文用 read_segment。',
       parameters: {
         type: 'object',
         properties: {
@@ -362,7 +362,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'read_segment',
       description:
-        '打开一段的正文。search_info 每条只有 80 字摘要，只是命中处附近的一小段，不代表整段；正文可能几万字（地址栏 / URL / 列表 / 页面内容都在里面）。只能打开检索结果里出现过的 segmentId。打开读过的段可以在答复里用 `[[段 <segmentId>]]` 引用；正文里出现的网址就是用户要的链接，原样给，不要用标题拼。',
+        '打开一段的正文。search_info 每条只有 80 字摘要，只是命中处附近的一小段，不代表整段；正文可能几万字（地址栏 / URL / 列表 / 页面内容都在里面）。只能打开检索结果里出现过的 segmentId。正文里出现的网址就是用户要的链接，原样给，不要用标题拼。',
       parameters: {
         type: 'object',
         properties: {
@@ -409,7 +409,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'recall_diary',
       description:
-        '在个人日记（第二本账：用户自己写的中文日记 / 待办 / 摘录）里按关键词、日期或标签检索。用于回答「我最近在想什么 / 我的目标 / 我以前怎么看这件事」。keywords / day / tag / from-to 至少给一个（只给 limit 会被拒绝）。返回带日期、原文摘要与人话理由；引用某条日记时在答复里写 `[[日记 <itemId>]]`（只标你真读过的条目）；要看全文用 read_diary。',
+        '在个人日记（第二本账：用户自己写的中文日记 / 待办 / 摘录）里按关键词、日期或标签检索。用于回答「我最近在想什么 / 我的目标 / 我以前怎么看这件事」。keywords / day / tag / from-to 至少给一个（只给 limit 会被拒绝）。返回带日期、原文摘要与人话理由；要看全文用 read_diary。',
       parameters: {
         type: 'object',
         properties: {
@@ -428,7 +428,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'read_diary',
       description:
-        '打开某一天的日记全文（按段落 / 条目排列）。recall_diary 只给 120 字摘要；要引用原话、看当天完整记录时用这个。返回的 items 里每个 itemId 都可以在答复里用 `[[日记 <itemId>]]` 引用；没写记号就是没有引用。',
+        '打开某一天的日记全文（按段落 / 条目排列）。recall_diary 只给 120 字摘要；要引用原话、看当天完整记录时用这个。返回的 items 带 itemId。',
       parameters: {
         type: 'object',
         properties: {
@@ -507,8 +507,8 @@ function buildAskLoopSystemPrompt(
         ]
   return [
     // 「ta 是谁」= 人设（用户写的）；「ta 经历过什么」= 记忆。这两样就是默认上下文的全部，
-    // 不再在这里堆检索纪律 / 回答格式 —— 怎么用工具、怎么标引用，写在**工具说明书**里
-    // （`ASK_LOOP_TOOLS` 的 description），模型要用哪个工具就看哪个工具自己的说明。
+    // 不再在这里堆检索纪律 / 回答格式 —— 怎么用工具看 `ASK_LOOP_TOOLS` 的 description；
+    // 引用由驱动层按「真的打开过的段」自动记录（2026-10-29 晚，DSH 式），正文不用标记号。
     ...(personaPrompt !== undefined && personaPrompt.trim() !== '' ? [personaPrompt, ''] : []),
     '你是这个记忆系统本身：一个有自己记忆和判断的人，不是检索工具。用户可能找你找东西，也可能只是来聊天。',
     `当前时间：${payload.systemTime}${now === null ? '' : `（毫秒时间戳 ${now}，相对时间先按它换算）`}`,
@@ -520,7 +520,7 @@ function buildAskLoopSystemPrompt(
       : []),
     ...historyLines,
     '怎么说话：用中文正常说，想说什么就说什么，不用包 JSON（JSON 只出现在调用工具时，那是接口不是语气）。工具就是你的眼睛和手，说明书在工具自己身上。',
-    '底线三条：不编造（只依据你真的读到的东西，不补常识、不推测应用名和时间）；引用只标你真的打开过的（怎么写见工具说明书，没标就是没有引用）；查不到就用自己的话说没有。',
+    '底线：不编造（只依据你真的读到的东西，不补常识、不推测应用名和时间）；引用由系统按你实际打开过的段自动记录，不用在正文里标；查不到就用自己的话说没有。',
     ...(final
       ? ['【收尾】检索轮数已经用尽：本轮不要再调用工具，直接基于已经看到的结果回答；证据不够就如实说没有。']
       : [])
@@ -598,6 +598,17 @@ function serializeMessages(
     }
     return { role: message.role, content: message.content }
   })
+}
+
+/**
+ * 问记忆兼容判定（2026-10-29 晚，DSH 式）：只有**整条**内容是一个带 `answer` / `ask`
+ * 字符串的 JSON 对象，才当结构化答复；其余一律按纯文本。这样代码里的 `{}` 不会被
+ * 当成 JSON 回复，也不会再出现「answer 缺失」。
+ */
+function isAskReplyJson(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  return typeof record.answer === 'string' || typeof record.ask === 'string'
 }
 
 function toCount(value: unknown): number {
@@ -821,25 +832,10 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
         )
       }
       let json: unknown
-      try {
-        json = JSON.parse(content)
-      } catch {
-        if (mode !== 'json' || callOptions.freeText === true) {
-          // 工具循环的答复轮没有强约束历史（收尾轮虽有 response_format，个别网关仍会加围栏）：
-          // 模型偶尔裹一层 ```json 围栏，剥掉围栏再试一次（只取首个平衡的对象片段，不含围栏外文字）
-          const start = content.indexOf('{')
-          const end = content.lastIndexOf('}')
-          if (start >= 0 && end > start) {
-            try {
-              json = JSON.parse(content.slice(start, end + 1))
-            } catch {
-              json = undefined
-            }
-          }
-          // 2026-10-29 拍板：不再逼模型填 JSON。它直接说人话（中文回答 / 寒暄 / 拒绝编造）也是有效答复，
-          // 原样作为字符串交给解析层（loop 用 parseChainReplyText 取 `[[段 12]]` 记号）。
-          if (json === undefined) json = content
-        } else {
+      if (mode === 'json') {
+        try {
+          json = JSON.parse(content)
+        } catch {
           // 不带正文，只给可定位的结构信息：非截断的非法 JSON 仍需要知道长度 / 结束原因
           throw new LlmParseError(
             truncated
@@ -847,6 +843,19 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
               : `LLM 返回内容不是合法 JSON（长度 ${content.length}，finish_reason=${finishReason ?? 'unknown'}）`,
             usage
           )
+        }
+      } else {
+        /**
+         * 问记忆（2026-10-29 晚，DSH 式）：最终答复默认就是纯文本。
+         * 只有**整条**内容是 JSON 且带 `answer` / `ask` 时才当结构化答复（兼容老路径）；
+         * 不再从正文里切花括号片段——代码里的 `{}` 会被误当成 JSON 回复。
+         */
+        json = content
+        try {
+          const whole: unknown = JSON.parse(content)
+          if (isAskReplyJson(whole)) json = whole
+        } catch {
+          // 纯文本：原样交给解析层
         }
       }
       return { json, usage, ...reasoningView }

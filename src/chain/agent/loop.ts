@@ -44,14 +44,17 @@ import {
 } from '../../understand/cloud/llm-client'
 import type { ChainAskClientResolution, ChainAskLog } from './ask'
 import { readChainFreshness } from './freshness'
-import { isNoEvidenceAnswer, parseChainReply, parseChainReplyText, type CitationMeta } from './parse'
+import { isNoEvidenceAnswer, memorySnippet, parseChainReply, parseChainReplyText, type CitationMeta } from './parse'
 import {
+  type ChainAskCitation,
+  type ChainAskMemoryCitation,
   type ChainAskResult,
   type ChainAskRelatedSegment,
   type ChainAskStats,
   type ChainAskTraceStep,
   type ChainAskTraceTool,
-  type ChainAskTurnContext
+  type ChainAskTurnContext,
+  MAX_CITATIONS
 } from './types'
 import { createAskToolExecutor, type AskHistorySummary, type DiaryToolDeps, type MemoryCitationMeta } from './tools'
 import type { ChainDb } from '../store'
@@ -83,6 +86,10 @@ export interface AskLoopResumeState {
   steps: readonly ChainAskTraceStep[]
   /** 暂停前给模型看过的日记条目（恢复后 memories 引用仍要能过白名单） */
   memoryWhitelist?: ReadonlyMap<number, MemoryCitationMeta>
+  /** 暂停前真正打开过的段（read_segment）：恢复后引用仍要自动带出 */
+  readSegments?: ReadonlyMap<number, CitationMeta>
+  /** 暂停前真正打开过的日记条目（read_diary）：恢复后引用仍要自动带出 */
+  readMemories?: ReadonlyMap<number, MemoryCitationMeta>
 }
 
 export interface AskLoopContext {
@@ -156,6 +163,31 @@ function relatedFromWhitelist(
   }))
 }
 
+/** 自动引用的展示上限：段沿用 MAX_CITATIONS，日记沿用旧口径 4 条（多的在过程里看） */
+const AUTO_MEMORY_CAP = 4
+
+/** 「已读 → 引用」：read_segment 真正打开过的段（不再看模型正文里的记号） */
+function citationsFromRead(reads: ReadonlyMap<number, CitationMeta>): ChainAskCitation[] {
+  return [...reads.values()].slice(0, MAX_CITATIONS).map((meta) => ({
+    segmentId: meta.segmentId,
+    at: meta.at,
+    app: meta.app,
+    title: meta.title,
+    why: ''
+  }))
+}
+
+/** 「已读 → 日记引用」：read_diary 真正打开过的条目 */
+function memoriesFromRead(reads: ReadonlyMap<number, MemoryCitationMeta>): ChainAskMemoryCitation[] {
+  return [...reads.values()].slice(0, AUTO_MEMORY_CAP).map((meta) => ({
+    itemId: meta.itemId,
+    day: meta.day,
+    section: meta.section,
+    why: '',
+    snippet: memorySnippet(meta.text)
+  }))
+}
+
 /** 每轮思考落盘上限：CoT 可能很长，全存会把历史文件撑大 */
 const MAX_TRACE_THINKING_CHARS = 4_000
 /** 每轮最多记几条工具调用（异常网关可能一口气给很多） */
@@ -206,6 +238,10 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   const whitelist = new Map<number, CitationMeta>(resume?.whitelist ?? [])
   /// 日记引用白名单：recall_diary / read_diary 给过的条目（memories 的越权门）
   const memoryWhitelist = new Map<number, MemoryCitationMeta>(resume?.memoryWhitelist ?? [])
+  /// 已读（DSH 式自动引用）：read_segment / read_diary 真正打开过的段与日记条目。
+  /// 最终 citations 只从这里来——模型在正文里写不写记号都不影响。
+  const readSegments = new Map<number, CitationMeta>(resume?.readSegments ?? [])
+  const readMemories = new Map<number, MemoryCitationMeta>(resume?.readMemories ?? [])
 
   /** 过程（D55 ③）：每轮思考 + 工具调用摘要；恢复时先继承暂停前的步骤 */
   const steps: ChainAskTraceStep[] = resume ? [...resume.steps] : []
@@ -414,6 +450,13 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         for (const meta of outcome.memories ?? []) {
           memoryWhitelist.set(meta.itemId, meta)
         }
+        // 自动引用：只有「真的打开过」才算（read_segment / read_diary），检索命中不算
+        for (const meta of outcome.read ?? []) {
+          readSegments.set(meta.segmentId, meta)
+        }
+        if (call.name === 'read_diary') {
+          for (const meta of outcome.memories ?? []) readMemories.set(meta.itemId, meta)
+        }
         // 检索是主进程同步执行的，耗时直接等于「点下去没反应」的时长。
         // 慢的才记一条（性能方案 §4.4 的 search_ms 观测点），别给每次工具调用刷日志。
         if (outcome.result.kind === 'search_info' && toolMs >= 100) {
@@ -449,7 +492,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           grants,
           stats: { ...stats, hits: hitsShown, evidence: whitelist.size, turns: globalTurn, toolCalls: toolCallCount },
           steps: [...steps],
-          memoryWhitelist: new Map(memoryWhitelist)
+          memoryWhitelist: new Map(memoryWhitelist),
+          readSegments: new Map(readSegments),
+          readMemories: new Map(readMemories)
         })
         log('info', 'chain ask loop: 轮数用尽，等用户决定是否继续', {
           turns: globalTurn,
@@ -467,33 +512,27 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       continue
     }
 
-    // 最终答复轮：引用白名单 + 归一 + 出口（hits / evidence 由 withLoopDiag 统一填）
+    // 最终答复轮：引用由「已读」自动带出（2026-10-29 晚，DSH 式）
     steps.push({ turn: globalTurn, ...(thinking ? { thinking } : {}), tools: [] })
-    const rawCitations = (response.json as { citations?: unknown } | null)?.citations
-    stats.cited = Array.isArray(rawCitations) ? rawCitations.length : 0
+    const autoCitations = citationsFromRead(readSegments)
+    const autoMemories = memoriesFromRead(readMemories)
 
     /**
-     * 2026-10-29 拍板：**不再强制模型填 JSON**。模型直接说话（中文回答、聊天、拒绝编造）
-     * 也认：`parseChainReplyText` 只从 `[[段 12]]` / `[[日记 7]]` 记号里取引用，
-     * 没有记号就是「这段话没有引用」。JSON 老路保留，模型愿意给结构化答复也照吃。
+     * 2026-10-29 晚拍板（DSH 式）：模型直接说话，不用写 `[[段 N]]`，也不用在 JSON 里填 citations。
+     * 引用 = 这一轮真正打开过的段 / 日记条目（read_segment / read_diary），由驱动层自动带出；
+     * JSON 只保留 `answer` / `ask` 的兼容，不再按「有没有引用」判成败。
      */
     const parseOptions = {
-      // 「关于对话本身」的答案不引用屏幕段：只有本会话有上文、或真的查过 ask_history 时才放行，
-      // 避免模型把普通问题也降级成无引用的自由发挥。
+      allowNoCitations: true,
       allowConversationAnswer: (ctx.history?.length ?? 0) > 0 || usedAskHistory,
-      // 日记引用的白名单：本轮 recall_diary / read_diary 实际给模型看过的条目
       memoryMeta: memoryWhitelist
     }
     const parsed =
       typeof response.json === 'string'
-        ? parseChainReplyText(response.json, whitelist, parseOptions)
+        ? parseChainReplyText(response.json)
         : parseChainReply(response.json, whitelist, parseOptions)
-    // 自由文本路径没有原始 citations 字段，按解析后真正留下的条数记；JSON 路径沿用原始条数（含被剥掉的）
-    if (parsed.ok && parsed.kind !== 'clarify' && typeof response.json === 'string') {
-      stats.cited = parsed.citations.length
-    }
     if (!parsed.ok) {
-      // 不成形的具体原因（缺字段 / 结构不对）只进日志：界面只有固定文案，事后没法复盘
+      // 不成形的具体原因（空答复 / 结构不对）只进日志：界面只有固定文案，事后没法复盘
       log('warn', 'chain ask loop: 答复不成形', {
         reason: parsed.reason,
         message: parsed.message,
@@ -526,28 +565,28 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       })
     }
     settleUsage()
+    // 引用只算「真的打开过」的：模型在正文 / JSON 里说引了哪段都不再采信
+    stats.cited = autoCitations.length
     if (parsed.kind === 'insufficient') {
-      // 查到了相关段但撑不起结论：保留模型说明，引用（0–3 条）只当「看过的证据」，
-      // 另外把检索到的段列出来——不再用一句固定文案把这一轮整个盖掉。
+      // 查到了相关段但撑不起结论：保留模型说明，引用 = 已读；再把检索到的段列出来
       return withTrace({
         kind: 'insufficient',
         answer: parsed.answer,
-        citations: parsed.citations,
-        ...(parsed.memories.length > 0 ? { memories: parsed.memories } : {}),
+        citations: autoCitations,
+        ...(autoMemories.length > 0 ? { memories: autoMemories } : {}),
         related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
       })
     }
-    if (isNoEvidenceAnswer(parsed.answer) && parsed.citations.length > 0) {
-      // 根因 7：嘴上说没找到却塞了引用。以前整段丢掉，用户只看到「没找到」；
-      // 现在保留说明与引用（「查到了这些，但不足以回答」比空白有用），日志留 mismatch 供排查。
-      log('warn', 'chain ask loop: answer 声称没找到但 citations 非空，按没找到保留说明', {
-        cited: parsed.citations.length
+    if (isNoEvidenceAnswer(parsed.answer) && autoCitations.length > 0) {
+      // 根因 7：嘴上说没找到、但确实打开过段。保留说明与已读引用，日志留 mismatch 供排查。
+      log('warn', 'chain ask loop: answer 声称没找到但打开过段，按没找到保留说明', {
+        cited: autoCitations.length
       })
       return withTrace({
         kind: 'no-evidence',
         note: parsed.answer,
-        citations: parsed.citations,
+        citations: autoCitations,
         related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
       })
@@ -563,8 +602,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     return withTrace({
       kind: 'answer',
       answer: parsed.answer,
-      citations: parsed.citations,
-      ...(parsed.memories.length > 0 ? { memories: parsed.memories } : {}),
+      citations: autoCitations,
+      ...(autoMemories.length > 0 ? { memories: autoMemories } : {}),
       stats: withLoopDiag(globalTurn, toolCallCount)
     })
   }

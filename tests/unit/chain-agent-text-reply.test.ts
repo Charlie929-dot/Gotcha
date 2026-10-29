@@ -1,15 +1,16 @@
 /**
- * 问记忆 · 自由文本答复（2026-10-29 拍板：不再强制填 JSON）
+ * 问记忆 · 自由文本答复（2026-10-29 晚，DSH 式）
  *
- * 底线没变：引用要能在白名单里找到、编造的段号被剥掉、只说了「没找到」仍按没找到收口。
- * 变的是语气：ta 想聊天就聊天，不必为了通过校验硬凑一个 JSON。
+ * ta 直接说话；引用不再靠模型在正文里标记号，而是由 read_segment / read_diary 的
+ * 「已读」记录自动带出。文本层只负责把旧记号从显示里剥掉，不再拿它算引用；
+ * 也不再做「空括号 / 连续空格」的全局清洗（会改坏代码）。
  */
 
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { askChain, type ChainAskOptions } from '../../src/chain/agent/ask'
-import { parseChainReplyText, type CitationMeta } from '../../src/chain/agent/parse'
+import { parseChainReplyText } from '../../src/chain/agent/parse'
 import { ensureChainSchema } from '../../src/chain/schema'
 import { closeSegment, insertContent, openSegment, type ChainDb } from '../../src/chain/store'
 import { FakeLlmClient } from '../../src/understand/cloud/llm-client'
@@ -62,68 +63,50 @@ function buildDeps(client: FakeLlmClient): ChainAskOptions {
   }
 }
 
-const meta = (id: number): Map<number, CitationMeta> =>
-  new Map([[id, { segmentId: id, at: NOW, app: 'Firefox', title: '文档' }]])
-
 describe('parseChainReplyText', () => {
-  it('纯聊天：没有引用也是正常答复（不再变成「没找到」）', () => {
-    const parsed = parseChainReplyText('在呢。今天想聊点什么？', new Map())
+  it('纯聊天：没有引用也是正常答复', () => {
+    const parsed = parseChainReplyText('在呢。今天想聊点什么？')
     expect(parsed).toMatchObject({ ok: true, kind: 'answer', citations: [] })
     if (parsed.ok && parsed.kind === 'answer') expect(parsed.answer).toBe('在呢。今天想聊点什么？')
   })
 
-  it('[[段 12]] 变成引用，记号从正文里去掉；编造的段号被剥掉', () => {
+  it('旧记号从正文里剥掉，不再产生引用', () => {
     const parsed = parseChainReplyText(
-      '17:57 的〈Firefox〉里在看文档 [[段 12]]。另一段是编的 [[段 999999]]',
-      meta(12)
+      '17:57 的〈Firefox〉里在看文档 [[段 12]]。另一段是编的 [[段 999999]]'
     )
     expect(parsed.ok).toBe(true)
     if (!parsed.ok || parsed.kind !== 'answer') return
-    expect(parsed.citations.map((item) => item.segmentId)).toEqual([12])
-    expect(parsed.citations[0]).toMatchObject({ app: 'Firefox', at: NOW })
+    expect(parsed.citations).toEqual([])
     expect(parsed.answer).not.toContain('[[段')
     expect(parsed.answer).toContain('看文档')
   })
 
-  it('[[日记 7]] 走日记白名单；没有白名单时整条丢掉', () => {
-    const memoryMeta = new Map([
-      [7, { itemId: 7, day: '2026-10-28', section: 'Diary', text: '今天早上有点困' }]
-    ])
-    const withWhitelist = parseChainReplyText('你说过早上有点困 [[日记 7]]', meta(12), {
-      memoryMeta
-    })
-    expect(withWhitelist.ok).toBe(true)
-    if (withWhitelist.ok && withWhitelist.kind === 'answer') {
-      expect(withWhitelist.memories.map((item) => item.itemId)).toEqual([7])
-      expect(withWhitelist.answer).not.toContain('[[日记')
-    }
-    const without = parseChainReplyText('你说过早上有点困 [[日记 7]]', meta(12))
-    expect(without.ok && without.kind === 'answer' && without.memories.length === 0).toBe(true)
+  it('旧日记记号也从正文里剥掉，不再产生 memories', () => {
+    const parsed = parseChainReplyText('你说过早上有点困 [[日记 7]]')
+    expect(parsed.ok && parsed.kind === 'answer' && parsed.answer).toBe('你说过早上有点困')
+    if (parsed.ok && parsed.kind === 'answer') expect(parsed.memories).toEqual([])
   })
 
-  it('只说了「信息链里没找到」仍按没找到收口（不把它当回答）', () => {
-    expect(parseChainReplyText('信息链里没找到', new Map())).toMatchObject({
-      ok: false,
-      reason: 'no-citations'
-    })
-    expect(parseChainReplyText('信息链里没找到。', new Map())).toMatchObject({
-      ok: false,
-      reason: 'no-citations'
-    })
+  it('只说了「信息链里没找到」仍然是文本，由循环层收口', () => {
+    expect(parseChainReplyText('信息链里没找到')).toMatchObject({ ok: true, kind: 'answer' })
+    expect(parseChainReplyText('信息链里没找到。')).toMatchObject({ ok: true, kind: 'answer' })
   })
 
-  it('去掉记号后不留下空括号 / 多余空格', () => {
-    const parsed = parseChainReplyText('我在（[[段 12]]）看到过这个', meta(12))
-    expect(parsed.ok && parsed.kind === 'answer' && parsed.answer).toBe('我在看到过这个')
+  it('拆掉引用外层括号，但不改正文里的空括号与缩进', () => {
+    const parsed = parseChainReplyText('我在（[[段 12]]）看到过这个；代码是 `.keys()`')
+    expect(parsed.ok && parsed.kind === 'answer' && parsed.answer).toBe('我在看到过这个；代码是 `.keys()`')
+
+    const code = parseChainReplyText('```python\n    f.write(x)\n```')
+    expect(code.ok && code.kind === 'answer' && code.answer).toContain('    f.write(x)')
   })
 
   it('空答复算结构不对', () => {
-    expect(parseChainReplyText('   ', new Map())).toMatchObject({ ok: false, reason: 'shape' })
+    expect(parseChainReplyText('   ')).toMatchObject({ ok: false, reason: 'shape' })
   })
 })
 
-describe('askChain · 自由文本收口', () => {
-  it('寒暄：模型直接说话，不再落成「没找到」', async () => {
+describe('askChain · 自动引用（DSH 式）', () => {
+  it('寒暄：模型直接说话，无引用也正常', async () => {
     seed()
     const client = new FakeLlmClient([{ json: '你好呀，我在。' }])
     const result = await askChain(buildDeps(client), '你好')
@@ -133,7 +116,22 @@ describe('askChain · 自由文本收口', () => {
     expect(result.citations).toEqual([])
   })
 
-  it('自由文本 + [[段 id]]：引用带上服务端事实；编造的剥掉', async () => {
+  it('read_segment 打开过的段自动成为引用；正文不写记号也行', async () => {
+    const id = seed()
+    const client = new FakeLlmClient([
+      { toolCalls: [{ name: 'search_info', arguments: { keywords: ['文档'] } }] },
+      { toolCalls: [{ name: 'read_segment', arguments: { segmentId: id } }] },
+      { json: '08:50 的〈Firefox〉在看文档' }
+    ])
+    const result = await askChain(buildDeps(client), '我刚才在看什么')
+    expect(result.kind).toBe('answer')
+    if (result.kind !== 'answer') return
+    expect(result.citations.map((item) => item.segmentId)).toEqual([id])
+    expect(result.citations[0]).toMatchObject({ app: 'Firefox', at: at(-600) })
+    expect(result.answer).not.toContain('[[段')
+  })
+
+  it('模型写引用了但没打开正文：不算引用，记号也不留在正文', async () => {
     const id = seed()
     const client = new FakeLlmClient([
       { toolCalls: [{ name: 'search_info', arguments: { keywords: ['文档'] } }] },
@@ -142,7 +140,7 @@ describe('askChain · 自由文本收口', () => {
     const result = await askChain(buildDeps(client), '我刚才在看什么')
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
-    expect(result.citations.map((item) => item.segmentId)).toEqual([id])
+    expect(result.citations).toEqual([])
     expect(result.answer).not.toContain('[[段')
   })
 })

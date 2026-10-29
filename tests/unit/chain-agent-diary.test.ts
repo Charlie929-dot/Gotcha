@@ -58,17 +58,16 @@ afterEach(() => {
 })
 
 describe('runAskLoop · 日记引用', () => {
-  it('recall_diary 命中可以当引用：memories 带日期 / 段落 / 原文片段', async () => {
+  it('read_diary 打开过的条目自动成为 memories（recall 只给摘要，不算引用）', async () => {
     const client = new FakeLlmClient([
       {
         toolCalls: [{ name: 'recall_diary', arguments: { keywords: ['评选'] } }],
         usage: { promptTokens: 10, completionTokens: 2 }
       },
+      { toolCalls: [{ name: 'read_diary', arguments: { day: '2026-09-29' } }] },
       {
         json: {
-          answer: '你去年评奖学金时重点观察了肖梦婷的讲解。',
-          citations: [],
-          memories: [{ itemId: 7, why: '日记里记了这次评选' }]
+          answer: '你去年评奖学金时重点观察了肖梦婷的讲解。'
         },
         usage: { promptTokens: 20, completionTokens: 8 }
       }
@@ -89,19 +88,19 @@ describe('runAskLoop · 日记引用', () => {
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
     expect(result.answer).toContain('肖梦婷')
-    // 屏幕段一条没有，日记引用一条就够撑起这次回答
+    // 屏幕段一条没有，日记引用一条就够撑起这次回答（引用由 read_diary 自动带出）
     expect(result.citations).toHaveLength(0)
     expect(result.memories).toHaveLength(1)
     expect(result.memories![0]).toMatchObject({
       itemId: 7,
       day: '2026-09-29',
       section: 'Diary',
-      why: '日记里记了这次评选'
+      why: ''
     })
     expect(result.memories![0].snippet).toContain('肖梦婷')
   })
 
-  it('编造的 itemId 被剥掉：只剩编造引用 → 按没找到收口', async () => {
+  it('模型写的 memories 不再采信：没打开就只是普通答复', async () => {
     const client = new FakeLlmClient([
       { toolCalls: [{ name: 'recall_diary', arguments: { keywords: ['评选'] } }] },
       { json: { answer: '你记过这件事。', citations: [], memories: [{ itemId: 999, why: '编的' }] } }
@@ -119,7 +118,9 @@ describe('runAskLoop · 日记引用', () => {
       '我记过什么？'
     )
 
-    expect(result.kind).toBe('no-evidence')
+    expect(result.kind).toBe('answer')
+    if (result.kind !== 'answer') return
+    expect(result.memories ?? []).toHaveLength(0)
   })
 
   it('read_diary 打开当天条目，也能作为引用来源', async () => {

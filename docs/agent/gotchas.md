@@ -1,4 +1,4 @@
-﻿# 已知坑（Gotchas）
+# 已知坑（Gotchas）
 
 > `AGENTS.md` 的外链细节。踩到一个补一行，带现象和对策。
 
@@ -19,6 +19,8 @@
 | 透明置顶窗口 | 挡点击 / 抢焦点 / 任务栏异常 | 收起态 `setIgnoreMouseEvents(true, { forward: true })`，只在交互区恢复；永不 `focus()` 抢焦点 |
 | 归纳任务与实时采集争用 | 卡顿、事件积压 | 归纳走 worker + 任务队列，空闲/低负载时执行；队列有上限与背压 |
 | 「为了调试」打印原文 | 隐私事故 | 日志只记 id + 元数据；代码审查重点看日志语句 |
+| 自由文本答复做全局清洗 | 删「空括号 / 连续空格」会把 `.keys()` 删成 `.keys`、把代码缩进压成 1 个空格；用户以为模型「识别错了」，实际是后处理改的（2026-10-29 21:45 真机） | 清洗只做「拆引用外层括号 + 删旧记号」；代码围栏内不做任何改写。答复里的 `.keys()` 必须原样保留 |
+| 从正文里切 `{...}` 当 JSON | 代码里的 `jaccard_matrix = {}` 被切成合法 JSON `{}`，解析层报「answer 缺失」，整条答复丢掉（2026-10-29 21:42 真机） | ask 模式只认**整条**内容是 JSON 且带 `answer` / `ask`；否则一律按纯文本交给解析层 |
 | 文档漂移 | 方案说的和代码不一致 | 按 workflow.md §5 同步矩阵 + 提交前自检 |
 | Electron 宿主 shell 启动 electron | DSH（Electron 应用）向子 shell 注入 `ELECTRON_RUN_AS_NODE=1`，`electron.exe` 退化为纯 Node：`electron.app` undefined、`whenReady` 直接崩（2026-10-21 验证：Electron 45.0.0） | 启动前清变量：PowerShell `Remove-Item Env:\ELECTRON_RUN_AS_NODE`；bash `unset ELECTRON_RUN_AS_NODE`。仅 DSH 派生 shell 需要，用户自有终端不受影响 |
 | electron 二进制未随 npm install 下载 | 本机 `npm install` 后 `node_modules/electron/dist` 缺失（electron 45 包未见 postinstall 钩子，2026-10-21 验证），dev 起不来 | 装完检查 `node_modules\electron\dist\electron.exe`（约 238MB）；缺失则 `node node_modules/electron/install.js` 手动补 |

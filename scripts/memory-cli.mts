@@ -4,6 +4,9 @@
  *   npm run memory -- ingest [目录]
  *   npm run memory -- recall 关键词1 关键词2 [--day 2026-09-29] [--tag 工程] [--limit 8]
  *   npm run memory -- day 2026-09-29
+ *   npm run memory -- items 关键词            # 浏览（按天倒序，20 一条页）
+ *   npm run memory -- delete 123              # 删一条（进回收站，同步不会再带回来）
+ *   npm run memory -- restore <uid>           # 撤销删除
  *   npm run memory -- profile
  *   npm run memory -- persona get
  *   npm run memory -- persona set name 小记
@@ -22,12 +25,16 @@ import { openDatabase } from '../src/db'
 import { getSetting, setSetting } from '../src/db/settings'
 import {
   buildMemoryProfile,
+  countDeleted,
+  deleteMemoryItem,
   forgetVault,
+  listMemoryItems,
   listMemorySources,
   memoryStats,
   previewMemoryProfile,
   readMemoryDay,
   recallMemory,
+  restoreMemoryItem,
   syncVault
 } from '../src/memory/store'
 import { readPersona, resolveVaultDir } from '../src/memory/persona'
@@ -53,6 +60,9 @@ function usage(): never {
       '  npm run memory -- ingest [目录]',
       '  npm run memory -- recall <关键词...> [--day yyyy-mm-dd] [--tag 标签] [--limit N]',
       '  npm run memory -- day <yyyy-mm-dd>',
+      '  npm run memory -- items [关键词]（也认 2026-09 / 2026-09-29）',
+      '  npm run memory -- delete <条目 id>',
+      '  npm run memory -- restore <uid>',
       '  npm run memory -- profile',
       '  npm run memory -- sources',
       '  npm run memory -- forget <目录>',
@@ -114,6 +124,35 @@ try {
     } else {
       console.log(view.text)
     }
+  } else if (command === 'items') {
+    const search = rest.join(' ').trim()
+    const page = listMemoryItems(db, { search, limit: 20 })
+    console.log(`# ${page.total} 条${page.hasMore ? `（只显示前 ${page.items.length} 条）` : ''}`)
+    for (const item of page.items) {
+      const time = item.ts !== null ? ` ${hhmm(item.ts)}` : ''
+      console.log(`\n[${item.day_key}${time}] ${item.section} · ${item.kind} · #${item.id}`)
+      console.log(`  ${item.text.slice(0, 200)}`)
+    }
+    console.log(`\n回收站：${countDeleted(db)} 条`)
+  } else if (command === 'delete') {
+    const id = Number(rest[0])
+    if (!Number.isInteger(id) || id <= 0) usage()
+    const result = deleteMemoryItem(db, id)
+    if (result === null) {
+      console.error(`没有这条记忆：#${rest[0]}（先 npm run memory -- items 看一眼 id）`)
+      process.exit(1)
+    }
+    console.log(`已删除 #${id}（${result.item.day_key}）· 回收站 ${result.deleted} 条`)
+    console.log(`撤销：npm run memory -- restore ${result.item.uid}`)
+  } else if (command === 'restore') {
+    const uid = rest[0]
+    if (!uid) usage()
+    const item = restoreMemoryItem(db, uid)
+    if (item === null) {
+      console.error('回收站里没有这条（可能已经恢复，或超出了保留上限）')
+      process.exit(1)
+    }
+    console.log(`已恢复 ${item.day_key} 的一条（#${item.id}）`)
   } else if (command === 'profile') {
     const preview = previewMemoryProfile(db)
     console.log(JSON.stringify({ stats: preview.stats, observations: preview.observations }, null, 2))

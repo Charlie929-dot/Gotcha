@@ -874,3 +874,127 @@ button.stop {
   flex: 1 1 220px;
   margin: 0;
 }
+
+/* ---- 个人记忆 · 记忆条目（浏览 / 删除；一条一行小卡片） ---- */
+
+.memory-browse {
+  margin-top: 10px;
+  padding-top: 10px;
+  /* 抽屉底部的「保存」栏是 sticky 的：留出一段空白，最后一条和提示才不会被盖住 */
+  padding-bottom: 56px;
+  border-top: 1px dashed var(--line);
+}
+
+.memory-browse-head {
+  display: flex;
+  gap: 8px;
+}
+
+.memory-browse-head input[type='search'] {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.memory-browse-head select {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.memory-browse-head input:focus,
+.memory-browse-head select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.memory-items {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.memory-item {
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.memory-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.memory-item-day {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.memory-item-del {
+  flex: 0 0 auto;
+  padding: 0 7px;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.memory-item-del:hover {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.memory-item-text {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+/* 长条目（一段能有两千字）先折到 8 行，点一下展开全文 —— 不点也不占一屏 */
+.memory-item-text.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 8;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.memory-item-meta {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.memory-browse-actions {
+  display: flex;
+  gap: 8px;
+  padding: 8px 0 0;
+}
+
+.memory-browse-actions button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}

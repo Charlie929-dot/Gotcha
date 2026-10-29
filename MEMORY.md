@@ -30,10 +30,10 @@
 ```
 src/memory/
   vault.ts     日记 markdown 解析（纯函数）：frontmatter / 模板 / Tracking / Diary 块
-  schema.ts    mem_* 三张表的 DDL（v8 迁移引用）
-  store.ts     增量同步、召回打分、按天读、统计与观测
+  schema.ts    mem_* 四张表的 DDL（v8 三张 + v9 回收站 mem_deleted）
+  store.ts     增量同步、召回打分、按天读、浏览 / 删除 / 撤销、统计与观测
   persona.ts   人设 + 红线（settings 表）+ 日记目录解析
-src/db/migrations.ts   v8：建 mem_items / mem_sources / mem_observations
+src/db/migrations.ts   v8：建 mem_items / mem_sources / mem_observations；v9：mem_deleted
 src/chain/agent/
   tools.ts     新增 recall_diary / read_diary / memory_profile（执行 + 参数钳制）
   parse.ts     memories[] 解析：itemId 必须落在本轮白名单里
@@ -42,8 +42,9 @@ src/chain/agent/
 src/understand/cloud/deepseek.ts  工具 schema + system 纪律 + 人设注入点
 src/main/index.ts                 启动 / 提问前增量同步、工具依赖注入、persona
 src/main/memory-settings.ts       设置抽屉（日记目录 + 人设）的校验与视图；保存后由 index.ts 立即同步
-src/renderer/ask/                  「日记引用」卡片（日期 + 原文片段 + why）+ 设置抽屉「个人记忆」一节
-scripts/memory-cli.mts + memory.mjs  CLI（ingest / recall / day / profile / persona）
+src/main/memory-admin.ts          设置抽屉「记忆条目」的校验与视图（浏览 / 删除 / 撤销）
+src/renderer/ask/                  「日记引用」卡片 + 设置抽屉「个人记忆」（目录 / 人设 / 条目列表）
+scripts/memory-cli.mts + memory.mjs  CLI（ingest / recall / day / items / delete / restore / profile / persona）
 ```
 
 ---
@@ -121,6 +122,9 @@ npm run memory -- profile
 npm run memory -- sources                 # 看索引里有哪些来源、各多少条
 npm run memory -- recall 周深 --limit 5
 npm run memory -- day 2026-09-29
+npm run memory -- items 周深              # 浏览（按天倒序，20 条一页；也认 2026-09 / 2026-09-29）
+npm run memory -- delete 4475             # 删一条（进回收站，同步不会再带回来）
+npm run memory -- restore <uid>           # 撤销删除
 npm run memory -- forget "C:\Users\HP\charlie_vault\daily"   # 只删这个目录的记忆
 npm run memory -- persona set tone "说话短一点，别煽情"
 npm run memory -- persona set redlines "别提比赛成绩|别用感叹号"
@@ -130,6 +134,9 @@ npm run memory -- persona set redlines "别提比赛成绩|别用感叹号"
 - **设置抽屉 → 个人记忆**（2026-10-29 新增，替代 CLI 改配置）：日记目录（手填，留空 = 自动找；
   环境变量优先时状态行会注明）＋ 名字 / 口吻 ＋ 追加红线（**每行一条**，最多 8 条）。
   **保存即同步**：按钮旁直接回「N 篇 / 新增 / 删除 / 共几条」，不用再记 CLI；
+- **设置抽屉 → 个人记忆 → 记忆条目**（2026-10-29）：关键词 / 日期前缀搜索、类别下拉、
+  一页 20 条「加载更多」；长条目折 8 行，点一下展开。每条右上角「删除」——只从记忆里拿掉，
+  **不改日记原文**；删完给「（可撤销）」，点「撤销删除」原样放回（详见第 8 节）；
 - 启动后 2s、以及每次提问前（节流 60s）自动增量同步；目录不存在就什么都不做（不为没开的功能够建库）；
 - 日记目录查找顺序：`GOTCHA_MEMORY_VAULT` → settings `memory.vault_dir`（`ingest` / 设置抽屉会写）→
   `%USERPROFILE%\charlie_vault\daily` 与 `D:\Github\charlie_vault\daily` 里**日记最多的那个**；
@@ -144,7 +151,28 @@ npm run memory -- persona set redlines "别提比赛成绩|别用感叹号"
 
 ---
 
-## 8. 已实测（2026-10-29，本机真库）
+## 8. 记忆条目：浏览与删除（2026-10-29）
+
+设置抽屉「个人记忆」下面就是条目列表：关键词搜索（也认 `2026-09` / `2026-09-29` 这种日期前缀）、
+类别下拉（日记 / 待办 / 笔记 / 摘录）、一页 20 条「加载更多」；长条目默认折 8 行，点一下展开。
+每条右上角「删除」：**只从记忆里拿掉，不改用户写的 md**，删完消息行给「（可撤销）」，
+点「撤销删除」原样放回。
+
+删除的去向是 `mem_deleted`（v9，回收站）：
+
+- 同步时按 uid **跳过**回收站里的条目 —— 日记原文还在，改别的段落会触发整份重解析，
+  没有这张表，删掉的条目下一次同步就自己回来了；
+- 存整行（不是只存 uid），撤销不用等下一次同步，uid 不变（再同步也不会重复插）；
+- 上限 500 条，超出按删除时间丢最旧的；
+- **改写被删那段 = 新的 uid = 用户新写的一条**，会重新进记忆（这是有意的：删的是「那条内容」）；
+- 删除 / 撤销都要开写连接（会关掉只读连接）：**回答进行中一律拒绝**（主进程 `ask-ipc`
+  按在途提问判定，渲染层也先拦一道）。
+
+CLI 是同一套实现：`items [关键词]` / `delete <id>` / `restore <uid>`。
+
+---
+
+## 9. 已实测（2026-10-29，本机真库）
 
 ```
 scanned 171 · skipped 51（模板 / 空日记）· added 2382 · items 2382
@@ -175,14 +203,25 @@ scanned 171 · skipped 51（模板 / 空日记）· added 2382 · items 2382
   注意：**换目录不会删除另一个目录的记忆**（只清本次目录下消失的文件），所以切目录后
   旧目录条目仍留在库里，要清就用 `npm run memory -- forget <旧目录>`。
 
+**记忆条目验收（2026-10-29 12:2x，真机 dev 实例 + 真库）**：
+- 抽屉里「共 2382 条」，按天倒序，每条带「删除」；搜「肖梦婷」→「共 1 条」（2026-09-29 01:19 的日记）；
+- 删一条 → 消息「已删除 2026-09-29 01:19「…」（可撤销）」+「撤销删除」按钮出现，条目从列表消失；
+- 点「撤销删除」→「已恢复 2026-09-29 的那一条」，条目回到列表；库里 `mem_deleted` 清空、
+  条目数回到 2382（验完复原，没留垃圾）。
+
+CLI 侧同一套（真库副本上跑，不碰真库）：
+- `items 陪伴ai模型` → 1 条；`delete 4475` → 回收站 1 条、搜索变 0 条；
+- **改同一份日记的另一个段落 → 整份重解析（added 1）→ 删掉的那条没有回来**（回收站仍 1 条）；
+- `restore <uid>` → 回到 1 条，再 `ingest` 是 `unchanged 3 / added 0`（不重复插）。
+
 ---
 
-## 9. 明确没做（下一阶段）
+## 10. 明确没做（下一阶段）
 
 1. **LLM 归纳（Hindsight 的 reflect）**：现在 `mem_observations` 只有统计型观测，不编心理分析。
    接模型需要新增 branded payload + 客户端方法（`completeMemoryReflect`），属于第二期。
 2. **向量召回**：日记还没进 bge 会话；关键词召回在 2 千条量级够用，上万条再说。
 3. **冲突消解**：`mem_observations.status` 已留 `superseded`，但「去年讨厌数学 / 今年想学好」这类
    互相打架的记忆还没有自动取代规则。
-4. **记忆管理页**：设置抽屉只管「目录 + 人设」；浏览 / 编辑 / 删除单条日记仍走 CLI 与 `forget`。
+4. **编辑（不只是删除）**：条目只能删 / 撤销，不能改正文——改正文应该改日记原文，下次同步自然更新。
 5. **多来源**：只接了日记目录，B站 / 邮件 / 文件还没进来（参考 bili-scroll 的定时轮 + 只读工具面）。

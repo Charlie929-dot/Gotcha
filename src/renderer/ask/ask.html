@@ -132,6 +132,32 @@
             <p class="hint">
               保存后会立即增量同步日记目录（只清理本次目录下消失的文件）；人设改动从下一次提问开始生效。
             </p>
+
+            <div class="memory-browse">
+              <div class="memory-browse-head">
+                <input
+                  id="memory-search"
+                  type="search"
+                  placeholder="搜关键词；输 2026-09 / 2026-09-29 看某月、某天"
+                />
+                <select id="memory-kind" title="只看某一类">
+                  <option value="">全部</option>
+                  <option value="diary">日记</option>
+                  <option value="task">待办</option>
+                  <option value="note">笔记</option>
+                  <option value="quote">摘录</option>
+                </select>
+              </div>
+              <p class="hint" id="memory-list-msg">正在读取…</p>
+              <ul id="memory-items" class="memory-items"></ul>
+              <div class="memory-browse-actions">
+                <button id="memory-more" type="button" hidden>加载更多</button>
+                <button id="memory-undo" type="button" hidden>撤销删除</button>
+              </div>
+              <p class="hint">
+                删除只把这条从记忆里拿掉，不改你写的日记原文，之后同步也不会带回来；删错了点「撤销删除」放回。
+              </p>
+            </div>
           </section>
 
           <div class="form-actions">

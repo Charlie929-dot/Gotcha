@@ -16,6 +16,9 @@
  * - `ask:settings:get/save`、`ask:provider:models/key/keys`（D53）：
  *   图谱入口封存后，供应商 / 密钥 / 出网确认只能在这里配。校验与图谱窗口**同一套**
  *   （`graph-ipc.ts` 的字段规则直接复用），保存后副作用交给 `onSettingsSaved` 注入。
+ * - `ask:memory:get/save`（vibe/free）：日记目录 + 人设；保存即同步。
+ * - `ask:memory:list/delete/restore`（vibe/free）：设置抽屉里浏览 / 删除 / 撤销单条记忆。
+ *   删除与同步一样要开写连接，**回答进行中一律拒绝**（否则会在只读连接还在读的时候关库）。
  */
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision, ChainAskTurnContext } from '../chain/agent/types'
@@ -23,6 +26,11 @@ import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskHistoryEntry } from './ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
 import type { MemorySettingsSaveResult, MemorySettingsView } from './memory-settings'
+import type {
+  MemoryDeleteView,
+  MemoryListView,
+  MemoryRestoreView
+} from './memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
@@ -88,6 +96,13 @@ export interface AskIpcDeps {
    */
   memorySettings?: () => MemorySettingsView | { error: string }
   saveMemorySettings?: (patch: unknown) => MemorySettingsSaveResult
+  /**
+   * 设置抽屉「记忆条目」：浏览（关键词 / 日期前缀 / 类别，分页）、删除单条（进回收站）、撤销。
+   * 删除与撤销都走写连接，回答进行中拒绝（handler 里按在途提问判定）。
+   */
+  memoryList?: (query: unknown) => MemoryListView
+  memoryDelete?: (input: unknown) => MemoryDeleteView
+  memoryRestore?: (input: unknown) => MemoryRestoreView
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -369,6 +384,58 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask memory settings save failed', { error: String(error) })
           return { ok: false, error: '保存失败' }
+        }
+      }
+    ],
+    [
+      'ask:memory:list',
+      (event, query) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies MemoryListView
+        if (!deps.memoryList) {
+          return { ok: false, error: '当前版本不支持浏览记忆条目' } satisfies MemoryListView
+        }
+        try {
+          return deps.memoryList(query)
+        } catch (error) {
+          deps.log('error', 'ask memory list failed', { error: String(error) })
+          return { ok: false, error: '读取记忆条目失败' } satisfies MemoryListView
+        }
+      }
+    ],
+    [
+      'ask:memory:delete',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies MemoryDeleteView
+        if (!deps.memoryDelete) {
+          return { ok: false, error: '当前版本不支持删除记忆条目' } satisfies MemoryDeleteView
+        }
+        // 删除要开写连接（会关掉只读连接）：在途提问正读着库，等它结束再删
+        if (active !== null) {
+          return { ok: false, error: '等这次回答结束再删（删除会短暂占用数据库）' } satisfies MemoryDeleteView
+        }
+        try {
+          return deps.memoryDelete(input)
+        } catch (error) {
+          deps.log('error', 'ask memory delete failed', { error: String(error) })
+          return { ok: false, error: '删除失败' } satisfies MemoryDeleteView
+        }
+      }
+    ],
+    [
+      'ask:memory:restore',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies MemoryRestoreView
+        if (!deps.memoryRestore) {
+          return { ok: false, error: '当前版本不支持撤销删除' } satisfies MemoryRestoreView
+        }
+        if (active !== null) {
+          return { ok: false, error: '等这次回答结束再撤销（会短暂占用数据库）' } satisfies MemoryRestoreView
+        }
+        try {
+          return deps.memoryRestore(input)
+        } catch (error) {
+          deps.log('error', 'ask memory restore failed', { error: String(error) })
+          return { ok: false, error: '撤销失败' } satisfies MemoryRestoreView
         }
       }
     ],

@@ -56,6 +56,31 @@ export interface MemoryHit extends MemoryItemRow {
   reasons: string[]
 }
 
+/** 浏览 / 管理（设置抽屉的「记忆条目」）：按天倒序分页，关键词或日期前缀过滤 */
+export interface MemoryListQuery {
+  /**
+   * 关键词（空格分词、逐词 OR，与召回同口径）；纯日期（`2026-09` / `2026-09-29`）
+   * 按 `day_key` 前缀匹配——想翻某一月 / 某一天时不用记日期语法。
+   */
+  search?: string
+  kind?: MemoryItemKind
+  offset?: number
+  limit?: number
+}
+
+export interface MemoryListResult {
+  items: MemoryItemRow[]
+  /** 满足条件的总条数（不是这一页） */
+  total: number
+  hasMore: boolean
+}
+
+/** 删一条的结果：删掉的整行 + 回收站现有条数（界面显示「已删除 · 撤销」用） */
+export interface DeleteMemoryResult {
+  item: MemoryItemRow
+  deleted: number
+}
+
 export interface RecallQuery {
   /** 拆好的关键词（逐词 OR，与问记忆的 search_info 同口径） */
   keywords?: readonly string[]
@@ -218,6 +243,12 @@ export function syncVault(db: Db, vaultDir: string, options: SyncVaultOptions = 
     knownSources.set(row.path, { mtime: row.mtime, size: row.size, dayKey: row.day_key })
   }
 
+  // 用户在设置抽屉里删掉的条目：日记原文还在，整份重解析时必须按 uid 跳过，
+  // 否则「改别的段落」就会把删掉的条目一并带回来（回收站见 mem_deleted）。
+  const suppressed = new Set(
+    (db.prepare('SELECT uid FROM mem_deleted').all() as Array<{ uid: string }>).map((row) => row.uid)
+  )
+
   const seenPaths = new Set<string>()
   for (const name of names) {
     const path = join(vaultDir, name)
@@ -277,6 +308,8 @@ export function syncVault(db: Db, vaultDir: string, options: SyncVaultOptions = 
       )
       for (const item of parsed.items) {
         const uid = itemUid(item)
+        // 删过的条目：不插回、也不进 keep（它本来就不在库里；万一旧行还在，下面的移除循环会清掉）
+        if (suppressed.has(uid)) continue
         keep.add(uid)
         // 待办的完成态也进 tags（`open` / `done`）：召回与统计共用一列，不用再读 meta
         const tags = [...item.tags]
@@ -521,6 +554,176 @@ export function readMemoryDay(
     lines.push(`${mark}${item.text}`)
   }
   return { dayKey, items, text: lines.join('\n') }
+}
+
+/* ------------------------------------------------------------------ */
+/* 浏览 / 删除（回收站）                                                */
+/* ------------------------------------------------------------------ */
+
+const LIST_LIMIT_DEFAULT = 20
+const LIST_LIMIT_MAX = 50
+/** 回收站上限：删掉的条目留整行，够撤销就行；超出按删除时间丢最旧的 */
+const DELETED_KEEP = 500
+const DATE_TOKEN_RE = /^\d{4}(?:-\d{2}){0,2}$/u
+
+interface DeletedRow {
+  uid: string
+  source_path: string
+  day_key: string
+  section: string
+  kind: string
+  text: string
+  text_norm: string
+  ts: number | null
+  line_start: number
+  line_end: number
+  tags: string
+  refs: string
+  deleted_at: number
+}
+
+/**
+ * 浏览条目（设置抽屉的「记忆条目」）：按天倒序、同一天按原文顺序（待办在日记前）。
+ * `search` 里纯日期的词按 `day_key` 前缀匹配（`2026-09` / `2026-09-29`），其余按正文 LIKE。
+ */
+export function listMemoryItems(db: Db, query: MemoryListQuery = {}): MemoryListResult {
+  const limit = Math.min(LIST_LIMIT_MAX, Math.max(1, Math.round(query.limit ?? LIST_LIMIT_DEFAULT)))
+  const offset = Math.max(0, Math.round(query.offset ?? 0))
+  const where: string[] = []
+  const params: unknown[] = []
+  if (query.kind !== undefined) {
+    where.push('kind = ?')
+    params.push(query.kind)
+  }
+  const tokens = (query.search ?? '')
+    .trim()
+    .split(/\s+/u)
+    .filter((token) => token !== '')
+    .slice(0, 6)
+  if (tokens.length > 0) {
+    const clauses: string[] = []
+    for (const token of tokens) {
+      if (DATE_TOKEN_RE.test(token)) {
+        clauses.push('day_key LIKE ?')
+        params.push(`${token}%`)
+      } else {
+        clauses.push("text_norm LIKE ? ESCAPE '\\'")
+        params.push(`%${escapeLike(normalizeMemoryText(token))}%`)
+      }
+    }
+    where.push(`(${clauses.join(' OR ')})`)
+  }
+  const clause = where.length === 0 ? '' : ` WHERE ${where.join(' AND ')}`
+  const total = (
+    db.prepare(`SELECT COUNT(*) AS count FROM mem_items${clause}`).get(...params) as { count: number }
+  ).count
+  const rows = db
+    .prepare(
+      `SELECT * FROM mem_items${clause}
+       ORDER BY day_key DESC, COALESCE(ts, 0) ASC, line_start ASC, id ASC
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, limit, offset) as Row[]
+  return { items: rows.map(toItem), total, hasMore: offset + rows.length < total }
+}
+
+/**
+ * 删一条：整行搬进回收站（`mem_deleted`），再从索引删掉。
+ * 同步时会按 uid 跳过回收站里的条目，所以「改日记别的段落」不会把它带回来；
+ * 条目正文改写后 uid 会变，那是用户新写的一条，不受这次删除影响。
+ */
+export function deleteMemoryItem(
+  db: Db,
+  itemId: number,
+  options: { now?: number } = {}
+): DeleteMemoryResult | null {
+  const row = db.prepare('SELECT * FROM mem_items WHERE id = ?').get(itemId) as Row | undefined
+  if (row === undefined) return null
+  const now = options.now ?? nowMs()
+  const item = toItem(row)
+  db.transaction(() => {
+    db.prepare(
+      `INSERT INTO mem_deleted
+         (uid, source_path, day_key, section, kind, text, text_norm, ts, line_start, line_end,
+          tags, refs, deleted_at)
+       VALUES (@uid, @sourcePath, @dayKey, @section, @kind, @text, @textNorm, @ts, @lineStart,
+               @lineEnd, @tags, @refs, @now)
+       ON CONFLICT(uid) DO UPDATE SET deleted_at = excluded.deleted_at`
+    ).run({
+      uid: item.uid,
+      sourcePath: item.source_path,
+      dayKey: item.day_key,
+      section: item.section,
+      kind: item.kind,
+      text: item.text,
+      textNorm: normalizeMemoryText(item.text),
+      ts: item.ts,
+      lineStart: item.line_start,
+      lineEnd: item.line_end,
+      tags: JSON.stringify(item.tags),
+      refs: JSON.stringify(item.refs),
+      now
+    })
+    db.prepare('DELETE FROM mem_items WHERE id = ?').run(itemId)
+    pruneDeleted(db)
+  })()
+  return { item, deleted: countDeleted(db) }
+}
+
+/** 撤销删除：把回收站里的整行原样放回索引（uid 不变，下次同步也不会重复插） */
+export function restoreMemoryItem(
+  db: Db,
+  uid: string,
+  options: { now?: number } = {}
+): MemoryItemRow | null {
+  const row = db.prepare('SELECT * FROM mem_deleted WHERE uid = ?').get(uid) as DeletedRow | undefined
+  if (row === undefined) return null
+  const now = options.now ?? nowMs()
+  db.transaction(() => {
+    db.prepare(
+      `INSERT INTO mem_items
+         (uid, source_path, day_key, section, kind, text, text_norm, ts, line_start, line_end,
+          tags, refs, created_at, updated_at)
+       VALUES (@uid, @sourcePath, @dayKey, @section, @kind, @text, @textNorm, @ts, @lineStart,
+               @lineEnd, @tags, @refs, @now, @now)
+       ON CONFLICT(uid) DO UPDATE SET
+         text = excluded.text,
+         text_norm = excluded.text_norm,
+         ts = excluded.ts,
+         tags = excluded.tags,
+         refs = excluded.refs,
+         updated_at = excluded.updated_at`
+    ).run({
+      uid: row.uid,
+      sourcePath: row.source_path,
+      dayKey: row.day_key,
+      section: row.section,
+      kind: row.kind,
+      text: row.text,
+      textNorm: row.text_norm,
+      ts: row.ts,
+      lineStart: row.line_start,
+      lineEnd: row.line_end,
+      tags: row.tags,
+      refs: row.refs,
+      now
+    })
+    db.prepare('DELETE FROM mem_deleted WHERE uid = ?').run(uid)
+  })()
+  return toItem(db.prepare('SELECT * FROM mem_items WHERE uid = ?').get(uid) as Row)
+}
+
+/** 回收站里有几条（界面显示「已删除 N 条」） */
+export function countDeleted(db: Db): number {
+  return (db.prepare('SELECT COUNT(*) AS count FROM mem_deleted').get() as { count: number }).count
+}
+
+function pruneDeleted(db: Db): void {
+  db.prepare(
+    `DELETE FROM mem_deleted WHERE uid IN (
+       SELECT uid FROM mem_deleted ORDER BY deleted_at DESC, rowid DESC LIMIT -1 OFFSET ?
+     )`
+  ).run(DELETED_KEEP)
 }
 
 /* ------------------------------------------------------------------ */

@@ -1,5 +1,5 @@
 /**
- * 个人记忆 · SQLite 表结构（v8）
+ * 个人记忆 · SQLite 表结构（v9）
  *
  * 与 `events`（屏幕记忆）并列的第二本账：**日记记忆**。
  * 表名统一 `mem_` 前缀，和采集/图谱的表互不干扰；`mem_items` 是事实源，
@@ -73,4 +73,37 @@ CREATE TABLE IF NOT EXISTS mem_observations (
 
 export const MEM_OBSERVATIONS_TOPIC_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_mem_observations_topic ON mem_observations(topic);
+`
+
+/**
+ * 回收站（v9）：用户在设置抽屉里删掉的条目。
+ *
+ * 两个作用：
+ * 1. 同步时**跳过**这些 uid —— 日记原文还在，改别的段落会触发整份重解析，
+ *    没有这张表的话删掉的条目下一次同步就自己回来了；
+ * 2. 存整行（不是只存 uid）：撤销删除可以原样放回，不必等下一次同步。
+ *
+ * 条目正文 / 段落 / 起始行任一变化都会换 uid：那是「新写的一条」，不受这里影响。
+ * 表本身有上限（`DELETED_KEEP`），超出按删除时间丢最旧的。
+ */
+export const MEM_DELETED_DDL = `
+CREATE TABLE IF NOT EXISTS mem_deleted (
+  uid         TEXT PRIMARY KEY,
+  source_path TEXT NOT NULL,
+  day_key     TEXT NOT NULL,
+  section     TEXT NOT NULL,
+  kind        TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  text_norm   TEXT NOT NULL,
+  ts          INTEGER,
+  line_start  INTEGER NOT NULL,
+  line_end    INTEGER NOT NULL,
+  tags        TEXT NOT NULL DEFAULT '[]',
+  refs        TEXT NOT NULL DEFAULT '[]',
+  deleted_at  INTEGER NOT NULL
+);
+`
+
+export const MEM_DELETED_DAY_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_mem_deleted_day ON mem_deleted(day_key);
 `

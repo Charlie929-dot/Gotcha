@@ -38,6 +38,8 @@ import {
   normalizeOcrSql
 } from './schema'
 import {
+  MEM_DELETED_DDL,
+  MEM_DELETED_DAY_INDEX_DDL,
   MEM_ITEMS_DDL,
   MEM_ITEMS_DAY_INDEX_DDL,
   MEM_ITEMS_SOURCE_INDEX_DDL,
@@ -245,6 +247,24 @@ export const migrations: Migration[] = [
       db.exec('DROP INDEX IF EXISTS idx_mem_items_ts')
       db.exec('DROP INDEX IF EXISTS idx_mem_items_day')
       db.exec('DROP TABLE IF EXISTS mem_items')
+    }
+  },
+  {
+    /**
+     * v9：个人记忆回收站。
+     *
+     * `mem_deleted` 存用户删掉的条目整行：同步时按 uid 跳过（原文还在，不能让它自己回来），
+     * 撤销时原样放回。只是删除功能的支撑数据，不影响 `mem_items` 的结构；
+     * down 会丢用户的「已删」标记（条目本身早已不在库里），只用于测试回滚。
+     */
+    version: 9,
+    up(db) {
+      db.exec(MEM_DELETED_DDL)
+      db.exec(MEM_DELETED_DAY_INDEX_DDL)
+    },
+    down(db) {
+      db.exec('DROP INDEX IF EXISTS idx_mem_deleted_day')
+      db.exec('DROP TABLE IF EXISTS mem_deleted')
     }
   }
 ]

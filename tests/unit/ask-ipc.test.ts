@@ -540,3 +540,90 @@ describe('ask IPC：个人记忆设置（日记目录 + 人设）', () => {
     expect(brokenSave(SENDER_OK as never, {})).toEqual({ ok: false, error: '保存失败' })
   })
 })
+
+describe('ask IPC：记忆条目（浏览 / 删除 / 撤销）', () => {
+  const item = { id: 3, uid: 'a'.repeat(40), day: '2026-09-29', text: 't' } as never
+
+  it('浏览：越权拒绝；参数原样交给 deps；没接能力如实拒绝', async () => {
+    const memoryList = vi.fn(() => ({ ok: true as const, items: [item], total: 1, hasMore: false, deleted: 0 }))
+    const deps = buildDeps({ memoryList })
+    const list = handler(deps, 'ask:memory:list')
+
+    expect(await list({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, {})).toEqual({
+      ok: false,
+      error: 'forbidden'
+    })
+    expect(memoryList).not.toHaveBeenCalled()
+    expect(await list(SENDER_OK as never, { search: '周深', offset: 20 })).toMatchObject({ ok: true, total: 1 })
+    expect(memoryList).toHaveBeenCalledWith({ search: '周深', offset: 20 })
+
+    expect(await handler(buildDeps(), 'ask:memory:list')(SENDER_OK as never, {})).toEqual({
+      ok: false,
+      error: '当前版本不支持浏览记忆条目'
+    })
+  })
+
+  it('删除 / 撤销：结果原样回传；抛错变成可读结果', async () => {
+    const memoryDelete = vi.fn(() => ({ ok: true as const, item, deleted: 1 }))
+    const memoryRestore = vi.fn(() => ({ ok: true as const, item }))
+    const deps = buildDeps({ memoryDelete, memoryRestore })
+
+    expect(await handler(deps, 'ask:memory:delete')(SENDER_OK as never, { id: 3 })).toMatchObject({
+      ok: true,
+      deleted: 1
+    })
+    expect(memoryDelete).toHaveBeenCalledWith({ id: 3 })
+    expect(await handler(deps, 'ask:memory:restore')(SENDER_OK as never, { uid: 'a'.repeat(40) })).toMatchObject({
+      ok: true
+    })
+
+    const logs: string[] = []
+    const broken = buildDeps({
+      memoryDelete: () => {
+        throw new Error('db gone')
+      },
+      log: (_level, message) => logs.push(message)
+    })
+    expect(await handler(broken, 'ask:memory:delete')(SENDER_OK as never, { id: 3 })).toEqual({
+      ok: false,
+      error: '删除失败'
+    })
+    expect(logs).toEqual(['ask memory delete failed'])
+  })
+
+  it('回答进行中：删除与撤销都拒绝（写连接会关掉正在读的只读连接）', async () => {
+    let release: (() => void) | null = null
+    const pending = new Promise<ChainAskResult>((resolve) => {
+      release = () =>
+        resolve({
+          kind: 'no-evidence',
+          stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 }
+        })
+    })
+    const memoryDelete = vi.fn(() => ({ ok: true as const, item, deleted: 1 }))
+    const memoryRestore = vi.fn(() => ({ ok: true as const, item }))
+    const deps = buildDeps({ ask: () => pending, memoryDelete, memoryRestore })
+    // 在途状态挂在 handler 表上：必须用**同一张表**（生产里注册的也是一份）
+    const handlers = createAskIpcHandlers(deps)
+    const query = handlers.get('ask:query')!
+    const remove = handlers.get('ask:memory:delete')!
+    const restore = handlers.get('ask:memory:restore')!
+
+    const running = query(SENDER_OK as never, '问点什么')
+    expect(await remove(SENDER_OK as never, { id: 3 })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('回答结束')
+    })
+    expect(await restore(SENDER_OK as never, { uid: 'a'.repeat(40) })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('回答结束')
+    })
+    expect(memoryDelete).not.toHaveBeenCalled()
+    expect(memoryRestore).not.toHaveBeenCalled()
+
+    release!()
+    await running
+    expect(await remove(SENDER_OK as never, { id: 3 })).toMatchObject({ ok: true })
+    expect(memoryDelete).toHaveBeenCalledTimes(1)
+  })
+})

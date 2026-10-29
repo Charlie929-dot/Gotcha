@@ -13,6 +13,7 @@ import type { AskConsentView } from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
 import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
+import type { MemoryDeleteView, MemoryListView, MemoryRestoreView } from '../main/memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
@@ -52,6 +53,15 @@ export interface AskApi {
   /* ---- 个人记忆（日记目录 + 人设；保存即同步） ---- */
   memorySettings(): Promise<MemorySettingsView | { error: string }>
   saveMemorySettings(patch: unknown): Promise<MemorySettingsSaveResult>
+  /* ---- 个人记忆 · 条目浏览 / 删除 / 撤销（设置抽屉「记忆条目」） ---- */
+  memoryList(query: {
+    search?: string
+    kind?: string
+    offset?: number
+    limit?: number
+  }): Promise<MemoryListView>
+  memoryDelete(id: number): Promise<MemoryDeleteView>
+  memoryRestore(uid: string): Promise<MemoryRestoreView>
   /** 托盘 / 球右键的「设置」：打开窗口就展开抽屉 */
   onOpenSettings(handler: () => void): () => void
 }
@@ -87,6 +97,10 @@ const api: AskApi = {
     ipcRenderer.invoke('ask:memory:get') as Promise<MemorySettingsView | { error: string }>,
   saveMemorySettings: (patch) =>
     ipcRenderer.invoke('ask:memory:save', patch) as Promise<MemorySettingsSaveResult>,
+  memoryList: (query) => ipcRenderer.invoke('ask:memory:list', query) as Promise<MemoryListView>,
+  memoryDelete: (id) => ipcRenderer.invoke('ask:memory:delete', { id }) as Promise<MemoryDeleteView>,
+  memoryRestore: (uid) =>
+    ipcRenderer.invoke('ask:memory:restore', { uid }) as Promise<MemoryRestoreView>,
   onOpenSettings: (handler) => {
     const listener = (): void => handler()
     ipcRenderer.on('ask:open-settings', listener)

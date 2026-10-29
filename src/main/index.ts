@@ -13,6 +13,7 @@ import {
   parseMemoryPatch,
   type MemorySettingsSaveResult
 } from './memory-settings'
+import { buildMemoryListView, deleteMemoryView, parseMemoryListQuery, restoreMemoryView } from './memory-admin'
 import type { DiaryToolDeps } from '../chain/agent/tools'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
@@ -1992,6 +1993,36 @@ if (primaryInstance) {
       // 个人记忆（vibe/free）：日记目录 + 人设；保存后立即同步日记目录
       memorySettings: readMemorySettings,
       saveMemorySettings,
+      // 记忆条目（浏览 / 删除 / 撤销）：浏览走只读连接；删除与撤销走写连接，
+      // 回答进行中由 ask-ipc 拒绝（开写连接会关掉正在读的只读连接）
+      memoryList: (query) => {
+        const db = connections.queryDb()
+        if (!db) return { ok: false, error: 'db-unavailable' }
+        const parsed = parseMemoryListQuery(query)
+        if (!parsed.ok) return { ok: false, error: parsed.error }
+        try {
+          return buildMemoryListView(db, parsed.query)
+        } catch (error) {
+          captureLog('warn', 'memory list failed', { error: String(error) })
+          return { ok: false, error: '读取记忆条目失败' }
+        }
+      },
+      memoryDelete: (input) => {
+        try {
+          return deleteMemoryView(connections.ensureWritable().db, input)
+        } catch (error) {
+          captureLog('warn', 'memory delete failed', { error: String(error) })
+          return { ok: false, error: '数据库暂不可用，没有删除' }
+        }
+      },
+      memoryRestore: (input) => {
+        try {
+          return restoreMemoryView(connections.ensureWritable().db, input)
+        } catch (error) {
+          captureLog('warn', 'memory restore failed', { error: String(error) })
+          return { ok: false, error: '数据库暂不可用，没有恢复' }
+        }
+      },
       log: (level, message, data) => captureLog(level, message, data)
     })
 

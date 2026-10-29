@@ -15,12 +15,16 @@ import { join } from 'node:path'
 import { openDatabase, type Db } from '../../src/db'
 import {
   buildMemoryProfile,
+  countDeleted,
+  deleteMemoryItem,
   forgetVault,
+  listMemoryItems,
   listMemorySources,
   memoryStats,
   readMemoryDay,
   readObservations,
   recallMemory,
+  restoreMemoryItem,
   syncVault
 } from '../../src/memory/store'
 
@@ -220,6 +224,82 @@ describe('readMemoryDay / memoryStats / 画像', () => {
 
     buildMemoryProfile(db, { now: 2_000 })
     expect(readObservations(db)).toHaveLength(first.length)
+  })
+})
+
+describe('浏览 / 删除 / 回收站', () => {
+  beforeEach(() => {
+    write('2026-09-29.md', dayA)
+    write('2026-10-02.md', dayB)
+    syncVault(db, dir, { now: 1_000 })
+  })
+
+  it('列表：按天倒序；同一天按原文顺序（待办在日记前）', () => {
+    const page = listMemoryItems(db, { limit: 3 })
+    expect(page.total).toBe(5)
+    expect(page.hasMore).toBe(true)
+    expect(page.items[0].day_key).toBe('2026-10-02')
+    expect(page.items.slice(1).map((item) => item.day_key)).toEqual(['2026-09-29', '2026-09-29'])
+    // 同一天里第一条是 Tracking 的待办（没有时刻 → ts 为 null）
+    expect(page.items[1].kind).toBe('task')
+    expect(page.items[1].ts).toBeNull()
+
+    const second = listMemoryItems(db, { offset: 3, limit: 3 })
+    expect(second.items).toHaveLength(2)
+    expect(second.hasMore).toBe(false)
+  })
+
+  it('搜索：关键词命中正文；日期前缀只按天过滤；类别过滤；多词是 OR', () => {
+    expect(listMemoryItems(db, { search: '肖梦婷' }).total).toBe(1)
+    expect(listMemoryItems(db, { search: '2026-09' }).total).toBe(4)
+    const day = listMemoryItems(db, { search: '2026-10-02' })
+    expect(day.total).toBe(1)
+    expect(day.items[0].day_key).toBe('2026-10-02')
+    expect(listMemoryItems(db, { kind: 'task' }).total).toBe(2)
+    expect(listMemoryItems(db, { search: '肖梦婷 断言' }).total).toBe(2)
+  })
+
+  it('删除：从索引消失、进回收站；改别的段落重同步也不会把它带回来', () => {
+    const target = listMemoryItems(db, { search: '肖梦婷' }).items[0]
+    const result = deleteMemoryItem(db, target.id)
+    expect(result).not.toBeNull()
+    expect(result!.item.uid).toBe(target.uid)
+    expect(result!.deleted).toBe(1)
+    expect(countDeleted(db)).toBe(1)
+    expect(memoryStats(db).items).toBe(4)
+    expect(recallMemory(db, { keywords: ['肖梦婷'], now: 1_000 }).hits).toHaveLength(0)
+
+    // 改同一份文件的另一个段落：整份重解析，但删掉的那条不能回来
+    write('2026-09-29.md', dayA.replace('比想象中好用', '比想象中麻烦'))
+    const later = new Date(Date.now() + 1_000)
+    utimesSync(join(dir, '2026-09-29.md'), later, later)
+    const sync = syncVault(db, dir, { now: 2_000 })
+    expect(sync.items).toBe(4)
+    expect(recallMemory(db, { keywords: ['肖梦婷'], now: 2_000 }).hits).toHaveLength(0)
+    expect(countDeleted(db)).toBe(1)
+  })
+
+  it('撤销删除：原样放回；文件没变时再同步也不会重复插入', () => {
+    const target = listMemoryItems(db, { search: '肖梦婷' }).items[0]
+    deleteMemoryItem(db, target.id)
+    const restored = restoreMemoryItem(db, target.uid)
+    expect(restored).not.toBeNull()
+    expect(restored!.uid).toBe(target.uid)
+    expect(restored!.text).toBe(target.text)
+    expect(restored!.tags).toEqual(target.tags)
+    expect(countDeleted(db)).toBe(0)
+    expect(recallMemory(db, { keywords: ['肖梦婷'], now: 1_000 }).hits).toHaveLength(1)
+
+    const sync = syncVault(db, dir, { now: 2_000 })
+    expect(sync.unchanged).toBe(2)
+    expect(memoryStats(db).items).toBe(5)
+  })
+
+  it('删不存在的 id / 恢复不存在的 uid：返回 null，一条都不动', () => {
+    expect(deleteMemoryItem(db, 999_999)).toBeNull()
+    expect(restoreMemoryItem(db, 'x'.repeat(40))).toBeNull()
+    expect(memoryStats(db).items).toBe(5)
+    expect(countDeleted(db)).toBe(0)
   })
 })
 

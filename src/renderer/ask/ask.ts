@@ -22,6 +22,7 @@ import {
 import type { SegmentEvidence } from '../../chain/agent/evidence'
 import type { AskHistoryEntry } from '../../main/ask-history'
 import type { MemorySettingsView } from '../../main/memory-settings'
+import type { MemoryListItemView } from '../../main/memory-admin'
 import type { AskApi } from '../ask-preload'
 import { createSettingsPanel } from '../graph/graph-settings-panel'
 
@@ -67,6 +68,13 @@ const memoryToneInput = must<HTMLInputElement>('set-persona-tone')
 const memoryRedlinesInput = must<HTMLTextAreaElement>('set-persona-redlines')
 const memorySaveButton = must<HTMLButtonElement>('memory-save')
 const memoryMsg = must<HTMLElement>('memory-msg')
+/* ---- 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销） ---- */
+const memorySearchInput = must<HTMLInputElement>('memory-search')
+const memoryKindSelect = must<HTMLSelectElement>('memory-kind')
+const memoryListMsg = must<HTMLElement>('memory-list-msg')
+const memoryItemsEl = must<HTMLUListElement>('memory-items')
+const memoryMoreButton = must<HTMLButtonElement>('memory-more')
+const memoryUndoButton = must<HTMLButtonElement>('memory-undo')
 
 /** 列表一次最多画多少条会话（永久保留，记录可能很多；搜索用来缩小范围） */
 const HISTORY_RENDER_LIMIT = 200
@@ -1018,6 +1026,7 @@ async function refreshMemorySettings(note = ''): Promise<void> {
 function openSettingsDrawer(): void {
   void settingsPanel?.open()
   void refreshMemorySettings()
+  void loadMemoryList(true)
 }
 
 if (api) {
@@ -1057,12 +1066,204 @@ if (api) {
       } else {
         memoryMsg.textContent = '已保存；没有可同步的日记目录（留空 = 自动找）'
       }
+      // 同步会改动条目（新增 / 删除），列表跟着重读一遍
+      void loadMemoryList(true)
     } catch (error) {
       memoryMsg.textContent = `保存失败：${String(error)}`
       memoryMsg.style.color = 'var(--error)'
     } finally {
       memorySaveButton.disabled = false
     }
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/* 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销）                            */
+/* ------------------------------------------------------------------ */
+
+/** 一页多少条（主进程 `memory-admin` 的上限 50；抽屉里 20 条一屏差不多） */
+const MEMORY_PAGE_SIZE = 20
+const MEMORY_KIND_TEXT: Record<MemoryListItemView['kind'], string> = {
+  diary: '日记',
+  task: '待办',
+  note: '笔记',
+  quote: '摘录'
+}
+
+/** 已经画到第几条（下一页的 offset）与当前条件的总条数 */
+let memoryListLoaded = 0
+let memoryListTotal = 0
+let memoryListLoading = false
+/** 最近一次删除的 uid（回收站键）：「撤销删除」按它放回 */
+let memoryLastDeletedUid: string | null = null
+/** 搜索框防抖（每敲一个字都查库没必要） */
+let memorySearchTimer: number | null = null
+
+function memoryRowElement(item: MemoryListItemView): HTMLLIElement {
+  const row = element('li', 'memory-item')
+  row.dataset.id = String(item.id)
+  const head = element('div', 'memory-item-head')
+  const day = element('span', 'memory-item-day')
+  const clock = item.clock !== null ? ` ${item.clock}` : ''
+  const section = item.section !== '' ? ` · ${item.section}` : ''
+  day.textContent = `${item.day}${clock} · ${MEMORY_KIND_TEXT[item.kind]}${section}`
+  const del = element('button', 'memory-item-del')
+  del.type = 'button'
+  del.textContent = '删除'
+  del.title = '从记忆里删掉这一条（不改日记原文；删错了可以撤销）'
+  del.addEventListener('click', () => {
+    void deleteMemoryEntry(item)
+  })
+  head.append(day, del)
+  const text = element('p', 'memory-item-text')
+  text.textContent = item.text
+  if (item.text.length > 160) {
+    // 日记一段能有两千字：先折 8 行，点一下展开 / 收起
+    text.classList.add('clamped')
+    text.title = '点一下展开 / 收起'
+    text.addEventListener('click', () => {
+      text.classList.toggle('clamped')
+    })
+  }
+  row.append(head, text)
+  const meta: string[] = []
+  if (item.tags.length > 0) meta.push(item.tags.map((tag) => `#${tag}`).join(' '))
+  if (item.refs.length > 0) meta.push(item.refs.map((ref) => `[[${ref}]]`).join(' '))
+  if (meta.length > 0) {
+    const bits = element('p', 'memory-item-meta')
+    bits.textContent = meta.join(' · ')
+    row.append(bits)
+  }
+  return row
+}
+
+function setMemoryListMsg(text: string, isError = false): void {
+  memoryListMsg.textContent = text
+  memoryListMsg.style.color = isError ? 'var(--error)' : ''
+}
+
+function memoryListSummary(deleted: number): string {
+  return `共 ${memoryListTotal} 条${deleted > 0 ? ` · 已删除 ${deleted} 条` : ''}`
+}
+
+/** 读一页：`reset` 从头画（搜索 / 类别 / 删除后），否则接着上一页追加 */
+async function loadMemoryList(reset: boolean): Promise<void> {
+  if (!api || memoryListLoading) return
+  memoryListLoading = true
+  const offset = reset ? 0 : memoryListLoaded
+  if (reset) setMemoryListMsg('正在读取…')
+  try {
+    const result = await api.memoryList({
+      search: memorySearchInput.value.trim(),
+      kind: memoryKindSelect.value,
+      offset,
+      limit: MEMORY_PAGE_SIZE
+    })
+    if (!result.ok) {
+      setMemoryListMsg(
+        result.error === 'db-unavailable'
+          ? '还没有记忆库（同步一次日记或开始采集后可用）'
+          : `读取失败：${result.error}`,
+        result.error !== 'db-unavailable'
+      )
+      return
+    }
+    if (reset) {
+      memoryItemsEl.replaceChildren()
+      memoryListLoaded = 0
+    }
+    for (const item of result.items) memoryItemsEl.append(memoryRowElement(item))
+    memoryListLoaded = offset + result.items.length
+    memoryListTotal = result.total
+    memoryMoreButton.hidden = !result.hasMore
+    memoryUndoButton.hidden = memoryLastDeletedUid === null
+    setMemoryListMsg(
+      memoryListTotal === 0
+        ? `没有匹配的条目${result.deleted > 0 ? ` · 已删除 ${result.deleted} 条` : ''}`
+        : memoryListSummary(result.deleted)
+    )
+  } catch (error) {
+    setMemoryListMsg(`读取失败：${String(error)}`, true)
+  } finally {
+    memoryListLoading = false
+  }
+}
+
+/** 删一条：进回收站，列表重读；删错了点「撤销删除」放回 */
+async function deleteMemoryEntry(item: MemoryListItemView): Promise<void> {
+  if (!api) return
+  if (busy) {
+    // 删除要开写连接（会先关掉只读连接），和保存一样等回答结束
+    setMemoryListMsg('等这次回答结束再删（删除会短暂占用数据库）', true)
+    return
+  }
+  const label = `${item.day}${item.clock !== null ? ` ${item.clock}` : ''}「${item.text.slice(0, 18)}」`
+  try {
+    const result = await api.memoryDelete(item.id)
+    if (!result.ok) {
+      setMemoryListMsg(`没有删除：${result.error}`, true)
+      return
+    }
+    memoryLastDeletedUid = result.item.uid
+    memoryUndoButton.hidden = false
+    await loadMemoryList(true)
+    setMemoryListMsg(`已删除 ${label}（可撤销）`)
+    // 状态行的「索引 N 条」跟着变（统计来自主进程现读）
+    void refreshMemorySettings()
+  } catch (error) {
+    setMemoryListMsg(`删除失败：${String(error)}`, true)
+  }
+}
+
+async function undoLastDelete(): Promise<void> {
+  if (!api || memoryLastDeletedUid === null) return
+  if (busy) {
+    setMemoryListMsg('等这次回答结束再撤销（会短暂占用数据库）', true)
+    return
+  }
+  const uid = memoryLastDeletedUid
+  try {
+    const result = await api.memoryRestore(uid)
+    if (!result.ok) {
+      setMemoryListMsg(`没有恢复：${result.error}`, true)
+      return
+    }
+    memoryLastDeletedUid = null
+    memoryUndoButton.hidden = true
+    await loadMemoryList(true)
+    setMemoryListMsg(`已恢复 ${result.item.day} 的那一条`)
+    void refreshMemorySettings()
+  } catch (error) {
+    setMemoryListMsg(`撤销失败：${String(error)}`, true)
+  }
+}
+
+if (api) {
+  memorySearchInput.addEventListener('input', () => {
+    if (memorySearchTimer !== null) window.clearTimeout(memorySearchTimer)
+    memorySearchTimer = window.setTimeout(() => {
+      memorySearchTimer = null
+      void loadMemoryList(true)
+    }, 300)
+  })
+  // 搜索框在 #settings-form 里：回车默认会「保存设置」，这里改成立即查一次
+  memorySearchInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    if (memorySearchTimer !== null) {
+      window.clearTimeout(memorySearchTimer)
+      memorySearchTimer = null
+    }
+    void loadMemoryList(true)
+  })
+  memoryKindSelect.addEventListener('change', () => {
+    void loadMemoryList(true)
+  })
+  memoryMoreButton.addEventListener('click', () => {
+    void loadMemoryList(false)
+  })
+  memoryUndoButton.addEventListener('click', () => {
+    void undoLastDelete()
   })
 }
 

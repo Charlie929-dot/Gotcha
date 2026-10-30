@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
 import Database from 'better-sqlite3'
@@ -132,13 +132,17 @@ import {
 } from './ask-history'
 import { createQqChannel, QQ_REPLY_DEFAULT_CHARS, type QqChannel, type QqChannelConfig } from './qq/channel'
 import { QqOb11Server } from './qq/ob11'
+import { NapcatManager } from './qq/napcat'
 import {
   applyQqPatch,
   buildQqSettingsView,
   parseQqPatch,
   QQ_DEFAULT_HOST,
   QQ_DEFAULT_PORT,
+  readNapcatAutoStart,
+  readNapcatShellDir,
   readQqConfig,
+  writeNapcatShellDir,
   type QqSettingsSaveResult,
   type QqSettingsView
 } from './qq/qq-settings'
@@ -255,6 +259,8 @@ let disposeGraphIpc: (() => void) | null = null
 let disposeAskIpc: (() => void) | null = null
 /** QQ 通道（D63）：默认关闭；挂在这里是为了 before-quit 能直接收口端口 */
 let qqChannel: QqChannel | null = null
+/** NapCat 托管（D66）：退出只停轮询，不结束用户正在用的 QQ（拍板：退出不关） */
+let qqNapcat: NapcatManager | null = null
 /**
  * 信息链接线（D42）：跟采集开关同一条命。启动时加载原生事件源（失败就降级成不采集），
  * 采集 running 时开、stopping 时收口并等在途截图落库。
@@ -1150,6 +1156,8 @@ app.on('before-quit', (event) => {
   disposeGraphIpc?.()
   disposeAskIpc?.()
   // QQ 通道先释放端口（不等回执；在途问答随进程退出一起收口）
+  qqNapcat?.dispose()
+  qqNapcat = null
   void qqChannel?.stop()
   qqChannel = null
   ballMenuShell?.dispose()
@@ -2172,11 +2180,43 @@ if (primaryInstance) {
         return result
       }
     })
+    /**
+     * NapCat 托管（D66）：找 / 装 NapCat、拉起进程、二维码、登录后热写 OneBot 配置。
+     * 只在 QQ 通道开着且用户没关自动启动时才自己拉；退出 Gotcha 不结束进程。
+     */
+    qqNapcat = new NapcatManager({
+      userDataDir: app.getPath('userData'),
+      getEndpoint: () => {
+        const config = qqChannelConfig()
+        return { port: config.port, token: config.accessToken }
+      },
+      isConnected: () => (qqChannel?.status().connections ?? 0) > 0,
+      getAutoStart: () => {
+        const db = connections.queryDb()
+        return db !== null ? readNapcatAutoStart(db) : true
+      },
+      getShellDir: () => {
+        const db = connections.queryDb()
+        return db !== null ? readNapcatShellDir(db) : ''
+      },
+      setShellDir: (dir) => {
+        const db = connections.ensureWritable().db
+        ensureChainSchema(db)
+        writeNapcatShellDir(db, dir)
+      },
+      log: (level, message, data) => captureLog(level, message, data)
+    })
+    void qqNapcat.locate()
     const refreshQqChannel = async (): Promise<{ ok: boolean; error?: string }> => {
       if (!qqChannel) return { ok: false, error: 'qq channel unavailable' }
       try {
         const result = await qqChannel.start(qqChannelConfig())
         if (!result.ok) captureLog('warn', 'qq channel not started', { error: result.error })
+        // 通道起来了才拉起 NapCat（D66）；已登录 / 已连着时 start 只做接管，不重复开 QQ
+        if (result.ok && qqChannel.isRunning()) {
+          const db = connections.queryDb()
+          if (db !== null && readNapcatAutoStart(db)) void qqNapcat?.start()
+        }
         return result
       } catch (error) {
         captureLog('error', 'qq channel refresh failed', { error: String(error) })
@@ -2207,6 +2247,8 @@ if (primaryInstance) {
       }
       // 保存即生效：起停端口 / 换 token 都在这里热切换；起不来也把设置留着（界面显示未运行 + 原因）
       await refreshQqChannel()
+      // 端口 / token 变了：NapCat 已在跑就热写 OneBot 配置，不用重启 QQ
+      void qqNapcat?.syncConfig()
       return { ok: true, view: buildQqSettingsView(db, qqChannel?.status()) }
     }
 
@@ -2362,6 +2404,28 @@ if (primaryInstance) {
       },
       qqSettings: readQqSettings,
       saveQqSettings,
+      qqNapcatStatus: () =>
+        qqNapcat?.status() ?? { phase: 'idle', installed: false, autoStart: true, loggedIn: false },
+      qqNapcatStart: () => qqNapcat?.start() ?? Promise.resolve({ ok: false, error: 'NapCat 未初始化' }),
+      qqNapcatStop: async () => {
+        await qqNapcat?.stop()
+      },
+      qqNapcatInstall: () =>
+        qqNapcat?.install() ?? Promise.resolve({ ok: false, error: 'NapCat 未初始化' }),
+      qqNapcatChooseDir: async () => {
+        const owner = askWindow ?? mainWindow
+        const picked =
+          owner !== null
+            ? await dialog.showOpenDialog(owner, { properties: ['openDirectory'] })
+            : await dialog.showOpenDialog({ properties: ['openDirectory'] })
+        if (picked.canceled || picked.filePaths.length === 0) {
+          return { ok: false, error: '没有选择目录' }
+        }
+        const saved = await qqNapcat?.setShellDir(picked.filePaths[0])
+        if (saved === undefined) return { ok: false, error: 'NapCat 未初始化' }
+        if (!saved.ok) return { ok: false, error: saved.error ?? '目录不可用' }
+        return { ok: true, view: qqNapcat?.status() }
+      },
       log: (level, message, data) => captureLog(level, message, data)
     })
 

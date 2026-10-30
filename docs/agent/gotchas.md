@@ -193,6 +193,12 @@
 | 勾了「允许局域网」＝ 端口对局域网开放 | 2026-10-30：`qq.host = 0.0.0.0` 后，同一网段任何机器都能连这个端口（token 仍是唯一门槛；token 泄露就等于别人能问你的记忆） | 只在 NapCat 跑在另一台机器时勾；勾了就把 token 当密码对待（≥12 位随机），别用方便记的词；用完可取消 |
 | QQ 回复「说好的多段，只来了一条」 | 2026-10-30 真机反馈：模型答了三四段，手机上只有一坨。早版 `splitForQq` 只看总字数（≤1800 就一条），段落信息完全没用上 | 改成**按空行分段、每段一条消息**（单段超上限再按行 / 码点切）；注意模型若只用**单换行**写多段，仍算一段——要么让模型空行分段，要么以后改成也按单换行切。条间留 200ms，避免连发太快 QQ 侧折叠 |
 
+| NapCat WebUI 不是「拿 config token 直接当 Bearer」 | 2026-10-30 托管时踩到：`/api/OB11Config/GetConfig` 直接带 `Authorization: Bearer <webui.json token>` 返回 `code:-1`。WebUI 要两步：先 `POST /api/auth/login {hash: sha256(token + ".napcat")}` 拿 `data.Credential`，再用 `Bearer <Credential>` | 登录 hash 见 `napcatTokenHash`；Credential 只在内存用、不进日志、不落盘；token 变了要重新登录 |
+| NapCat 登录二维码在文件里，不在 WebUI 的 qrcodeurl | 2026-10-30：`QQLogin/CheckLoginStatus` 返回的 `qrcodeurl` 在已登录时是 `txz.qq.com` 链接，不是图片；登录前真正能扫的是 `<shell>/cache/qrcode.png` | 托管器轮询这个 PNG（PNG 头校验 → data URL）；`isLogin` 只用来判断登录成功，不用 qrcodeurl 当图 |
+| 手动起 NapCat 的正确姿势 | 2026-10-30：`NapCatWinBootMain.exe` 不是双击就能用——launcher 会设五个环境变量（`NAPCAT_PATCH_PACKAGE` / `NAPCAT_LOAD_PATH` / `NAPCAT_INJECT_PATH` / `NAPCAT_LAUNCHER_PATH` / `NAPCAT_MAIN_PATH`）并传 `<QQ.exe> <NapCatWinBootHook.dll>`；少一个 QQ 起来也不加载 NapCat | 见 `src/main/qq/napcat.ts` 的 `spawnNapcat`；cwd 必须是 Shell 目录，QQ 路径取注册表 `UninstallString` 的目录 + `QQ.exe` |
+| NapCat 目录 1.2GB ≠ 安装包大小 | 2026-10-30：`D:\NapCat\OneKey\NapCat.52230.Shell` 1.2GB，大头是它自己的 `versions/9.9.33` QQ 运行时；官方 `NapCat.Shell.zip` 只有 ~36MB，登录后自己补 QQ 运行时 / 复用本机 QQ | 「嵌入 Gotcha」只托管进程、不把目录塞进仓库；设置抽屉下载的是 `NapCat.Shell.zip`，解压到 `<userData>/napcat/NapCat.Shell` |
+| 退出 Gotcha 后 NapCat 还在跑 | 2026-10-30 拍板「退出不关」：NapCat/QQ 是用户自己的账号，不能随 Gotcha 一起收口 | `dispose()` 只清轮询；下次启动用 `isConnected` / `NapCatWinBootMain.exe` 检测并接管，不重复拉进程；「停止」只 `taskkill /T /F` 自己拉起的树，附着的第三方实例只断开并提示 |
+
 ## 规则
 
 - 同一个坑第二次出现，说明这里没记住——先补本文件，再修代码。

@@ -34,6 +34,7 @@ import type {
 } from './memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from './qq/qq-settings'
+import type { NapcatView } from './qq/napcat'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -202,6 +203,15 @@ export interface AskIpcDeps {
    */
   qqSettings?: () => QqSettingsView | { error: string }
   saveQqSettings?: (patch: unknown) => QqSettingsSaveResult | Promise<QqSettingsSaveResult>
+  /**
+   * NapCat 托管（D66）：状态（含二维码 data URL）、启动 / 停止、下载安装、选目录。
+   * 安装是长任务：这里只负责踢一脚，进度由 `qqNapcatStatus` 轮询回界面。
+   */
+  qqNapcatStatus?: () => NapcatView
+  qqNapcatStart?: () => Promise<{ ok: boolean; error?: string }>
+  qqNapcatStop?: () => Promise<void>
+  qqNapcatInstall?: () => Promise<{ ok: boolean; error?: string }>
+  qqNapcatChooseDir?: () => Promise<{ ok: boolean; error?: string; view?: NapcatView }>
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -598,6 +608,71 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask qq settings save failed', { error: String(error) })
           return { ok: false, error: '保存失败' } satisfies QqSettingsSaveResult
+        }
+      }
+    ],
+    [
+      'ask:qq:napcat:get',
+      (event) => {
+        if (!ensureSender(event)) return { error: 'forbidden' }
+        try {
+          return deps.qqNapcatStatus?.() ?? { error: 'unsupported' }
+        } catch (error) {
+          deps.log('error', 'ask qq napcat status failed', { error: String(error) })
+          return { error: 'napcat-status-failed' }
+        }
+      }
+    ],
+    [
+      'ask:qq:napcat:start',
+      async (event) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqNapcatStart) return { ok: false, error: '当前版本不支持托管 NapCat' }
+        try {
+          return await deps.qqNapcatStart()
+        } catch (error) {
+          deps.log('error', 'ask qq napcat start failed', { error: String(error) })
+          return { ok: false, error: '启动 NapCat 失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:napcat:stop',
+      async (event) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqNapcatStop) return { ok: false, error: '当前版本不支持托管 NapCat' }
+        try {
+          await deps.qqNapcatStop()
+          return { ok: true }
+        } catch (error) {
+          deps.log('error', 'ask qq napcat stop failed', { error: String(error) })
+          return { ok: false, error: '停止 NapCat 失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:napcat:install',
+      async (event) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqNapcatInstall) return { ok: false, error: '当前版本不支持下载安装 NapCat' }
+        try {
+          return await deps.qqNapcatInstall()
+        } catch (error) {
+          deps.log('error', 'ask qq napcat install failed', { error: String(error) })
+          return { ok: false, error: '安装 NapCat 失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:napcat:dir',
+      async (event) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqNapcatChooseDir) return { ok: false, error: '当前版本不支持选择目录' }
+        try {
+          return await deps.qqNapcatChooseDir()
+        } catch (error) {
+          deps.log('error', 'ask qq napcat choose dir failed', { error: String(error) })
+          return { ok: false, error: '选择目录失败' }
         }
       }
     ],

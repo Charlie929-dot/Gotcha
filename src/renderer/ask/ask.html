@@ -218,6 +218,20 @@
           <section>
             <h3>QQ 通道</h3>
             <p class="hint" id="qq-status">读取中…</p>
+            <div class="qq-napcat">
+              <p class="hint" id="qq-napcat-status">NapCat：读取中…</p>
+              <img id="qq-napcat-qr" class="qq-napcat-qr" alt="NapCat 登录二维码" hidden />
+              <div class="memory-actions">
+                <button id="qq-napcat-install" type="button" hidden>下载并安装 NapCat</button>
+                <button id="qq-napcat-dir" type="button">选择目录…</button>
+                <button id="qq-napcat-start" type="button" class="primary">启动 NapCat</button>
+                <button id="qq-napcat-stop" type="button">停止</button>
+              </div>
+              <progress id="qq-napcat-progress" max="1" value="0" hidden></progress>
+              <label class="check">
+                <input id="set-qq-napcat-auto" type="checkbox" /> 随 Gotcha 自动启动 NapCat（退出 Gotcha 不会关掉 QQ）
+              </label>
+            </div>
             <label class="check">
               <input id="set-qq-enabled" type="checkbox" /> 开启 QQ 私聊（默认关；开了才开端口等 NapCat 拨入）
             </label>
@@ -243,6 +257,7 @@
             <p class="hint">
               QQ 私聊里的问题走桌面同一条问记忆链路（同一份出云确认与每日额度），回答按纯文本分条发回；
               群聊、图片、语音、文件都不接。给自己发消息也行（白名单里填自己的号）。
+              NapCat 没装的话点上面的「下载并安装」；首次登录用手机 QQ 扫上面的二维码。
               注意：开了之后回答会经 NapCat 发到腾讯服务器，所以默认关闭、只放行白名单里的号；
               token 只存在本机设置里，不写日志。
             </p>

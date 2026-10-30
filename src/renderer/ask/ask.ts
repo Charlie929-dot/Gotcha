@@ -32,6 +32,7 @@ import type { AskHistoryEntry } from '../../main/ask-history'
 import type { MemorySettingsView } from '../../main/memory-settings'
 import type { MemoryListItemView } from '../../main/memory-admin'
 import type { QqSettingsView } from '../../main/qq/qq-settings'
+import type { NapcatView } from '../../main/qq/napcat'
 import type { AskApi } from '../ask-preload'
 import { createSettingsPanel } from '../graph/graph-settings-panel'
 
@@ -113,6 +114,14 @@ const qqAllowInput = must<HTMLTextAreaElement>('set-qq-allow')
 const qqMaxCharsInput = must<HTMLInputElement>('set-qq-maxchars')
 const qqSaveButton = must<HTMLButtonElement>('qq-save')
 const qqMsg = must<HTMLElement>('qq-msg')
+const qqNapcatStatusEl = must<HTMLElement>('qq-napcat-status')
+const qqNapcatQrEl = must<HTMLImageElement>('qq-napcat-qr')
+const qqNapcatInstallButton = must<HTMLButtonElement>('qq-napcat-install')
+const qqNapcatDirButton = must<HTMLButtonElement>('qq-napcat-dir')
+const qqNapcatStartButton = must<HTMLButtonElement>('qq-napcat-start')
+const qqNapcatStopButton = must<HTMLButtonElement>('qq-napcat-stop')
+const qqNapcatProgressEl = must<HTMLProgressElement>('qq-napcat-progress')
+const qqNapcatAutoInput = must<HTMLInputElement>('set-qq-napcat-auto')
 
 /** 列表一次最多画多少条会话（永久保留，记录可能很多；搜索用来缩小范围） */
 const HISTORY_RENDER_LIMIT = 200
@@ -1436,6 +1445,7 @@ function openSettingsDrawer(): void {
   void settingsPanel?.open()
   void refreshMemorySettings()
   void refreshQqSettings()
+  startNapcatPolling()
   void loadMemoryList(true)
 }
 
@@ -1595,7 +1605,8 @@ if (api) {
         port: Number(qqPortInput.value),
         accessToken: qqTokenInput.value,
         allowUsers: qqAllowInput.value,
-        replyMaxChars: Number(qqMaxCharsInput.value)
+        replyMaxChars: Number(qqMaxCharsInput.value),
+        napcatAutoStart: qqNapcatAutoInput.checked
       })
       if (!result.ok) {
         qqMsg.textContent = `没有保存：${result.error}`
@@ -1603,6 +1614,8 @@ if (api) {
         return
       }
       fillQqSettings(result.view)
+      qqNapcatAutoDirty = false
+      void refreshNapcat()
       qqMsg.textContent = result.view.running
         ? '已保存并开始监听（NapCat 里填好同样的端口与 token）'
         : '已保存；未运行，原因见上面那行状态'
@@ -1613,6 +1626,148 @@ if (api) {
       qqSaveButton.disabled = false
     }
   })
+}
+
+/* ------------------------------------------------------------------ */
+/* 设置抽屉 · NapCat 托管（D66）：状态 / 二维码 / 启停 / 下载安装       */
+/* ------------------------------------------------------------------ */
+
+let qqNapcatTimer: number | null = null
+let qqNapcatBusy = false
+/** 用户改过「自动启动」但还没保存：轮询别把复选框改回去 */
+let qqNapcatAutoDirty = false
+
+function napcatStatusText(view: NapcatView): string {
+  switch (view.phase) {
+    case 'downloading':
+      return `NapCat：下载中… ${Math.round((view.progress ?? 0) * 100)}%`
+    case 'installing':
+      return 'NapCat：正在解压…'
+    case 'starting':
+      return 'NapCat：正在启动 QQ…'
+    case 'waiting-login':
+      if (view.loggedIn) return 'NapCat：QQ 已登录，正在接入 Gotcha…'
+      return view.qrDataUrl !== undefined
+        ? 'NapCat：用手机 QQ 扫码登录（二维码约 2 分钟有效）'
+        : 'NapCat：等待二维码…（QQ 登录窗口可能已经弹出）'
+    case 'connected':
+      return `NapCat：已登录并连上 Gotcha${view.uin !== undefined ? `（${view.uin}）` : ''}`
+    case 'error':
+      return `NapCat：${view.error ?? '出错了，点「启动」重试'}`
+    default:
+      return view.installed
+        ? `NapCat：已找到${view.shellDir !== undefined ? `（${view.shellDir}）` : ''}，点「启动」`
+        : 'NapCat：没找到，点「下载并安装」，或选择已有目录'
+  }
+}
+
+function renderNapcatView(view: NapcatView): void {
+  qqNapcatStatusEl.textContent = napcatStatusText(view)
+  qqNapcatStatusEl.style.color = view.phase === 'error' ? 'var(--error)' : ''
+
+  const working =
+    view.phase === 'downloading' || view.phase === 'installing' || view.phase === 'starting'
+  qqNapcatInstallButton.hidden = view.installed
+  qqNapcatInstallButton.disabled = working || qqNapcatBusy
+  qqNapcatStartButton.disabled =
+    !view.installed || working || view.phase === 'connected' || view.phase === 'waiting-login'
+  qqNapcatStopButton.disabled =
+    !view.installed || view.phase === 'idle' || view.phase === 'error' || view.phase === 'downloading'
+
+  if (view.qrDataUrl !== undefined) {
+    qqNapcatQrEl.src = view.qrDataUrl
+    qqNapcatQrEl.hidden = false
+  } else {
+    qqNapcatQrEl.hidden = true
+    qqNapcatQrEl.removeAttribute('src')
+  }
+
+  const downloading = view.phase === 'downloading'
+  qqNapcatProgressEl.hidden = !downloading
+  qqNapcatProgressEl.value = downloading ? (view.progress ?? 0) : 0
+
+  qqNapcatAutoInput.checked = qqNapcatAutoDirty ? qqNapcatAutoInput.checked : view.autoStart
+}
+
+/** 只在抽屉打开时轮询（1.5s）；关掉就停，不做后台常驻 */
+function startNapcatPolling(): void {
+  qqNapcatAutoDirty = false
+  if (qqNapcatTimer !== null) {
+    void refreshNapcat()
+    return
+  }
+  qqNapcatTimer = window.setInterval(() => {
+    if (drawerEl.hidden) {
+      stopNapcatPolling()
+      return
+    }
+    void refreshNapcat()
+  }, 1_500)
+  void refreshNapcat()
+}
+
+function stopNapcatPolling(): void {
+  if (qqNapcatTimer === null) return
+  window.clearInterval(qqNapcatTimer)
+  qqNapcatTimer = null
+}
+
+async function refreshNapcat(): Promise<void> {
+  if (!api) return
+  try {
+    const view = await api.qqNapcatStatus()
+    if ('error' in view) {
+      qqNapcatStatusEl.textContent = 'NapCat：读取状态失败'
+      return
+    }
+    renderNapcatView(view)
+  } catch (error) {
+    qqNapcatStatusEl.textContent = `NapCat：读取状态失败（${String(error)}）`
+  }
+}
+
+async function runNapcatAction(action: 'start' | 'stop' | 'install' | 'dir'): Promise<void> {
+  if (!api || qqNapcatBusy) return
+  qqNapcatBusy = true
+  qqNapcatStatusEl.style.color = ''
+  qqNapcatStatusEl.textContent =
+    action === 'install'
+      ? 'NapCat：开始下载…'
+      : action === 'start'
+        ? 'NapCat：启动中…'
+        : action === 'stop'
+          ? 'NapCat：停止中…'
+          : 'NapCat：选择目录…'
+  try {
+    const result =
+      action === 'start'
+        ? await api.qqNapcatStart()
+        : action === 'stop'
+          ? await api.qqNapcatStop()
+          : action === 'install'
+            ? await api.qqNapcatInstall()
+            : await api.qqNapcatChooseDir()
+    if (!result.ok && result.error !== undefined) {
+      qqNapcatStatusEl.textContent = `NapCat：${result.error}`
+      qqNapcatStatusEl.style.color = 'var(--error)'
+    }
+  } catch (error) {
+    qqNapcatStatusEl.textContent = `NapCat：操作失败（${String(error)}）`
+    qqNapcatStatusEl.style.color = 'var(--error)'
+  } finally {
+    qqNapcatBusy = false
+    void refreshNapcat()
+  }
+}
+
+if (api) {
+  qqNapcatAutoInput.addEventListener('change', () => {
+    qqNapcatAutoDirty = true
+  })
+  qqNapcatInstallButton.addEventListener('click', () => void runNapcatAction('install'))
+  qqNapcatDirButton.addEventListener('click', () => void runNapcatAction('dir'))
+  qqNapcatStartButton.addEventListener('click', () => void runNapcatAction('start'))
+  qqNapcatStopButton.addEventListener('click', () => void runNapcatAction('stop'))
 }
 
 /* ------------------------------------------------------------------ */

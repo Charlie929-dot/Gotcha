@@ -29,6 +29,29 @@ export const QQ_SETTING_KEYS = {
   replyMaxChars: 'qq.reply_max_chars'
 } as const
 
+/**
+ * NapCat 托管（D66）的设置键。
+ * - `auto_start` 缺省视为开（没存过 = 默认随 Gotcha 拉起）；
+ * - `path` 是用户手选的 Shell 目录；空串表示让探测逻辑自己找。
+ */
+export const QQ_NAPCAT_SETTING_KEYS = {
+  autoStart: 'qq.napcat.auto_start',
+  shellDir: 'qq.napcat.path'
+} as const
+
+/** 默认开：没存过 / 存了非 0 都算开，只有明确存 '0' 才关 */
+export function readNapcatAutoStart(db: Db): boolean {
+  return getSetting(db, QQ_NAPCAT_SETTING_KEYS.autoStart) !== '0'
+}
+
+export function readNapcatShellDir(db: Db): string {
+  return getSetting(db, QQ_NAPCAT_SETTING_KEYS.shellDir).trim()
+}
+
+export function writeNapcatShellDir(db: Db, dir: string): void {
+  setSetting(db, QQ_NAPCAT_SETTING_KEYS.shellDir, dir)
+}
+
 export const QQ_DEFAULT_PORT = 8643
 /** 默认只听本机回环；「允许局域网」= `0.0.0.0`（给 NapCat 在另一台机器时用） */
 export const QQ_DEFAULT_HOST = '127.0.0.1'
@@ -61,6 +84,8 @@ export interface QqSettingsPatch {
   accessToken?: string
   allowUsers?: string[]
   replyMaxChars?: number
+  /** NapCat 是否随 Gotcha 自动启动（D66） */
+  napcatAutoStart?: boolean
 }
 
 export type QqSettingsSaveResult =
@@ -148,6 +173,10 @@ export function parseQqPatch(raw: unknown): { ok: true; patch: QqSettingsPatch }
     }
     patch.replyMaxChars = chars
   }
+  if ('napcatAutoStart' in raw) {
+    if (typeof raw['napcatAutoStart'] !== 'boolean') return { ok: false, error: '自动启动开关必须是布尔值' }
+    patch.napcatAutoStart = raw['napcatAutoStart']
+  }
   if (Object.keys(patch).length === 0) return { ok: false, error: '没有要保存的改动' }
   return { ok: true, patch }
 }
@@ -173,6 +202,9 @@ export function applyQqPatch(db: Db, patch: QqSettingsPatch): void {
   if (patch.allowUsers !== undefined) setSetting(db, QQ_SETTING_KEYS.allowUsers, patch.allowUsers.join(','))
   if (patch.replyMaxChars !== undefined) {
     setSetting(db, QQ_SETTING_KEYS.replyMaxChars, String(patch.replyMaxChars))
+  }
+  if (patch.napcatAutoStart !== undefined) {
+    setSetting(db, QQ_NAPCAT_SETTING_KEYS.autoStart, patch.napcatAutoStart ? '1' : '0')
   }
 }
 

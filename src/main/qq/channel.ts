@@ -30,6 +30,8 @@ export interface QqTransport {
   sendPrivate(userId: number, text: string): Promise<void>
   /** NapCat `get_image`：拿 base64（优先）或 url（兜底） */
   getImage(file: string): Promise<{ base64?: string; url?: string }>
+  /** 改 QQ 昵称（M4 传承）：可选，老测试假实现不用接 */
+  setProfile?(nickname: string): Promise<void>
   status(): QqTransportStatus
 }
 
@@ -251,6 +253,8 @@ export interface QqChannel {
   handleMessage(inbound: QqInbound): Promise<void>
   /** 当前是否在跑（组合根退出 / 重配时用） */
   isRunning(): boolean
+  /** 改 QQ 昵称（M4 传承）：transport 没接就静默跳过，调用方记日志 */
+  setProfile?(nickname: string): Promise<void>
 }
 
 export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): QqChannel {
@@ -477,6 +481,10 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       }
     },
     handleMessage,
-    isRunning: () => running
+    isRunning: () => running,
+    async setProfile(nickname: string) {
+      if (transport.setProfile === undefined) return
+      await transport.setProfile(nickname)
+    }
   }
 }

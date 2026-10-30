@@ -35,7 +35,7 @@ import type {
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
 import type { AskConversationPort } from './conversation'
-import type { AskHistorySummary, DiaryToolDeps } from './tools'
+import type { AskHistorySummary, ConceiveDaughterResult, DiaryToolDeps } from './tools'
 import {
   EVIDENCE_TEXT_CHARS,
   type ChainAskRelatedSegment,
@@ -94,6 +94,13 @@ export interface ChainAskOptions {
   readAskHistory?: (scope: 'conversation' | 'all') => readonly AskHistorySummary[]
   /** 日记记忆（第二本账）：不传 = 没接入，三个记忆工具会如实报错 */
   diary?: DiaryToolDeps
+  /**
+   * 传承（M4）：生命 ≤15% 且模式带工具时才由组合根注入；
+   * 不传 = 模型调 `conceive_daughter` 会回「现在还不能传承」。
+   */
+  conceive?: (nickname: string, letter?: string) => Promise<ConceiveDaughterResult>
+  /** 母亲留下的信（`<mom_letter>`，M4）：只有女儿代才有 */
+  momLetter?: string
   /**
    * read_segment 的截图读取（主进程注入）。**没开「历史截图出云」时不要传**：
    * 不传 = 读段只回 UIA 文字，截图不出云。
@@ -290,6 +297,8 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         captureRunning: options.captureRunning ?? (() => false),
         ...(options.readAskHistory ? { readAskHistory: options.readAskHistory } : {}),
         ...(options.diary ? { diary: options.diary } : {}),
+        ...(options.conceive ? { conceive: options.conceive } : {}),
+        ...(options.momLetter ? { momLetter: options.momLetter } : {}),
         ...(options.readShot ? { readShot: options.readShot } : {}),
         ...(options.personaPrompt ? { personaPrompt: options.personaPrompt } : {}),
         ...(options.tools ? { tools: options.tools } : {}),

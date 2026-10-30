@@ -45,6 +45,11 @@ export interface CloudAskConversation {
 export interface AskConversationPort {
   load(): CloudAskConversation
   save(next: CloudAskConversation): void
+  /**
+   * 清空这个会话（M4 传承：女儿从空白开始）。
+   * 可选：老调用方 / 测试的假实现不必实现；主进程的两种实现都会清内存。
+   */
+  clear?(): void
 }
 
 /** 会话字符预算：超过就裁最旧的轮次（约 40k 汉字 / 80k 字符，给工具结果留余量） */

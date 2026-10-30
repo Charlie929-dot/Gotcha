@@ -388,9 +388,19 @@ export class QqOb11Server {
     }
   }
 
+  /**
+   * 改 QQ 昵称（M4 传承）：OneBot `set_qq_profile`。
+   * 失败抛错，由调用方记日志——改名失败不该影响传承本身。
+   */
+  async setProfile(nickname: string): Promise<void> {
+    const response = await this.callAction('set_qq_profile', { nickname })
+    if (typeof response.retcode === 'number' && response.retcode !== 0) {
+      throw new Error(`OneBot set_qq_profile 失败（${response.retcode}）${response.wording ?? ''}`)
+    }
+  }
+
   /** 私聊发一条纯文本（OneBot `send_private_msg`） */
-  async sendPrivate(userId: number, text: string): Promise<void> {
-    const response = await this.callAction('send_private_msg', {
+  async sendPrivate(userId: number, text: string): Promise<void> {    const response = await this.callAction('send_private_msg', {
       user_id: userId,
       message: [{ type: 'text', data: { text } }]
     })

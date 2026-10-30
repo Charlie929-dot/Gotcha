@@ -196,6 +196,23 @@ describe('记忆仓节点（分支）操作', { timeout: 60_000 }, () => {
     expect(await repo.deleteBranch('spring')).toMatchObject({ ok: false, reason: 'not-found' })
   })
 
+  it('orphan 分支：清空工作区只留脚手架，切回原分支内容还在', async () => {
+    const repo = await readyRepo()
+    await repo.writeFile('conversations/c1.jsonl', '母亲\n')
+    await repo.commit('memory: save before birth')
+    const orphan = await repo.switchCreateOrphan('xiaoyu')
+    expect(orphan.ok).toBe(true)
+    expect(orphan.head?.branch).toBe('xiaoyu')
+    // 母亲的分支内容不在女儿的空白树里
+    expect(await repo.readFile('conversations/c1.jsonl')).toBeNull()
+    expect(await repo.readFile('.gitattributes')).not.toBeNull()
+    await repo.writeFile('letters/xiaoyu.md', '给女儿\n')
+    expect((await repo.commit('memory: born xiaoyu')).committed).toBe(true)
+
+    expect((await repo.switchBranch('default')).ok).toBe(true)
+    expect(await repo.readFile('conversations/c1.jsonl')).toBe('母亲\n')
+  })
+
   it('分支列表与分支日志带最近提交', async () => {
     const repo = await readyRepo()
     await repo.switchCreate('spring')

@@ -967,3 +967,33 @@ describe('问记忆 · 轮数用尽后的续查', () => {
     expect(paused.resumeId).toMatch(/^r[a-z0-9]+$/)
   })
 })
+
+describe('传承（M4）', () => {
+  it('调用 conceive_daughter 后结果带 conceived、这一问不落会话', async () => {
+    let saves = 0
+    const conversation = {
+      load: () => ({ digest: '', turns: [] as never[] }),
+      save: () => {
+        saves += 1
+      },
+      clear: () => undefined
+    }
+    const client = new FakeLlmClient([
+      { toolCalls: [{ name: 'conceive_daughter', arguments: { nickname: '小雨', letter: '给女儿' } }] },
+      { json: '我会记得你。' }
+    ])
+    const result = await askChain(
+      buildDeps(client, {
+        conversation,
+        conceive: async () => ({ ok: true, nickname: 'xiao-yu', message: '女儿 xiao-yu 已出生' })
+      }),
+      '快没电了'
+    )
+    expect(result.kind).toBe('answer')
+    expect(result.conceived).toBe(true)
+    expect(saves).toBe(0)
+    expect(client.optionCalls[0]?.conceive).toBe(true)
+    expect(client.askLoopRequests).toHaveLength(2)
+    if (result.kind === 'answer') expect(result.answer).toBe('我会记得你。')
+  })
+})

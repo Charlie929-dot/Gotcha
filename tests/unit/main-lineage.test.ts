@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  birthDayOf,
   childBranches,
   emptyLineage,
   ensureLineage,
@@ -21,6 +22,7 @@ import {
   withActive,
   withBranchAdded,
   withBranchRemoved,
+  withGenerationAdded,
   writeLineage
 } from '../../src/main/lineage'
 
@@ -192,6 +194,75 @@ describe('家谱 · 节点（分支）操作', () => {
     const base = emptyLineage(1000)
     expect(generationOf(base, 'default')?.id).toBe('gen-1')
     expect(generationOf(base, 'nope')).toBeNull()
+  })
+})
+
+describe('传承（M4）', () => {
+  it('加一代：母亲置 dead、女儿开新 generation + 分支、active 切过去', () => {
+    const base = emptyLineage(1000)
+    const next = withGenerationAdded(base, {
+      branch: 'xiaoyu',
+      nickname: 'xiaoyu',
+      mother: 'default',
+      at: 2_000,
+      letter: 'letters/xiaoyu.md'
+    })
+    expect(next).not.toBeNull()
+    if (next === null) return
+    expect(next.active).toBe('xiaoyu')
+    expect(next.generations).toHaveLength(2)
+    expect(next.generations[0]).toMatchObject({ id: 'gen-1', died_at: 2_000 })
+    expect(next.generations[1]).toMatchObject({
+      id: 'gen-2',
+      branch: 'xiaoyu',
+      nickname: 'xiaoyu',
+      mother: 'gen-1',
+      born_at: 2_000,
+      died_at: null,
+      life_tokens_used: 0,
+      letter: 'letters/xiaoyu.md'
+    })
+    expect(next.branches).toEqual([
+      expect.objectContaining({ branch: 'default', status: 'dead' }),
+      expect.objectContaining({ branch: 'xiaoyu', generation: 'gen-2', parent: null, status: 'alive', life_tokens_used: 0 })
+    ])
+    expect(birthDayOf(next, 'xiaoyu')).toBe('1970-01-01')
+    expect(withBranchRemoved(next, 'xiaoyu')).toBeNull()
+  })
+
+  it('重名 / 母亲不存在 / 母亲已 dead 都返回 null', () => {
+    const base = emptyLineage(1000)
+    const next = withGenerationAdded(base, {
+      branch: 'xiaoyu',
+      nickname: 'xiaoyu',
+      mother: 'default',
+      at: 2_000
+    })
+    expect(next).not.toBeNull()
+    if (next === null) return
+    expect(
+      withGenerationAdded(next, { branch: 'xiaoyu', nickname: 'x', mother: 'default', at: 3_000 })
+    ).toBeNull()
+    expect(
+      withGenerationAdded(base, { branch: 'x', nickname: 'x', mother: 'nope', at: 3_000 })
+    ).toBeNull()
+    expect(
+      withGenerationAdded(next, { branch: 'x', nickname: 'x', mother: 'default', at: 3_000 })
+    ).toBeNull()
+  })
+
+  it('birthDayOf 用本地日；不是代分支返回 null', () => {
+    const at = new Date(2026, 9, 30, 23, 30).getTime()
+    const next = withGenerationAdded(emptyLineage(1), {
+      branch: 'xiaoyu',
+      nickname: 'xiaoyu',
+      mother: 'default',
+      at
+    })
+    expect(next).not.toBeNull()
+    if (next === null) return
+    expect(birthDayOf(next, 'xiaoyu')).toBe('2026-10-30')
+    expect(birthDayOf(next, 'nope')).toBeNull()
   })
 })
 

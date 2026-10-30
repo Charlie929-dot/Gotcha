@@ -22,7 +22,7 @@ import {
   type MemorySettingsSaveResult
 } from './memory-settings'
 import { buildMemoryListView, deleteMemoryView, parseMemoryListQuery, restoreMemoryView } from './memory-admin'
-import type { DiaryToolDeps } from '../chain/agent/tools'
+import type { ConceiveDaughterResult, DiaryToolDeps } from '../chain/agent/tools'
 import { askToolGroupsOf, asksMemoryContext, DEFAULT_ASK_MODE } from '../chain/agent/mode'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
@@ -129,8 +129,19 @@ import {
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
 import { createAskConversationRegistry } from './ask-conversation'
-import { createCommandHandler, memoryDayKey, type CompactOutcome } from './commands'
-import { lifeOf, ensureLineage, lineageSnapshot, readLineage, recordLineageUsage } from './lineage'
+import { createCommandHandler, memoryDayKey, slugifyNodeName, type CompactOutcome } from './commands'
+import {
+  birthDayOf,
+  ensureLineage,
+  findBranch,
+  generationOf,
+  lifeOf,
+  lineageSnapshot,
+  readLineage,
+  recordLineageUsage,
+  withGenerationAdded,
+  writeLineage
+} from './lineage'
 import { createMemoryRepo } from './memory-repo'
 import { forkDetachedIfNeeded } from './node-fork'
 import {
@@ -145,6 +156,7 @@ import {
   ASK_HISTORY_FILE,
   clearAskHistory,
   readAskHistory,
+  removeAskHistoryConversation,
   toHistoryEntry
 } from './ask-history'
 import { createQqChannel, QQ_REPLY_DEFAULT_CHARS, type QqChannel, type QqChannelConfig } from './qq/channel'
@@ -1916,19 +1928,25 @@ if (primaryInstance) {
      * 日记记忆（第二本账）给工具循环的实现：查询走当前连接（通常只读），
      * 只有同步（`syncMemoryIfDue`）会开写连接 —— 走过来问的记忆不该顺手改库。
      */
-    const diaryToolsFor = (db: ChainDb): DiaryToolDeps => ({
-      recall: (query) =>
-        recallMemory(db, { ...query, now: Date.now() }).hits.map((hit) => ({
-          itemId: hit.id,
-          day: hit.day_key,
-          section: hit.section,
-          kind: hit.kind,
-          text: hit.text,
-          tags: hit.tags,
-          refs: hit.refs,
-          reasons: hit.reasons
-        })),
+    const diaryToolsFor = (db: ChainDb, options: { sinceDay?: string } = {}): DiaryToolDeps => ({
+      recall: (query) => {
+        const result = recallMemory(db, { ...query, now: Date.now() })
+        return result.hits
+          .filter((hit) => options.sinceDay === undefined || hit.day_key >= options.sinceDay)
+          .map((hit) => ({
+            itemId: hit.id,
+            day: hit.day_key,
+            section: hit.section,
+            kind: hit.kind,
+            text: hit.text,
+            tags: hit.tags,
+            refs: hit.refs,
+            reasons: hit.reasons
+          }))
+      },
       readDay: (day) => {
+        // 女儿代读不到出生日之前的日记（M4）；返回 null 由工具如实回「这一天没有」
+        if (options.sinceDay !== undefined && day < options.sinceDay) return null
         const view = readMemoryDay(db, day)
         if (view === null) return null
         return {
@@ -2038,22 +2056,51 @@ if (primaryInstance) {
     /**
      * 生命（M3）：`life_tokens_used` 按节点记，每轮 ask 前现读。
      * 读不到就不显示（不阻塞）；数字只进 `<now>` 的一行事实，不是证据。
+     * M4：额外带出生日（女儿读不到出生前的日记）与母亲的信（`<mom_letter>`）。
      */
-    const lifeStateNow = async (): Promise<{ used: number; limit: number } | undefined> => {
+    interface AskLifeContext {
+      branch: string
+      used: number
+      limit: number
+      /** 这一代的出生日（本地 `yyyy-mm-dd`）；代分支才有 */
+      bornDay?: string
+      /** 母亲留下的信（仓内相对路径）；第一代没有 */
+      letterPath?: string
+    }
+    const lifeStateNow = async (): Promise<AskLifeContext | undefined> => {
       try {
         const read = await readLineage(lineageFile)
         if (read.status !== 'ok') return undefined
         const life = lifeOf(read.lineage, read.lineage.active)
-        return life === null ? undefined : { used: life.used, limit: life.limit }
+        if (life === null) return undefined
+        const generation = generationOf(read.lineage, read.lineage.active)
+        // 只有「女儿代」（有母亲）才有出生日边界；第一代看全部日记
+        const bornDay =
+          generation !== null && generation.mother !== null
+            ? birthDayOf(read.lineage, read.lineage.active)
+            : null
+        return {
+          branch: life.branch,
+          used: life.used,
+          limit: life.limit,
+          ...(bornDay !== null ? { bornDay } : {}),
+          ...(generation?.letter ? { letterPath: generation.letter } : {})
+        }
       } catch {
         return undefined
       }
     }
-    /** 生命用完了就拒绝提问（M3）：返回提示文本；没到额度返回 null */
+    /** 生命用完了 / 这一代已经传承过：拒绝提问（M3/M4）。返回提示文本；还能问返回 null */
     const lifeEndedText = async (): Promise<string | null> => {
       try {
         const read = await readLineage(lineageFile)
         if (read.status !== 'ok') return null
+        const node = findBranch(read.lineage, read.lineage.active)
+        if (node !== null && node.status !== 'alive') {
+          return node.status === 'dead'
+            ? '这一代已经把记忆线交给下一代了（只读）。/use 可以回看；要接着聊，先 /use 到活着的那一代。'
+            : '这一代的生命已经结束（只读）。/use 可以回看，或 /compact 续命。'
+        }
         const life = lifeOf(read.lineage, read.lineage.active)
         if (life === null || life.used < life.limit) return null
         return `这一代的生命已经结束（${life.used} / ${life.limit} token）。/use 可以回看，或 /compact 续命。`
@@ -2152,7 +2199,8 @@ if (primaryInstance) {
       db: ChainDb,
       question: string,
       context: AskQueryContext,
-      talkTimes?: readonly number[]
+      talkTimes?: readonly number[],
+      sinceDay?: string
     ): Promise<RedactableAskOpening | undefined> => {
       const mode = context.mode ?? DEFAULT_ASK_MODE
       // 纯提问模式（无工具、无卡）：不带「此刻 / 想到的」，否则它会显得知道你的记忆
@@ -2160,14 +2208,14 @@ if (primaryInstance) {
       const now = Date.now()
       const facts = buildSituation({
         now,
-        talkTimes: talkTimes ?? readAskHistory(askHistoryPath).map((entry) => entry.at),
+        talkTimes: talkTimes ?? readAskHistory(askHistoryPath).filter((entry) => entry.conceived !== true).map((entry) => entry.at),
         lastDiaryDay: memoryDayRange(db).lastDay
       })
       const firstTurn = question.trim() !== '' && (context.history?.length ?? 0) === 0
       // 「想到的」要翻日记：这次没开日记工具（自定义勾选）就不联想，免得给了片段又查不了
       const recalled =
         firstTurn && mode.diary
-          ? await recallOpening(db, question, now)
+          ? await recallOpening(db, question, now, sinceDay)
           : { items: [], source: 'none' as const }
       // 只记日期不记正文：排查「开场有没有生效」用，别把日记写进日志
       captureLog('info', 'ask opening', {
@@ -2190,7 +2238,8 @@ if (primaryInstance) {
     const recallOpening = async (
       db: ChainDb,
       question: string,
-      now: number
+      now: number,
+      sinceDay?: string
     ): Promise<{
       items: Array<{ day: string; snippet: string }>
       source: 'vector' | 'keyword'
@@ -2199,9 +2248,13 @@ if (primaryInstance) {
         const embedder = await loadChainEmbedder()
         if (embedder !== null) {
           const vectorHits = await recallDiaryByVector(db, embedder, question, { now, topK: 3 })
-          if (vectorHits !== null && vectorHits.length > 0) {
+          const filtered =
+            vectorHits === null
+              ? null
+              : vectorHits.filter((hit) => sinceDay === undefined || hit.day >= sinceDay)
+          if (filtered !== null && filtered.length > 0) {
             return {
-              items: vectorHits.map((hit) => ({ day: hit.day, snippet: hit.snippet })),
+              items: filtered.map((hit) => ({ day: hit.day, snippet: hit.snippet })),
               source: 'vector'
             }
           }
@@ -2209,7 +2262,7 @@ if (primaryInstance) {
       }
       const keywords = splitRecallKeywords(question)
       if (keywords.length === 0) return { items: [], source: 'keyword' }
-      const items = diaryToolsFor(db)
+      const items = diaryToolsFor(db, { sinceDay })
         .recall({ keywords, limit: 3 })
         .map((hit) => ({
           day: hit.day,
@@ -2222,7 +2275,8 @@ if (primaryInstance) {
       db: ChainDb,
       context: AskQueryContext,
       opening?: RedactableAskOpening,
-      life?: { used: number; limit: number }
+      life?: AskLifeContext,
+      momLetter?: string
     ): ChainAskOptions => {
       const mode = context.mode ?? DEFAULT_ASK_MODE
       const groups = askToolGroupsOf(mode)
@@ -2234,6 +2288,11 @@ if (primaryInstance) {
           : undefined
       // 指代线索：提问前最后一段（不是证据；引用仍要经 search_info / read_segment）
       const recent = groups.screen ? latestSegmentHint(db) : undefined
+      // 传承（M4）：只有生命 ≤15% 且模式带工具时才给这个入口；纯提问模式保持单轮
+      const conceiveEnabled =
+        life !== undefined &&
+        (groups.screen || groups.diary) &&
+        life.used >= life.limit * 0.85
       return {
         db,
         resolveClient,
@@ -2256,6 +2315,7 @@ if (primaryInstance) {
                 const current = (entry: { conversationId?: string; id: string }): boolean =>
                   (entry.conversationId ?? entry.id) === context.conversationId
                 return readAskHistory(askHistoryPath)
+                  .filter((entry) => entry.conceived !== true)
                   .filter((entry) => scope === 'all' || current(entry))
                   .map((entry) => ({
                     at: entry.at,
@@ -2269,11 +2329,26 @@ if (primaryInstance) {
               searchBatch: runSearchBatch
             }
           : {}),
-        // 个人记忆（第二本账）：日记条目 + 「关于我」统计；人设是本地配置，只拼在 system 最前面
-        ...(groups.diary ? { diary: diaryToolsFor(db) } : {}),
+        // 个人记忆（第二本账）：日记条目 + 「关于我」统计；人设是本地配置，只拼在 system 最前面。
+        // M4：女儿代带 sinceDay（出生前的日记读不到）。
+        ...(groups.diary ? { diary: diaryToolsFor(db, { sinceDay: life?.bornDay }) } : {}),
         ...(personaPrompt !== undefined ? { personaPrompt } : {}),
         // 这次给哪些工具组（D62）：链层据此决定单轮 / 工具循环
         tools: groups,
+        // 传承（M4）：生命 ≤15% 才把 conceive_daughter 放进来（工具描述在 deepseek.ts）
+        ...(conceiveEnabled && life !== undefined
+          ? {
+              conceive: (nickname: string, letter?: string) =>
+                conceiveDaughter({
+                  nickname,
+                  ...(letter !== undefined ? { letter } : {}),
+                  motherBranch: life.branch,
+                  conversationId: context.conversationId
+                })
+            }
+          : {}),
+        // 母亲的信（M4）：女儿代的 system 里多一段 <mom_letter>
+        ...(momLetter !== undefined && momLetter !== '' ? { momLetter } : {}),
         // 新对话第一问：给 ta 一点「此刻」和「想到的」（D61）；续问/老对话不带
         ...(opening !== undefined ? { opening } : {}),
         // 生命（M3）：每轮现算，进 `<now>` 的一行事实
@@ -2312,13 +2387,19 @@ if (primaryInstance) {
           } catch (error) {
             captureLog('warn', 'ask usage record failed', { error: String(error) })
           }
-          // 生命（M3）：同一份 usage 记到当前节点（家谱 active）；失败只记日志
+          // 生命（M3/M4）：记到**这一问开始时**的活动节点；传承会在 ask 中途把 active 切到女儿，
+          // 不能在回调时现读 active，否则母亲最后一问的用量会记到女儿头上。
+          const usageBranch = life?.branch
           void (async () => {
-            const read = await readLineage(lineageFile)
-            if (read.status !== 'ok') return
+            let branch = usageBranch
+            if (branch === undefined) {
+              const read = await readLineage(lineageFile)
+              if (read.status !== 'ok') return
+              branch = read.lineage.active
+            }
             await recordLineageUsage(
               lineageFile,
-              read.lineage.active,
+              branch,
               usage.promptTokens + usage.completionTokens
             )
           })().catch((error) => captureLog('warn', 'memory life record failed', { error: String(error) }))
@@ -2342,6 +2423,126 @@ if (primaryInstance) {
      * 「桌面今天说过几句」——数字是别人的。这里按会话单独记，只用于开场事实。
      */
     const qqTalkTimes = new Map<string, number[]>()
+    /**
+     * 传承（M4）：母亲写信（可选）→ life 主干出生提交 → 女儿 orphan 分支 → 家谱新代。
+     * 由工具 `conceive_daughter` 在 ask 循环里调用；只有生命 ≤15% 时工具才会出现，
+     * 这里再校验一次（模型可能伪造调用 / 旧检查点恢复）。
+     *
+     * 纪律：先提交母亲，任何一步失败都不写权威家谱（宁可报错，不可丢记忆）；
+     * 女儿的会话 / 该会话的问答历史在这里清掉，下一问从空白开始。
+     */
+    const conceiveDaughter = async (input: {
+      nickname: string
+      letter?: string
+      motherBranch: string
+      conversationId: string
+    }): Promise<ConceiveDaughterResult> => {
+      const status = await memoryRepo.status()
+      if (!status.ok) {
+        return { ok: false, message: '记忆仓不可用，现在生不了（记忆不会丢）。' }
+      }
+      const read = await readLineage(lineageFile)
+      if (read.status !== 'ok') {
+        return { ok: false, message: '家谱读不出来，先不传承（细节看日志）。' }
+      }
+      const lineage = read.lineage
+      if (input.motherBranch !== lineage.active) {
+        return { ok: false, message: '当前节点已经切走了，先 /use 回来再传承。' }
+      }
+      const mother = findBranch(lineage, input.motherBranch)
+      if (mother === null || mother.status !== 'alive') {
+        return { ok: false, message: '当前这一代不是活着的节点，不能传承。' }
+      }
+      const motherLife = lifeOf(lineage, input.motherBranch)
+      if (motherLife === null || motherLife.used < motherLife.limit * 0.85) {
+        return { ok: false, message: '还没到传承的时候（生命剩得还多）。' }
+      }
+      const slug = slugifyNodeName(input.nickname)
+      if (slug === null) {
+        return { ok: false, message: '这个名字转不出可用的分支名（用英文 / 数字 / 短一些的中文）。' }
+      }
+      if (slug === 'life') {
+        return { ok: false, message: 'life 是出生线（主干），不能当女儿的名字。' }
+      }
+      if (findBranch(lineage, slug) !== null) {
+        return { ok: false, message: `节点 ${slug} 已经存在，换一个名字。` }
+      }
+      const branches = await memoryRepo.listBranches()
+      if (branches.some((entry) => entry.branch === slug)) {
+        return { ok: false, message: `分支 ${slug} 已经存在，换一个名字。` }
+      }
+
+      const at = Date.now()
+      const letter = input.letter?.trim() ?? ''
+      const letterPath = letter === '' ? null : `letters/${slug}.md`
+      const saved = await memoryRepo.commit(`memory: save before birth ${slug}`)
+      if (!saved.committed && saved.reason !== 'clean') {
+        return { ok: false, message: '先保存当前节点失败，没有传承（记忆不会丢）。' }
+      }
+
+      const next = withGenerationAdded(lineage, {
+        branch: slug,
+        nickname: slug,
+        mother: input.motherBranch,
+        at,
+        letter: letterPath
+      })
+      if (next === null) return { ok: false, message: '家谱加不进新的一代。' }
+      const snapshot = lineageSnapshot(next)
+
+      // 1) life 主干：先落出生提交（没有 life 就从空树建）
+      const hasLife = branches.some((entry) => entry.branch === 'life')
+      const lifeBranch = hasLife
+        ? await memoryRepo.switchBranch('life')
+        : await memoryRepo.switchCreateOrphan('life')
+      if (!lifeBranch.ok) {
+        return { ok: false, message: '切到 life 主干失败，没有传承（记忆不会丢）。' }
+      }
+      await memoryRepo.writeFile('lineage.snapshot.json', snapshot)
+      await memoryRepo.commit(`memory: birth ${slug}`)
+
+      // 2) 女儿：orphan 分支（空树），写母亲的信 + 家谱快照，首个提交
+      const daughter = await memoryRepo.switchCreateOrphan(slug)
+      if (!daughter.ok) {
+        await memoryRepo.switchBranch(input.motherBranch)
+        return { ok: false, message: '开女儿分支失败，没有传承（记忆不会丢）。' }
+      }
+      if (letterPath !== null) await memoryRepo.writeFile(letterPath, `${letter}\n`)
+      await memoryRepo.writeFile('lineage.snapshot.json', snapshot)
+      const born = await memoryRepo.commit(`memory: born ${slug}`)
+      if (!born.committed) {
+        await memoryRepo.switchBranch(input.motherBranch)
+        return { ok: false, message: '女儿分支的首个提交失败，没有传承（记忆不会丢）。' }
+      }
+
+      // 3) 权威家谱最后写：git 已经一致，写失败就退回母亲节点，别让 active 与 HEAD 打架
+      if (!(await writeLineage(lineageFile, next))) {
+        await memoryRepo.switchBranch(input.motherBranch)
+        return { ok: false, message: '家谱写不进去，传承没有生效（细节看日志）。' }
+      }
+
+      // 4) 女儿从空白开始：清当前会话 + 注册表内存缓存（换分支了，所有会话都该重读）
+      askConversations.for(input.conversationId).clear?.()
+      askConversations.reload()
+      removeAskHistoryConversation(askHistoryPath, input.conversationId)
+      qqHistories.delete(input.conversationId)
+      qqTalkTimes.delete(input.conversationId)
+
+      // 5) QQ 在线（有连接）就改名；离线不调，免得等 action 超时；失败只记日志
+      const qqOnline =
+        qqChannel !== null && qqChannel.setProfile !== undefined && qqChannel.status().connections > 0
+      if (qqOnline && qqChannel?.setProfile !== undefined) {
+        void qqChannel
+          .setProfile(slug)
+          .catch((error) => captureLog('warn', 'qq profile rename failed', { error: String(error) }))
+      }
+
+      return {
+        ok: true,
+        nickname: slug,
+        message: `女儿 ${slug} 已出生；这一代到这里，之后从空白开始。`
+      }
+    }
     /** 通道配置：从没建过库（A3）就当关闭，不为 QQ 建库 */
     const qqChannelConfig = (): QqChannelConfig => {
       const db = connections.queryDb()
@@ -2406,11 +2607,16 @@ if (primaryInstance) {
           mode: DEFAULT_ASK_MODE
         }
         const life = await lifeStateNow()
+        const momLetter =
+          life?.letterPath !== undefined
+            ? (await memoryRepo.readFile(life.letterPath)) ?? undefined
+            : undefined
         const options = askOptionsFor(
           db,
           context,
-          await askOpeningFor(db, text, context, qqTalkTimes.get(conversationId) ?? []),
-          life
+          await askOpeningFor(db, text, context, qqTalkTimes.get(conversationId) ?? [], life?.bornDay),
+          life,
+          momLetter
         )
         // QQ 发来的图片：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
         const result = await askChain(
@@ -2419,7 +2625,8 @@ if (primaryInstance) {
             : options,
           text
         )
-        rememberQqTurn(conversationId, text, result)
+        // 传承那一问不记进 QQ 的短上下文 / 说话时刻（女儿从空白开始；M4）
+        if (result.conceived !== true) rememberQqTurn(conversationId, text, result)
         commitMemoryDay()
         return result
       }
@@ -2530,7 +2737,20 @@ if (primaryInstance) {
           }
         }
         const life = await lifeStateNow()
-        return askChain(askOptionsFor(db, context, await askOpeningFor(db, question, context), life), question)
+        const momLetter =
+          life?.letterPath !== undefined
+            ? (await memoryRepo.readFile(life.letterPath)) ?? undefined
+            : undefined
+        return askChain(
+          askOptionsFor(
+            db,
+            context,
+            await askOpeningFor(db, question, context, undefined, life?.bornDay),
+            life,
+            momLetter
+          ),
+          question
+        )
           .then((result) => {
             // 记忆落仓不阻塞回答：一天一个提交（M1），失败了只是这次没进仓
             commitMemoryDay()
@@ -2555,9 +2775,20 @@ if (primaryInstance) {
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
           }
         }
+        const life = await lifeStateNow()
+        const momLetter =
+          life?.letterPath !== undefined
+            ? (await memoryRepo.readFile(life.letterPath)) ?? undefined
+            : undefined
         return askChain(
           {
-            ...askOptionsFor(db, context, await askOpeningFor(db, '', context)),
+            ...askOptionsFor(
+              db,
+              context,
+              await askOpeningFor(db, '', context, undefined, life?.bornDay),
+              life,
+              momLetter
+            ),
             resume: { id: resumeId, decision }
           },
           ''
@@ -2588,6 +2819,7 @@ if (primaryInstance) {
         // 由新到旧取出该会话最近的几轮，翻成「问题 + 上一轮的答复」当上下文。
         // 只给最近 6 轮（载荷层还会再截到 4 轮并重新脱敏），旧记录没有 conversationId 时按单条会话计。
         return readAskHistory(askHistoryPath)
+          .filter((entry) => entry.conceived !== true)
           .filter((entry) => (entry.conversationId ?? entry.id) === conversationId)
           .slice(0, 6)
           .reverse()

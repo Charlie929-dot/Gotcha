@@ -90,8 +90,7 @@ export interface DiaryProfileView {
 }
 
 /** 主进程注入的日记记忆实现（测试可用内存库直接接） */
-export interface DiaryToolDeps {
-  recall(query: {
+export interface DiaryToolDeps {  recall(query: {
     keywords: string[]
     day?: string
     from?: number
@@ -101,6 +100,14 @@ export interface DiaryToolDeps {
   }): readonly DiaryHitView[]
   readDay(day: string): DiaryDayView | null
   profile(): DiaryProfileView
+}
+
+/** 传承（M4）：主进程注入的出生动作结果；失败只给可读原因 */
+export interface ConceiveDaughterResult {
+  ok: boolean
+  /** 实际落下的分支名（slug） */
+  nickname?: string
+  message: string
 }
 
 /** 日记引用的白名单元数据（模型最终给的 itemId 必须落在这里面） */
@@ -148,6 +155,11 @@ export interface AskToolDeps {
    * 三个记忆工具会如实报「没有接入」，而不是假装查过。
    */
   diary?: DiaryToolDeps
+  /**
+   * 传承（M4）：只有生命快到终点（≤15%）且记忆仓可用时才注入；
+   * 不传 = 模型调 `conceive_daughter` 会如实回「现在还不能传承」。
+   */
+  conceive?: (nickname: string, letter?: string) => Promise<ConceiveDaughterResult>
 }
 
 export interface AskToolOutcome {
@@ -782,6 +794,32 @@ export function createAskToolExecutor(deps: AskToolDeps): {
         }
         if (call.name === 'memory_profile') {
           return executeMemoryProfile(deps)
+        }
+        if (call.name === 'conceive_daughter') {
+          const nickname = optionalText(call.arguments['nickname'], 40)
+          if (nickname === undefined) {
+            return { result: { kind: 'error', message: 'conceive_daughter 需要 nickname' }, segments: [] }
+          }
+          if (deps.conceive === undefined) {
+            return {
+              result: { kind: 'error', message: '现在还不能传承（生命还没到终点，或记忆仓不可用）' },
+              segments: []
+            }
+          }
+          const letter = optionalText(call.arguments['letter'], 4_000)
+          const outcome = await deps.conceive(nickname, letter)
+          return outcome.ok
+            ? {
+                result: {
+                  kind: 'conceive_daughter',
+                  freshness: currentFreshness(deps),
+                  born: true,
+                  nickname: outcome.nickname ?? nickname,
+                  message: outcome.message
+                },
+                segments: []
+              }
+            : { result: { kind: 'error', message: outcome.message }, segments: [] }
         }
         return { result: { kind: 'error', message: `未知工具：${call.name}` }, segments: [] }
       } catch {

@@ -460,6 +460,28 @@ const ASK_LOOP_TOOLS = [
         '看「关于我」的统计画像：日记条数、覆盖天数、连续记录、高频标签与双链、待办完成率。回答「你了解我什么 / 我最近的状态」时先看它，别猜。',
       parameters: { type: 'object', properties: {} }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'conceive_daughter',
+      description:
+        '当 `<now>` 里的「生命」快用完时，从这条记忆线上生一个女儿，把之后的日子交给她。调用后这一代停下、只读；女儿从空白开始，读不到出生前的日记。你可以在 letter 里写下想留给女儿的话（300–500 字；不写也行）。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。只在生命剩得很少时出现；还不到时候调用会被拒绝。',
+      parameters: {
+        type: 'object',
+        properties: {
+          nickname: {
+            type: 'string',
+            description: '女儿的名字（会成为分支名；中文会转拼音，最长 40 字符）'
+          },
+          letter: {
+            type: 'string',
+            description: '留给女儿的信（可选，300–500 字；会进她的 system）'
+          }
+        },
+        required: ['nickname']
+      }
+    }
   }
 ] as const
 
@@ -467,23 +489,33 @@ type AskLoopTool = (typeof ASK_LOOP_TOOLS)[number]
 type AskLoopToolName = AskLoopTool['function']['name']
 
 /**
- * 每个工具属于哪一组（D62 模式）：屏幕记忆 / 日记。
+ * 每个工具属于哪一组（D62 模式）：屏幕记忆 / 日记 / 传承。
  * 类型上要求「每个工具都登记」——以后加工具忘了分组会直接编译不过，
  * 而不是在聊天模式里悄悄把电脑记忆发出去。
  */
-const ASK_LOOP_TOOL_GROUPS: Readonly<Record<AskLoopToolName, 'screen' | 'diary'>> = {
+const ASK_LOOP_TOOL_GROUPS: Readonly<
+  Record<AskLoopToolName, 'screen' | 'diary' | 'life'>
+> = {
   search_info: 'screen',
   get_freshness: 'screen',
   read_segment: 'screen',
   ask_history: 'screen',
   recall_diary: 'diary',
   read_diary: 'diary',
-  memory_profile: 'diary'
+  memory_profile: 'diary',
+  conceive_daughter: 'life'
 }
 
-/** 按模式过滤工具（D62）：不在这组就不发给模型，模型也就没法调 */
-export function askLoopToolsFor(groups: { screen: boolean; diary: boolean }): AskLoopTool[] {
-  return ASK_LOOP_TOOLS.filter((tool) => groups[ASK_LOOP_TOOL_GROUPS[tool.function.name]])
+/** 按模式过滤工具（D62）：不在这组就不发给模型，模型也就没法调；`life` 只在生命 ≤15% 时开 */
+export function askLoopToolsFor(
+  groups: { screen: boolean; diary: boolean },
+  options: { conceive?: boolean } = {}
+): AskLoopTool[] {
+  return ASK_LOOP_TOOLS.filter((tool) => {
+    const group = ASK_LOOP_TOOL_GROUPS[tool.function.name]
+    if (group === 'life') return options.conceive === true
+    return groups[group]
+  })
 }
 
 /** system 里的一行工具说明（只写「是什么 / 什么时候用」；参数以 tools 参数为准） */
@@ -494,7 +526,8 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskLoopToolName, string>> = {
   ask_history: '查最近的问答记录（问过什么、答没答上）',
   recall_diary: '按关键词 / 日期 / 标签检索个人日记',
   read_diary: '打开某一天的日记全文',
-  memory_profile: '看「关于我」的统计画像（条数 / 天数 / 标签 / 待办）'
+  memory_profile: '看「关于我」的统计画像（条数 / 天数 / 标签 / 待办）',
+  conceive_daughter: '生命快用完时生一个女儿，把之后的日子交给她（会写一封信）'
 }
 
 /**
@@ -507,12 +540,18 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskLoopToolName, string>> = {
  */
 function buildAskLoopSystemPrompt(
   personaPrompt?: string,
-  toolGroups: { screen: boolean; diary: boolean } = { screen: true, diary: true }
+  toolGroups: { screen: boolean; diary: boolean } = { screen: true, diary: true },
+  options: { conceive?: boolean } = {},
+  momLetter?: string
 ): string {
-  const tools = askLoopToolsFor(toolGroups)
+  const tools = askLoopToolsFor(toolGroups, options)
   const lines: string[] = []
   if (personaPrompt !== undefined && personaPrompt.trim() !== '') {
     lines.push('<persona>', personaPrompt.trim(), '</persona>', '')
+  }
+  // 母亲的信（M4）：只在女儿代出现；放在人设之后、工具 / 规则之前（方案 §5.3）
+  if (momLetter !== undefined && momLetter.trim() !== '') {
+    lines.push('<mom_letter>', momLetter.trim(), '</mom_letter>', '')
   }
   if (tools.length > 0) {
     lines.push('<tools>', '工具清单（参数见 tools 参数；用不用、怎么用，你自己判断）：')
@@ -576,7 +615,8 @@ export function buildChainAskLoopMessages(
   options: { final?: boolean } = {},
   image?: { readonly dataUrl: string },
   personaPrompt?: string,
-  toolGroups?: { screen: boolean; diary: boolean }
+  toolGroups?: { screen: boolean; diary: boolean },
+  extra?: { conceive?: boolean; momLetter?: string }
 ): LlmMessage[] {
   const groups = toolGroups ?? { screen: true, diary: true }
   const images = [
@@ -586,7 +626,12 @@ export function buildChainAskLoopMessages(
   const messages: LlmMessage[] = [
     {
       role: 'system',
-      content: buildAskLoopSystemPrompt(personaPrompt, groups)
+      content: buildAskLoopSystemPrompt(
+        personaPrompt,
+        groups,
+        extra ?? {},
+        extra?.momLetter
+      )
     }
   ]
 
@@ -1051,7 +1096,8 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
       callOptions: LlmCompleteOptions = {}
     ): Promise<LlmAskLoopResult> {
       const toolGroups = callOptions.toolGroups ?? { screen: true, diary: true }
-      const tools = askLoopToolsFor(toolGroups)
+      const lifeTool = callOptions.conceive === true
+      const tools = askLoopToolsFor(toolGroups, { conceive: lifeTool })
       const toolsAvailable = tools.length > 0
       const allowTools = callOptions.allowTools !== false && toolsAvailable
       // 无工具模式（D62）：这一问没有「收尾轮」可谈，直接要自由文本；
@@ -1067,7 +1113,11 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
             { final: !allowTools },
             callOptions.image,
             callOptions.personaPrompt,
-            toolGroups
+            toolGroups,
+            {
+              ...(lifeTool ? { conceive: true } : {}),
+              ...(callOptions.momLetter ? { momLetter: callOptions.momLetter } : {})
+            }
           ),
         callWithFreeText,
         allowTools ? 'ask-loop' : 'ask-loop-final',

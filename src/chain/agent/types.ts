@@ -108,7 +108,7 @@ export interface ChainAskTrace {
   steps: ChainAskTraceStep[]
 }
 
-export type ChainAskResult =
+export type ChainAskResult = (
   | {
       kind: 'answer'
       answer: string
@@ -198,6 +198,13 @@ export type ChainAskResult =
       stats: ChainAskStats
       trace?: ChainAskTrace
     }
+) & {
+  /**
+   * 这一问里传承成功（M4）：答复照常显示给用户，但不进会话 / 不写下一代上下文，
+   * 下一问从空白开始。界面 / 记录层据此只把它当一条「展示用」结果。
+   */
+  conceived?: true
+}
 
 /** 续问时带上的上一轮对话（问题 + 最终答复 / 澄清问题），让「那上午呢」这类指代有处可落 */
 export interface ChainAskTurnContext {

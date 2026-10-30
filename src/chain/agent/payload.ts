@@ -354,6 +354,17 @@ export type RedactableAskLoopToolResult =
       stats: Record<string, number | string | null>
       observations: readonly RedactableDiaryObservation[]
     }
+  /**
+   * 传承（M4）：this generation 已经把记忆线交给女儿。
+   * `born=true` 时工具结果会告诉模型「这一问之后从空白开始」；`nickname` 是女儿的分支名。
+   */
+  | {
+      kind: 'conceive_daughter'
+      freshness: AskLoopFreshness
+      born: boolean
+      nickname: string
+      message: string
+    }
 
 /** 循环里的一次往返：模型发起的调用 + 执行器给出的摘要 */
 export interface RedactableAskLoopTurn {
@@ -997,6 +1008,18 @@ export function buildAskLoopPayload(
           observations.push({ topic: item.topic, statement: statement.text })
         }
         view = { kind: 'memory_profile', freshness: result.freshness, stats: result.stats, observations }
+        break
+      }
+      case 'conceive_daughter': {
+        const nickname = policy.redact(normalizeText(result.nickname))
+        const message = policy.redact(normalizeText(result.message))
+        view = {
+          kind: 'conceive_daughter',
+          freshness: result.freshness,
+          born: result.born === true,
+          nickname: nickname.blocked ? '' : nickname.text.slice(0, 60),
+          message: message.blocked ? '传承完成' : message.text.slice(0, 240)
+        }
         break
       }
       default: {

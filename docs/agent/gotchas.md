@@ -204,6 +204,9 @@
 | 真 git 单测在并行下会超 vitest 默认 5s | 2026-10-30 M2：`main-memory-repo.test.ts` 单个用例（init + 提交 + checkout）串起来接近 20s，全量并行（152 worker）时默认 5s 会随机红 | 这类 describe 写 `{ timeout: 30_000 }`；产品里的仓超时仍是 20s / 推送 60s，两套数不要混 |
 | 会话不再自动裁剪，长聊天会一路涨到额度 | 2026-10-30 M3（D69）：去掉了 80k 自动丢轮（生命口径要求上下文真的变大）；不 `/compact` 就会一直涨，到 500K 冻结 | `<now>` 生命行会提前显示「还剩 X%」；看到掉得厉害就 `/compact`。旧轮原文在 git 历史里，`/use <sha>` 可回看 |
 | `/compact` 只压当前会话，不是整个节点 | 2026-10-30 M3：M1 拍板会话按 `conversationId` 一文件（1=A），所以 `/compact` 压的是桌面窗口**当前这个会话**，不是节点下所有会话 | 命令需要 conversationId（`ask-ipc` 提前解析并传给 command）；QQ 侧 M5 接命令时也要传；别按「整个节点一份 turns.jsonl」去理解 |
+| `git checkout --orphan` 不等于空树 | 2026-10-30 M4：`--orphan` 只换 HEAD，旧文件还留在索引 / 工作区；直接提交会把母亲的 `conversations/` 带进女儿分支 | `switchCreateOrphan` 里执行 `git rm -rf --ignore-unmatch .` 清空，再写回 `.gitattributes` / `.gitignore` / 三个目录脚手架；单测见 `main-memory-repo.test.ts` 的 orphan 用例 |
+| 传承后母亲最后一问的 usage 会记到女儿头上 | 2026-10-30 M4：`onUsage` 以前在回调时现读 `lineage.active`，而传承会把 active 切到女儿；母亲那一问的用量就记成了女儿的生命 | 在 `askOptionsFor` 里捕获**这一问开始时**的 `life.branch` 传给 `onUsage`；`recordLineageUsage` 再拒绝 `status !== 'alive'` 的节点（恢复中的边角也挡住） |
+| 第一代不能套「出生日之后」的日记过滤 | 2026-10-30 M4：`lineage` 第一代 `born_at` 是建谱时间（今天），若给所有代都设 `sinceDay`，第一代会看不到今天的日记 | 只有 `generation.mother !== null`（女儿代）才算出生日边界；第一代 `bornDay` 不传，照常读全部日记 |
 
 ## 规则
 

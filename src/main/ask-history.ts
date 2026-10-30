@@ -66,6 +66,11 @@ export interface AskHistoryEntry {
   /** `kind=error` 时的可读消息 */
   message?: string
   /**
+   * 传承那一问（M4）：界面上照常显示，但不进下一代的上下文（模型历史 / ask_history 工具都过滤）。
+   * 老记录没有这个字段 = 普通问答。
+   */
+  conceived?: boolean
+  /**
    * 过程（D55 ③）：每轮思考 + 工具调用摘要。
    * 老记录没有这个字段；只用于展示，不写回请求。
    */
@@ -217,6 +222,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
   if (data.conversationId !== undefined && (typeof data.conversationId !== 'string' || data.conversationId === '')) {
     return null
   }
+  if (data.conceived !== undefined && typeof data.conceived !== 'boolean') return null
   if (data.trace !== undefined && !isTrace(data.trace)) return null
   if (data.kind === 'clarify') {
     if (!isClarify(data.clarify)) return null
@@ -239,6 +245,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
     ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
     ...(typeof data.message === 'string' ? { message: data.message } : {}),
     ...(typeof data.note === 'string' ? { note: data.note } : {}),
+    ...(typeof data.conceived === 'boolean' ? { conceived: data.conceived } : {}),
     ...(isTrace(data.trace) ? { trace: data.trace } : {}),
     stats: data.stats
   }
@@ -331,6 +338,27 @@ export function clearAskHistory(filePath: string): void {
   refreshCacheHeader(filePath, [])
 }
 
+/**
+ * 删掉某个会话的全部记录（M4 传承：女儿从空白开始）。
+ * 只删**这个会话**，不动其他会话；返回删掉的条数。文件仍是追加写的 JSONL，
+ * 删完重写成「旧 → 新」的行序，缓存头跟着刷新。
+ */
+export function removeAskHistoryConversation(filePath: string, conversationId: string): number {
+  const entries = readAskHistory(filePath)
+  const kept = entries.filter((entry) => (entry.conversationId ?? entry.id) !== conversationId)
+  const removed = entries.length - kept.length
+  if (removed === 0) return 0
+  mkdirSync(dirname(filePath), { recursive: true })
+  const lines = kept
+    .slice()
+    .reverse()
+    .map((entry) => JSON.stringify(entry))
+  writeFileSync(filePath, lines.length === 0 ? '' : `${lines.join('\n')}\n`, 'utf8')
+  // kept 已是「最新在前」，与 readAskHistory 的缓存口径一致
+  refreshCacheHeader(filePath, kept)
+  return removed
+}
+
 /** 把一次问答结果折成一条记录；id 只要在同一进程内唯一即可（时刻 + 随机后缀） */
 export function toHistoryEntry(
   question: string,
@@ -349,7 +377,9 @@ export function toHistoryEntry(
     ...(imagePath ? { imagePath } : {}),
     ...(attachments && attachments.length > 0 ? { attachments: [...attachments] } : {}),
     // 过程（D55 ③）：所有出口都带（暂停轮不落历史，最终结果会带完整 steps）
-    ...(result.trace ? { trace: result.trace } : {})
+    ...(result.trace ? { trace: result.trace } : {}),
+    // 传承那一问（M4）：只显示，不进下一代上下文
+    ...(result.conceived ? { conceived: true } : {})
   }
   if (result.kind === 'answer') {
     return {

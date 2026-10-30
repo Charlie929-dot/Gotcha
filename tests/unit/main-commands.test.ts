@@ -55,6 +55,7 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     head: async () => ({ branch: 'default', detached: false, sha: 'abc1234' }),
     switchBranch: async (name) => ({ ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }),
     switchCreate: async (name) => ({ ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }),
+    switchCreateOrphan: async (name) => ({ ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }),
     checkoutCommit: async (ref) => ({ ok: true, head: { branch: null, detached: true, sha: ref } }),
     deleteBranch: async () => ({ ok: true }),
     listBranches: async () => [{ branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 }],

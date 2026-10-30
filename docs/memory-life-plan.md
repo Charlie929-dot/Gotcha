@@ -1,6 +1,6 @@
 # 记忆生命与分支（memory-life）· 方案 v1
 
-> 状态：**M1–M3 已实现**（2026-10-30，D67：仓 / 家谱 / 会话与图片落盘 / 每日提交 / `/help` `/backup`；D68：节点命令 `/log` `/new` `/use` `/del` + 历史提交自动分叉；D69：生命记账 / `<now>` 生命行 / `/compact` / 冻结 / 去掉自动裁剪），M4–M6 未开工。拍板人原话：「把记忆做成 github 仓库」「生命尽头写一封信传给女儿」「在分支上随意控制记忆版本」。
+> 状态：**M1–M4 已实现**（2026-10-30，D67：仓 / 家谱 / 会话与图片落盘 / 每日提交 / `/help` `/backup`；D68：节点命令 `/log` `/new` `/use` `/del` + 历史提交自动分叉；D69：生命记账 / `<now>` 生命行 / `/compact` / 冻结 / 去掉自动裁剪；D71：`conceive_daughter` 工具 / 女儿 orphan 空分支 / `<mom_letter>` / 日记出生日边界），M5–M6 未开工。拍板人原话：「把记忆做成 github 仓库」「生命尽头写一封信传给女儿」「在分支上随意控制记忆版本」。**M4 口径变化（D71）**：本轮不新增写信 LLM 调用 / 模板信，`letter` 由 ta 在工具参数里自己写（主动写留到 `llm-call` 的自调用能力）。
 > 事实源：`src/chain/agent/*`（会话 / 载荷 / 工具循环）、`src/main/index.ts`（组合根）、`src/main/qq/*`（QQ 通道 / NapCat）、`src/memory/*`（个人记忆索引）、`src/main/ask-history.ts`（桌面问答历史）。
 > 取代 / 搁置：`docs/agent/llm-call.md` 第 4 步（perceive / 快照）**搁置**；D64 的「自动裁剪 + digest」被本方案的手动 `/compact` 取代；P2（工具目录搬家）、P4（NapCat 拆分）不做。
 
@@ -189,6 +189,8 @@ life
     ├─ QQ 通道在线则 set_qq_profile(nickname)（失败只记日志）
     └─ 会话清空：女儿从空白开始（出生日之前的日记不索引）
 ```
+
+> M4 实现（D71）：写信**不调模型**；`letter` 是工具参数，ta 想写就写、不写就不生成（主动写留到 `llm-call` 的自调用能力）。`<mom_letter>` 只在有信时进女儿 system；第一代不设出生日边界。
 
 女儿的日记边界：索引按出生日过滤（`day_key >= born_at`），读不到出生前的日记；母亲的分支 `/use` 可回看，但只读。
 

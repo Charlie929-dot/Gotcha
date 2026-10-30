@@ -369,9 +369,14 @@ describe('命令执行', () => {
       lineageFile
     })
     expect(textOf(await run('/log 0-1'))).toBe(
-      ['[0] default', '[0-0] 记忆 2026-10-30 18:05 · bbb2222', '[0-1] 记忆 2026-10-30 · aaa1111'].join('\n')
+      [
+        '[0] default  ← 当前',
+        '[0-0] 记忆 2026-10-30 18:05 · bbb2222',
+        '[0-1] 记忆 2026-10-30 · aaa1111'
+      ].join('\n')
     )
-    expect(textOf(await run('/log ask'))).toContain('[0] ask')
+    // 不是当前节点就不带标记
+    expect(textOf(await run('/log ask')).split('\n')[0]).toBe('[0] ask')
     expect(textOf(await run('/log 9-9'))).toContain('没有节点 9-9')
   })
 

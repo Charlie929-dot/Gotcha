@@ -89,7 +89,7 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
       ['[0] life · 主干', '[0-0] ask · 纯模型 · 0 个工具  ← 当前', '[0-1] default · 7 个工具'].join('\n')
     )
     const history = textOf(await run('/log 0-0'))
-    expect(history.split('\n')[0]).toBe('[0] ask')
+    expect(history.split('\n')[0]).toBe('[0] ask  ← 当前')
     expect(history).toMatch(/\[0-0\] 提问会话 ask · [0-9a-f]{7,}/u)
     expect(history).toMatch(/\[0-1\] 出生 default · [0-9a-f]{7,}/u)
   })

@@ -476,10 +476,15 @@ function genealogyLine(
 }
 
 /** `/log <节点>`：这个节点的记忆历史（最近 20 条；编号相对这一页，新到旧） */
-async function historyText(deps: CommandDeps, branch: string): Promise<string> {
+async function historyText(
+  deps: CommandDeps,
+  branch: string,
+  headBranch: string | null
+): Promise<string> {
   const limit = 20
   const commits = await deps.repo.branchLog(branch, limit)
-  const lines = [`[0] ${branch}`]
+  const current = headBranch === branch ? '  ← 当前' : ''
+  const lines = [`[0] ${branch}${current}`]
   if (commits.length === 0) lines.push('（还没有提交）')
   else {
     commits.forEach((commit, index) => {
@@ -507,7 +512,7 @@ async function logText(deps: CommandDeps, target: string): Promise<string> {
     const hit =
       flat.find((node) => node.id === target) ?? flat.find((node) => node.branch === target)
     if (hit === undefined) return `没有节点 ${target}（/log 看家谱）。`
-    return historyText(deps, hit.branch)
+    return historyText(deps, hit.branch, head.branch)
   }
 
   const lines = flat.map((node) => genealogyLine(lineage, node, head.branch))

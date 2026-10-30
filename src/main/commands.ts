@@ -475,20 +475,29 @@ function genealogyLine(
   return `[${node.id}] ${node.branch}${suffix}${current}`
 }
 
-/** `/log <节点>`：这个节点的记忆历史（最近 20 条；编号相对这一页，新到旧） */
+/** 短 sha 比较：`%h` 与 `rev-parse --short` 的位数可能不同，按前缀认同一个提交 */
+function sameCommit(a: string, b: string | null): boolean {
+  if (b === null || a === '' || b === '') return false
+  return a === b || (a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a)))
+}
+
+/**
+ * `/log <节点>`：这个节点的记忆历史（最近 20 条；编号相对这一页，新到旧）。
+ * 首行标出「是不是现在所在的节点」，节点内正在用的那条记忆（HEAD）标 `← 正在用`。
+ */
 async function historyText(
   deps: CommandDeps,
   branch: string,
-  headBranch: string | null
+  head: { current: boolean; sha: string | null }
 ): Promise<string> {
   const limit = 20
   const commits = await deps.repo.branchLog(branch, limit)
-  const current = headBranch === branch ? '  ← 当前' : ''
-  const lines = [`[0] ${branch}${current}`]
+  const lines = [`[0] ${branch}${head.current ? '  ← 当前' : ''}`]
   if (commits.length === 0) lines.push('（还没有提交）')
   else {
     commits.forEach((commit, index) => {
-      lines.push(`[0-${index}] ${labelCommitSubject(commit.subject)} · ${commit.hash}`)
+      const inUse = head.current && sameCommit(commit.hash, head.sha) ? '  ← 正在用' : ''
+      lines.push(`[0-${index}] ${labelCommitSubject(commit.subject)} · ${commit.hash}${inUse}`)
     })
   }
   return lines.join('\n')
@@ -512,7 +521,10 @@ async function logText(deps: CommandDeps, target: string): Promise<string> {
     const hit =
       flat.find((node) => node.id === target) ?? flat.find((node) => node.branch === target)
     if (hit === undefined) return `没有节点 ${target}（/log 看家谱）。`
-    return historyText(deps, hit.branch, head.branch)
+    return historyText(deps, hit.branch, {
+      current: head.branch === hit.branch,
+      sha: head.sha
+    })
   }
 
   const lines = flat.map((node) => genealogyLine(lineage, node, head.branch))

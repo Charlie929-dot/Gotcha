@@ -358,6 +358,7 @@ describe('命令执行', () => {
     const run = createCommandHandler({
       repo: fakeRepo({
         ...treeBranches(),
+        head: async () => ({ branch: 'default', detached: false, sha: 'bbb2222' }),
         branchLog: async (name) =>
           name === 'default'
             ? [
@@ -371,11 +372,11 @@ describe('命令执行', () => {
     expect(textOf(await run('/log 0-1'))).toBe(
       [
         '[0] default  ← 当前',
-        '[0-0] 记忆 2026-10-30 18:05 · bbb2222',
+        '[0-0] 记忆 2026-10-30 18:05 · bbb2222  ← 正在用',
         '[0-1] 记忆 2026-10-30 · aaa1111'
       ].join('\n')
     )
-    // 不是当前节点就不带标记
+    // 不是当前节点：不标节点，也不标「正在用」
     expect(textOf(await run('/log ask')).split('\n')[0]).toBe('[0] ask')
     expect(textOf(await run('/log 9-9'))).toContain('没有节点 9-9')
   })

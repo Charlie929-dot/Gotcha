@@ -35,6 +35,8 @@ export interface GitRunResult {
 
 export interface GitRunOptions {
   timeoutMs?: number
+  /** 输出上限（字符）；超出只保留前 N 个，防止 `git log -p` 把内存吃满（`/git` 用） */
+  maxOutput?: number
 }
 
 /** 可注入的 git 执行器：测试用来模拟「没装 git」或固定回执 */
@@ -160,6 +162,11 @@ export interface MemoryRepo {
   mergeBase(a: string, b: string): Promise<string | null>
   /** 某个 ref 的提交数（`/log <节点>` 分页用）；读不出来返回 0 */
   commitCount(ref: string): Promise<number>
+  /**
+   * 在记忆仓里跑原生命令（`/git`，D78）：argv 直传、**不经过 shell**、不弹凭据；
+   * 输出截到 200k 字符，避免 `git log -p` 之类把内存吃满。
+   */
+  git(args: readonly string[]): Promise<GitRunResult>
   /** 短 sha → 验证并解析；不存在返回 null */
   revParse(ref: string): Promise<string | null>
 }
@@ -220,11 +227,14 @@ function spawnGit(cwd: string): GitRunner {
 
       child.stdout?.setEncoding('utf8')
       child.stderr?.setEncoding('utf8')
+      const cap = options.maxOutput ?? 0
       child.stdout?.on('data', (chunk: string) => {
         stdout += chunk
+        if (cap > 0 && stdout.length > cap) stdout = stdout.slice(0, cap)
       })
       child.stderr?.on('data', (chunk: string) => {
         stderr += chunk
+        if (cap > 0 && stderr.length > cap) stderr = stderr.slice(0, cap)
       })
       child.on('error', (error: NodeJS.ErrnoException) => {
         finish({
@@ -455,6 +465,14 @@ export function createMemoryRepo(options: {
     return Number.isFinite(count) && count > 0 ? count : 0
   }
 
+  const gitInner = async (args: readonly string[]): Promise<GitRunResult> => {
+    const status = await ensure()
+    if (!status.ok) {
+      return { ok: false, code: null, stdout: '', stderr: '', error: status.reason }
+    }
+    return run([...args], { maxOutput: 200_000 })
+  }
+
   const revParseInner = async (ref: string): Promise<string | null> => {
     const status = await ensure()
     if (!status.ok) return null
@@ -682,6 +700,7 @@ export function createMemoryRepo(options: {
     branchLog: (name, limit = 5) => exclusive(() => branchLogInner(name, limit)),
     mergeBase: (a, b) => exclusive(() => mergeBaseInner(a, b)),
     commitCount: (ref) => exclusive(() => commitCountInner(ref)),
+    git: (args) => exclusive(() => gitInner(args)),
     clearConversations: () => exclusive(clearConversationsInner),
     revParse: (ref) => exclusive(() => revParseInner(ref))
   }

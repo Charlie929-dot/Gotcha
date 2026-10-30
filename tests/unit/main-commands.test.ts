@@ -64,6 +64,7 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     branchLog: async () => [],
     mergeBase: async () => null,
     commitCount: async () => 0,
+    git: async () => ({ ok: true, code: 0, stdout: '', stderr: '' }),
     revParse: async () => null
   }
   return { ...base, ...overrides }
@@ -860,6 +861,102 @@ describe('命令执行', () => {
     expect(commits[1]).toBe('memory: 今天收拾房间')
 
     expect(textOf(await run('/backup 起名'))).toContain('用法：/backup [-d]')
+  })
+
+  it('/git：在记忆仓里跑原生命令，回显输出与退出码；stderr 也回显', async () => {
+    const lineageFile = tempLineageFile()
+    const seen: string[][] = []
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        git: async (args) => {
+          seen.push([...args])
+          return {
+            ok: false,
+            code: 128,
+            stdout: '1b2d9b3 save\nccf78e8 day\n',
+            stderr: 'warning: 示例 stderr\n'
+          }
+        }
+      }),
+      lineageFile
+    })
+    const text = textOf(await run('/git log --oneline -2'))
+    expect(seen).toEqual([['log', '--oneline', '-2']])
+    expect(text).toContain('/git log --oneline -2')
+    expect(text.split('\n')[1]).toBe('1b2d9b3 save')
+    expect(text).toContain('[stderr]')
+    expect(text).toContain('warning: 示例 stderr')
+    expect(text).toContain('（第 1/1 页 · 退出码 128）')
+
+    const missing = createCommandHandler({
+      repo: fakeRepo({ git: async () => ({ ok: false, code: null, stdout: '', stderr: '', error: 'git-missing' }) }),
+      lineageFile
+    })
+    expect(textOf(await missing('/git status'))).toContain('没找到 git')
+
+    expect(textOf(await run('/git'))).toContain('用法：/git <git 参数>')
+    const fresh = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    expect(textOf(await fresh('/git n'))).toContain('先跑一条 /git 命令')
+  })
+
+  it('/git：输出超过一页时 /git n / /git l 翻页（不重跑命令）', async () => {
+    const lineageFile = tempLineageFile()
+    let calls = 0
+    const stdout = `${Array.from({ length: 45 }, (_, index) => `l${index}`).join('\n')}\n`
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        git: async () => {
+          calls += 1
+          return { ok: true, code: 0, stdout, stderr: '' }
+        }
+      }),
+      lineageFile
+    })
+    const first = textOf(await run('/git log -45'))
+    expect(first.split('\n')[1]).toBe('l0')
+    expect(first.split('\n')[20]).toBe('l19')
+    expect(first).toContain('第 1/3 页')
+    expect(first).toContain('/git n 下一页')
+
+    const second = textOf(await run('/git n'))
+    expect(second.split('\n')[1]).toBe('l20')
+    expect(second).toContain('/git l 上一页')
+    expect(calls).toBe(1)
+
+    expect(textOf(await run('/git l')).split('\n')[1]).toBe('l0')
+  })
+
+  it('/git：改了 HEAD 就同步家谱当前节点并重载会话', async () => {
+    const lineageFile = tempLineageFile()
+    await seededLineage(lineageFile)
+    let current = 'default'
+    let reloads = 0
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        head: async () => ({
+          branch: current,
+          detached: false,
+          sha: current === 'default' ? 'abc1234' : 'def5678'
+        }),
+        git: async (args) => {
+          if (args[0] === 'checkout') current = 'spring'
+          return { ok: true, code: 0, stdout: '', stderr: '' }
+        }
+      }),
+      lineageFile,
+      reloadConversations: () => {
+        reloads += 1
+      }
+    })
+    const text = textOf(await run('/git checkout spring'))
+    expect(text).toContain('（没有输出）')
+    expect(text).toContain('HEAD 已切到 spring，家谱当前节点同步')
+    expect(reloads).toBe(1)
+
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.active).toBe('spring')
   })
 
   it('未知命令与还没接上的命令分开回；/cancel 清等待', async () => {

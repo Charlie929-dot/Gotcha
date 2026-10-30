@@ -59,7 +59,13 @@ import {
   type LineageBranch,
   type LineageRead
 } from './lineage'
-import type { MemoryBranchInfo, MemoryRepo, MemorySwitchResult } from './memory-repo'
+import type {
+  GitRunResult,
+  MemoryBranchInfo,
+  MemoryHead,
+  MemoryRepo,
+  MemorySwitchResult
+} from './memory-repo'
 import { nextForkName } from './node-fork'
 
 export interface ParsedCommand {
@@ -122,7 +128,8 @@ export const KNOWN_COMMANDS = [
   'cancel',
   'compact',
   'mode',
-  'tool'
+  'tool',
+  'git'
 ] as const
 
 /** 当前已经接上的命令 */
@@ -136,7 +143,8 @@ export const READY_COMMANDS = [
   'cancel',
   'compact',
   'mode',
-  'tool'
+  'tool',
+  'git'
 ] as const
 
 /** 命名 / 删除确认的等待时限（方案 §6.2：60 秒超时，可 /cancel） */
@@ -421,6 +429,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /tool            看当前分支的工具；set / ele / add / rm',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
+    '  /git <参数>      在记忆仓里跑原生命令（/git n|l 翻页）',
     '  /cancel          取消等待中的命名 / 删除',
     '',
     `当前节点：${active}（${activeKind === 'assistant' ? '纯模型' : '聊天'}）`,
@@ -606,6 +615,71 @@ async function historyPage(
     )
   }
   return { text: lines.join('\n'), offset: start }
+}
+
+/** `/git` 输出每页多少行（D78） */
+const GIT_PAGE = 20
+const GIT_LINE_MAX = 300
+
+interface GitPage {
+  command: string
+  lines: string[]
+  page: number
+  code: number | null
+}
+
+/** `/git` 的 stdout + stderr → 逐行（去掉首尾空行、每行截断） */
+function gitOutputLines(result: GitRunResult): string[] {
+  const out: string[] = []
+  for (const line of result.stdout.split('\n')) {
+    if (line === '' && out.length === 0) continue
+    out.push(line)
+  }
+  while (out.length > 0 && out[out.length - 1] === '') out.pop()
+  if (result.stderr.trim() !== '') {
+    if (out.length > 0) out.push('')
+    out.push('[stderr]')
+    for (const line of result.stderr.split('\n')) {
+      if (line.trim() !== '') out.push(line)
+    }
+  }
+  if (out.length === 0) out.push('（没有输出）')
+  return out.map((line) => (line.length > GIT_LINE_MAX ? `${line.slice(0, GIT_LINE_MAX)}…` : line))
+}
+
+function gitPageText(state: GitPage): string {
+  const total = Math.max(1, Math.ceil(state.lines.length / GIT_PAGE))
+  const page = Math.max(0, Math.min(state.page, total - 1))
+  const lines = state.lines.slice(page * GIT_PAGE, page * GIT_PAGE + GIT_PAGE)
+  const footer = [
+    `第 ${page + 1}/${total} 页`,
+    page > 0 ? '/git l 上一页' : '',
+    page + 1 < total ? '/git n 下一页' : '',
+    state.code === null ? '没跑起来' : `退出码 ${state.code}`
+  ]
+    .filter((item) => item !== '')
+    .join(' · ')
+  return [`/git ${state.command}`, ...lines, '', `（${footer}）`].join('\n')
+}
+
+/** `/git` 改了 HEAD 之后：同步家谱 active、回执里说明（detached 只写仓外家谱，D76 口径） */
+async function syncAfterGit(deps: CommandDeps, head: MemoryHead): Promise<string> {
+  const read = await readLineage(deps.lineageFile)
+  if (read.status !== 'ok') return '（HEAD 变了，但家谱读不出来，细节看日志）'
+  const lineage = read.lineage
+  const branch = head.detached ? lineage.active : head.branch
+  if (branch === null) return ''
+  if (findBranch(lineage, branch) === null) {
+    return `（HEAD 切到 ${branch}，但家谱里没有这个节点，先 /log 看看）`
+  }
+  const next = withActive(lineage, branch)
+  if (next !== null && next !== lineage) {
+    if (head.detached) await writeLineage(deps.lineageFile, next)
+    else await writeLineageQuietly(deps, next)
+  }
+  return head.detached
+    ? `（HEAD 停在 ${head.sha ?? '未知'}，家谱当前节点记作 ${branch}）`
+    : `（HEAD 已切到 ${branch}，家谱当前节点同步）`
 }
 
 /** 家谱里某分支的模式描述（`/mode`、`/use`、`ask:mode` 共用） */
@@ -1291,6 +1365,8 @@ export function createCommandHandler(
   let viewedNode: string | null = null
   /** 当前翻到哪一页（D77：`/log n` 下一页、`/log l` 上一页） */
   let history: { node: string; offset: number } | null = null
+  /** `/git` 上一次的输出（D78：翻页用，不重跑命令） */
+  let gitPage: GitPage | null = null
 
   /**
    * 超时的等待：命名等待（D75）按默认名把动作做完（切换 / 备份照做），
@@ -1411,6 +1487,47 @@ export function createCommandHandler(
         pending = { kind: 'memory', action: { kind: 'backup' } }
         pendingAt = at
         return commandResult(namePromptText('backup', at))
+      }
+      case 'git': {
+        const args = parsed.args.filter((arg) => arg !== '')
+        if (args.length === 1 && (args[0] === 'n' || args[0] === 'l')) {
+          if (gitPage === null) {
+            return commandResult('先跑一条 /git 命令，再用 /git n 下一页 / /git l 上一页。')
+          }
+          const total = Math.max(1, Math.ceil(gitPage.lines.length / GIT_PAGE))
+          const page = args[0] === 'n' ? gitPage.page + 1 : gitPage.page - 1
+          gitPage = { ...gitPage, page: Math.max(0, Math.min(page, total - 1)) }
+          return commandResult(gitPageText(gitPage))
+        }
+        if (args.length === 0) {
+          return commandResult(
+            '用法：/git <git 参数>（在记忆仓里跑，例如 /git log --oneline -8；/git n|l 翻页）'
+          )
+        }
+        const before = await deps.repo.head()
+        const result = await deps.repo.git(args)
+        if (result.error !== undefined) {
+          const why =
+            result.error === 'git-missing'
+              ? '没找到 git（装一个再重开应用）'
+              : result.error === 'timeout'
+                ? '超时了（20 秒）'
+                : `跑不起来（${result.error}）`
+          return commandResult(`git ${why}，细节看日志。`)
+        }
+        const after = await deps.repo.head()
+        let note = ''
+        if (before.branch !== after.branch || before.sha !== after.sha) {
+          deps.reloadConversations?.()
+          note = await syncAfterGit(deps, after)
+        }
+        gitPage = {
+          command: args.join(' '),
+          lines: gitOutputLines(result),
+          page: 0,
+          code: result.code
+        }
+        return commandResult(note === '' ? gitPageText(gitPage) : `${gitPageText(gitPage)}\n\n${note}`)
       }
       case 'cancel': {
         if (pending === null) return commandResult('没有等待中的操作。')

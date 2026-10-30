@@ -16,7 +16,7 @@
 import type { Db } from '../db'
 import type { Embedder } from '../understand/embedding/types'
 import type { RecallCandidate } from './recall'
-import { textHash } from './recall'
+import { selectRecalls, textHash } from './recall'
 import { dayStartTs } from './vault'
 
 /** 送进 embedder 的正文上限：日记一条通常一两百字，遇到超长条目也别让一次推理撑爆 */
@@ -218,6 +218,75 @@ export function listDiaryRecallCandidates(db: Db, model: string, dim: number): R
     ts: row.ts ?? dayStartTs(row.dayKey),
     payload: { uid: row.uid, dayKey: row.dayKey, text: row.text }
   }))
+}
+
+/** 「想到的」一条：日期 + 原文片段（与关键词路同一形状，调用方不用分两套） */
+export interface DiaryVectorRecallHit {
+  uid: string
+  day: string
+  snippet: string
+  score: number
+}
+
+/** 注入正文的截断长度（与 `askOpeningFor` 的关键词路一致，别让一条长日记占满「想到的」） */
+export const DIARY_RECALL_SNIPPET_MAX_CHARS = 120
+/** 默认取几条：设计稿 §3.3 的「回想」是 6–8 条，开场只放 3 条（剩下的让模型自己查） */
+export const DIARY_RECALL_TOP_K = 3
+
+/**
+ * 用「当前问题」的向量回想日记（`llm-call` §3.5 / §4.2，D57）。
+ *
+ * 这是向量索引的**唯一消费者**：索引每天在补，回想却一直走关键词 LIKE，
+ * 等于白算（2026-10-30 收敛）。调用方优先用它，拿不到再回落到关键词。
+ *
+ * 返回 `null` 表示这条路这次不可用——模型没加载、embed 失败、维度不对、
+ * 或者索引还一条都没有；调用方据此回落，不要把「没向量」说成「没想到」。
+ * 已经跑通但确实没有过阈值的条目，返回空数组。
+ */
+export async function recallDiaryByVector(
+  db: Db,
+  embedder: Embedder,
+  query: string,
+  options: { now?: number; topK?: number; minSimilarity?: number } = {}
+): Promise<DiaryVectorRecallHit[] | null> {
+  const text = query.trim()
+  if (text === '') return []
+  let vector: Float32Array | undefined
+  try {
+    ;[vector] = await embedder.embed([text])
+  } catch {
+    return null
+  }
+  if (vector === undefined || vector.length !== embedder.dim) return null
+  const candidates = listDiaryRecallCandidates(db, embedder.model, embedder.dim)
+  // 索引还没建完（升级后 / 刚同步）：这次先走关键词，别让第一问变得空落落
+  if (candidates.length === 0) return null
+  const hits = selectRecalls(candidates, vector, {
+    now: options.now ?? Date.now(),
+    topK: options.topK ?? DIARY_RECALL_TOP_K,
+    ...(options.minSimilarity !== undefined ? { minSimilarity: options.minSimilarity } : {})
+  })
+  const result: DiaryVectorRecallHit[] = []
+  for (const hit of hits) {
+    const payload = hit.payload as { uid?: unknown; dayKey?: unknown; text?: unknown } | undefined
+    if (
+      payload === undefined ||
+      typeof payload.uid !== 'string' ||
+      typeof payload.dayKey !== 'string' ||
+      typeof payload.text !== 'string'
+    ) {
+      continue
+    }
+    const snippet = payload.text.replace(/\s+/gu, ' ').trim().slice(0, DIARY_RECALL_SNIPPET_MAX_CHARS)
+    if (snippet === '') continue
+    result.push({ uid: payload.uid, day: payload.dayKey, snippet, score: hit.score })
+  }
+  return result
+}
+
+/** 索引里有没有日记向量（没有就别为「想到的」加载模型；只查一行） */
+export function hasDiaryVectors(db: Db): boolean {
+  return db.prepare("SELECT 1 AS hit FROM mem_vectors WHERE item_type = 'diary' LIMIT 1").get() !== undefined
 }
 
 /** 索引状态（设置抽屉 / 日志用） */

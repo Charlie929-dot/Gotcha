@@ -93,6 +93,46 @@ describe('对话记录：读写', () => {
   })
 })
 
+// 文件永久保留、无界增长：每问都要读它（开场时间戳 + ask_history 工具）。
+// 缓存按 path + mtime + size 命中，自己追加/清空时推进；外部改写要能失效。
+describe('对话记录：进程内缓存', () => {
+  it('返回的是副本：改返回值不会污染下一次读', () => {
+    const path = tempFile()
+    appendAskHistory(path, entry(1_000, '第一问'))
+    const first = readAskHistory(path)
+    first.push(entry(9_999, '伪造'))
+    expect(readAskHistory(path).map((item) => item.question)).toEqual(['第一问'])
+  })
+
+  it('自己追加后不重读文件也能读到新条目（最新在前）', () => {
+    const path = tempFile()
+    appendAskHistory(path, entry(1_000, '一早'))
+    readAskHistory(path) // 建缓存
+    appendAskHistory(path, entry(2_000, '一晚'))
+    expect(readAskHistory(path).map((item) => item.question)).toEqual(['一晚', '一早'])
+    // 缓存与文件一致：文件里就是两行
+    expect(readFileSync(path, 'utf8').trim().split('\n')).toHaveLength(2)
+  })
+
+  it('外部改写（手工编辑 / 拷回）后按 mtime/size 失效重解析', () => {
+    const path = tempFile()
+    appendAskHistory(path, entry(1_000, '旧的'))
+    expect(readAskHistory(path).map((item) => item.question)).toEqual(['旧的'])
+    writeFileSync(path, JSON.stringify(entry(2_000, '手工改过的一版记录')), 'utf8')
+    expect(readAskHistory(path).map((item) => item.question)).toEqual(['手工改过的一版记录'])
+  })
+
+  it('清空后缓存也空，再追加能读到', () => {
+    const path = tempFile()
+    appendAskHistory(path, entry(1_000, '一问'))
+    expect(readAskHistory(path)).toHaveLength(1)
+    clearAskHistory(path)
+    expect(readAskHistory(path)).toEqual([])
+    appendAskHistory(path, entry(3_000, '二问'))
+    expect(readAskHistory(path).map((item) => item.question)).toEqual(['二问'])
+  })
+})
+
 describe('对话记录：单行校验', () => {
   it('拒绝坏形状（非对象 / 未知 kind / citations 不是数组 / stats 缺字段 / answer 类型错）', () => {
     const base = entry(1_000, 'q')

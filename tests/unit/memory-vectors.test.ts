@@ -18,12 +18,14 @@ import { textHash } from '../../src/memory/recall'
 import { syncVault } from '../../src/memory/store'
 import {
   countPendingVectors,
+  hasDiaryVectors,
   indexDiaryVectors,
   listDiaryRecallCandidates,
   listDiaryVectors,
   memoryVectorStats,
   packVector,
   pruneOrphanVectors,
+  recallDiaryByVector,
   unpackVector
 } from '../../src/memory/vectors'
 
@@ -228,5 +230,61 @@ describe('孤儿清理 / 读取', () => {
     const stats = memoryVectorStats(db, MODEL)
     expect(stats).toMatchObject({ items: 4, vectors: 4, pending: 0, models: [MODEL] })
     expect(countPendingVectors(db, MODEL)).toBe(0)
+  })
+})
+
+// 「想到的」的向量路：索引的唯一消费者（2026-10-30 收敛）
+describe('recallDiaryByVector：拿不到就回 null，让调用方回落关键词', () => {
+  it('索引还空 → hasDiaryVectors 假、回想返回 null（不加载模型也能判断）', async () => {
+    syncVault(db, dir, { now: 1_000 })
+    expect(hasDiaryVectors(db)).toBe(false)
+    expect(await recallDiaryByVector(db, fakeEmbedder(), '今天下午在弄什么', { now: 2_000 })).toBeNull()
+  })
+
+  it('索引建好后按问题回想：给日期 + 片段，条数受 topK 约束', async () => {
+    syncVault(db, dir, { now: 1_000 })
+    await indexDiaryVectors(db, fakeEmbedder(), { now: 2_000 })
+    expect(hasDiaryVectors(db)).toBe(true)
+
+    const hits = await recallDiaryByVector(db, fakeEmbedder(), '写周报', { now: 3_000, topK: 3 })
+    expect(hits).not.toBeNull()
+    expect(hits!.length).toBeGreaterThan(0)
+    expect(hits!.length).toBeLessThanOrEqual(3)
+    for (const hit of hits!) {
+      expect(hit.day).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+      expect(hit.snippet.trim()).not.toBe('')
+      expect(hit.snippet.length).toBeLessThanOrEqual(120)
+      expect(hit.uid).not.toBe('')
+      expect(Number.isFinite(hit.score)).toBe(true)
+    }
+
+    const single = await recallDiaryByVector(db, fakeEmbedder(), '写周报', { now: 3_000, topK: 1 })
+    expect(single).toHaveLength(1)
+  })
+
+  it('embed 抛错 / 维度不对 → null（回落关键词，不说「没想到」）', async () => {
+    syncVault(db, dir, { now: 1_000 })
+    await indexDiaryVectors(db, fakeEmbedder(), { now: 2_000 })
+    const broken = {
+      model: MODEL,
+      dim: DIM,
+      async embed(): Promise<Float32Array[]> {
+        throw new Error('model exploded')
+      }
+    }
+    expect(await recallDiaryByVector(db, broken, '写周报', { now: 3_000 })).toBeNull()
+    expect(
+      await recallDiaryByVector(db, fakeEmbedder({ dim: DIM, returnDim: DIM + 4 }), '写周报', { now: 3_000 })
+    ).toBeNull()
+  })
+
+  it('阈值太高 → 返回空数组（跑通了、只是没命中，调用方自己决定要不要回落）', async () => {
+    syncVault(db, dir, { now: 1_000 })
+    await indexDiaryVectors(db, fakeEmbedder(), { now: 2_000 })
+    const hits = await recallDiaryByVector(db, fakeEmbedder(), '写周报', {
+      now: 3_000,
+      minSimilarity: 2
+    })
+    expect(hits).toEqual([])
   })
 })

@@ -1,5 +1,5 @@
 /**
- * 本地命令（memory-life M1）：解析 / /help / /backup / 未知 / 还没接上。
+ * 本地命令（memory-life M1/M2）：解析 / /help / /log / /new / /use / /del / /backup / 未知。
  * 用假仓，不碰真 git（真仓行为在 main-memory-repo.test.ts）。
  */
 
@@ -8,8 +8,21 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { commandResult, createCommandHandler, memoryDayKey, parseCommand } from '../../src/main/commands'
-import { ensureLineage, writeLineage } from '../../src/main/lineage'
+import {
+  COMMAND_WAIT_TIMEOUT_MS,
+  commandResult,
+  createCommandHandler,
+  memoryDayKey,
+  parseCommand,
+  slugifyNodeName
+} from '../../src/main/commands'
+import {
+  ensureLineage,
+  readLineage,
+  withBranchAdded,
+  writeLineage,
+  type Lineage
+} from '../../src/main/lineage'
 import type { MemoryRepo } from '../../src/main/memory-repo'
 import type { ChainAskResult } from '../../src/chain/agent/types'
 
@@ -36,7 +49,15 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     lastCommit: async () => ({ hash: 'abc1234', subject: 'memory: 2026-10-30' }),
     writeFile: async () => true,
     readFile: async () => null,
-    deleteFile: async () => true
+    deleteFile: async () => true,
+    head: async () => ({ branch: 'default', detached: false, sha: 'abc1234' }),
+    switchBranch: async (name) => ({ ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }),
+    switchCreate: async (name) => ({ ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }),
+    checkoutCommit: async (ref) => ({ ok: true, head: { branch: null, detached: true, sha: ref } }),
+    deleteBranch: async () => ({ ok: true }),
+    listBranches: async () => [{ branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 }],
+    branchLog: async () => [],
+    revParse: async () => null
   }
   return { ...base, ...overrides }
 }
@@ -45,6 +66,28 @@ function textOf(result: ChainAskResult | null): string {
   expect(result?.kind).toBe('command')
   if (result === null || result.kind !== 'command') return ''
   return result.text
+}
+
+async function seededLineage(file: string): Promise<Lineage> {
+  const seeded = await ensureLineage(file, { now: 1 })
+  const next = withBranchAdded(seeded.lineage, {
+    branch: 'spring',
+    generation: 'gen-1',
+    parent: 'default',
+    at: 2
+  })
+  if (next === null) throw new Error('seed failed')
+  await writeLineage(file, next)
+  return next
+}
+
+function twoBranches(): Partial<MemoryRepo> {
+  return {
+    listBranches: async () => [
+      { branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 },
+      { branch: 'spring', sha: 'def5678', subject: 'memory: save before new', at: 2 }
+    ]
+  }
 }
 
 describe('命令解析', () => {
@@ -69,16 +112,29 @@ describe('命令解析', () => {
   it('提交主题按本地日', () => {
     expect(memoryDayKey(new Date(2026, 9, 30, 18, 5).getTime())).toBe('2026-10-30')
   })
+
+  it('名字转 slug：中文转拼音、英文原样、符号转不出报 null', () => {
+    expect(slugifyNodeName('春天')).toBe('chun-tian')
+    expect(slugifyNodeName('Spring')).toBe('spring')
+    expect(slugifyNodeName('foo bar')).toBe('foo-bar')
+    expect(slugifyNodeName('a_b')).toBe('a-b')
+    expect(slugifyNodeName('!!!')).toBeNull()
+    expect(slugifyNodeName('   ')).toBeNull()
+  })
 })
 
 describe('命令执行', () => {
-  it('/help 报当前节点与仓状态', async () => {
+  it('/help 报当前节点、仓状态与新命令', async () => {
     const lineageFile = tempLineageFile()
     await ensureLineage(lineageFile, { now: 1 })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     const text = textOf(await run('/help'))
     expect(text).toContain('当前节点：default')
     expect(text).toContain('记忆仓：可用 · 分支 default · 最近提交「memory: 2026-10-30」')
+    expect(text).toContain('/log')
+    expect(text).toContain('/new <名字>')
+    expect(text).toContain('/use')
+    expect(text).toContain('/del')
     expect(text).toContain('/backup')
   })
 
@@ -94,19 +150,224 @@ describe('命令执行', () => {
     expect(textOf(await run('/help'))).toContain('记忆仓：不可用 · 没找到 git')
   })
 
-  it('/help 显示家谱里的活动节点（切过分支之后）', async () => {
+  it('/log 列出节点、标出当前与分叉来源', async () => {
     const lineageFile = tempLineageFile()
-    const seeded = await ensureLineage(lineageFile, { now: 1 })
-    await writeLineage(lineageFile, {
-      ...seeded.lineage,
-      active: 'spring',
-      branches: [
-        ...seeded.lineage.branches,
-        { branch: 'spring', generation: 'gen-1', parent: 'default', created_at: 2, status: 'alive' }
-      ]
+    await seededLineage(lineageFile)
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        head: async () => ({ branch: 'spring', detached: false, sha: 'def5678' }),
+        status: async () => ({ ok: true, root: 'C:/tmp/memory-repo', branch: 'spring', head: 'def5678', dirty: false }),
+        ...twoBranches()
+      }),
+      lineageFile
     })
+    const text = textOf(await run('/log'))
+    expect(text).toContain('[1] default')
+    expect(text).toContain('[2] spring（从 default 分叉）  ← 当前')
+    expect(text).toContain('def5678  memory: save before new')
+    expect(text).toContain('/use <编号|名字>')
+  })
+
+  it('/log 在 detached 时提示「第一句话会分叉」', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        head: async () => ({ branch: null, detached: true, sha: 'abc1234' }),
+        ...twoBranches()
+      }),
+      lineageFile
+    })
+    expect(textOf(await run('/log'))).toContain('HEAD 停在历史提交 abc1234')
+  })
+
+  it('/new 春天：中文转拼音开分支，家谱记一条并切过去', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
-    expect(textOf(await run('/help'))).toContain('当前节点：spring')
+    const text = textOf(await run('/new 春天'))
+    expect(text).toContain('===this is chun-tian===')
+    expect(text).toContain('从 default 开出')
+
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.branches.map((item) => item.branch)).toEqual(['default', 'chun-tian'])
+    expect(read.lineage.branches[1]).toMatchObject({ parent: 'default', generation: 'gen-1' })
+  })
+
+  it('/new 重名报错，不动仓', async () => {
+    const lineageFile = tempLineageFile()
+    await seededLineage(lineageFile)
+    const run = createCommandHandler({ repo: fakeRepo(twoBranches()), lineageFile })
+    expect(textOf(await run('/new Spring'))).toContain('节点 spring 已经存在')
+  })
+
+  it('/new 不带名字进入命名等待，下一条普通文本当名字', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    let clock = 1000
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile, now: () => clock })
+    expect(textOf(await run('/new'))).toContain('给新节点起个名字')
+    clock += 1000
+    expect(textOf(await run('秋天'))).toContain('===this is qiu-tian===')
+  })
+
+  it('命名等待 60 秒后过期，普通文本照常走模型', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    let clock = 1000
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile, now: () => clock })
+    await run('/new')
+    clock += COMMAND_WAIT_TIMEOUT_MS + 1
+    expect(await run('秋天')).toBeNull()
+  })
+
+  it('/use 分支：先保存当前、切分支、写家谱 active、重载会话', async () => {
+    const lineageFile = tempLineageFile()
+    await seededLineage(lineageFile)
+    let reloads = 0
+    let switched: string | null = null
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        ...twoBranches(),
+        switchBranch: async (name) => {
+          switched = name
+          return { ok: true, head: { branch: name, detached: false, sha: 'def5678' } }
+        }
+      }),
+      lineageFile,
+      reloadConversations: () => {
+        reloads += 1
+      }
+    })
+    const text = textOf(await run('/use spring'))
+    expect(text).toContain('===this is spring===')
+    expect(switched).toBe('spring')
+    expect(reloads).toBe(1)
+
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.active).toBe('spring')
+  })
+
+  it('/use 编号：按 /log 的顺序取节点', async () => {
+    const lineageFile = tempLineageFile()
+    await seededLineage(lineageFile)
+    let switched: string | null = null
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        ...twoBranches(),
+        switchBranch: async (name) => {
+          switched = name
+          return { ok: true, head: { branch: name, detached: false, sha: 'def5678' } }
+        }
+      }),
+      lineageFile
+    })
+    expect(textOf(await run('/use 2'))).toContain('===this is spring===')
+    expect(switched).toBe('spring')
+    expect(textOf(await run('/use 9'))).toContain('没有第 9 个节点')
+  })
+
+  it('/use 短 sha：切到历史提交（detached），不写家谱 active', async () => {
+    const lineageFile = tempLineageFile()
+    const seeded = await seededLineage(lineageFile)
+    let checkedOut: string | null = null
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        ...twoBranches(),
+        revParse: async (ref) => (ref === 'abc1234' ? 'abc1234' : null),
+        checkoutCommit: async (ref) => {
+          checkedOut = ref
+          return { ok: true, head: { branch: null, detached: true, sha: ref } }
+        }
+      }),
+      lineageFile
+    })
+    const text = textOf(await run('/use abc1234'))
+    expect(text).toContain('===this is 历史提交 abc1234===')
+    expect(text).toContain('分叉成 default-<序号>')
+    expect(checkedOut).toBe('abc1234')
+
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.active).toBe(seeded.active)
+  })
+
+  it('/use 不存在的目标如实报错', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    expect(textOf(await run('/use nope'))).toContain('没找到节点或提交')
+  })
+
+  it('/del 需要 confirm：确认后删分支并移出家谱', async () => {
+    const lineageFile = tempLineageFile()
+    await seededLineage(lineageFile)
+    let deleted: string | null = null
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        ...twoBranches(),
+        deleteBranch: async (name) => {
+          deleted = name
+          return { ok: true }
+        }
+      }),
+      lineageFile
+    })
+    expect(textOf(await run('/del spring'))).toContain('回复 confirm 确认')
+    expect(textOf(await run('confirm'))).toContain('已删除节点 spring')
+    expect(deleted).toBe('spring')
+
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.branches.map((item) => item.branch)).toEqual(['default'])
+  })
+
+  it('/del 当前节点 / 有后代 / 不存在都拒绝', async () => {
+    const lineageFile = tempLineageFile()
+    const seeded = await seededLineage(lineageFile)
+    const run = createCommandHandler({ repo: fakeRepo(twoBranches()), lineageFile })
+    expect(textOf(await run('/del default'))).toContain('不能删当前节点')
+    expect(textOf(await run('/del nope'))).toContain('没有节点 nope')
+
+    // spring 下面加一个 winter：有后代不许删
+    const withWinter = withBranchAdded(seeded, {
+      branch: 'winter',
+      generation: 'gen-1',
+      parent: 'spring',
+      at: 3
+    })
+    expect(withWinter).not.toBeNull()
+    if (withWinter === null) return
+    await writeLineage(lineageFile, withWinter)
+    const withChild = createCommandHandler({
+      repo: fakeRepo({
+        listBranches: async () => [
+          { branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 },
+          { branch: 'spring', sha: 'def5678', subject: 'memory: save before new', at: 2 },
+          { branch: 'winter', sha: 'fff9999', subject: 'memory: init', at: 3 }
+        ]
+      }),
+      lineageFile
+    })
+    expect(textOf(await withChild('/del spring'))).toContain('下面还有 winter')
+  })
+
+  it('confirm 等待中发别的话：不删，照常走模型', async () => {
+    const lineageFile = tempLineageFile()
+    await seededLineage(lineageFile)
+    const run = createCommandHandler({ repo: fakeRepo(twoBranches()), lineageFile })
+    await run('/del spring')
+    expect(await run('算了，继续聊')).toBeNull()
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.branches.map((item) => item.branch)).toEqual(['default', 'spring'])
   })
 
   it('/backup：提交成功 + 没配远端 → 明说只在本地', async () => {
@@ -150,13 +411,15 @@ describe('命令执行', () => {
     expect(textOf(await unavailable('/backup'))).toContain('记忆仓不可用')
   })
 
-  it('未知命令与还没接上的命令分开回', async () => {
+  it('未知命令与还没接上的命令分开回；/cancel 清等待', async () => {
     const lineageFile = tempLineageFile()
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     expect(textOf(await run('/nope'))).toContain('未知命令：/nope')
-    const pending = textOf(await run('/log'))
-    expect(pending).toContain('/log 还没接上')
-    expect(textOf(await run('/use spring'))).toContain('/use 还没接上')
+    expect(textOf(await run('/compact'))).toContain('/compact 还没接上')
+    expect(textOf(await run('/cancel'))).toBe('没有等待中的操作。')
+    await run('/new')
+    expect(textOf(await run('/cancel'))).toBe('已取消。')
+    expect(await run('秋天')).toBeNull()
   })
 
   it('普通问题不接管（返回 null）', async () => {

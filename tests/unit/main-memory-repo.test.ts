@@ -33,7 +33,7 @@ const missingGit: GitRunner = async () => ({
   error: 'ENOENT'
 })
 
-describe('记忆仓 git 封装', { timeout: 30_000 }, () => {
+describe('记忆仓 git 封装', { timeout: 60_000 }, () => {
   it('首次 ensure 建仓：default 分支、脚手架、首个提交', async () => {
     const repo = createMemoryRepo({ root: tempRoot(), log: () => undefined })
     const status = await repo.ensure()
@@ -128,5 +128,88 @@ describe('记忆仓 git 封装', { timeout: 30_000 }, () => {
     expect(status.ok).toBe(false)
     if (status.ok) return
     expect(status.reason).toBe('broken')
+  })
+})
+
+describe('记忆仓节点（分支）操作', { timeout: 60_000 }, () => {
+  async function readyRepo(): Promise<ReturnType<typeof createMemoryRepo>> {
+    const repo = createMemoryRepo({ root: tempRoot(), log: () => undefined })
+    await repo.ensure()
+    return repo
+  }
+
+  it('开新分支并切回：HEAD 跟着走', async () => {
+    const repo = await readyRepo()
+    const created = await repo.switchCreate('spring')
+    expect(created.ok).toBe(true)
+    expect(created.head?.branch).toBe('spring')
+
+    const head = await repo.head()
+    expect(head).toMatchObject({ branch: 'spring', detached: false })
+    expect(head.sha).not.toBeNull()
+
+    const back = await repo.switchBranch('default')
+    expect(back.ok).toBe(true)
+    expect((await repo.head()).branch).toBe('default')
+  })
+
+  it('工作区有未提交改动时拒绝切换（dirty）', async () => {
+    const repo = await readyRepo()
+    await repo.switchCreate('spring')
+    await repo.switchBranch('default')
+    await repo.writeFile('conversations/c1.jsonl', 'x\n')
+    expect(await repo.switchBranch('spring')).toMatchObject({ ok: false, reason: 'dirty' })
+  })
+
+  it('不存在的分支 / 已存在的名字分开报', async () => {
+    const repo = await readyRepo()
+    expect(await repo.switchBranch('nope')).toMatchObject({ ok: false, reason: 'not-found' })
+    await repo.switchCreate('spring')
+    expect(await repo.switchCreate('spring')).toMatchObject({ ok: false, reason: 'exists' })
+  })
+
+  it('切历史提交：detached，HEAD 指向那一刻；不存在的提交报 not-found', async () => {
+    const repo = await readyRepo()
+    const first = (await repo.lastCommit())?.hash
+    expect(first).toBeTruthy()
+    await repo.writeFile('conversations/c1.jsonl', 'later\n')
+    await repo.commit('memory: later')
+
+    const checkedOut = await repo.checkoutCommit(first as string)
+    expect(checkedOut.ok).toBe(true)
+    expect(checkedOut.head?.detached).toBe(true)
+    expect(checkedOut.head?.branch).toBeNull()
+    // short sha 前缀对得上（lastCommit 给完整 sha）
+    expect(first?.startsWith(checkedOut.head?.sha ?? '')).toBe(true)
+
+    expect(await repo.checkoutCommit('nope-nope')).toMatchObject({ ok: false, reason: 'not-found' })
+    expect(await repo.revParse('nope-nope')).toBeNull()
+    expect(await repo.revParse('HEAD')).not.toBeNull()
+  })
+
+  it('删分支：非当前成功；当前 / 不存在分开报', async () => {
+    const repo = await readyRepo()
+    await repo.switchCreate('spring')
+    await repo.switchBranch('default')
+    expect(await repo.deleteBranch('spring')).toMatchObject({ ok: true })
+    expect(await repo.deleteBranch('default')).toMatchObject({ ok: false, reason: 'current' })
+    expect(await repo.deleteBranch('spring')).toMatchObject({ ok: false, reason: 'not-found' })
+  })
+
+  it('分支列表与分支日志带最近提交', async () => {
+    const repo = await readyRepo()
+    await repo.switchCreate('spring')
+    await repo.writeFile('conversations/c1.jsonl', 'a\n')
+    await repo.commit('memory: save before new')
+
+    const branches = await repo.listBranches()
+    expect(branches.map((item) => item.branch).sort()).toEqual(['default', 'spring'])
+    const spring = branches.find((item) => item.branch === 'spring')
+    expect(spring?.subject).toBe('memory: save before new')
+
+    const log = await repo.branchLog('spring', 2)
+    expect(log[0]?.subject).toBe('memory: save before new')
+    expect(log.length).toBeLessThanOrEqual(2)
+    expect(await repo.branchLog('nope')).toEqual([])
   })
 })

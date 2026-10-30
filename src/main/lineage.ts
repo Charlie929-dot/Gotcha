@@ -250,3 +250,71 @@ export function lineageSnapshot(lineage: Lineage): string {
 export function activeBranch(lineage: Lineage): string {
   return lineage.active
 }
+
+/* ------------------------------------------------------------------ */
+/* 节点（分支）操作：M2 —— 纯函数，返回 null 表示这次操作不合法          */
+/* ------------------------------------------------------------------ */
+
+export interface AddBranchInput {
+  branch: string
+  /** 属于哪一代（`/new` 从当前节点开分支时沿用原分支的代） */
+  generation: string
+  /** 从哪个节点分出来；第一代 / 代分支为 null */
+  parent: string | null
+  at: number
+}
+
+export function findBranch(lineage: Lineage, branch: string): LineageBranch | null {
+  return lineage.branches.find((item) => item.branch === branch) ?? null
+}
+
+export function generationOf(lineage: Lineage, branch: string): LineageGeneration | null {
+  const node = findBranch(lineage, branch)
+  if (node === null) return null
+  return lineage.generations.find((item) => item.id === node.generation) ?? null
+}
+
+/** 直接挂在某节点下的子节点（`/del` 的「有后代不许删」） */
+export function childBranches(lineage: Lineage, branch: string): LineageBranch[] {
+  return lineage.branches.filter((item) => item.parent === branch)
+}
+
+/** 追加一条节点；重名 / 代不存在 / 父节点不存在返回 null */
+export function withBranchAdded(lineage: Lineage, input: AddBranchInput): Lineage | null {
+  if (input.branch.trim() === '') return null
+  if (findBranch(lineage, input.branch) !== null) return null
+  if (input.parent !== null && findBranch(lineage, input.parent) === null) return null
+  if (!lineage.generations.some((item) => item.id === input.generation)) return null
+  return {
+    ...lineage,
+    branches: [
+      ...lineage.branches,
+      {
+        branch: input.branch,
+        generation: input.generation,
+        parent: input.parent,
+        created_at: input.at,
+        status: 'alive'
+      }
+    ]
+  }
+}
+
+/** 切活动节点；分支不存在返回 null，已经在就不变 */
+export function withActive(lineage: Lineage, branch: string): Lineage | null {
+  if (findBranch(lineage, branch) === null) return null
+  if (lineage.active === branch) return lineage
+  return { ...lineage, active: branch }
+}
+
+/**
+ * 删除一条节点：当前节点 / 代的主分支 / 有子节点的都不许删，返回 null 由调用方报原因。
+ * （git 层的 `branch -D` 不检查后代，这层是唯一防线。）
+ */
+export function withBranchRemoved(lineage: Lineage, branch: string): Lineage | null {
+  if (findBranch(lineage, branch) === null) return null
+  if (lineage.active === branch) return null
+  if (lineage.generations.some((item) => item.branch === branch)) return null
+  if (lineage.branches.some((item) => item.parent === branch)) return null
+  return { ...lineage, branches: lineage.branches.filter((item) => item.branch !== branch) }
+}

@@ -330,6 +330,11 @@ export interface AskConversationRegistry {
   /** 取（或新建）某个会话的存储；最近用过的排到最后，超上限淘汰最久未用的 */
   for(conversationId: string): AskConversationPort
   /**
+   * 只清内存缓存（M2：切节点后用）：下次 `for()` 从盘上重读。
+   * 不删文件——checkout 已经把 `conversations/` 整份换成目标节点的版本了。
+   */
+  reload(): void
+  /**
    * 清空全部会话：内存缓存全丢；接记忆仓时连仓里的 `conversations/*.jsonl`
    * 与图片资产一起删（调用方负责先提交一次，删了还能从 git 历史找回）。
    */
@@ -371,6 +376,9 @@ export function createAskConversationRegistry(
         stores.delete(oldest)
       }
       return store
+    },
+    reload() {
+      stores.clear()
     },
     clear() {
       stores.clear()

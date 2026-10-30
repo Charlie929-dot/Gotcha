@@ -1,16 +1,36 @@
 /**
- * 问记忆 · 本地命令（memory-life M1，2026-10-30）
+ * 问记忆 · 本地命令（memory-life M1/M2，2026-10-30）
  *
  * 命令是**一条普通消息**：文本以 `/` 开头就先过这里；命中就在本地执行、回一条文本，
  * 不经过模型、不进问答历史、不计生命、不占 QQ 限流（方案 §6 / §6.2）。
  *
- * M1 只实现「看状态」与「立即备份」两条；`/log /new /use /del /compact` 在 M2/M3，
- * 这里回一句「还没接上」，而不是装成未知命令（用户分得清「没做」和「拼错」）。
+ * M1：`/help` / `/backup`。
+ * M2：`/log` `/new` `/use` `/del`——节点（git 分支）的看 / 开 / 切 / 删，
+ * 外加历史提交只读查看（detached；第一次提问时由组合根自动分叉）。
+ *
+ * 两条纪律：
+ * - 任何切换前先提交当前节点；提交失败就**不切**（宁可报错，不可丢记忆）；
+ * - 节点名统一走拼音 slug（`/new 春天` → `spring`），git 分支名只含 `[a-z0-9-]`。
  */
 
+import { pinyin } from 'pinyin-pro'
+
 import type { ChainAskResult, ChainAskStats } from '../chain/agent/types'
-import { readLineage, type LineageRead } from './lineage'
-import type { MemoryRepo } from './memory-repo'
+import {
+  childBranches,
+  ensureLineage,
+  findBranch,
+  generationOf,
+  lineageSnapshot,
+  readLineage,
+  withActive,
+  withBranchAdded,
+  withBranchRemoved,
+  writeLineage,
+  type Lineage,
+  type LineageRead
+} from './lineage'
+import type { MemoryBranchInfo, MemoryRepo, MemorySwitchResult } from './memory-repo'
 
 export interface ParsedCommand {
   /** 命令名，已转小写（`/HELP` 与 `/help` 一样） */
@@ -22,14 +42,24 @@ export interface CommandDeps {
   repo: MemoryRepo
   /** 家谱权威文件（仓外） */
   lineageFile: string
+  /** 切节点后清掉会话内存缓存：下次提问从盘上（目标节点）重读 */
+  reloadConversations?: () => void
   now?: () => number
+  /** 名字 → slug；测试可注入固定实现（默认 pinyin-pro） */
+  slugify?: (name: string) => string | null
 }
 
 /** 方案里定义过的命令（含未实现的）：用于区分「拼错」与「还没做」 */
-export const KNOWN_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'compact'] as const
+export const KNOWN_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact'] as const
 
-/** M1 真正接上的命令 */
-export const READY_COMMANDS = ['help', 'backup'] as const
+/** 当前已经接上的命令 */
+export const READY_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel'] as const
+
+/** 命名 / 删除确认的等待时限（方案 §6.2：60 秒超时，可 /cancel） */
+export const COMMAND_WAIT_TIMEOUT_MS = 60_000
+
+const SLUG_MAX_CHARS = 40
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/u
 
 export function parseCommand(text: string): ParsedCommand | null {
   const trimmed = text.trim()
@@ -38,6 +68,24 @@ export function parseCommand(text: string): ParsedCommand | null {
   const name = (head ?? '').toLowerCase()
   if (name === '') return null
   return { name, args }
+}
+
+/**
+ * 名字 → git 分支名：英文原样、中文转无声调拼音，只留 `[a-z0-9-]`。
+ * 转不出合法 slug（全符号 / 空）返回 null，由调用方如实报错。
+ */
+export function slugifyNodeName(name: string): string | null {
+  const trimmed = name.trim()
+  if (trimmed === '') return null
+  const ascii = /^[\x20-\x7e]+$/u.test(trimmed)
+  const raw = ascii ? trimmed : pinyin(trimmed, { toneType: 'none', type: 'array' }).join(' ')
+  const slug = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+/u, '')
+    .slice(0, SLUG_MAX_CHARS)
+    .replace(/-+$/u, '')
+  return slug !== '' && SLUG_RE.test(slug) ? slug : null
 }
 
 /** 命令回执：形状与问答复保持一致，界面当一条普通答复显示 */
@@ -72,6 +120,68 @@ function repoReasonText(reason: 'git-missing' | 'init-failed' | 'broken'): strin
   }
 }
 
+function failureReasonText(result: MemorySwitchResult, action: string): string {
+  switch (result.reason) {
+    case 'unavailable':
+      return '记忆仓不可用，没有动。'
+    case 'dirty':
+      return `${action}失败：工作区还有未提交的改动（先 /backup 再试）。`
+    case 'not-found':
+      return `${action}失败：没找到（/log 看看有哪些）。`
+    case 'exists':
+      return `${action}失败：分支已经存在。`
+    case 'invalid':
+      return `${action}失败：名字不合法（用英文 / 数字 / 连字符）。`
+    case 'current':
+      return `${action}失败：不能对当前分支这么做。`
+    default:
+      return `${action}失败（细节看日志）。`
+  }
+}
+
+/** 当前节点先落一次；干净（clean）也算成功。返回错误文本时不切换。 */
+async function saveBefore(deps: CommandDeps, why: 'new' | 'use' | 'del'): Promise<string | null> {
+  // detached（历史提交只读查看）没有「当前节点」可保存：直接切，脏树由 repo 层拒绝
+  const head = await deps.repo.head()
+  if (head.detached) return null
+  const result = await deps.repo.commit(`memory: save before ${why}`)
+  if (result.committed || result.reason === 'clean' || result.reason === 'already') return null
+  if (result.reason === 'unavailable') return '记忆仓不可用，没有切换（记忆不会丢）。'
+  return `保存当前节点失败${result.detail ? `（${result.detail}）` : ''}，没有切换。`
+}
+
+/** 家谱里的节点顺序（`/log` 的编号与 `/use <编号>` 同一口径），家谱外分支接在后面 */
+function orderBranches(lineage: Lineage | null, branches: readonly MemoryBranchInfo[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  if (lineage !== null) {
+    for (const item of lineage.branches) {
+      if (seen.has(item.branch)) continue
+      if (!branches.some((entry) => entry.branch === item.branch)) continue
+      out.push(item.branch)
+      seen.add(item.branch)
+    }
+  }
+  for (const item of branches) {
+    if (seen.has(item.branch)) continue
+    out.push(item.branch)
+    seen.add(item.branch)
+  }
+  return out
+}
+
+async function syncActive(deps: CommandDeps, lineage: Lineage | null, branch: string): Promise<void> {
+  if (lineage === null) return
+  const next = withActive(lineage, branch)
+  if (next === null || next === lineage) return
+  await writeLineageQuietly(deps, next)
+}
+
+async function writeLineageQuietly(deps: CommandDeps, lineage: Lineage): Promise<void> {
+  await writeLineage(deps.lineageFile, lineage)
+  await deps.repo.writeFile('lineage.snapshot.json', lineageSnapshot(lineage))
+}
+
 async function helpText(deps: CommandDeps): Promise<string> {
   const status = await deps.repo.status()
   let repoLine: string
@@ -94,15 +204,282 @@ async function helpText(deps: CommandDeps): Promise<string> {
   }
   const active = read.status === 'ok' ? read.lineage.active : 'default'
   return [
-    '问记忆 · 记忆仓（M1）',
+    '问记忆 · 记忆仓（M2 节点）',
     '',
     '可用命令：',
-    '  /help    看这一页',
-    '  /backup  立即提交记忆；配了远端就推送',
+    '  /help            看这一页',
+    '  /log             看记忆节点（编号给 /use 用）',
+    '  /new <名字>      从当前节点开新分支（中文转拼音）',
+    '  /use <名字|编号|提交>  切节点；切历史提交 = 只读查看',
+    '  /del <名字>      删节点（要回 confirm）',
+    '  /backup          立即提交记忆；配了远端就推送',
+    '  /cancel          取消等待中的命名 / 删除',
     '',
     `当前节点：${active}`,
     `记忆仓：${repoLine}`
   ].join('\n')
+}
+
+async function logText(deps: CommandDeps): Promise<string> {
+  const status = await deps.repo.status()
+  if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
+  const head = await deps.repo.head()
+  const branches = await deps.repo.listBranches()
+  if (branches.length === 0) return '记忆仓里还没有节点。'
+  const read = await readLineage(deps.lineageFile)
+  const lineage = read.status === 'ok' ? read.lineage : null
+  const ordered = orderBranches(lineage, branches)
+
+  const lines = ['问记忆 · 记忆节点', '']
+  ordered.forEach((branch, index) => {
+    const info = branches.find((entry) => entry.branch === branch)
+    if (info === undefined) return
+    const node = lineage === null ? null : findBranch(lineage, branch)
+    const parentText = node?.parent ? `（从 ${node.parent} 分叉）` : ''
+    const current = head.branch === branch ? '  ← 当前' : ''
+    lines.push(`[${index + 1}] ${branch}${parentText}${current}`)
+    lines.push(`    ${info.sha}  ${info.subject}`)
+  })
+  if (head.detached && head.sha !== null) {
+    lines.push('')
+    lines.push(`HEAD 停在历史提交 ${head.sha}（只读查看；发第一句话会从这里分叉）`)
+  }
+  lines.push('', '用法：/use <编号|名字> 切节点；/use <短 sha> 看历史提交。')
+  return lines.join('\n')
+}
+
+async function createNode(deps: CommandDeps, slug: string, at: number): Promise<string> {
+  const status = await deps.repo.status()
+  if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
+  const head = await deps.repo.head()
+  if (head.detached) {
+    return '当前停在历史提交上——先发一句话从这里分叉，或 /use 回一个节点，再 /new。'
+  }
+  const current = head.branch ?? status.branch
+  const branches = await deps.repo.listBranches()
+  if (branches.some((entry) => entry.branch === slug)) {
+    return `节点 ${slug} 已经存在（/log 看看有哪些）。`
+  }
+
+  const saved = await saveBefore(deps, 'new')
+  if (saved !== null) return saved
+
+  const created = await deps.repo.switchCreate(slug)
+  if (!created.ok) return failureReasonText(created, `开出节点 ${slug}`)
+
+  const read = await ensureLineage(deps.lineageFile, { now: at })
+  const lineage = read.lineage
+  const parent = findBranch(lineage, current) !== null ? current : lineage.active
+  const generation = generationOf(lineage, parent)?.id ?? lineage.generations[0]?.id ?? 'gen-1'
+  const added = withBranchAdded(lineage, { branch: slug, generation, parent, at })
+  if (added !== null) await writeLineageQuietly(deps, added)
+  deps.reloadConversations?.()
+
+  return [
+    `===this is ${slug}===`,
+    `新节点 ${slug} 已从 ${parent} 开出，当前在这里。`,
+    '发一句话就开始记到这条线上；/use 可以切回去。'
+  ].join('\n')
+}
+
+async function useNode(deps: CommandDeps, target: string, at: number): Promise<string> {
+  const status = await deps.repo.status()
+  if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
+  const head = await deps.repo.head()
+  const branches = await deps.repo.listBranches()
+  const read = await readLineage(deps.lineageFile)
+  const lineage = read.status === 'ok' ? read.lineage : null
+
+  let branchName: string | null = null
+  if (/^\d+$/u.test(target)) {
+    const index = Number(target) - 1
+    branchName = orderBranches(lineage, branches)[index] ?? null
+    if (branchName === null) return `没有第 ${target} 个节点（/log 看看有哪些）。`
+  } else if (branches.some((entry) => entry.branch === target)) {
+    branchName = target
+  }
+
+  if (branchName !== null) {
+    if (head.branch === branchName) {
+      await syncActive(deps, lineage, branchName)
+      return `===this is ${branchName}===\n已经在 ${branchName}。`
+    }
+    const saved = await saveBefore(deps, 'use')
+    if (saved !== null) return saved
+    const switched = await deps.repo.switchBranch(branchName)
+    if (!switched.ok) return failureReasonText(switched, `切到 ${branchName}`)
+    await syncActive(deps, lineage, branchName)
+    deps.reloadConversations?.()
+    return `===this is ${branchName}===\n已切到节点 ${branchName}。这一问开始用它的记忆。`
+  }
+
+  const sha = await deps.repo.revParse(target)
+  if (sha === null) return `没找到节点或提交「${target}」（/log 看看有哪些）。`
+  const saved = await saveBefore(deps, 'use')
+  if (saved !== null) return saved
+  const checkedOut = await deps.repo.checkoutCommit(sha)
+  if (!checkedOut.ok) return failureReasonText(checkedOut, `切到提交 ${sha}`)
+  deps.reloadConversations?.()
+
+  const from = head.branch ?? lineage?.active ?? 'default'
+  return [
+    `===this is 历史提交 ${sha}===`,
+    `已停在 ${sha}——这里是只读的旧位置，家谱不变。`,
+    `发第一句话会从这里分叉成 ${from}-<序号>；只看不聊不会留下分支。`
+  ].join('\n')
+}
+
+interface DeletableOk {
+  ok: true
+  branch: string
+}
+interface DeletableNo {
+  ok: false
+  message: string
+}
+
+async function checkDeletable(deps: CommandDeps, slug: string): Promise<DeletableOk | DeletableNo> {
+  const status = await deps.repo.status()
+  if (!status.ok) return { ok: false, message: `记忆仓不可用：${repoReasonText(status.reason)}` }
+  const head = await deps.repo.head()
+  const read = await readLineage(deps.lineageFile)
+  if (read.status !== 'ok') return { ok: false, message: '家谱读不出来（细节看日志），先不删。' }
+  const lineage = read.lineage
+  const node = findBranch(lineage, slug)
+  if (node === null) {
+    const branches = await deps.repo.listBranches()
+    if (!branches.some((entry) => entry.branch === slug)) {
+      return { ok: false, message: `没有节点 ${slug}。` }
+    }
+    if (head.branch === slug) return { ok: false, message: '不能删当前节点。' }
+    return { ok: true, branch: slug }
+  }
+  if (slug === head.branch) return { ok: false, message: '不能删当前节点。' }
+  if (lineage.generations.some((item) => item.branch === slug)) {
+    return { ok: false, message: `${slug} 是一代鱼的主分支，不能删。` }
+  }
+  const children = childBranches(lineage, slug)
+  if (children.length > 0) {
+    return {
+      ok: false,
+      message: `${slug} 下面还有 ${children.map((item) => item.branch).join('、')}，先删它们。`
+    }
+  }
+  return { ok: true, branch: slug }
+}
+
+async function deleteNode(deps: CommandDeps, branch: string): Promise<string> {
+  const saved = await saveBefore(deps, 'del')
+  if (saved !== null) return saved
+  const removed = await deps.repo.deleteBranch(branch)
+  if (!removed.ok) return failureReasonText(removed, `删除 ${branch}`)
+
+  const read = await readLineage(deps.lineageFile)
+  if (read.status === 'ok') {
+    const next = withBranchRemoved(read.lineage, branch)
+    if (next !== null) await writeLineageQuietly(deps, next)
+  }
+  return `已删除节点 ${branch}（提交还在仓里，/use 短 sha 仍能找回）。`
+}
+
+type Pending = { kind: 'name' } | { kind: 'delete'; branch: string } | null
+
+/**
+ * 返回处理函数：不是命令 → null（调用方继续走模型）；
+ * 是命令 → 一条 `command` 回执（永不出网，除了 /backup 的 git push）。
+ *
+ * 等待状态（命名 / 删除确认）也在这里：等待中的**非命令文本**会被当名字或 confirm，
+ * 其它输入视为放弃等待、照常走模型。
+ */
+export function createCommandHandler(deps: CommandDeps): (text: string) => Promise<ChainAskResult | null> {
+  const now = deps.now ?? Date.now
+  const slugify = deps.slugify ?? slugifyNodeName
+  let pending: Pending = null
+  let pendingAt = 0
+
+  const expire = (at: number): void => {
+    if (pending !== null && at - pendingAt > COMMAND_WAIT_TIMEOUT_MS) pending = null
+  }
+
+  const handleNodeName = async (raw: string, at: number): Promise<ChainAskResult> => {
+    const slug = slugify(raw)
+    if (slug === null) {
+      return commandResult(`「${raw}」转不出可用的节点名（用英文 / 数字 / 短一些的中文名）。`)
+    }
+    return commandResult(await createNode(deps, slug, at))
+  }
+
+  return async (text) => {
+    const at = now()
+    expire(at)
+    const trimmed = text.trim()
+
+    if (pending !== null && !trimmed.startsWith('/')) {
+      if (pending.kind === 'name') {
+        pending = null
+        return handleNodeName(trimmed, at)
+      }
+      const branch = pending.branch
+      if (trimmed.toLowerCase() === 'confirm') {
+        pending = null
+        return commandResult(await deleteNode(deps, branch))
+      }
+      pending = null
+      return null
+    }
+
+    const parsed = parseCommand(text)
+    if (parsed === null) return null
+    if (!(KNOWN_COMMANDS as readonly string[]).includes(parsed.name)) {
+      return commandResult(`未知命令：/${parsed.name}\n发 /help 看看能做什么。`)
+    }
+    switch (parsed.name) {
+      case 'help':
+        return commandResult(await helpText(deps))
+      case 'log':
+        return commandResult(await logText(deps))
+      case 'backup':
+        return commandResult(await backupText(deps, at))
+      case 'cancel': {
+        if (pending === null) return commandResult('没有等待中的操作。')
+        pending = null
+        return commandResult('已取消。')
+      }
+      case 'new': {
+        const name = parsed.args.join(' ').trim()
+        if (name === '') {
+          pending = { kind: 'name' }
+          pendingAt = at
+          return commandResult(
+            '给新节点起个名字（中文会转成拼音，例如「春天」→ chun-tian），60 秒内发给我。'
+          )
+        }
+        return handleNodeName(name, at)
+      }
+      case 'use': {
+        const target = parsed.args.join(' ').trim()
+        if (target === '') {
+          return commandResult('用法：/use <节点名|编号|提交>（先 /log 看看有哪些）')
+        }
+        return commandResult(await useNode(deps, target, at))
+      }
+      case 'del': {
+        const raw = parsed.args.join(' ').trim()
+        if (raw === '') return commandResult('用法：/del <节点名>（先 /log 看看有哪些）')
+        const slug = slugify(raw)
+        if (slug === null) return commandResult(`「${raw}」不是有效的节点名。`)
+        const check = await checkDeletable(deps, slug)
+        if (!check.ok) return commandResult(check.message)
+        pending = { kind: 'delete', branch: check.branch }
+        pendingAt = at
+        return commandResult(
+          `确定删除节点 ${check.branch}？回复 confirm 确认（60 秒内）；发别的话就不删。`
+        )
+      }
+      default:
+        return commandResult(`/${parsed.name} 还没接上（M2 有 /help /log /new /use /del /backup）。`)
+    }
+  }
 }
 
 async function backupText(deps: CommandDeps, at: number): Promise<string> {
@@ -128,28 +505,5 @@ async function backupText(deps: CommandDeps, at: number): Promise<string> {
       return `${head}记忆仓不可用，没有推送。`
     default:
       return `${head}推送失败（网络 / 凭据），下次 /backup 再试。`
-  }
-}
-
-/**
- * 返回处理函数：不是命令 → null（调用方继续走模型）；
- * 是命令 → 一条 `command` 回执（永不出网，除了 /backup 的 git push）。
- */
-export function createCommandHandler(deps: CommandDeps): (text: string) => Promise<ChainAskResult | null> {
-  const now = deps.now ?? Date.now
-  return async (text) => {
-    const parsed = parseCommand(text)
-    if (parsed === null) return null
-    if (!(KNOWN_COMMANDS as readonly string[]).includes(parsed.name)) {
-      return commandResult(`未知命令：/${parsed.name}\n发 /help 看看能做什么。`)
-    }
-    switch (parsed.name) {
-      case 'help':
-        return commandResult(await helpText(deps))
-      case 'backup':
-        return commandResult(await backupText(deps, now()))
-      default:
-        return commandResult(`/${parsed.name} 还没接上（记忆仓 M1 只有 /help 和 /backup）。`)
-    }
   }
 }

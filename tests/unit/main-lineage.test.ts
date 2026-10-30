@@ -8,12 +8,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  childBranches,
   emptyLineage,
   ensureLineage,
+  generationOf,
   lineageSnapshot,
   LINEAGE_LIFE_TOKENS,
   parseLineage,
   readLineage,
+  withActive,
+  withBranchAdded,
+  withBranchRemoved,
   writeLineage
 } from '../../src/main/lineage'
 
@@ -104,5 +109,86 @@ describe('家谱', () => {
     expect(text.endsWith('\n')).toBe(true)
     expect(text).toContain('\n  "version": 1,')
     expect(parseLineage(JSON.parse(text))).toEqual(lineage)
+  })
+})
+
+describe('家谱 · 节点（分支）操作', () => {
+  it('追加节点：重名 / 代不存在 / 父节点不存在都返回 null', () => {
+    const base = emptyLineage(1000)
+    const added = withBranchAdded(base, {
+      branch: 'spring',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2000
+    })
+    expect(added?.branches.map((item) => item.branch)).toEqual(['default', 'spring'])
+    expect(added?.branches[1]).toMatchObject({ parent: 'default', status: 'alive', created_at: 2000 })
+
+    expect(added).not.toBeNull()
+    if (added === null) return
+    expect(withBranchAdded(added, { branch: 'spring', generation: 'gen-1', parent: 'default', at: 2 })).toBeNull()
+    expect(withBranchAdded(base, { branch: 'x', generation: 'gen-9', parent: 'default', at: 2 })).toBeNull()
+    expect(withBranchAdded(base, { branch: 'x', generation: 'gen-1', parent: 'nope', at: 2 })).toBeNull()
+    expect(withBranchAdded(base, { branch: '  ', generation: 'gen-1', parent: 'default', at: 2 })).toBeNull()
+  })
+
+  it('切 active：存在才切；已经在该节点就原样返回', () => {
+    const base = emptyLineage(1000)
+    const added = withBranchAdded(base, {
+      branch: 'spring',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2000
+    })
+    expect(added).not.toBeNull()
+    if (added === null) return
+    expect(withActive(added, 'spring')?.active).toBe('spring')
+    expect(withActive(added, 'nope')).toBeNull()
+    expect(withActive(base, 'default')).toBe(base)
+  })
+
+  it('删节点：当前 / 代主分支 / 有子节点都不许删', () => {
+    const base = emptyLineage(1000)
+    const spring = withBranchAdded(base, {
+      branch: 'spring',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2
+    })
+    expect(spring).not.toBeNull()
+    if (spring === null) return
+
+    // default 同时是当前节点与 gen-1 的主分支
+    expect(withBranchRemoved(spring, 'default')).toBeNull()
+    // spring 不是当前节点，可以删
+    expect(withBranchRemoved(spring, 'spring')?.branches.map((item) => item.branch)).toEqual(['default'])
+    // 切到 spring 之后就不许删了
+    const onSpring = withActive(spring, 'spring')
+    expect(onSpring).not.toBeNull()
+    if (onSpring === null) return
+    expect(withBranchRemoved(onSpring, 'spring')).toBeNull()
+
+    // spring 下面有 winter：有后代不许删
+    const winter = withBranchAdded(spring, {
+      branch: 'winter',
+      generation: 'gen-1',
+      parent: 'spring',
+      at: 3
+    })
+    expect(winter).not.toBeNull()
+    if (winter === null) return
+    expect(childBranches(winter, 'spring').map((item) => item.branch)).toEqual(['winter'])
+    expect(withBranchRemoved(winter, 'spring')).toBeNull()
+    expect(withBranchRemoved(winter, 'winter')?.branches.map((item) => item.branch)).toEqual([
+      'default',
+      'spring'
+    ])
+    expect(withBranchRemoved(winter, 'nope')).toBeNull()
+  })
+
+  it('generationOf 找到所属代', () => {
+    const base = emptyLineage(1000)
+    expect(generationOf(base, 'default')?.id).toBe('gen-1')
+    expect(generationOf(base, 'nope')).toBeNull()
   })
 })

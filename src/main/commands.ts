@@ -319,6 +319,10 @@ function labelCommitSubject(line: string): string {
     [/memory: born (\S+)/gu, '$1 出生（分支首个提交）'],
     [/memory: ask (\S+)/gu, '提问会话 $1'],
     [/memory: ask\b/gu, '提问会话（挂载）'],
+    // D73 / D74 之前建的旧分支：名字还叫 assistant / life，主题也按人话显示
+    [/memory: assistant (\S+)/gu, '提问会话 $1（旧名）'],
+    [/memory: assistant\b/gu, '提问会话（旧挂载）'],
+    [/memory: life\b/gu, '主干建立'],
     [/memory: save before \w+/gu, '保存（切换前）'],
     [/memory: compact (\S+)/gu, '压缩 $1'],
     [/memory: 清空问答历史前/gu, '清空历史前'],

@@ -207,8 +207,8 @@ export function createDeterministicFakeLlm(options: { delayMs?: number } = {}): 
     },
 
     /**
-     * 问记忆 · 工具循环（toolloop）：两轮脚本——先检索最近的段，
-     * 再引用检索结果的第一段作答。引用的 segmentId 来自工具返回（白名单内），
+     * 问记忆 · 工具循环（toolloop）：三步脚本——先检索最近的段，再打开第一段，
+     * 最后直接说话（引用由驱动层按「已读」自动带出，不再靠模型写 citations）。
      * E2E 断言「answer / no-evidence / citations」路径全部可复现。
      */
     async completeAskLoop(
@@ -236,13 +236,17 @@ export function createDeterministicFakeLlm(options: { delayMs?: number } = {}): 
         return result.kind === 'search_info' ? (result.hits ?? []) : []
       })
       const first = hits[0]
+      const opened = payload.turns.some((turn) => turn.toolCall.name === 'read_segment')
+      if (first !== undefined && !opened) {
+        return {
+          toolCalls: [{ id: 'fake_call_read', name: 'read_segment', arguments: { segmentId: first.segmentId } }],
+          usage: { promptTokens: 120, completionTokens: 6 }
+        }
+      }
       return {
         json: first
-          ? {
-              answer: truncate(`模拟回答：在「${first.title}」里做过相关的事（${first.at}）`, 200),
-              citations: [{ segmentId: first.segmentId, why: truncate(`模拟依据 ${first.segmentId}`, 40) }]
-            }
-          : { answer: '信息链里没找到', citations: [] },
+          ? { answer: truncate(`模拟回答：在「${first.title}」里做过相关的事（${first.at}）`, 200) }
+          : { answer: '信息链里没找到' },
         usage: { promptTokens: 150, completionTokens: 20 }
       }
     },

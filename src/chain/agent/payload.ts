@@ -25,6 +25,109 @@ export interface AskTextPolicy {
   redact(text: string): AskTextRedaction
 }
 
+/**
+ * 用户随问题上传的附件（2026-10-29）：
+ * - 图片：用户在输入框粘贴 / 拖进来 / 选的，与选区截图同口径，不过脱敏墙；
+ * - 文件：只收文本类，抽取出来的文本随问题一起出云；用户主动选的，同样不过脱敏墙。
+ * 这里只做协议校验与截断，安全判定在出云门（D24）。
+ */
+export interface RedactableAskAttachments {
+  images?: readonly string[]
+  files?: readonly { name: string; text: string }[]
+}
+
+/** 协议处理后的附件（图片 data URL、文件文本已截断） */
+export interface CloudAskAttachments {
+  readonly images: readonly string[]
+  readonly files: readonly { readonly name: string; readonly text: string }[]
+}
+
+/** 附件上限：条数 / 单图体积（data URL 字符数）/ 文件文本总量（字符） */
+const ATTACH_IMAGE_MAX = 4
+const ATTACH_FILE_MAX = 4
+const ATTACH_IMAGE_DATA_URL_MAX_CHARS = 6 * 1024 * 1024
+const ATTACH_FILE_NAME_MAX_CHARS = 120
+const ATTACH_TEXT_TOTAL_MAX_CHARS = 30_000
+const ATTACH_IMAGE_DATA_URL_RE = /^data:image\/(png|jpeg|webp|gif);base64,/i
+
+/** 图片附件 → 协议视图：只收图片 data URL，条数与单张长度钳死 */
+function guardAttachImages(images: readonly string[] | undefined): string[] {
+  if (!images || images.length === 0) return []
+  const out: string[] = []
+  for (const url of images) {
+    if (typeof url !== 'string' || url.length > ATTACH_IMAGE_DATA_URL_MAX_CHARS) continue
+    if (!ATTACH_IMAGE_DATA_URL_RE.test(url)) continue
+    out.push(url)
+    if (out.length >= ATTACH_IMAGE_MAX) break
+  }
+  return out
+}
+
+/** 文本附件 → 协议视图：逐条截断文件名，正文按总预算切（后略标记写在正文里） */
+function guardAttachFiles(files: readonly { name: string; text: string }[] | undefined): { name: string; text: string }[] {
+  if (!files || files.length === 0) return []
+  const out: { name: string; text: string }[] = []
+  let remaining = ATTACH_TEXT_TOTAL_MAX_CHARS
+  for (const file of files) {
+    if (remaining <= 0 || out.length >= ATTACH_FILE_MAX) break
+    if (typeof file.text !== 'string') continue
+    const name = (file.name ?? '').trim().slice(0, ATTACH_FILE_NAME_MAX_CHARS) || '未命名文件'
+    const text = file.text.slice(0, remaining)
+    if (text.trim() === '') continue
+    const clipped = text.length < file.text.length ? `${text}\n…（后面还有 ${file.text.length - text.length} 字，已截断）` : text
+    out.push({ name, text: clipped })
+    remaining -= text.length
+  }
+  return out
+}
+
+/** 附件协议视图（没有附件返回 undefined，载荷里就不出现这个键） */
+function guardAttachments(
+  attachments: RedactableAskAttachments | undefined
+): CloudAskAttachments | undefined {
+  if (!attachments) return undefined
+  const images = guardAttachImages(attachments.images)
+  const files = guardAttachFiles(attachments.files)
+  if (images.length === 0 && files.length === 0) return undefined
+  return { images, files }
+}
+
+/** 开场注入的「此刻」事实上限：一两句话，撑大反而像旁白 */
+const OPENING_FACTS_MAX_CHARS = 300
+/** 开场最多带几条「想到的」：与工具召回同量级，多了会变成塞满上下文 */
+export const ASK_LOOP_OPENING_REMEMBERED_MAX = 3
+
+/**
+ * 开场注入 → 送云视图。逐段过策略：
+ * - facts 是本地算的（时间 / 计数 / 日期），过一遍只为口径统一；
+ * - 日记片段是用户正文：命中阻断规则整条丢，不连坐。
+ */
+function guardOpening(
+  policy: AskTextPolicy,
+  opening: RedactableAskOpening | undefined
+): CloudAskOpening | undefined {
+  if (!opening) return undefined
+  let facts: string | undefined
+  if (opening.facts !== undefined && opening.facts.trim() !== '') {
+    const guarded = guardText(policy, opening.facts, OPENING_FACTS_MAX_CHARS)
+    if (!guarded.blocked) facts = guarded.text
+  }
+  const remembered: Array<{ day: string; snippet: string }> = []
+  for (const hit of opening.remembered ?? []) {
+    const day = guardText(policy, hit.day, 20)
+    if (day.blocked) continue
+    const snippet = guardText(policy, hit.snippet, ASK_LOOP_DIARY_SNIPPET_MAX_CHARS)
+    if (snippet.blocked) continue
+    remembered.push({ day: day.text, snippet: snippet.text })
+    if (remembered.length >= ASK_LOOP_OPENING_REMEMBERED_MAX) break
+  }
+  if (facts === undefined && remembered.length === 0) return undefined
+  return {
+    ...(facts !== undefined ? { facts } : {}),
+    ...(remembered.length > 0 ? { remembered } : {})
+  }
+}
+
 /** 问记忆（S1）里的单段证据 */
 export interface CloudChainAskEvidence {
   readonly segmentId: number
@@ -44,6 +147,8 @@ declare const chainAskBrand: unique symbol
 export interface ChainAskPayload {
   readonly question: string
   readonly evidence: readonly CloudChainAskEvidence[]
+  /** 用户随问题上传的附件（没有就不出现） */
+  readonly attachments?: CloudAskAttachments
   readonly [chainAskBrand]: true
 }
 
@@ -67,6 +172,11 @@ export interface AskBuildOptions {
   titleMaxChars?: number
   /** 问题的字符上限；默认 500（问题是用户敲的，不该有长文） */
   questionMaxChars?: number
+  /**
+   * 用户随本轮问题上传的附件（图片 / 文本文件）。
+   * 与选区截图同口径：用户主动提供，不过脱敏墙；出云门照旧在门口判定。
+   */
+  attachments?: RedactableAskAttachments
 }
 
 export interface ChainAskBuildResult {
@@ -128,6 +238,60 @@ export interface RedactableAskLoopConversationTurn {
   answer: string
 }
 
+/**
+ * 开场注入（2026-10-29 深夜七，D61）：「此刻」每轮注入，「想到的」只在新对话第一问出现。
+ *
+ * - `facts`：本地算出来的「此刻」事实（时间 / 今天说过几句 / 上次多久前 / 日记记到哪天），
+ *   不含用户正文；由主进程用确定规则算，不是模型推测。
+ * - `remembered`：按问题关键词本地回想到的日记片段——**联想，不是证据**；
+ *   想核对要让它自己 `recall_diary` / `read_diary`（引用仍只由「真的打开过」生成）。
+ *
+ * 两段都按屏幕 / 日记文本同口径过策略：命中断阻断就整条丢，半截被打码也照实带出去。
+ */
+export interface RedactableRememberedHit {
+  day: string
+  snippet: string
+}
+
+export interface RedactableAskOpening {
+  facts?: string
+  remembered?: readonly RedactableRememberedHit[]
+}
+
+/** 过策略后的开场注入（送云视图） */
+export interface CloudAskOpening {
+  readonly facts?: string
+  readonly remembered?: readonly { readonly day: string; readonly snippet: string }[]
+}
+
+/**
+ * 日记召回的一条命中（个人记忆 · 第二本账）。
+ * `day` 是日记文件名日期（本地可读，不带时间戳）；`snippet` 是原文片段。
+ */
+export interface RedactableDiaryHit {
+  itemId: number
+  day: string
+  kind: string
+  snippet: string
+  tags: readonly string[]
+  refs: readonly string[]
+  /** 为什么命中（提到 X / 标签 / 距今多少天）；模型要能向用户解释「为什么给这几条」 */
+  reasons: readonly string[]
+}
+
+/** 打开某一天后返回的条目（供模型引用；只有 itemId 能在最终 memories 里被承认） */
+export interface RedactableDiaryItem {
+  itemId: number
+  section: string
+  text: string
+}
+
+/** 「关于我」的一条观测（当前只有统计型，来源写死在 `source`） */
+export interface RedactableDiaryObservation {
+  topic: string
+  statement: string
+}
+
 /** 一次工具结果的待组装视图：按 kind 决定哪些字段是屏幕文本 */
 export type RedactableAskLoopToolResult =
   | {
@@ -150,18 +314,51 @@ export type RedactableAskLoopToolResult =
       at: string
       app: string
       title: string
+      /** 只含 UIA 采到的界面文字；OCR 不当作读段证据（2026-10-29 拍板） */
       text: string
       urls: readonly string[]
       offset: number
       limit: number
+      /** 附在工具结果后面的截图张数（0 = 没开历史截图 / 这一段没图） */
+      shotCount?: number
     }
   /** 执行器兜底：参数不合法 / 未知工具 / 执行抛错（message 是固定文案或已过策略的工具名） */
   | { kind: 'error'; message: string }
+  /** 日记召回（个人记忆 · 第二本账；与屏幕段检索并列） */
+  | {
+      kind: 'recall_diary'
+      freshness: AskLoopFreshness
+      hits: readonly RedactableDiaryHit[]
+      stats: { mode: string; candidates: number }
+    }
+  /** 打开某一天：返回该天的条目与拼接后的全文（模型可据此引用具体 itemId） */
+  | {
+      kind: 'read_diary'
+      freshness: AskLoopFreshness
+      day: string
+      text: string
+      items: readonly RedactableDiaryItem[]
+      offset: number
+      limit: number
+    }
+  /** 「关于我」：条目 / 天数 / 待办 / 高频话题（全部是统计，不是心理分析） */
+  | {
+      kind: 'memory_profile'
+      freshness: AskLoopFreshness
+      stats: Record<string, number | string | null>
+      observations: readonly RedactableDiaryObservation[]
+    }
 
 /** 循环里的一次往返：模型发起的调用 + 执行器给出的摘要 */
 export interface RedactableAskLoopTurn {
   toolCall: { name: string; arguments: Record<string, unknown> }
   toolResult: RedactableAskLoopToolResult
+  /**
+   * read_segment 带出的截图（data URL）。
+   * 2026-10-29 拍板：OCR 不可信，读段只给 UIA 文字 + 截图；图走 user 消息，
+   * 不能塞进 tool 消息（DeepSeek 只允许 user 消息带图，tool 带图直接 400）。
+   */
+  images?: readonly string[]
   /**
    * 这一轮模型给出的思维链（只有开 thinking 才有）。回传给模型时**原样**带回去：
    * DeepSeek 在请求带 `tools` 时要求回传历史各轮 CoT，缺了就从第 2 轮起 400。
@@ -173,6 +370,8 @@ export interface RedactableAskLoopTurn {
 export interface CloudAskLoopTurn {
   readonly toolCall: { readonly name: string; readonly arguments: Record<string, unknown> }
   readonly toolResult: Record<string, unknown>
+  /** see `RedactableAskLoopTurn.images`（已过协议校验；未开历史截图时为空） */
+  readonly images?: readonly string[]
   /** 同一轮的思维链（模型自己产出的，只回传给同一个模型，不落盘界面之外） */
   readonly reasoning?: string
 }
@@ -189,6 +388,10 @@ export interface ChainAskLoopPayload {
   readonly history: readonly { readonly question: string; readonly answer: string }[]
   /** 提问前最后一段证据（指代线索；已过策略，阻断则缺省） */
   readonly recent?: AskRecentSegment
+  /** 开场注入（新对话第一问才出现；见 `RedactableAskOpening`） */
+  readonly opening?: CloudAskOpening
+  /** 用户随本轮问题上传的附件（图片 / 文本文件；没有就不出现） */
+  readonly attachments?: CloudAskAttachments
   readonly [chainAskLoopBrand]: true
 }
 
@@ -201,6 +404,10 @@ export interface ChainAskLoopBuildInput {
   history?: readonly RedactableAskLoopConversationTurn[]
   /** 提问前最后一段证据（应用 / 标题 / 时刻；送云前过策略） */
   recent?: AskRecentSegment
+  /** 开场注入（新对话第一问；送云前逐段过策略） */
+  opening?: RedactableAskOpening
+  /** 用户随本轮问题上传的附件（用户主动提供，不过脱敏墙） */
+  attachments?: RedactableAskAttachments
 }
 
 export interface ChainAskLoopBuildResult {
@@ -253,6 +460,10 @@ const ASK_LOOP_URL_MAX_CHARS = 400
 /** read_segment 一次送云的正文字符范围（模型可用 offset 继续翻） */
 export const ASK_LOOP_READ_MIN_CHARS = 1
 export const ASK_LOOP_READ_MAX_CHARS = 6000
+/** 日记召回一条最多给多少字：和 search_info 的 80 字摘要同量级（模型要细节必须 read_diary） */
+export const ASK_LOOP_DIARY_SNIPPET_MAX_CHARS = 120
+/** 日记引用里原文片段的上限（最终答复的 memories[].snippet） */
+export const ASK_LOOP_DIARY_QUOTE_MAX_CHARS = 160
 
 /* ------------------------------------------------------------------ */
 /* 组装辅助                                                            */
@@ -298,6 +509,7 @@ export function buildAskPayload(
   }
 
   const asked = guardText(policy, question, limits.questionMaxChars)
+  const attachments = guardAttachments(options.attachments)
   const views: CloudChainAskEvidence[] = []
   const blockedSegmentIds: number[] = []
   const redactedSegmentIds: number[] = []
@@ -327,7 +539,8 @@ export function buildAskPayload(
   return {
     payload: {
       question: asked.blocked ? '' : asked.text,
-      evidence: views
+      evidence: views,
+      ...(attachments ? { attachments } : {})
     } as unknown as ChainAskPayload,
     questionBlocked: asked.blocked,
     blockedSegmentIds,
@@ -437,6 +650,25 @@ function guardLoopHit(
   }
 }
 
+/** 每轮工具结果后面最多带几张截图（每张约 1024 token；给一张就够判断 OCR 糊没糊） */
+const TURN_IMAGE_MAX = 2
+/** 单张 data URL 的字符上限（4MB 文件 → base64 ≈ 5.3MB；留余量） */
+const TURN_IMAGE_DATA_URL_MAX_CHARS = 8 * 1024 * 1024
+const TURN_IMAGE_DATA_URL_RE = /^data:image\/(png|jpeg|webp|gif);base64,/i
+
+/** 截图 data URL 的协议校验：只收图片 data URL，条数与长度都钳死 */
+function guardTurnImages(images: readonly string[] | undefined): string[] {
+  if (!images || images.length === 0) return []
+  const out: string[] = []
+  for (const url of images) {
+    if (typeof url !== 'string' || url.length > TURN_IMAGE_DATA_URL_MAX_CHARS) continue
+    if (!TURN_IMAGE_DATA_URL_RE.test(url)) continue
+    out.push(url)
+    if (out.length >= TURN_IMAGE_MAX) break
+  }
+  return out
+}
+
 /**
  * 循环载荷的组装。问题与单发口径完全一致（先剥后截、阻断整次不出云）；
  * 每一轮的 toolResult 按 kind 过策略——search_info 的命中被阻断就整条剔掉
@@ -448,6 +680,8 @@ export function buildAskLoopPayload(
   policy: AskTextPolicy
 ): ChainAskLoopBuildResult {
   const asked = guardText(policy, input.question, ASK_QUESTION_MAX_CHARS)
+  const attachments = guardAttachments(input.attachments)
+  const opening = guardOpening(policy, input.opening)
 
   // 历史轮：问题与答复都是上一轮的屏幕文本（再送一次要再过策略）；阻断就整轮丢掉
   const history: Array<{ question: string; answer: string }> = []
@@ -475,6 +709,8 @@ export function buildAskLoopPayload(
   const blockedSegmentIds: number[] = []
   for (const turn of input.turns) {
     const result = turn.toolResult
+    /** 这一轮允许带给模型的截图；read_segment 且文本没被脱敏时才放行 */
+    let images: string[] | undefined
     let view: Record<string, unknown>
     switch (result.kind) {
       case 'search_info': {
@@ -518,6 +754,9 @@ export function buildAskLoopPayload(
           view = { kind: 'error', message: '这一段包含敏感内容，不能展开' }
           break
         }
+        // 截图没法脱敏：正文里命中过脱敏规则就不附图（宁可少给，不让原图绕过去）
+        const redacted = app.redacted || title.redacted || text.redacted
+        if (!redacted) images = guardTurnImages(turn.images)
         const full = text.text
         const offset = Math.min(full.length, Math.max(0, Math.trunc(result.offset)))
         const limit = Math.min(
@@ -535,8 +774,75 @@ export function buildAskLoopPayload(
           urls: guardLoopUrls(policy, result.urls),
           offset,
           totalChars: full.length,
+          truncated: offset + limit < full.length,
+          shotCount: images?.length ?? 0
+        }
+        break
+      }
+      case 'recall_diary': {
+        const hits: Array<{
+          itemId: number
+          day: string
+          kind: string
+          snippet: string
+          tags: string[]
+          refs: string[]
+          reasons: string[]
+        }> = []
+        for (const hit of result.hits) {
+          const snippet = guardText(policy, hit.snippet, ASK_LOOP_DIARY_SNIPPET_MAX_CHARS)
+          if (snippet.blocked) continue
+          hits.push({
+            itemId: hit.itemId,
+            day: hit.day,
+            kind: hit.kind,
+            snippet: snippet.text,
+            tags: guardLoopNames(policy, hit.tags),
+            refs: guardLoopNames(policy, hit.refs),
+            reasons: guardLoopNames(policy, hit.reasons)
+          })
+        }
+        view = { kind: 'recall_diary', freshness: result.freshness, hits, stats: result.stats }
+        break
+      }
+      case 'read_diary': {
+        const text = guardText(policy, result.text, Number.MAX_SAFE_INTEGER)
+        if (text.blocked) {
+          view = { kind: 'error', message: '这一天的日记包含敏感内容，不能展开' }
+          break
+        }
+        const full = text.text
+        const offset = Math.min(full.length, Math.max(0, Math.trunc(result.offset)))
+        const limit = Math.min(
+          ASK_LOOP_READ_MAX_CHARS,
+          Math.max(ASK_LOOP_READ_MIN_CHARS, Math.trunc(result.limit))
+        )
+        const items: Array<{ itemId: number; section: string; text: string }> = []
+        for (const item of result.items) {
+          const itemText = guardText(policy, item.text, ASK_LOOP_DIARY_SNIPPET_MAX_CHARS * 3)
+          if (itemText.blocked) continue
+          items.push({ itemId: item.itemId, section: item.section, text: itemText.text })
+        }
+        view = {
+          kind: 'read_diary',
+          freshness: result.freshness,
+          day: result.day,
+          text: full.slice(offset, offset + limit),
+          items,
+          offset,
+          totalChars: full.length,
           truncated: offset + limit < full.length
         }
+        break
+      }
+      case 'memory_profile': {
+        const observations: Array<{ topic: string; statement: string }> = []
+        for (const item of result.observations) {
+          const statement = guardText(policy, item.statement, ASK_LOOP_DIARY_QUOTE_MAX_CHARS * 2)
+          if (statement.blocked) continue
+          observations.push({ topic: item.topic, statement: statement.text })
+        }
+        view = { kind: 'memory_profile', freshness: result.freshness, stats: result.stats, observations }
         break
       }
       default: {
@@ -551,6 +857,7 @@ export function buildAskLoopPayload(
         arguments: guardLoopArgs(policy, turn.toolCall.arguments)
       },
       toolResult: view,
+      ...(images && images.length > 0 ? { images } : {}),
       // 思维链是模型基于**已脱敏**的工具结果产出的，原样回传（不回传会 400）；
       // 不裁剪：DeepSeek 要求把 CoT 完整带回去。
       ...(typeof turn.reasoning === 'string' && turn.reasoning !== ''
@@ -566,7 +873,9 @@ export function buildAskLoopPayload(
       freshness: input.freshness,
       turns,
       history,
-      ...(recent ? { recent } : {})
+      ...(recent ? { recent } : {}),
+      ...(opening ? { opening } : {}),
+      ...(attachments ? { attachments } : {})
     } as unknown as ChainAskLoopPayload,
     questionBlocked: asked.blocked,
     blockedSegmentIds

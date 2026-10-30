@@ -33,7 +33,15 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'graph.theme_secondary_max': '2',
   'graph.edge_min_sim': '0.64',
   'graph.edge_top_k': '4',
-  'graph.edge_mutual': '1'
+  'graph.edge_mutual': '1',
+  // 个人记忆（日记 = 第二本账）：目录留空 = 自动找（见 memory/persona.ts resolveVaultDir）
+  'memory.vault_dir': '',
+  'memory.persona_name': '贴心大肥鱼',
+  'memory.persona_tone':
+    '像认识很久的老朋友：短句、具体、先给结论；不确定就说不确定，可以有自己的看法，不用端着',
+  'memory.persona_redlines': '',
+  // 启用的人格卡（D62）：<userData>/persona-cards/ 里的 .md 文件名；空 = 不用卡
+  'memory.persona_card': ''
 }
 
 export function getSetting(db: Db, key: string): string {

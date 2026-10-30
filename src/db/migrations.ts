@@ -38,6 +38,18 @@ import {
   normalizeOcrSql
 } from './schema'
 import {
+  MEM_DELETED_DDL,
+  MEM_DELETED_DAY_INDEX_DDL,
+  MEM_VECTORS_DDL,
+  MEM_ITEMS_DDL,
+  MEM_ITEMS_DAY_INDEX_DDL,
+  MEM_ITEMS_SOURCE_INDEX_DDL,
+  MEM_ITEMS_TS_INDEX_DDL,
+  MEM_OBSERVATIONS_DDL,
+  MEM_OBSERVATIONS_TOPIC_INDEX_DDL,
+  MEM_SOURCES_DDL
+} from '../memory/schema'
+import {
   decodeEmbeddingVector,
   encodeVectorFloat32,
   encodeVectorInt16
@@ -208,6 +220,67 @@ export const migrations: Migration[] = [
     },
     down(db) {
       rebuildEventEmbeddings(db, (vec) => encodeVectorFloat32(vec))
+    }
+  },
+  {
+    /**
+     * v8：个人记忆（日记 = 第二本账）。
+     *
+     * 与屏幕记忆（events）平级：`mem_items` 是日记条目事实源，`mem_sources` 记同步指纹
+     * （mtime + size 没变就跳过解析），`mem_observations` 是可重算的「关于我」观测。
+     * 三张表都由 `src/memory/store.ts` 读写；down 会丢用户数据，只用于测试回滚。
+     */
+    version: 8,
+    up(db) {
+      db.exec(MEM_ITEMS_DDL)
+      db.exec(MEM_ITEMS_DAY_INDEX_DDL)
+      db.exec(MEM_ITEMS_TS_INDEX_DDL)
+      db.exec(MEM_ITEMS_SOURCE_INDEX_DDL)
+      db.exec(MEM_SOURCES_DDL)
+      db.exec(MEM_OBSERVATIONS_DDL)
+      db.exec(MEM_OBSERVATIONS_TOPIC_INDEX_DDL)
+    },
+    down(db) {
+      db.exec('DROP INDEX IF EXISTS idx_mem_observations_topic')
+      db.exec('DROP TABLE IF EXISTS mem_observations')
+      db.exec('DROP TABLE IF EXISTS mem_sources')
+      db.exec('DROP INDEX IF EXISTS idx_mem_items_source')
+      db.exec('DROP INDEX IF EXISTS idx_mem_items_ts')
+      db.exec('DROP INDEX IF EXISTS idx_mem_items_day')
+      db.exec('DROP TABLE IF EXISTS mem_items')
+    }
+  },
+  {
+    /**
+     * v9：个人记忆回收站。
+     *
+     * `mem_deleted` 存用户删掉的条目整行：同步时按 uid 跳过（原文还在，不能让它自己回来），
+     * 撤销时原样放回。只是删除功能的支撑数据，不影响 `mem_items` 的结构；
+     * down 会丢用户的「已删」标记（条目本身早已不在库里），只用于测试回滚。
+     */
+    version: 9,
+    up(db) {
+      db.exec(MEM_DELETED_DDL)
+      db.exec(MEM_DELETED_DAY_INDEX_DDL)
+    },
+    down(db) {
+      db.exec('DROP INDEX IF EXISTS idx_mem_deleted_day')
+      db.exec('DROP TABLE IF EXISTS mem_deleted')
+    }
+  },
+  {
+    /**
+     * v10：个人记忆向量（`mem_vectors`）。
+     *
+     * 日记 / 对话 / 观测的本地 embedding（`llm-call.md` §4，D57）；派生数据、可整表重建，
+     * 所以 down 直接删表不丢用户内容。索引任务见 `src/memory/vectors.ts`。
+     */
+    version: 10,
+    up(db) {
+      db.exec(MEM_VECTORS_DDL)
+    },
+    down(db) {
+      db.exec('DROP TABLE IF EXISTS mem_vectors')
     }
   }
 ]

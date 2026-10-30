@@ -435,12 +435,14 @@ describe('工具循环 · 一轮多个 tool_calls', () => {
         ]
       },
       {
+        toolCalls: [
+          { id: 'read_a', name: 'read_segment', arguments: { segmentId: first } },
+          { id: 'read_b', name: 'read_segment', arguments: { segmentId: second } }
+        ]
+      },
+      {
         json: {
-          answer: '两段都提到过。',
-          citations: [
-            { segmentId: first, why: '报错那段' },
-            { segmentId: second, why: '说明那段' }
-          ]
+          answer: '两段都提到过。'
         }
       }
     ])
@@ -449,11 +451,11 @@ describe('工具循环 · 一轮多个 tool_calls', () => {
     // 两个调用都执行了、都进了 turn（不是只留最后一个）
     const payload = client.askLoopRequests[1]
     expect(payload.turns).toHaveLength(2)
-    // 白名单齐全：两边的段都能被引用
+    // 两段都打开过：自动引用齐全（模型不写 citations）
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
     expect(result.citations.map((citation) => citation.segmentId)).toEqual([first, second])
-    expect(result.stats).toMatchObject({ turns: 2, toolCalls: 2 })
+    expect(result.stats).toMatchObject({ turns: 3, toolCalls: 4 })
 
     // 回填消息：assistant / tool 两边的 id 一一对应且不重复
     const messages = buildChainAskLoopMessages(payload)
@@ -916,6 +918,7 @@ describe('工具循环 · 引用白名单收缩', () => {
     const client = new FakeLlmClient([
       searchCall({ keywords: ['LNK1104'] }),
       searchCall({ keywords: ['LNK1104'] }),
+      { toolCalls: [{ name: 'read_segment', arguments: { segmentId: visible } }] },
       {
         json: {
           answer: '两段都算数。',
@@ -929,10 +932,11 @@ describe('工具循环 · 引用白名单收缩', () => {
     const result = await askChain(buildDeps(client), 'LNK1104')
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
+    // 被挡的段打不开；可见段打开过 → 自动引用只有可见段
     expect(result.citations.map((citation) => citation.segmentId)).toEqual([visible])
     // 诊断口径的区分：hits = 各次 search_info 返回的命中总数（含被挡的，两轮各 2 条）；
     // evidence = 去重后真正给模型看过的段（被挡的 1password 段不在内）
-    expect(result.stats).toMatchObject({ hits: 4, evidence: 1, cited: 2 })
+    expect(result.stats).toMatchObject({ hits: 4, evidence: 1, cited: 1 })
     // 第二轮 / 第三轮的载荷里，被挡的段始终没有出现（同段同关键词 → 脱敏结果稳定）
     for (const payload of client.askLoopRequests.slice(1)) {
       const sentIds = payload.turns.flatMap((turn) => {
@@ -957,7 +961,7 @@ describe('工具循环 · 引用白名单收缩', () => {
     const client = new FakeLlmClient([
       searchCall({ keywords: ['PEAR'] }),
       searchCall({ keywords: ['APPLE'] }),
-      { json: { answer: '09:00 的〈Firefox〉里记过。', citations: [{ segmentId: seg, why: '笔记那段' }] } }
+      { json: { answer: '09:00 的〈Firefox〉里记过。' } }
     ])
     const result = await askChain(buildDeps(client), 'PEAR 和 APPLE')
 
@@ -967,11 +971,11 @@ describe('工具循环 · 引用白名单收缩', () => {
     // 而且看到的是**干净那一条**内容行（APPLE），不是被挡的密码行
     expect(secondTurnHits[0].snippet).toContain('APPLE')
     expect(secondTurnHits[0].snippet).not.toContain('密码')
-    // 第一轮那次「被挡」不会粘住白名单：后续轮次见过就能引用（曾经是 fail-safe 假阴性，
-    // 已按 QA 建议改成「当前 build 里 payload 可见段 id 的并集」）
+    // 白名单不粘：后续轮次见过就算「给模型看过」；但引用仍只来自 read_segment 打开的正文，
+    // 本用例没打开正文 → 没有引用（旧「按记号引用」已废）
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
-    expect(result.citations.map((citation) => citation.segmentId)).toEqual([seg])
+    expect(result.citations).toEqual([])
     // 安全方向不放松：被挡的那次命中始终不出现在送云载荷里
     const firstTurnHits = (client.askLoopRequests[1].turns[0].toolResult as ToolResultView).hits ?? []
     expect(firstTurnHits).toHaveLength(0)
@@ -1107,7 +1111,7 @@ describe('工具循环 · 客户端能力路由', () => {
 /* ------------------------------------------------------------------ */
 
 describe('工具循环 · schema 与执行器一致性', () => {
-  it('wire 层的三个工具名都能被执行器认；search_info 的参数与执行器解析的一一对应', async () => {
+  it('wire 层的七个工具名都能被执行器认；search_info 的参数与执行器解析的一一对应', async () => {
     seedOne(1, 'Firefox', at(0), 'LNK1104 的记录')
     const payload = buildChainAskLoopPayload({
       question: '随便问问',
@@ -1146,7 +1150,10 @@ describe('工具循环 · schema 与执行器一致性', () => {
       'search_info',
       'get_freshness',
       'read_segment',
-      'ask_history'
+      'ask_history',
+      'recall_diary',
+      'read_diary',
+      'memory_profile'
     ])
     // search_info 的参数名必须与执行器解析的键完全一致（多一个 = 模型给了没人读，少一个 = 模型给不了）
     expect(Object.keys(body.tools[0].function.parameters.properties).sort()).toEqual([

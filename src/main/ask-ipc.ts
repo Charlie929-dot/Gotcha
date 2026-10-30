@@ -16,13 +16,24 @@
  * - `ask:settings:get/save`、`ask:provider:models/key/keys`（D53）：
  *   图谱入口封存后，供应商 / 密钥 / 出网确认只能在这里配。校验与图谱窗口**同一套**
  *   （`graph-ipc.ts` 的字段规则直接复用），保存后副作用交给 `onSettingsSaved` 注入。
+ * - `ask:memory:get/save`（vibe/free）：日记目录 + 人设；保存即同步。
+ * - `ask:memory:list/delete/restore`（vibe/free）：设置抽屉里浏览 / 删除 / 撤销单条记忆。
+ *   删除与同步一样要开写连接，**回答进行中一律拒绝**（否则会在只读连接还在读的时候关库）。
  */
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision, ChainAskTurnContext } from '../chain/agent/types'
+import { normalizeAskMode, type AskModeConfig } from '../chain/agent/mode'
 import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskHistoryEntry } from './ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
+import type { MemorySettingsSaveResult, MemorySettingsView } from './memory-settings'
+import type {
+  MemoryDeleteView,
+  MemoryListView,
+  MemoryRestoreView
+} from './memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
+import type { QqSettingsSaveResult, QqSettingsView } from './qq/qq-settings'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -35,13 +46,90 @@ export interface AskConsentView {
   clientReason?: string
 }
 
-/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区问答附带的截图路径） */
+/** 用户随问题上传的附件（渲染层已把图片压成 data URL、文本文件读成文本） */
+export interface AskAttachmentInput {
+  kind: 'image' | 'file'
+  /** 文件名（展示用；图片可能是「截图」） */
+  name?: string
+  /** kind=image：图片 data URL（只收 png/jpeg/webp/gif） */
+  dataUrl?: string
+  /** kind=file：文本内容（渲染层已截断；主进程再校验上限） */
+  text?: string
+}
+
+/** 附件在上下文里的形态：主进程落盘后补 `path`（历史回看用） */
+export interface AskQueryAttachment extends AskAttachmentInput {
+  path?: string
+}
+
+/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区截图 / 上传附件 / 模式） */
 export interface AskQueryContext {
   conversationId: string
   history: readonly ChainAskTurnContext[]
   signal: AbortSignal
+  /** 这次用的模式（D62）：决定给哪些工具、注不注入人格卡；缺省由主进程按「问记忆」处理 */
+  mode?: AskModeConfig
   /** 选区问答：随这条对话留存的截图（主进程校验后给绝对路径） */
   imagePath?: string
+  /** 用户上传的附件（图片 / 文本文件；主进程在提问前落盘图片并回填 path） */
+  attachments?: AskQueryAttachment[]
+}
+
+/** 附件上限：与渲染层一致（渲染层先挡一道，这里再挡一道） */
+export const ASK_ATTACH_IMAGE_MAX = 4
+export const ASK_ATTACH_FILE_MAX = 4
+const ASK_ATTACH_NAME_MAX_CHARS = 120
+const ASK_ATTACH_IMAGE_DATA_URL_MAX_CHARS = 6 * 1024 * 1024
+const ASK_ATTACH_FILE_TEXT_MAX_CHARS = 200_000
+const ASK_ATTACH_IMAGE_DATA_URL_RE = /^data:image\/(png|jpeg|webp|gif);base64,/i
+
+function parseAttachments(raw: unknown): AskQueryAttachment[] | null {
+  if (raw === undefined) return []
+  if (!Array.isArray(raw) || raw.length === 0) return []
+  if (raw.length > ASK_ATTACH_IMAGE_MAX + ASK_ATTACH_FILE_MAX) return null
+  const out: AskQueryAttachment[] = []
+  let images = 0
+  let files = 0
+  for (const item of raw) {
+    if (!isPlainObject(item)) return null
+    const kind = item.kind
+    const name =
+      typeof item.name === 'string' ? item.name.trim().slice(0, ASK_ATTACH_NAME_MAX_CHARS) : undefined
+    if (kind === 'image') {
+      if (images >= ASK_ATTACH_IMAGE_MAX) return null
+      const dataUrl = item.dataUrl
+      if (typeof dataUrl !== 'string' || dataUrl.length > ASK_ATTACH_IMAGE_DATA_URL_MAX_CHARS) return null
+      if (!ASK_ATTACH_IMAGE_DATA_URL_RE.test(dataUrl)) return null
+      out.push({ kind: 'image', ...(name ? { name } : {}), dataUrl })
+      images += 1
+      continue
+    }
+    if (kind === 'file') {
+      if (files >= ASK_ATTACH_FILE_MAX) return null
+      const text = item.text
+      if (typeof text !== 'string' || text.length > ASK_ATTACH_FILE_TEXT_MAX_CHARS) return null
+      out.push({ kind: 'file', ...(name ? { name } : {}), text })
+      files += 1
+      continue
+    }
+    return null
+  }
+  return out
+}
+
+/** 附件 → 历史元信息（图片带 path 才能回看；文本只记字数，不落盘） */
+function historyAttachments(
+  attachments: readonly AskQueryAttachment[] | undefined
+): { kind: 'image' | 'file'; name?: string; path?: string; chars?: number }[] {
+  const out: { kind: 'image' | 'file'; name?: string; path?: string; chars?: number }[] = []
+  for (const item of attachments ?? []) {
+    if (item.kind === 'image') {
+      out.push({ kind: 'image', ...(item.name ? { name: item.name } : {}), ...(item.path ? { path: item.path } : {}) })
+    } else {
+      out.push({ kind: 'file', ...(item.name ? { name: item.name } : {}), chars: (item.text ?? '').length })
+    }
+  }
+  return out
 }
 
 export interface AskIpcDeps {
@@ -51,7 +139,13 @@ export interface AskIpcDeps {
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
   /** 成功走完一次提问就落一条历史（失败只记日志，不能影响回答）；`imagePath` 只有选区问答才有 */
-  record: (question: string, result: ChainAskResult, conversationId: string, imagePath?: string) => void
+  record: (
+    question: string,
+    result: ChainAskResult,
+    conversationId: string,
+    imagePath?: string,
+    attachments?: { kind: 'image' | 'file'; name?: string; path?: string; chars?: number }[]
+  ) => void
   /** 截图路径 → data URL（渲染层读不了文件）；路径非法 / 读不到返回 null */
   image?: (path: string) => string | null
   /**
@@ -81,6 +175,33 @@ export interface AskIpcDeps {
   providerModels?: (input: ProviderModelsInput) => Promise<FetchModelsResult>
   saveProviderKey?: (providerId: string, apiKey: string) => ProviderKeySaveResult
   providerKeys?: () => Record<string, ApiKeySource>
+  /**
+   * 个人记忆（vibe/free）：日记目录 + 人设。保存后主进程**立即同步**日记目录
+   * （用户选的口径：保存即同步），同步结果随返回值一起回界面。
+   */
+  memorySettings?: () => MemorySettingsView | { error: string }
+  saveMemorySettings?: (patch: unknown) => MemorySettingsSaveResult
+  /**
+   * 人格卡（D62）：保存一张卡（导入 / 覆盖）→ 更新后的视图；文本由渲染层读好，
+   * 主进程再按上限校验（不静默截断）。读取单张卡给预览用。
+   */
+  savePersonaCard?: (name: string, text: string) => { ok: boolean; error?: string; view?: MemorySettingsView }
+  readPersonaCard?: (name: string) => string | null
+  /** 在文件资源管理器里打开卡片目录（目录不存在时先建） */
+  openPersonaCardDir?: () => boolean
+  /**
+   * 设置抽屉「记忆条目」：浏览（关键词 / 日期前缀 / 类别，分页）、删除单条（进回收站）、撤销。
+   * 删除与撤销都走写连接，回答进行中拒绝（handler 里按在途提问判定）。
+   */
+  memoryList?: (query: unknown) => MemoryListView
+  memoryDelete?: (input: unknown) => MemoryDeleteView
+  memoryRestore?: (input: unknown) => MemoryRestoreView
+  /**
+   * QQ 通道（D63）：读设置视图 / 保存并热生效。
+   * 保存会起停本机 WS 端口（默认关），失败原因随 `view.lastError` 回界面，不抛异常。
+   */
+  qqSettings?: () => QqSettingsView | { error: string }
+  saveQqSettings?: (patch: unknown) => QqSettingsSaveResult | Promise<QqSettingsSaveResult>
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -125,7 +246,13 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
   /** 挂起的「还要继续吗」：resumeId → 原始问题 + 会话 + 截图（答案没出来前不落历史） */
   const pendingResume = new Map<
     string,
-    { question: string; conversationId: string; imagePath?: string }
+    {
+      question: string
+      conversationId: string
+      mode: AskModeConfig
+      imagePath?: string
+      attachments?: AskQueryAttachment[]
+    }
   >()
 
   /**
@@ -136,8 +263,11 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     question: string,
     conversationId: string,
     result: ChainAskResult,
-    imagePath?: string
+    mode: AskModeConfig,
+    imagePath?: string,
+    attachments?: readonly AskQueryAttachment[]
   ): ChainAskResult => {
+    const recorded = historyAttachments(attachments)
     if (result.kind === 'continue-ask') {
       if (result.resumeId) {
         while (pendingResume.size >= PENDING_RESUME_MAX) {
@@ -145,14 +275,23 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           if (oldest === undefined) break
           pendingResume.delete(oldest)
         }
-        pendingResume.set(result.resumeId, { question, conversationId, ...(imagePath ? { imagePath } : {}) })
+        pendingResume.set(result.resumeId, {
+          question,
+          conversationId,
+          mode,
+          ...(imagePath ? { imagePath } : {}),
+          ...(recorded.length > 0 ? { attachments: [...attachments!] } : {})
+        })
       }
       return result
     }
     try {
-      // 不带图时只传三个参数：老测试 / 老调用方的入参形状保持不变
-      if (imagePath) deps.record(question, result, conversationId, imagePath)
-      else deps.record(question, result, conversationId)
+      // 不带图 / 附件时保持老调用形状
+      if (imagePath || recorded.length > 0) {
+        deps.record(question, result, conversationId, imagePath, recorded)
+      } else {
+        deps.record(question, result, conversationId)
+      }
     } catch (error) {
       deps.log('warn', 'ask history record failed', { error: String(error) })
     }
@@ -184,6 +323,11 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           typeof rawImage === 'string' && rawImage.length > 0 && rawImage.length <= 512
             ? rawImage
             : undefined
+        const attachments = parseAttachments(payload.attachments)
+        if (attachments === null) return failure('附件不合法（只收图片和文本文件，条数 / 大小有上限）')
+        // 模式（D62）：不是对象就拒（不静默猜），对象里缺的字段按关处理
+        if (payload.mode !== undefined && !isPlainObject(payload.mode)) return failure('模式不合法')
+        const mode = normalizeAskMode(payload.mode)
 
         let history: readonly ChainAskTurnContext[] = []
         try {
@@ -200,9 +344,11 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             conversationId,
             history,
             signal: controller.signal,
-            ...(imagePath ? { imagePath } : {})
+            mode,
+            ...(imagePath ? { imagePath } : {}),
+            ...(attachments.length > 0 ? { attachments } : {})
           })
-          return settle(asked, conversationId, result, imagePath)
+          return settle(asked, conversationId, result, mode, imagePath, attachments)
         } catch (error) {
           deps.log('error', 'ask:query failed', { error: String(error) })
           return failure('问记忆出错，看日志')
@@ -242,9 +388,20 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             conversationId: pending.conversationId,
             history,
             signal: controller.signal,
-            ...(pending.imagePath ? { imagePath: pending.imagePath } : {})
+            mode: pending.mode,
+            ...(pending.imagePath ? { imagePath: pending.imagePath } : {}),
+            ...(pending.attachments && pending.attachments.length > 0
+              ? { attachments: pending.attachments }
+              : {})
           })
-          return settle(pending.question, pending.conversationId, result, pending.imagePath)
+          return settle(
+            pending.question,
+            pending.conversationId,
+            result,
+            pending.mode,
+            pending.imagePath,
+            pending.attachments
+          )
         } catch (error) {
           deps.log('error', 'ask:resume failed', { error: String(error) })
           return failure('续查出错，看日志')
@@ -339,6 +496,112 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
       }
     ],
     [
+      'ask:memory:get',
+      (event) => {
+        if (!ensureSender(event)) return { error: 'forbidden' }
+        try {
+          return deps.memorySettings?.() ?? { error: 'unsupported' }
+        } catch (error) {
+          deps.log('error', 'ask memory settings read failed', { error: String(error) })
+          return { error: 'memory-settings-read-failed' }
+        }
+      }
+    ],
+    [
+      'ask:memory:save',
+      (event, patch) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.saveMemorySettings) {
+          return { ok: false, error: '当前版本不支持保存个人记忆设置' }
+        }
+        try {
+          return deps.saveMemorySettings(patch)
+        } catch (error) {
+          deps.log('error', 'ask memory settings save failed', { error: String(error) })
+          return { ok: false, error: '保存失败' }
+        }
+      }
+    ],
+    [
+      'ask:memory:list',
+      (event, query) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies MemoryListView
+        if (!deps.memoryList) {
+          return { ok: false, error: '当前版本不支持浏览记忆条目' } satisfies MemoryListView
+        }
+        try {
+          return deps.memoryList(query)
+        } catch (error) {
+          deps.log('error', 'ask memory list failed', { error: String(error) })
+          return { ok: false, error: '读取记忆条目失败' } satisfies MemoryListView
+        }
+      }
+    ],
+    [
+      'ask:memory:delete',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies MemoryDeleteView
+        if (!deps.memoryDelete) {
+          return { ok: false, error: '当前版本不支持删除记忆条目' } satisfies MemoryDeleteView
+        }
+        // 删除要开写连接（会关掉只读连接）：在途提问正读着库，等它结束再删
+        if (active !== null) {
+          return { ok: false, error: '等这次回答结束再删（删除会短暂占用数据库）' } satisfies MemoryDeleteView
+        }
+        try {
+          return deps.memoryDelete(input)
+        } catch (error) {
+          deps.log('error', 'ask memory delete failed', { error: String(error) })
+          return { ok: false, error: '删除失败' } satisfies MemoryDeleteView
+        }
+      }
+    ],
+    [
+      'ask:memory:restore',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies MemoryRestoreView
+        if (!deps.memoryRestore) {
+          return { ok: false, error: '当前版本不支持撤销删除' } satisfies MemoryRestoreView
+        }
+        if (active !== null) {
+          return { ok: false, error: '等这次回答结束再撤销（会短暂占用数据库）' } satisfies MemoryRestoreView
+        }
+        try {
+          return deps.memoryRestore(input)
+        } catch (error) {
+          deps.log('error', 'ask memory restore failed', { error: String(error) })
+          return { ok: false, error: '撤销失败' } satisfies MemoryRestoreView
+        }
+      }
+    ],
+    [
+      'ask:qq:get',
+      (event) => {
+        if (!ensureSender(event)) return { error: 'forbidden' }
+        try {
+          return deps.qqSettings?.() ?? { error: 'unsupported' }
+        } catch (error) {
+          deps.log('error', 'ask qq settings read failed', { error: String(error) })
+          return { error: 'qq-settings-read-failed' }
+        }
+      }
+    ],
+    [
+      'ask:qq:save',
+      async (event, patch) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies QqSettingsSaveResult
+        if (!deps.saveQqSettings) {
+          return { ok: false, error: '当前版本不支持 QQ 通道' } satisfies QqSettingsSaveResult
+        }
+        try {
+          return await deps.saveQqSettings(patch)
+        } catch (error) {
+          deps.log('error', 'ask qq settings save failed', { error: String(error) })
+          return { ok: false, error: '保存失败' } satisfies QqSettingsSaveResult
+        }
+      }
+    ],
+    [
       'ask:provider:models',
       async (event, input) => {
         if (!ensureSender(event)) {
@@ -399,6 +662,53 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask provider key status failed', { error: String(error) })
           return {}
+        }
+      }
+    ],
+    [
+      'ask:memory:card:save',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (
+          !isPlainObject(input) ||
+          typeof input.name !== 'string' ||
+          typeof input.text !== 'string'
+        ) {
+          return { ok: false, error: '参数不合法' }
+        }
+        if (!deps.savePersonaCard) return { ok: false, error: '当前版本不支持人格卡' }
+        try {
+          return deps.savePersonaCard(input.name, input.text)
+        } catch (error) {
+          deps.log('error', 'ask persona card save failed', { error: String(error) })
+          return { ok: false, error: '保存人格卡失败' }
+        }
+      }
+    ],
+    [
+      'ask:memory:card:get',
+      (event, name) => {
+        if (!ensureSender(event)) return null
+        if (typeof name !== 'string' || name.length === 0 || name.length > 120) return null
+        if (!deps.readPersonaCard) return null
+        try {
+          return deps.readPersonaCard(name)
+        } catch (error) {
+          deps.log('warn', 'ask persona card read failed', { error: String(error) })
+          return null
+        }
+      }
+    ],
+    [
+      'ask:memory:card:open',
+      (event) => {
+        if (!ensureSender(event)) return false
+        if (!deps.openPersonaCardDir) return false
+        try {
+          return deps.openPersonaCardDir()
+        } catch (error) {
+          deps.log('warn', 'ask persona card dir open failed', { error: String(error) })
+          return false
         }
       }
     ],

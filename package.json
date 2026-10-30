@@ -21,6 +21,7 @@
     "perf:sample": "node scripts/perf/runtime-sample.mjs",
     "perf:suite": "vitest run --config tests/perf/vitest.perf.config.ts",
     "setting": "node scripts/setting.mjs",
+    "memory": "node scripts/memory.mjs",
     "check:embedding-worker": "node scripts/check-embedding-worker.mjs",
     "check:search-worker": "node scripts/check-search-worker.mjs",
     "check:mirror-coverage": "node scripts/perf/mirror-coverage.mjs"
@@ -32,6 +33,7 @@
     "@types/d3-force": "^3.0.10",
     "@types/d3-scale": "^4.0.9",
     "@types/node": "^26.6.5",
+    "@types/ws": "^8.18.2",
     "d3-color": "^3.1.0",
     "d3-force": "^3.0.0",
     "d3-scale": "^4.0.2",
@@ -50,6 +52,7 @@
     "active-win": "9.0.0",
     "better-sqlite3": "13.0.3",
     "electron-log": "5.4.4",
-    "onnxruntime-node": "^1.30.0"
+    "onnxruntime-node": "^1.30.0",
+    "ws": "^8.22.0"
   }
 }

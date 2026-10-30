@@ -43,7 +43,7 @@ describe('migrations · :memory: 库', () => {
     try {
       expect(getSchemaVersion(db)).toBe(0)
       expect(applyMigrations(db)).toBe(LATEST)
-      expect(LATEST).toBe(7)
+      expect(LATEST).toBe(10)
 
       db.prepare("INSERT INTO events (ts, app) VALUES (1, 'notepad')").run()
       // 第二次跑同一套迁移：不应抛错、版本不倒退、已有数据不丢
@@ -320,6 +320,49 @@ describe('migrations · :memory: 库', () => {
       expect(restored.vec.byteLength).toBe(512 * 4)
       const back = decodeEmbeddingVector(restored.vec, restored.dim)
       for (let i = 0; i < vec.length; i += 1) expect(back[i]).toBeCloseTo(vec[i], 4)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v9：个人记忆回收站（mem_deleted）建好；down 后重 up 结构一致', () => {
+    const db = new Database(':memory:')
+    try {
+      applyMigrations(db)
+      expect(structureSnapshot(db).map((row) => row.name)).toContain('mem_deleted')
+      expect(structureSnapshot(db).map((row) => row.name)).toContain('idx_mem_deleted_day')
+
+      revertMigrations(db, 8)
+      expect(structureSnapshot(db).map((row) => row.name)).not.toContain('mem_deleted')
+
+      expect(applyMigrations(db)).toBe(LATEST)
+      expect(structureSnapshot(db).map((row) => row.name)).toContain('mem_deleted')
+      // 回收站整行都能放回：列就是 mem_items 那一套（少了 id，多了 deleted_at）
+      const columns = columnNames(db, 'mem_deleted')
+      expect(columns).toContain('uid')
+      expect(columns).toContain('text')
+      expect(columns).toContain('tags')
+      expect(columns).toContain('deleted_at')
+      expect(columns).not.toContain('id')
+    } finally {
+      db.close()
+    }
+  })
+
+  it('v10：个人记忆向量（mem_vectors）建好；down 后重 up 结构一致', () => {
+    const db = new Database(':memory:')
+    try {
+      applyMigrations(db)
+      expect(structureSnapshot(db).map((row) => row.name)).toContain('mem_vectors')
+      // 主键是 (item_type, item_id, model)：同一模型覆盖、换模型各存一份
+      const columns = columnNames(db, 'mem_vectors')
+      expect(columns).toEqual(['item_type', 'item_id', 'model', 'vector', 'text_hash', 'updated_at'])
+
+      revertMigrations(db, 9)
+      expect(structureSnapshot(db).map((row) => row.name)).not.toContain('mem_vectors')
+
+      expect(applyMigrations(db)).toBe(LATEST)
+      expect(structureSnapshot(db).map((row) => row.name)).toContain('mem_vectors')
     } finally {
       db.close()
     }

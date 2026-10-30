@@ -28,6 +28,11 @@ export interface LlmMessage {
   content: string
   /** role=user 且带图时附在正文后（wire 层拼成 OpenAI 兼容的内容段数组） */
   imageUrl?: string
+  /**
+   * role=user 的多张图（用户上传的附件 / read_segment 带出的历史截图）。
+   * 与 `imageUrl` 合并；DeepSeek 只允许 user 消息带图，tool 消息带图会 400。
+   */
+  images?: readonly string[]
   /** role=assistant 调工具时附带（content 可为空串） */
   toolCalls?: readonly LlmToolCall[]
   /** role=tool 时：对应调用的 id */
@@ -85,11 +90,30 @@ export interface LlmCompleteOptions {
    */
   allowTools?: boolean
   /**
+   * 允许最终答复是**自由文本**（2026-10-29 拍板：不再逼模型填 JSON）。
+   *
+   * `true` 时收尾轮不发 `response_format`，模型直接说人话也照收（解析层从
+   * `[[段 12]]` / `[[日记 7]]` 记号里取引用）；结构化 JSON 仍然兼容。
+   * 只对 `completeAskLoop` 生效。
+   */
+  freeText?: boolean
+  /**
    * 选区问答：随本轮问题一起给模型看的截图（`data:image/...;base64,...`）。
    * **不走脱敏**——这是用户在界面上自己框的图（拍板 2026-10-28），不是从记忆库里翻出来的文本；
    * 出网确认门（D24）照旧在 `askChain` 门口判定。
    */
   image?: { readonly dataUrl: string }
+  /**
+   * 人设提示（本地配置：名字 / 口吻 / 红线）。
+   * 只拼在工具循环的 system 最前面，**不进 branded 载荷**——它不是屏幕内容，
+   * 出云确认门仍按整次请求在 `askChain` 门口判定。
+   */
+  personaPrompt?: string
+  /**
+   * 工具循环给哪些工具组（D62 模式）：`screen` = 屏幕记忆工具，`diary` = 日记工具。
+   * 缺省两组都开（老行为）。两组都关时：不带 tools、不写「数据边界 / 工具」段。
+   */
+  toolGroups?: { screen: boolean; diary: boolean }
 }
 
 export interface LlmClient {

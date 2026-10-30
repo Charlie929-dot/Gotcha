@@ -470,3 +470,223 @@ describe('ask IPC：设置抽屉（D53）', () => {
     expect(handler(deps, 'ask:provider:keys')(SENDER_OK as never)).toEqual({})
   })
 })
+
+describe('ask IPC：个人记忆设置（日记目录 + 人设）', () => {
+  const view = {
+    vaultDir: 'D:\\vault',
+    resolvedDir: 'D:\\vault',
+    dirSource: 'setting',
+    personaName: '记忆球',
+    personaTone: 't',
+    redLines: [],
+    hardRedLines: [],
+    stats: {}
+  } as never
+
+  it('读 / 存：越权拒绝；成功原样回传；保存即同步的结果一起回来', () => {
+    const saveResult = {
+      ok: true as const,
+      view,
+      sync: { scanned: 1, unchanged: 0, skipped: 0, added: 1, updated: 0, removed: 0, items: 1 },
+      syncedDir: 'D:\\vault'
+    }
+    const memorySettings = vi.fn(() => view)
+    const saveMemorySettings = vi.fn(() => saveResult)
+    const deps = buildDeps({ memorySettings, saveMemorySettings })
+
+    const read = handler(deps, 'ask:memory:get')
+    expect(read({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never)).toEqual({
+      error: 'forbidden'
+    })
+    expect(read(SENDER_OK as never)).toBe(view)
+
+    const save = handler(deps, 'ask:memory:save')
+    expect(save({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, {})).toEqual({
+      ok: false,
+      error: 'forbidden'
+    })
+    expect(saveMemorySettings).not.toHaveBeenCalled()
+    expect(save(SENDER_OK as never, { vaultDir: 'D:\\vault' })).toBe(saveResult)
+    expect(saveMemorySettings).toHaveBeenCalledWith({ vaultDir: 'D:\\vault' })
+  })
+
+  it('没接能力 / 抛错都变成可读结果，不抛回渲染层', () => {
+    expect(handler(buildDeps(), 'ask:memory:get')(SENDER_OK as never)).toEqual({
+      error: 'unsupported'
+    })
+    expect(handler(buildDeps(), 'ask:memory:save')(SENDER_OK as never, {})).toEqual({
+      ok: false,
+      error: '当前版本不支持保存个人记忆设置'
+    })
+
+    const brokenRead = handler(
+      buildDeps({
+        memorySettings: () => {
+          throw new Error('db gone')
+        }
+      }),
+      'ask:memory:get'
+    )
+    expect(brokenRead(SENDER_OK as never)).toEqual({ error: 'memory-settings-read-failed' })
+
+    const brokenSave = handler(
+      buildDeps({
+        saveMemorySettings: () => {
+          throw new Error('db gone')
+        }
+      }),
+      'ask:memory:save'
+    )
+    expect(brokenSave(SENDER_OK as never, {})).toEqual({ ok: false, error: '保存失败' })
+  })
+})
+
+describe('ask IPC：记忆条目（浏览 / 删除 / 撤销）', () => {
+  const item = { id: 3, uid: 'a'.repeat(40), day: '2026-09-29', text: 't' } as never
+
+  it('浏览：越权拒绝；参数原样交给 deps；没接能力如实拒绝', async () => {
+    const memoryList = vi.fn(() => ({ ok: true as const, items: [item], total: 1, hasMore: false, deleted: 0 }))
+    const deps = buildDeps({ memoryList })
+    const list = handler(deps, 'ask:memory:list')
+
+    expect(await list({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, {})).toEqual({
+      ok: false,
+      error: 'forbidden'
+    })
+    expect(memoryList).not.toHaveBeenCalled()
+    expect(await list(SENDER_OK as never, { search: '周深', offset: 20 })).toMatchObject({ ok: true, total: 1 })
+    expect(memoryList).toHaveBeenCalledWith({ search: '周深', offset: 20 })
+
+    expect(await handler(buildDeps(), 'ask:memory:list')(SENDER_OK as never, {})).toEqual({
+      ok: false,
+      error: '当前版本不支持浏览记忆条目'
+    })
+  })
+
+  it('删除 / 撤销：结果原样回传；抛错变成可读结果', async () => {
+    const memoryDelete = vi.fn(() => ({ ok: true as const, item, deleted: 1 }))
+    const memoryRestore = vi.fn(() => ({ ok: true as const, item }))
+    const deps = buildDeps({ memoryDelete, memoryRestore })
+
+    expect(await handler(deps, 'ask:memory:delete')(SENDER_OK as never, { id: 3 })).toMatchObject({
+      ok: true,
+      deleted: 1
+    })
+    expect(memoryDelete).toHaveBeenCalledWith({ id: 3 })
+    expect(await handler(deps, 'ask:memory:restore')(SENDER_OK as never, { uid: 'a'.repeat(40) })).toMatchObject({
+      ok: true
+    })
+
+    const logs: string[] = []
+    const broken = buildDeps({
+      memoryDelete: () => {
+        throw new Error('db gone')
+      },
+      log: (_level, message) => logs.push(message)
+    })
+    expect(await handler(broken, 'ask:memory:delete')(SENDER_OK as never, { id: 3 })).toEqual({
+      ok: false,
+      error: '删除失败'
+    })
+    expect(logs).toEqual(['ask memory delete failed'])
+  })
+
+  it('回答进行中：删除与撤销都拒绝（写连接会关掉正在读的只读连接）', async () => {
+    let release: (() => void) | null = null
+    const pending = new Promise<ChainAskResult>((resolve) => {
+      release = () =>
+        resolve({
+          kind: 'no-evidence',
+          stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 }
+        })
+    })
+    const memoryDelete = vi.fn(() => ({ ok: true as const, item, deleted: 1 }))
+    const memoryRestore = vi.fn(() => ({ ok: true as const, item }))
+    const deps = buildDeps({ ask: () => pending, memoryDelete, memoryRestore })
+    // 在途状态挂在 handler 表上：必须用**同一张表**（生产里注册的也是一份）
+    const handlers = createAskIpcHandlers(deps)
+    const query = handlers.get('ask:query')!
+    const remove = handlers.get('ask:memory:delete')!
+    const restore = handlers.get('ask:memory:restore')!
+
+    const running = query(SENDER_OK as never, '问点什么')
+    expect(await remove(SENDER_OK as never, { id: 3 })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('回答结束')
+    })
+    expect(await restore(SENDER_OK as never, { uid: 'a'.repeat(40) })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('回答结束')
+    })
+    expect(memoryDelete).not.toHaveBeenCalled()
+    expect(memoryRestore).not.toHaveBeenCalled()
+
+    release!()
+    await running
+    expect(await remove(SENDER_OK as never, { id: 3 })).toMatchObject({ ok: true })
+    expect(memoryDelete).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ask IPC：模式（D62）', () => {
+  const noEvidence: ChainAskResult = {
+    kind: 'no-evidence',
+    stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 }
+  }
+
+  it('模式不是对象：直接拒，不静默猜', async () => {
+    const ask = vi.fn(async (): Promise<ChainAskResult> => noEvidence)
+    const query = handler(buildDeps({ ask }), 'ask:query')
+    for (const mode of ['chat', 42, null, ['chat']]) {
+      expect(await query(SENDER_OK as never, { question: '问', mode })).toMatchObject({
+        kind: 'error',
+        message: '模式不合法'
+      })
+    }
+    expect(ask).not.toHaveBeenCalled()
+  })
+
+  it('不传模式 = 问记忆（老调用方行为不变）', async () => {
+    const ask = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => noEvidence)
+    await handler(buildDeps({ ask }), 'ask:query')(SENDER_OK as never, { question: '问' })
+    expect(ask.mock.calls[0]![1].mode).toEqual({ screen: true, diary: true, card: false })
+  })
+
+  it('聊天 / 组合模式原样交给主进程（缺字段按关）', async () => {
+    const ask = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => noEvidence)
+    const query = handler(buildDeps({ ask }), 'ask:query')
+    await query(SENDER_OK as never, { question: '问', mode: { screen: false, diary: true, card: true } })
+    expect(ask.mock.calls[0]![1].mode).toEqual({ screen: false, diary: true, card: true })
+    await query(SENDER_OK as never, { question: '问', mode: { card: true } })
+    expect(ask.mock.calls[1]![1].mode).toEqual({ screen: false, diary: false, card: true })
+  })
+
+  it('续查沿用暂停时的模式（不会从聊天悄悄变回问记忆）', async () => {
+    const paused: ChainAskResult = {
+      kind: 'continue-ask',
+      question: '还要接着查吗？',
+      options: ['继续查'],
+      stats: { hits: 1, evidence: 1, cited: 0, questionChars: 2 },
+      resumeId: 'rabc123'
+    }
+    const resume = vi.fn(async (): Promise<ChainAskResult> => noEvidence)
+    const handlers = createAskIpcHandlers(
+      buildDeps({
+        ask: async () => paused,
+        resume,
+        conversationHistory: () => []
+      })
+    )
+    await handlers.get('ask:query')!(SENDER_OK as never, {
+      question: '问',
+      conversationId: 'conv-1',
+      mode: { screen: false, diary: true, card: true }
+    })
+    await handlers.get('ask:resume')!(SENDER_OK as never, { resumeId: 'rabc123', decision: 'continue' })
+    expect(resume).toHaveBeenCalledWith(
+      'rabc123',
+      'continue',
+      expect.objectContaining({ mode: { screen: false, diary: true, card: true } })
+    )
+  })
+})

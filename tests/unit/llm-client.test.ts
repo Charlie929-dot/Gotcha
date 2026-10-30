@@ -514,6 +514,32 @@ describe('DeepSeek 客户端 · 工具轮 CoT 回传', () => {
     expect(assistant?.content).toBeNull()
   })
 
+  it('模型这一轮没产出 CoT（tool_calls 但 reasoning 为空）时回传空串，不是缺字段', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"answer":"查到了"}' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 4 }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    // 真机复现（2026-10-29）：第 2 轮 thinkingLen=0，第 3 轮请求缺 reasoning_content → 400
+    await client.completeAskLoop?.(loopPayload([{}]))
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as {
+      messages: Array<{ role: string; reasoning_content?: string; tool_calls?: unknown[] }>
+    }
+    const assistant = body.messages.find((message) => message.role === 'assistant')
+    expect(assistant?.tool_calls).toHaveLength(1)
+    expect(assistant?.reasoning_content).toBe('')
+    // 「缺字段」和「空串」在 DeepSeek 是两种命运：前者 400，后者 200（已用真 key 探针确认）
+    expect(Object.hasOwn(assistant as object, 'reasoning_content')).toBe(true)
+  })
+
   it('非 DeepSeek 端点不发 reasoning_content（严格网关会因未知字段 400）', async () => {
     const fetchImpl = vi.fn(
       async () =>
@@ -554,5 +580,39 @@ describe('DeepSeek 客户端 · 工具轮 CoT 回传', () => {
     expect((error as LlmHttpError).detail).toContain('Missing reasoning_content')
     // 正文压成单行、有上限（不把多行错误原文原样塞进日志）
     expect((error as LlmHttpError).detail).not.toContain('\n')
+  })
+})
+
+/* ------------------------------------------------------------------ */
+/* 最终答复按文本（2026-10-29 晚：不再从正文里切花括号当 JSON）          */
+/* ------------------------------------------------------------------ */
+
+describe('DeepSeek 客户端 · 问记忆最终答复按文本', () => {
+  it('纯文本里带 {}：原样当文本，不报「answer 缺失」', async () => {
+    const content = 'jaccard_matrix = {}\nfor malware1 in malware_paths:\n    pass'
+    const fetchImpl = vi.fn(async () => okResponse(content))
+    const result = await makeClient(fetchImpl as unknown as typeof fetch).completeAskLoop?.(loopPayload())
+    expect(result?.json).toBe(content)
+  })
+
+  it('整条 JSON 且带 answer：保留兼容', async () => {
+    const content = '{"answer":"查到了","citations":[]}'
+    const fetchImpl = vi.fn(async () => okResponse(content))
+    const result = await makeClient(fetchImpl as unknown as typeof fetch).completeAskLoop?.(loopPayload())
+    expect(result?.json).toEqual({ answer: '查到了', citations: [] })
+  })
+
+  it('整条 JSON 但没有 answer / ask：按文本，不把 JSON 当答复', async () => {
+    const content = '{"code":"print(1)"}'
+    const fetchImpl = vi.fn(async () => okResponse(content))
+    const result = await makeClient(fetchImpl as unknown as typeof fetch).completeAskLoop?.(loopPayload())
+    expect(result?.json).toBe(content)
+  })
+
+  it('围栏里的 JSON 也不切片：按文本交给解析层', async () => {
+    const content = '```json\n{"answer":"x"}\n```'
+    const fetchImpl = vi.fn(async () => okResponse(content))
+    const result = await makeClient(fetchImpl as unknown as typeof fetch).completeAskLoop?.(loopPayload())
+    expect(result?.json).toBe(content)
   })
 })

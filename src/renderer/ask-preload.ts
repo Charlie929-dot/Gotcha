@@ -8,11 +8,15 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision } from '../chain/agent/types'
+import type { AskModeConfig } from '../chain/agent/mode'
 import type { SegmentEvidence } from '../chain/agent/evidence'
-import type { AskConsentView } from '../main/ask-ipc'
+import type { AskConsentView, AskAttachmentInput } from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
+import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
+import type { MemoryDeleteView, MemoryListView, MemoryRestoreView } from '../main/memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
+import type { QqSettingsSaveResult, QqSettingsView } from '../main/qq/qq-settings'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -21,8 +25,15 @@ export interface AskApi {
    * 问一次记忆。`conversationId` 相同的提问会被当成同一会话的续问——
    * 主进程按它取之前几轮当上下文（不传则主进程现造一个）。
    * `imagePath` 是选区问答留存的截图（主进程只认 ask-shots 下的文件）。
+   * `attachments` 是用户随问题上传的图片 / 文本文件（图片 data URL、文本已截断）。
    */
-  query(question: string, conversationId?: string, imagePath?: string): Promise<ChainAskResult>
+  query(
+    question: string,
+    conversationId?: string,
+    imagePath?: string,
+    attachments?: readonly AskAttachmentInput[],
+    mode?: AskModeConfig
+  ): Promise<ChainAskResult>
   /**
    * 「还要继续查吗」的选择：continue = 再给一轮检索预算，stop = 按现有结果收尾。
    * `resumeId` 来自 `continue-ask` 结果；过期 / 重开窗口后失效。
@@ -48,16 +59,41 @@ export interface AskApi {
   providerModels(input: ProviderModelsInput): Promise<FetchModelsResult>
   saveProviderKey(providerId: string, apiKey: string): Promise<ProviderKeySaveResult>
   providerKeys(): Promise<Record<string, ApiKeySource>>
+  /* ---- 个人记忆（日记目录 + 人设；保存即同步） ---- */
+  memorySettings(): Promise<MemorySettingsView | { error: string }>
+  saveMemorySettings(patch: unknown): Promise<MemorySettingsSaveResult>
+  /* ---- 人格卡（D62）：导入 / 预览 / 打开卡片目录 ---- */
+  savePersonaCard(name: string, text: string): Promise<{
+    ok: boolean
+    error?: string
+    view?: MemorySettingsView
+  }>
+  personaCard(name: string): Promise<string | null>
+  openPersonaCardDir(): Promise<boolean>
+  /* ---- 个人记忆 · 条目浏览 / 删除 / 撤销（设置抽屉「记忆条目」） ---- */
+  memoryList(query: {
+    search?: string
+    kind?: string
+    offset?: number
+    limit?: number
+  }): Promise<MemoryListView>
+  memoryDelete(id: number): Promise<MemoryDeleteView>
+  memoryRestore(uid: string): Promise<MemoryRestoreView>
+  /* ---- QQ 通道（D63）：NapCat 反向 WS 拨入本机；默认关闭 ---- */
+  qqSettings(): Promise<QqSettingsView | { error: string }>
+  saveQqSettings(patch: unknown): Promise<QqSettingsSaveResult>
   /** 托盘 / 球右键的「设置」：打开窗口就展开抽屉 */
   onOpenSettings(handler: () => void): () => void
 }
 
 const api: AskApi = {
-  query: (question, conversationId, imagePath) =>
+  query: (question, conversationId, imagePath, attachments, mode) =>
     ipcRenderer.invoke('ask:query', {
       question,
       ...(conversationId ? { conversationId } : {}),
-      ...(imagePath ? { imagePath } : {})
+      ...(imagePath ? { imagePath } : {}),
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      ...(mode ? { mode } : {})
     }) as Promise<ChainAskResult>,
   resume: (resumeId, decision) =>
     ipcRenderer.invoke('ask:resume', { resumeId, decision }) as Promise<ChainAskResult>,
@@ -79,6 +115,25 @@ const api: AskApi = {
     ipcRenderer.invoke('ask:provider:key', { providerId, apiKey }) as Promise<ProviderKeySaveResult>,
   providerKeys: () =>
     ipcRenderer.invoke('ask:provider:keys') as Promise<Record<string, ApiKeySource>>,
+  memorySettings: () =>
+    ipcRenderer.invoke('ask:memory:get') as Promise<MemorySettingsView | { error: string }>,
+  saveMemorySettings: (patch) =>
+    ipcRenderer.invoke('ask:memory:save', patch) as Promise<MemorySettingsSaveResult>,
+  savePersonaCard: (name, text) =>
+    ipcRenderer.invoke('ask:memory:card:save', { name, text }) as Promise<{
+      ok: boolean
+      error?: string
+      view?: MemorySettingsView
+    }>,
+  personaCard: (name) => ipcRenderer.invoke('ask:memory:card:get', name) as Promise<string | null>,
+  openPersonaCardDir: () => ipcRenderer.invoke('ask:memory:card:open') as Promise<boolean>,
+  memoryList: (query) => ipcRenderer.invoke('ask:memory:list', query) as Promise<MemoryListView>,
+  memoryDelete: (id) => ipcRenderer.invoke('ask:memory:delete', { id }) as Promise<MemoryDeleteView>,
+  memoryRestore: (uid) =>
+    ipcRenderer.invoke('ask:memory:restore', { uid }) as Promise<MemoryRestoreView>,
+  qqSettings: () => ipcRenderer.invoke('ask:qq:get') as Promise<QqSettingsView | { error: string }>,
+  saveQqSettings: (patch) =>
+    ipcRenderer.invoke('ask:qq:save', patch) as Promise<QqSettingsSaveResult>,
   onOpenSettings: (handler) => {
     const listener = (): void => handler()
     ipcRenderer.on('ask:open-settings', listener)

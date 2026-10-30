@@ -12,6 +12,7 @@ import {
   NO_EVIDENCE_TEXT,
   type ChainAskCitation,
   type ChainAskErrorReason,
+  type ChainAskMemoryCitation,
   type ChainAskRelatedSegment,
   type ChainAskResult,
   type ChainAskResumeDecision,
@@ -19,7 +20,18 @@ import {
   type ChainAskTrace
 } from '../../chain/agent/types'
 import type { SegmentEvidence } from '../../chain/agent/evidence'
+import {
+  ASK_MODE_PRESETS,
+  DEFAULT_ASK_MODE,
+  askModePresetOf,
+  normalizeAskMode,
+  type AskModeConfig,
+  type AskModePreset
+} from '../../chain/agent/mode'
 import type { AskHistoryEntry } from '../../main/ask-history'
+import type { MemorySettingsView } from '../../main/memory-settings'
+import type { MemoryListItemView } from '../../main/memory-admin'
+import type { QqSettingsView } from '../../main/qq/qq-settings'
 import type { AskApi } from '../ask-preload'
 import { createSettingsPanel } from '../graph/graph-settings-panel'
 
@@ -57,6 +69,50 @@ const historyList = must<HTMLUListElement>('history-list')
 const historyCount = must<HTMLSpanElement>('history-count')
 const historySearch = must<HTMLInputElement>('history-search')
 const historyClear = must<HTMLButtonElement>('history-clear')
+/* ---- 附件（图片 / 文本文件） ---- */
+const attachButton = must<HTMLButtonElement>('attach')
+const fileInput = must<HTMLInputElement>('file-input')
+const attachmentsEl = must<HTMLElement>('attachments')
+/* ---- 设置抽屉 · 个人记忆（日记目录 + 人设；保存即同步） ---- */
+const memoryStatusEl = must<HTMLElement>('memory-status')
+const memoryVaultInput = must<HTMLInputElement>('set-memory-vault')
+const memoryNameInput = must<HTMLInputElement>('set-persona-name')
+const memoryToneInput = must<HTMLInputElement>('set-persona-tone')
+const memoryRedlinesInput = must<HTMLTextAreaElement>('set-persona-redlines')
+const memorySaveButton = must<HTMLButtonElement>('memory-save')
+const memoryMsg = must<HTMLElement>('memory-msg')
+/* ---- 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销） ---- */
+const memorySearchInput = must<HTMLInputElement>('memory-search')
+const memoryKindSelect = must<HTMLSelectElement>('memory-kind')
+const memoryListMsg = must<HTMLElement>('memory-list-msg')
+const memoryItemsEl = must<HTMLUListElement>('memory-items')
+const memoryMoreButton = must<HTMLButtonElement>('memory-more')
+const memoryUndoButton = must<HTMLButtonElement>('memory-undo')
+/* ---- 模式条（D62：问记忆 / 聊天 / 提问 + 组合开关） ---- */
+const modeButtons = [...document.querySelectorAll<HTMLButtonElement>('.mode-btn')]
+const modeExtraToggle = must<HTMLButtonElement>('mode-extra-toggle')
+const modeExtra = must<HTMLElement>('mode-extra')
+const modeScreenInput = must<HTMLInputElement>('mode-screen')
+const modeDiaryInput = must<HTMLInputElement>('mode-diary')
+const modeCardInput = must<HTMLInputElement>('mode-card')
+const modeNote = must<HTMLElement>('mode-note')
+/* ---- 设置抽屉 · 人格卡（D62） ---- */
+const personaCardSelect = must<HTMLSelectElement>('set-persona-card')
+const personaCardPreview = must<HTMLTextAreaElement>('persona-card-preview')
+const personaCardFileInput = must<HTMLInputElement>('persona-card-file')
+const personaCardOpenButton = must<HTMLButtonElement>('persona-card-open')
+const personaCardStatus = must<HTMLElement>('persona-card-status')
+const personaCardMsg = must<HTMLElement>('persona-card-msg')
+/* ---- 设置抽屉 · QQ 通道（D63） ---- */
+const qqStatusEl = must<HTMLElement>('qq-status')
+const qqEnabledInput = must<HTMLInputElement>('set-qq-enabled')
+const qqLanInput = must<HTMLInputElement>('set-qq-lan')
+const qqPortInput = must<HTMLInputElement>('set-qq-port')
+const qqTokenInput = must<HTMLInputElement>('set-qq-token')
+const qqAllowInput = must<HTMLTextAreaElement>('set-qq-allow')
+const qqMaxCharsInput = must<HTMLInputElement>('set-qq-maxchars')
+const qqSaveButton = must<HTMLButtonElement>('qq-save')
+const qqMsg = must<HTMLElement>('qq-msg')
 
 /** 列表一次最多画多少条会话（永久保留，记录可能很多；搜索用来缩小范围） */
 const HISTORY_RENDER_LIMIT = 200
@@ -67,6 +123,214 @@ let entries: AskHistoryEntry[] = []
 let activeConversationId: string | null = null
 let filter = ''
 let busy = false
+
+/* ------------------------------------------------------------------ */
+/* 模式（D62）：问记忆 / 聊天 / 提问 + 组合开关                          */
+/* ------------------------------------------------------------------ */
+
+const MODE_STORAGE_KEY = 'gotcha.ask.mode'
+const PRESET_LABEL: Record<AskModePreset, string> = {
+  memory: '问记忆',
+  chat: '聊天',
+  plain: '提问'
+}
+
+function loadAskMode(): AskModeConfig {
+  try {
+    const raw = localStorage.getItem(MODE_STORAGE_KEY)
+    if (raw === null) return { ...DEFAULT_ASK_MODE }
+    return normalizeAskMode(JSON.parse(raw))
+  } catch {
+    return { ...DEFAULT_ASK_MODE }
+  }
+}
+
+let askMode: AskModeConfig = loadAskMode()
+/** 当前启用的人格卡文件名（设置抽屉读到后回填；只用于提示「选了卡但没启用」） */
+let activePersonaCard = ''
+
+/** 模式条 / 开关 / 提示一起刷新（切模式、读设置后都走这里） */
+function applyModeUI(): void {
+  const preset = askModePresetOf(askMode)
+  for (const button of modeButtons) {
+    button.classList.toggle('active', button.dataset.mode === preset)
+  }
+  modeScreenInput.checked = askMode.screen
+  modeDiaryInput.checked = askMode.diary
+  modeCardInput.checked = askMode.card
+  const parts = [
+    askMode.screen ? '屏幕记忆开' : '屏幕记忆关',
+    askMode.diary ? '日记开' : '日记关'
+  ]
+  if (askMode.card) {
+    parts.push(activePersonaCard !== '' ? `人格卡：${activePersonaCard}` : '人格卡（还没选卡）')
+  } else {
+    parts.push('人格卡关')
+  }
+  modeNote.textContent = `${preset === null ? '组合' : PRESET_LABEL[preset]} · ${parts.join(' · ')}`
+}
+
+function setAskMode(next: AskModeConfig): void {
+  askMode = normalizeAskMode(next)
+  try {
+    localStorage.setItem(MODE_STORAGE_KEY, JSON.stringify(askMode))
+  } catch {
+    // 存不了只影响下次打开窗口的默认值，不影响这次提问
+  }
+  applyModeUI()
+  // 下一条消息才生效：已经发出去的那几轮上下文不重写（Q2 选 A）
+  setStatus('idle', `模式：${modeNote.textContent ?? ''}（下一条生效）`)
+}
+
+/* ------------------------------------------------------------------ */
+/* 附件（图片 / 文本文件）                                              */
+/* ------------------------------------------------------------------ */
+
+/** 待发送的附件：图片已压成 data URL；文本文件只留文本（原文件不落盘） */
+type PendingAttachment =
+  | { kind: 'image'; id: string; name: string; dataUrl: string }
+  | { kind: 'file'; id: string; name: string; text: string }
+
+const MAX_ATTACH_IMAGES = 4
+const MAX_ATTACH_FILES = 4
+/** 单个文本文件上限（200KB 原文件；抽出的文本再按下面总预算截） */
+const MAX_ATTACH_FILE_BYTES = 200 * 1024
+/** 单个文件送云文本上限；总预算在载荷层还有一道 30k */
+const MAX_ATTACH_FILE_CHARS = 30_000
+/** 图片长边上限：超过就缩，控制 token 与请求体 */
+const MAX_ATTACH_IMAGE_EDGE = 1600
+
+let pendingAttachments: PendingAttachment[] = []
+let attachSeq = 0
+
+function nextAttachId(): string {
+  attachSeq += 1
+  return `a${attachSeq}`
+}
+
+function clearAttachments(): void {
+  pendingAttachments = []
+  renderAttachments()
+}
+
+function renderAttachments(): void {
+  attachmentsEl.replaceChildren()
+  attachmentsEl.hidden = pendingAttachments.length === 0
+  for (const item of pendingAttachments) {
+    const chip = element('div', 'attachment')
+    if (item.kind === 'image') {
+      const image = element('img')
+      image.src = item.dataUrl
+      image.alt = item.name
+      chip.append(image)
+    }
+    const name = element('span', 'attachment-name')
+    name.textContent = item.kind === 'file' ? `${item.name}` : item.name || '截图'
+    name.title = name.textContent
+    const remove = element('button', 'attachment-remove')
+    remove.type = 'button'
+    remove.textContent = '×'
+    remove.title = '移除'
+    remove.addEventListener('click', () => {
+      pendingAttachments = pendingAttachments.filter((entry) => entry.id !== item.id)
+      renderAttachments()
+    })
+    chip.append(name, remove)
+    attachmentsEl.append(chip)
+  }
+}
+
+function isImageFile(file: File): boolean {
+  return file.type.startsWith('image/')
+}
+
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'md', 'markdown', 'csv', 'json', 'log', 'py', 'ts', 'tsx', 'js', 'jsx', 'css', 'html',
+  'htm', 'xml', 'yml', 'yaml', 'ini', 'toml', 'sql', 'sh', 'bat', 'ps1', 'java', 'c', 'cpp', 'h',
+  'go', 'rs', 'env', 'gitignore', 'conf', 'cfg'
+])
+
+function isTextFile(file: File): boolean {
+  if (file.type.startsWith('text/')) return true
+  if (file.type === 'application/json') return true
+  const ext = file.name.includes('.') ? file.name.split('.').pop()?.toLowerCase() ?? '' : ''
+  return ext !== '' && TEXT_EXTENSIONS.has(ext)
+}
+
+/** 图片 → data URL；大图缩到长边 1600（PNG 保持 PNG，截图文字不糊） */
+async function readImage(file: File): Promise<string> {
+  const raw = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error ?? new Error('读取失败'))
+    reader.readAsDataURL(file)
+  })
+  if (file.size <= 1_500_000) return raw
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const node = new Image()
+    node.onload = () => resolve(node)
+    node.onerror = () => reject(new Error('图片解码失败'))
+    node.src = raw
+  })
+  const scale = Math.min(1, MAX_ATTACH_IMAGE_EDGE / Math.max(image.width, image.height))
+  if (scale >= 1) return raw
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(image.width * scale))
+  canvas.height = Math.max(1, Math.round(image.height * scale))
+  const context = canvas.getContext('2d')
+  if (!context) return raw
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  // 截图里的字用 PNG 才不糊；照片类用 JPEG 压体积
+  const png = file.type === 'image/png' || file.name.toLowerCase().endsWith('.png')
+  return canvas.toDataURL(png ? 'image/png' : 'image/jpeg', 0.86)
+}
+
+async function addFiles(files: readonly File[]): Promise<void> {
+  for (const file of files) {
+    const imageCount = pendingAttachments.filter((item) => item.kind === 'image').length
+    const fileCount = pendingAttachments.filter((item) => item.kind === 'file').length
+    if (isImageFile(file)) {
+      if (imageCount >= MAX_ATTACH_IMAGES) {
+        setStatus('error', `最多带 ${MAX_ATTACH_IMAGES} 张图片`)
+        continue
+      }
+      if (file.size > 20 * 1024 * 1024) {
+        setStatus('error', `图片太大：${file.name}`)
+        continue
+      }
+      try {
+        const dataUrl = await readImage(file)
+        if (dataUrl.startsWith('data:image/')) {
+          pendingAttachments.push({ kind: 'image', id: nextAttachId(), name: file.name || '截图', dataUrl })
+        }
+      } catch {
+        setStatus('error', `读不了这张图：${file.name}`)
+      }
+      continue
+    }
+    if (!isTextFile(file)) {
+      setStatus('error', `只收图片和文本文件：${file.name}`)
+      continue
+    }
+    if (fileCount >= MAX_ATTACH_FILES) {
+      setStatus('error', `最多带 ${MAX_ATTACH_FILES} 个文件`)
+      continue
+    }
+    if (file.size > MAX_ATTACH_FILE_BYTES) {
+      setStatus('error', `文件太大（上限 200KB）：${file.name}`)
+      continue
+    }
+    try {
+      const text = (await file.text()).slice(0, MAX_ATTACH_FILE_CHARS)
+      if (text.trim() !== '') {
+        pendingAttachments.push({ kind: 'file', id: nextAttachId(), name: file.name, text })
+      }
+    } catch {
+      setStatus('error', `读不了这个文件：${file.name}`)
+    }
+  }
+  renderAttachments()
+}
 
 function setStatus(kind: 'idle' | 'busy' | 'error', text: string): void {
   statusEl.dataset.kind = kind
@@ -120,12 +384,15 @@ function hitsText(stats: ChainAskStats): string {
     : `命中 ${stats.hits} 段`
 }
 
-function statsText(stats: ChainAskStats): string {
+function statsText(stats: ChainAskStats, memoryCount = 0): string {
   const parts: string[] = []
   if (stats.turns !== undefined) parts.push(`${stats.turns} 轮`)
   if (stats.toolCalls !== undefined) parts.push(`${stats.toolCalls} 次工具调用`)
   parts.push(hitsText(stats))
   if (stats.cited > 0) parts.push(`引用 ${stats.cited} 段`)
+  // 日记引用不占屏幕段：只靠日记回答时，引用数要单独说，否则一行「引用 0 段」和
+  // 下面 4 张日记卡片自相矛盾（2026-10-29 验收时踩到）
+  if (memoryCount > 0) parts.push(`日记引用 ${memoryCount} 条`)
   return parts.join(' · ')
 }
 
@@ -152,7 +419,12 @@ function statusOf(result: ChainAskResult): { kind: 'idle' | 'error'; text: strin
   if (result.kind === 'no-evidence') {
     return { kind: 'idle', text: `${hitsText(result.stats)}，但证据不足以回答` }
   }
-  return { kind: 'idle', text: `命中 ${result.stats.hits} 段，引用 ${result.citations.length} 段` }
+  const memoryCount = result.memories?.length ?? 0
+  const memoryText = memoryCount > 0 ? `，日记引用 ${memoryCount} 条` : ''
+  return {
+    kind: 'idle',
+    text: `命中 ${result.stats.hits} 段，引用 ${result.citations.length} 段${memoryText}`
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -199,7 +471,10 @@ function listConversations(): ConversationView[] {
 /* ------------------------------------------------------------------ */
 
 function entryLabel(entry: AskHistoryEntry): string {
-  if (entry.kind === 'answer') return `回答 · ${entry.citations.length} 段引用`
+  if (entry.kind === 'answer') {
+    const memories = entry.memories?.length ?? 0
+    return `回答 · ${entry.citations.length} 段引用${memories > 0 ? ` · ${memories} 条日记` : ''}`
+  }
   if (entry.kind === 'clarify') return '向你确认'
   if (entry.kind === 'insufficient') return '查到了，但不够'
   if (entry.kind === 'no-evidence') return '没找到'
@@ -298,11 +573,47 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node
 }
 
-function appendUserBubble(text: string, imagePath?: string): void {
+/** 附件在界面上的视图（历史记录给 path；刚发送的 pending 给 dataUrl） */
+type AttachmentView = {
+  kind: 'image' | 'file'
+  name?: string
+  path?: string
+  dataUrl?: string
+  text?: string
+  chars?: number
+}
+
+function appendUserBubble(
+  text: string,
+  imagePath?: string,
+  attachments?: readonly AttachmentView[]
+): void {
   const wrap = element('div', 'msg user')
   const bubble = element('div', 'bubble')
   bubble.textContent = text
   if (imagePath) appendShotThumb(bubble, imagePath)
+  if (attachments && attachments.length > 0) {
+    const list = element('div', 'attach-list')
+    for (const item of attachments) {
+      if (item.kind === 'image') {
+        if (item.path) {
+          appendShotThumb(list, item.path)
+        } else if (item.dataUrl) {
+          const image = element('img', 'shot-thumb')
+          image.src = item.dataUrl
+          image.alt = item.name ?? '图片'
+          image.loading = 'lazy'
+          image.addEventListener('click', () => image.classList.toggle('zoomed'))
+          list.append(image)
+        }
+        continue
+      }
+      const chip = element('span', 'attach-file')
+      chip.textContent = item.name ?? '文件'
+      list.append(chip)
+    }
+    if (list.childElementCount > 0) bubble.append(list)
+  }
   wrap.append(bubble)
   threadEl.append(wrap)
 }
@@ -349,8 +660,41 @@ function citationList(citations: ChainAskCitation[]): HTMLElement {
   return list
 }
 
-/** 检索到、但没进引用的段：给一个可点开的入口，别让「命中了很多」变成一句空话 */
-function relatedList(related: ChainAskRelatedSegment[]): HTMLElement {
+/**
+ * 日记引用（个人记忆 · 第二本账）：直接摆日期 + 原文片段，不做点开动作。
+ * 日记没有截图、也没有「段证据」可读，把原文摊开就是最好的核对方式；
+ * 用户能一眼判断「它是不是真记得我写过这句」。
+ */
+function memoryList(memories: ChainAskMemoryCitation[]): HTMLElement {
+  const list = element('ul', 'citations memories')
+  for (const memory of memories) {
+    const li = element('li')
+    const box = element('div', 'memory-card')
+    const title = element('span', 'citation-title')
+    title.textContent = `${memory.day}${memory.section ? ` · ${memory.section}` : ''}`
+    const snippet = element('p', 'memory-snippet')
+    snippet.textContent = memory.snippet
+    box.append(title, snippet)
+    if (memory.why) {
+      const why = element('span', 'citation-why')
+      why.textContent = memory.why
+      box.append(why)
+    }
+    li.append(box)
+    list.append(li)
+  }
+  return list
+}
+
+/** 日记引用小节：没有就不画（不占位、不显示「0 条」） */
+function appendMemories(card: HTMLElement, memories: ChainAskMemoryCitation[] | undefined): void {
+  if (!memories || memories.length === 0) return
+  const title = element('h2', 'section-title')
+  title.textContent = `日记引用（${memories.length} 条）`
+  card.append(title, memoryList(memories))
+}
+
+/** 检索到、但没进引用的段：给一个可点开的入口，别让「命中了很多」变成一句空话 */function relatedList(related: ChainAskRelatedSegment[]): HTMLElement {
   const list = element('ul', 'citations related')
   for (const item of related) {
     const li = element('li')
@@ -420,14 +764,20 @@ function appendTrace(card: HTMLElement, trace: ChainAskTrace | undefined): void 
   if (fold) card.append(fold)
 }
 
-function assistantCard(className: string, label: string, at: number, stats: ChainAskStats): HTMLElement {
+function assistantCard(
+  className: string,
+  label: string,
+  at: number,
+  stats: ChainAskStats,
+  memoryCount = 0
+): HTMLElement {
   const wrap = element('div', 'msg assistant')
   const card = element('div', `card ${className}`)
   const head = element('div', 'card-head')
   const tag = element('span', 'card-label')
   tag.textContent = label
   const meta = element('span', 'muted')
-  meta.textContent = `${formatClock(at)} · ${statsText(stats)}`
+  meta.textContent = `${formatClock(at)} · ${statsText(stats, memoryCount)}`
   head.append(tag, meta)
   card.append(head)
   wrap.append(card)
@@ -436,10 +786,10 @@ function assistantCard(className: string, label: string, at: number, stats: Chai
 }
 
 function renderTurn(entry: AskHistoryEntry): void {
-  appendUserBubble(entry.question, entry.imagePath)
+  appendUserBubble(entry.question, entry.imagePath, entry.attachments)
 
   if (entry.kind === 'answer') {
-    const card = assistantCard('answer', '回答', entry.at, entry.stats)
+    const card = assistantCard('answer', '回答', entry.at, entry.stats, entry.memories?.length ?? 0)
     const text = element('p', 'answer-text')
     text.textContent = entry.answer ?? ''
     card.append(text)
@@ -448,12 +798,13 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `引用（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    appendMemories(card, entry.memories)
     appendTrace(card, entry.trace)
     return
   }
 
   if (entry.kind === 'insufficient') {
-    const card = assistantCard('insufficient', '查到了，但不够', entry.at, entry.stats)
+    const card = assistantCard('insufficient', '查到了，但不够', entry.at, entry.stats, entry.memories?.length ?? 0)
     const text = element('p', 'answer-text muted')
     text.textContent = entry.answer ?? ''
     card.append(text)
@@ -462,6 +813,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `相关证据（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    appendMemories(card, entry.memories)
     appendRelated(card, entry.related, entry.citations.length > 0)
     appendTrace(card, entry.trace)
     return
@@ -496,7 +848,7 @@ function renderTurn(entry: AskHistoryEntry): void {
   }
 
   if (entry.kind === 'no-evidence') {
-    const card = assistantCard('empty', '没找到', entry.at, entry.stats)
+    const card = assistantCard('empty', '没找到', entry.at, entry.stats, entry.memories?.length ?? 0)
     const note = (entry.note ?? '').trim()
     // 模型给了「查到了什么、为什么还是答不了」的说明就显示出来；只重复固定文案时不重复画
     const hasNote =
@@ -511,6 +863,7 @@ function renderTurn(entry: AskHistoryEntry): void {
       title.textContent = `相关证据（${entry.citations.length} 段）`
       card.append(title, citationList(entry.citations))
     }
+    appendMemories(card, entry.memories)
     appendRelated(card, entry.related, entry.citations.length > 0)
     appendTrace(card, entry.trace)
     return
@@ -527,10 +880,10 @@ function renderEmptyThread(): void {
   threadEl.replaceChildren()
   const hint = element('div', 'thread-empty')
   const title = element('p', 'thread-empty-title')
-  title.textContent = '问一件过去做过的事'
+  title.textContent = '想说什么都行'
   const body = element('p', 'muted')
   body.textContent =
-    '比如「下午那个编译错误最后怎么解决的」。同一段对话里可以接着追问（「那上午呢」），我会带着前面的上下文继续查。'
+    '想找以前的事就直接问，比如「下午那个编译错误最后怎么解决的」；想聊两句也可以。同一段对话里能接着追问（「那上午呢」）。'
   hint.append(title, body)
   threadEl.append(hint)
 }
@@ -561,8 +914,12 @@ function renderThread(): void {
 /** 当前线程（用于把用户刚问的一句立刻画出来，不等历史落盘） */
 let currentThreadEntries: AskHistoryEntry[] = []
 
-function appendPending(question: string, imagePath?: string): void {
-  appendUserBubble(question, imagePath)
+function appendPending(
+  question: string,
+  imagePath?: string,
+  attachments?: readonly AttachmentView[]
+): void {
+  appendUserBubble(question, imagePath, attachments)
   const wrap = element('div', 'msg assistant')
   const card = element('div', 'card pending')
   const text = element('p', 'muted')
@@ -741,9 +1098,15 @@ function setBusy(next: boolean): void {
   submitButton.disabled = next
   stopButton.hidden = !next
   newChatButton.disabled = next
+  attachButton.disabled = next
+  questionInput.disabled = next
 }
 
-async function ask(question: string, imagePath?: string): Promise<void> {
+async function ask(
+  question: string,
+  imagePath?: string,
+  attachments?: readonly AttachmentView[]
+): Promise<void> {
   if (busy) return
   if (!api) {
     setStatus('error', '窗口没接上主进程（preload 缺失）')
@@ -753,12 +1116,30 @@ async function ask(question: string, imagePath?: string): Promise<void> {
   if (currentThreadEntries.length === 0) threadEl.replaceChildren()
 
   setupBusy()
-  appendPending(question, imagePath)
+  appendPending(question, imagePath, attachments)
   questionInput.value = ''
   const conversationId = activeConversationId
+  // 附件随这一次问题发送；发出去之后就不再重复带（追问不重发旧图 / 旧文件）
+  const apiAttachments = (attachments ?? [])
+    .map((item) =>
+      item.kind === 'image' && item.dataUrl
+        ? { kind: 'image' as const, name: item.name, dataUrl: item.dataUrl }
+        : item.kind === 'file' && item.text
+          ? { kind: 'file' as const, name: item.name, text: item.text }
+          : null
+    )
+    .filter((item): item is NonNullable<typeof item> => item !== null)
+  pendingAttachments = []
+  renderAttachments()
 
   try {
-    const result = await api.query(question, conversationId, imagePath)
+    const result = await api.query(
+      question,
+      conversationId,
+      imagePath,
+      apiAttachments.length > 0 ? apiAttachments : undefined,
+      askMode
+    )
     if (result.kind === 'continue-ask') {
       // 这一问还没落历史：保留刚画的问题气泡，只把等待卡换成「还要继续吗」
       renderContinueCard(result)
@@ -800,7 +1181,31 @@ form.addEventListener('submit', (event) => {
     setStatus('error', '问题不能为空')
     return
   }
-  void ask(question)
+  const attachments = pendingAttachments.slice()
+  void ask(question, undefined, attachments)
+})
+
+/* 附件入口：点按钮选文件、直接粘贴图片、把文件拖进输入区 */
+attachButton.addEventListener('click', () => fileInput.click())
+fileInput.addEventListener('change', () => {
+  const files = Array.from(fileInput.files ?? [])
+  fileInput.value = ''
+  if (files.length > 0) void addFiles(files)
+})
+questionInput.addEventListener('paste', (event) => {
+  const files = Array.from(event.clipboardData?.files ?? [])
+  if (files.length > 0) {
+    event.preventDefault()
+    void addFiles(files)
+  }
+})
+form.addEventListener('dragover', (event) => {
+  event.preventDefault()
+})
+form.addEventListener('drop', (event) => {
+  event.preventDefault()
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  if (files.length > 0) void addFiles(files)
 })
 
 stopButton.addEventListener('click', () => {
@@ -816,6 +1221,7 @@ newChatButton.addEventListener('click', () => {
   renderThread()
   renderHistoryList()
   questionInput.value = ''
+  clearAttachments()
   questionInput.focus()
   setStatus('idle', '新对话')
 })
@@ -875,6 +1281,36 @@ must<HTMLButtonElement>('evidence-close').addEventListener('click', () => {
 })
 
 /* ------------------------------------------------------------------ */
+/* 模式条（D62）：预设按钮 + 组合开关                                   */
+/* ------------------------------------------------------------------ */
+
+for (const button of modeButtons) {
+  button.addEventListener('click', () => {
+    const preset = button.dataset.mode as AskModePreset | undefined
+    if (preset === undefined || !(preset in ASK_MODE_PRESETS)) return
+    setAskMode({ ...ASK_MODE_PRESETS[preset] })
+  })
+}
+
+modeExtraToggle.addEventListener('click', () => {
+  const open = modeExtra.hidden
+  modeExtra.hidden = !open
+  modeExtraToggle.setAttribute('aria-expanded', String(open))
+})
+
+for (const input of [modeScreenInput, modeDiaryInput, modeCardInput]) {
+  input.addEventListener('change', () => {
+    setAskMode({
+      screen: modeScreenInput.checked,
+      diary: modeDiaryInput.checked,
+      card: modeCardInput.checked
+    })
+  })
+}
+
+applyModeUI()
+
+/* ------------------------------------------------------------------ */
 /* 设置抽屉（D53：供应商 / 密钥 / 出网确认 / 用量）                     */
 /* ------------------------------------------------------------------ */
 
@@ -908,9 +1344,467 @@ const settingsPanel = api
     })
   : null
 
-settingsButton.addEventListener('click', () => {
+/* ------------------------------------------------------------------ */
+/* 设置抽屉 · 个人记忆（日记目录 + 人设）                              */
+/* ------------------------------------------------------------------ */
+
+const DIR_SOURCE_TEXT: Record<MemorySettingsView['dirSource'], string> = {
+  env: '环境变量 GOTCHA_MEMORY_VAULT',
+  setting: '设置里的目录',
+  auto: '自动探测（日记最多的位置）',
+  none: '没有找到'
+}
+
+function fillMemorySettings(view: MemorySettingsView): void {
+  memoryVaultInput.value = view.vaultDir
+  memoryNameInput.value = view.personaName
+  memoryToneInput.value = view.personaTone
+  memoryRedlinesInput.value = view.redLines.join('\n')
+  const dir = view.resolvedDir ?? '（没有）'
+  const stats = view.stats
+  const range =
+    stats.firstDay !== null && stats.lastDay !== null ? ` · ${stats.firstDay} → ${stats.lastDay}` : ''
+  memoryStatusEl.textContent = `当前目录：${dir}（${DIR_SOURCE_TEXT[view.dirSource]}）· 索引 ${stats.items} 条 / ${stats.days} 天${range}`
+  memoryStatusEl.dataset.source = view.dirSource
+
+  // 人格卡（D62）：下拉 = 不使用 + 目录里的卡；启用的卡文件被删了也回显（带「文件不存在」）
+  activePersonaCard = view.activeCard
+  personaCardSelect.replaceChildren()
+  const none = document.createElement('option')
+  none.value = ''
+  none.textContent = '不使用（走上面的名字 / 口吻）'
+  personaCardSelect.append(none)
+  for (const card of view.cards) {
+    const option = document.createElement('option')
+    option.value = card.name
+    option.textContent = `${card.title || card.name}（${card.chars} 字）`
+    personaCardSelect.append(option)
+  }
+  if (view.activeCard !== '' && !view.cards.some((card) => card.name === view.activeCard)) {
+    const missing = document.createElement('option')
+    missing.value = view.activeCard
+    missing.textContent = `${view.activeCard}（文件不存在）`
+    personaCardSelect.append(missing)
+  }
+  personaCardSelect.value = view.activeCard
+  personaCardStatus.textContent =
+    view.cardDir === ''
+      ? '当前环境读不到卡片目录'
+      : view.cards.length > 0
+        ? `卡片目录：${view.cardDir}（${view.cards.length} 张）`
+        : `还没有卡片。点「导入 .md」，或把 .md 放进 ${view.cardDir}`
+  personaCardPreview.value = ''
+  void refreshPersonaCardPreview()
+  applyModeUI()
+}
+
+/** 预览当前选中的卡（只读；读不到就是空） */
+async function refreshPersonaCardPreview(): Promise<void> {
+  const name = personaCardSelect.value
+  if (!api || name === '') {
+    personaCardPreview.value = ''
+    return
+  }
+  try {
+    personaCardPreview.value = (await api.personaCard(name)) ?? ''
+  } catch {
+    personaCardPreview.value = ''
+  }
+}
+
+/** 读一次记忆设置并回填（开抽屉 / 保存后都走这里） */
+async function refreshMemorySettings(note = ''): Promise<void> {
+  if (!api) return
+  memoryMsg.textContent = note
+  memoryMsg.style.color = ''
+  try {
+    const view = await api.memorySettings()
+    if ('error' in view) {
+      memoryStatusEl.textContent =
+        view.error === 'db-unavailable'
+          ? '还没有记忆库（同步一次日记或开始采集后可用）'
+          : '读取个人记忆设置失败'
+      return
+    }
+    fillMemorySettings(view)
+  } catch (error) {
+    memoryStatusEl.textContent = `读取个人记忆设置失败：${String(error)}`
+  }
+}
+
+function openSettingsDrawer(): void {
   void settingsPanel?.open()
-})
+  void refreshMemorySettings()
+  void refreshQqSettings()
+  void loadMemoryList(true)
+}
+
+if (api) {
+  memorySaveButton.addEventListener('click', async () => {
+    if (busy) {
+      // 同步要开写连接（会短暂关掉只读连接），别在回答进行中动库
+      memoryMsg.textContent = '等这次回答结束再保存（同步会短暂占用数据库）'
+      memoryMsg.style.color = 'var(--error)'
+      return
+    }
+    memorySaveButton.disabled = true
+    memoryMsg.textContent = '保存中…'
+    memoryMsg.style.color = ''
+    try {
+      const redLines = memoryRedlinesInput.value
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+      const result = await api.saveMemorySettings({
+        vaultDir: memoryVaultInput.value.trim(),
+        personaName: memoryNameInput.value,
+        personaTone: memoryToneInput.value,
+        redLines
+      })
+      if (!result.ok) {
+        memoryMsg.textContent = `没有保存：${result.error}`
+        memoryMsg.style.color = 'var(--error)'
+        return
+      }
+      if (result.view) fillMemorySettings(result.view)
+      if (result.sync) {
+        const sync = result.sync
+        memoryMsg.textContent = `已保存并同步：${result.syncedDir}（${sync.scanned} 篇 / 新增 ${sync.added} / 删除 ${sync.removed} / 共 ${sync.items} 条）`
+      } else if (result.syncError) {
+        memoryMsg.textContent = `设置已保存，但同步失败：${result.syncError}`
+        memoryMsg.style.color = 'var(--error)'
+      } else {
+        memoryMsg.textContent = '已保存；没有可同步的日记目录（留空 = 自动找）'
+      }
+      // 同步会改动条目（新增 / 删除），列表跟着重读一遍
+      void loadMemoryList(true)
+    } catch (error) {
+      memoryMsg.textContent = `保存失败：${String(error)}`
+      memoryMsg.style.color = 'var(--error)'
+    } finally {
+      memorySaveButton.disabled = false
+    }
+  })
+}
+
+if (api) {
+  // 人格卡（D62）：切换 / 导入即启用；文本由渲染层读好，主进程按上限校验
+  personaCardSelect.addEventListener('change', async () => {
+    void refreshPersonaCardPreview()
+    const name = personaCardSelect.value
+    personaCardMsg.style.color = ''
+    personaCardMsg.textContent = '切换中…'
+    try {
+      const result = await api!.saveMemorySettings({ personaCard: name })
+      if (!result.ok) {
+        personaCardMsg.textContent = `没有切换：${result.error}`
+        personaCardMsg.style.color = 'var(--error)'
+        return
+      }
+      personaCardMsg.textContent =
+        name === '' ? '已停用（回到名字 / 口吻）' : `已启用：${name}（从下一次聊天生效）`
+      if (result.view) fillMemorySettings(result.view)
+    } catch (error) {
+      personaCardMsg.textContent = `切换失败：${String(error)}`
+      personaCardMsg.style.color = 'var(--error)'
+    }
+  })
+
+  personaCardFileInput.addEventListener('change', async () => {
+    const file = personaCardFileInput.files?.[0]
+    // 选同一个文件两次也要触发：先把 input 清空
+    personaCardFileInput.value = ''
+    if (!file) return
+    personaCardMsg.style.color = ''
+    personaCardMsg.textContent = `导入中：${file.name}…`
+    try {
+      const text = await file.text()
+      const result = await api!.savePersonaCard(file.name.replace(/\.md$/i, ''), text)
+      if (!result.ok) {
+        personaCardMsg.textContent = `没有导入：${result.error}`
+        personaCardMsg.style.color = 'var(--error)'
+        return
+      }
+      personaCardMsg.textContent = `已导入并启用：${file.name}（从下一次聊天生效）`
+      if (result.view) fillMemorySettings(result.view)
+    } catch (error) {
+      personaCardMsg.textContent = `导入失败：${String(error)}`
+      personaCardMsg.style.color = 'var(--error)'
+    }
+  })
+
+  personaCardOpenButton.addEventListener('click', async () => {
+    try {
+      const ok = await api!.openPersonaCardDir()
+      personaCardMsg.textContent = ok ? '已在文件资源管理器里打开' : '打不开卡片目录'
+    } catch (error) {
+      personaCardMsg.textContent = `打不开卡片目录：${String(error)}`
+    }
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/* 设置抽屉 · QQ 通道（D63：OneBot 11 反向 WS，默认关）                */
+/* ------------------------------------------------------------------ */
+
+function fillQqSettings(view: QqSettingsView): void {
+  qqEnabledInput.checked = view.enabled
+  qqLanInput.checked = view.allowLan
+  qqPortInput.value = String(view.port)
+  qqTokenInput.value = view.accessToken
+  qqAllowInput.value = view.allowUsers.join(', ')
+  qqMaxCharsInput.value = String(view.replyMaxChars)
+  const listen = `${view.allowLan ? '0.0.0.0' : '127.0.0.1'}:${view.port}`
+  qqStatusEl.textContent = view.running
+    ? `运行中：${listen} · NapCat 已连 ${view.connections} 条`
+    : view.enabled
+      ? `已开启但没起来${view.lastError !== undefined ? `（${view.lastError}）` : ''}`
+      : '未开启（不监听任何端口）'
+  qqStatusEl.style.color = view.enabled && !view.running ? 'var(--error)' : ''
+}
+
+/** 读一次 QQ 通道设置并回填（开抽屉 / 保存后都走这里） */
+async function refreshQqSettings(note = ''): Promise<void> {
+  if (!api) return
+  qqMsg.textContent = note
+  qqMsg.style.color = ''
+  try {
+    const view = await api.qqSettings()
+    if ('error' in view) {
+      qqStatusEl.textContent =
+        view.error === 'db-unavailable'
+          ? '还没有记忆库（开始采集或同步一次日记后可用）'
+          : '读取 QQ 通道设置失败'
+      return
+    }
+    fillQqSettings(view)
+  } catch (error) {
+    qqStatusEl.textContent = `读取 QQ 通道设置失败：${String(error)}`
+  }
+}
+
+if (api) {
+  qqSaveButton.addEventListener('click', async () => {
+    qqSaveButton.disabled = true
+    qqMsg.style.color = ''
+    qqMsg.textContent = '保存中…'
+    try {
+      const result = await api!.saveQqSettings({
+        enabled: qqEnabledInput.checked,
+        allowLan: qqLanInput.checked,
+        port: Number(qqPortInput.value),
+        accessToken: qqTokenInput.value,
+        allowUsers: qqAllowInput.value,
+        replyMaxChars: Number(qqMaxCharsInput.value)
+      })
+      if (!result.ok) {
+        qqMsg.textContent = `没有保存：${result.error}`
+        qqMsg.style.color = 'var(--error)'
+        return
+      }
+      fillQqSettings(result.view)
+      qqMsg.textContent = result.view.running
+        ? '已保存并开始监听（NapCat 里填好同样的端口与 token）'
+        : '已保存；未运行，原因见上面那行状态'
+    } catch (error) {
+      qqMsg.textContent = `保存失败：${String(error)}`
+      qqMsg.style.color = 'var(--error)'
+    } finally {
+      qqSaveButton.disabled = false
+    }
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/* 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销）                            *//* ------------------------------------------------------------------ */
+
+/** 一页多少条（主进程 `memory-admin` 的上限 50；抽屉里 20 条一屏差不多） */
+const MEMORY_PAGE_SIZE = 20
+const MEMORY_KIND_TEXT: Record<MemoryListItemView['kind'], string> = {
+  diary: '日记',
+  task: '待办',
+  note: '笔记',
+  quote: '摘录'
+}
+
+/** 已经画到第几条（下一页的 offset）与当前条件的总条数 */
+let memoryListLoaded = 0
+let memoryListTotal = 0
+let memoryListLoading = false
+/** 最近一次删除的 uid（回收站键）：「撤销删除」按它放回 */
+let memoryLastDeletedUid: string | null = null
+/** 搜索框防抖（每敲一个字都查库没必要） */
+let memorySearchTimer: number | null = null
+
+function memoryRowElement(item: MemoryListItemView): HTMLLIElement {
+  const row = element('li', 'memory-item')
+  row.dataset.id = String(item.id)
+  const head = element('div', 'memory-item-head')
+  const day = element('span', 'memory-item-day')
+  const clock = item.clock !== null ? ` ${item.clock}` : ''
+  const section = item.section !== '' ? ` · ${item.section}` : ''
+  day.textContent = `${item.day}${clock} · ${MEMORY_KIND_TEXT[item.kind]}${section}`
+  const del = element('button', 'memory-item-del')
+  del.type = 'button'
+  del.textContent = '删除'
+  del.title = '从记忆里删掉这一条（不改日记原文；删错了可以撤销）'
+  del.addEventListener('click', () => {
+    void deleteMemoryEntry(item)
+  })
+  head.append(day, del)
+  const text = element('p', 'memory-item-text')
+  text.textContent = item.text
+  if (item.text.length > 160) {
+    // 日记一段能有两千字：先折 8 行，点一下展开 / 收起
+    text.classList.add('clamped')
+    text.title = '点一下展开 / 收起'
+    text.addEventListener('click', () => {
+      text.classList.toggle('clamped')
+    })
+  }
+  row.append(head, text)
+  const meta: string[] = []
+  if (item.tags.length > 0) meta.push(item.tags.map((tag) => `#${tag}`).join(' '))
+  if (item.refs.length > 0) meta.push(item.refs.map((ref) => `[[${ref}]]`).join(' '))
+  if (meta.length > 0) {
+    const bits = element('p', 'memory-item-meta')
+    bits.textContent = meta.join(' · ')
+    row.append(bits)
+  }
+  return row
+}
+
+function setMemoryListMsg(text: string, isError = false): void {
+  memoryListMsg.textContent = text
+  memoryListMsg.style.color = isError ? 'var(--error)' : ''
+}
+
+function memoryListSummary(deleted: number): string {
+  return `共 ${memoryListTotal} 条${deleted > 0 ? ` · 已删除 ${deleted} 条` : ''}`
+}
+
+/** 读一页：`reset` 从头画（搜索 / 类别 / 删除后），否则接着上一页追加 */
+async function loadMemoryList(reset: boolean): Promise<void> {
+  if (!api || memoryListLoading) return
+  memoryListLoading = true
+  const offset = reset ? 0 : memoryListLoaded
+  if (reset) setMemoryListMsg('正在读取…')
+  try {
+    const result = await api.memoryList({
+      search: memorySearchInput.value.trim(),
+      kind: memoryKindSelect.value,
+      offset,
+      limit: MEMORY_PAGE_SIZE
+    })
+    if (!result.ok) {
+      setMemoryListMsg(
+        result.error === 'db-unavailable'
+          ? '还没有记忆库（同步一次日记或开始采集后可用）'
+          : `读取失败：${result.error}`,
+        result.error !== 'db-unavailable'
+      )
+      return
+    }
+    if (reset) {
+      memoryItemsEl.replaceChildren()
+      memoryListLoaded = 0
+    }
+    for (const item of result.items) memoryItemsEl.append(memoryRowElement(item))
+    memoryListLoaded = offset + result.items.length
+    memoryListTotal = result.total
+    memoryMoreButton.hidden = !result.hasMore
+    memoryUndoButton.hidden = memoryLastDeletedUid === null
+    setMemoryListMsg(
+      memoryListTotal === 0
+        ? `没有匹配的条目${result.deleted > 0 ? ` · 已删除 ${result.deleted} 条` : ''}`
+        : memoryListSummary(result.deleted)
+    )
+  } catch (error) {
+    setMemoryListMsg(`读取失败：${String(error)}`, true)
+  } finally {
+    memoryListLoading = false
+  }
+}
+
+/** 删一条：进回收站，列表重读；删错了点「撤销删除」放回 */
+async function deleteMemoryEntry(item: MemoryListItemView): Promise<void> {
+  if (!api) return
+  if (busy) {
+    // 删除要开写连接（会先关掉只读连接），和保存一样等回答结束
+    setMemoryListMsg('等这次回答结束再删（删除会短暂占用数据库）', true)
+    return
+  }
+  const label = `${item.day}${item.clock !== null ? ` ${item.clock}` : ''}「${item.text.slice(0, 18)}」`
+  try {
+    const result = await api.memoryDelete(item.id)
+    if (!result.ok) {
+      setMemoryListMsg(`没有删除：${result.error}`, true)
+      return
+    }
+    memoryLastDeletedUid = result.item.uid
+    memoryUndoButton.hidden = false
+    await loadMemoryList(true)
+    setMemoryListMsg(`已删除 ${label}（可撤销）`)
+    // 状态行的「索引 N 条」跟着变（统计来自主进程现读）
+    void refreshMemorySettings()
+  } catch (error) {
+    setMemoryListMsg(`删除失败：${String(error)}`, true)
+  }
+}
+
+async function undoLastDelete(): Promise<void> {
+  if (!api || memoryLastDeletedUid === null) return
+  if (busy) {
+    setMemoryListMsg('等这次回答结束再撤销（会短暂占用数据库）', true)
+    return
+  }
+  const uid = memoryLastDeletedUid
+  try {
+    const result = await api.memoryRestore(uid)
+    if (!result.ok) {
+      setMemoryListMsg(`没有恢复：${result.error}`, true)
+      return
+    }
+    memoryLastDeletedUid = null
+    memoryUndoButton.hidden = true
+    await loadMemoryList(true)
+    setMemoryListMsg(`已恢复 ${result.item.day} 的那一条`)
+    void refreshMemorySettings()
+  } catch (error) {
+    setMemoryListMsg(`撤销失败：${String(error)}`, true)
+  }
+}
+
+if (api) {
+  memorySearchInput.addEventListener('input', () => {
+    if (memorySearchTimer !== null) window.clearTimeout(memorySearchTimer)
+    memorySearchTimer = window.setTimeout(() => {
+      memorySearchTimer = null
+      void loadMemoryList(true)
+    }, 300)
+  })
+  // 搜索框在 #settings-form 里：回车默认会「保存设置」，这里改成立即查一次
+  memorySearchInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    if (memorySearchTimer !== null) {
+      window.clearTimeout(memorySearchTimer)
+      memorySearchTimer = null
+    }
+    void loadMemoryList(true)
+  })
+  memoryKindSelect.addEventListener('change', () => {
+    void loadMemoryList(true)
+  })
+  memoryMoreButton.addEventListener('click', () => {
+    void loadMemoryList(false)
+  })
+  memoryUndoButton.addEventListener('click', () => {
+    void undoLastDelete()
+  })
+}
+
+settingsButton.addEventListener('click', openSettingsDrawer)
 
 // 点遮罩空白处关抽屉；Esc 也关（面板自己不管关闭键）
 drawerEl.addEventListener('mousedown', (event) => {
@@ -923,7 +1817,7 @@ window.addEventListener('keydown', (event) => {
 
 // 托盘 / 球右键的「设置」：窗口打开即展开抽屉
 api?.onOpenSettings(() => {
-  void settingsPanel?.open()
+  openSettingsDrawer()
 })
 
 void (async () => {
@@ -936,6 +1830,8 @@ void (async () => {
   await refreshHistory()
   // 默认新会话（D55 ②）：不静默接上最近一段；要接着问就点顶部「继续上一段」或左栏记录
   await refreshConsent()
+  // 读一次人设 / 卡库：模式条的「人格卡：xx」要显示真实启用的卡（读不到就显示未选卡）
+  void refreshMemorySettings()
   // 选区问答的交接单：新开一条会话、带着截图直接问（不覆盖用户正在看的会话）
   api?.onPrefill((payload) => {
     if (busy) return

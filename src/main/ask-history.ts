@@ -12,6 +12,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type {
   ChainAskCitation,
+  ChainAskMemoryCitation,
   ChainAskRelatedSegment,
   ChainAskResult,
   ChainAskStats,
@@ -21,6 +22,17 @@ import type {
 } from '../chain/agent/types'
 
 export const ASK_HISTORY_FILE = 'ask-history.jsonl'
+
+/** 用户随问题上传的附件（只存展示用的元信息；图片原图在 ask-shots 下，文本不落盘） */
+export interface AskHistoryAttachment {
+  kind: 'image' | 'file'
+  /** 原始文件名（图片可能是「截图」） */
+  name?: string
+  /** 图片在 ask-shots 下的留存路径（30 天后清掉，界面如实降级） */
+  path?: string
+  /** 文本文件抽出的字符数（原文件不落盘） */
+  chars?: number
+}
 
 export interface AskHistoryEntry {
   /** 渲染层列表 key（时刻 + 随机后缀） */
@@ -37,10 +49,14 @@ export interface AskHistoryEntry {
   kind: 'answer' | 'no-evidence' | 'insufficient' | 'error' | 'clarify'
   answer?: string
   citations: ChainAskCitation[]
+  /** 日记引用（个人记忆 · 第二本账）；老记录没有这个字段 */
+  memories?: ChainAskMemoryCitation[]
   /** 检索到、但没进引用的段（`insufficient` / `no-evidence` 才有；只为给界面一个入口） */
   related?: ChainAskRelatedSegment[]
   /** 选区问答：随这条对话留存的截图路径（`<userData>/ask-shots/shot-*.png`；过期清掉后读不到，界面如实降级） */
   imagePath?: string
+  /** 用户随这条问题上传的附件（图片路径 / 文本文件名；老记录没有这个字段） */
+  attachments?: AskHistoryAttachment[]
   /** `kind=no-evidence` 时模型给的补充说明（查到了什么、为什么不足以回答）；没有就显示固定文案 */
   note?: string
   /** `kind=clarify`：模型反向向用户确认的问题 + 候选 */
@@ -87,8 +103,22 @@ function isCitation(value: unknown): value is ChainAskCitation {
   )
 }
 
-function isClarify(value: unknown): value is { question: string; options: string[] } {
+/** 日记引用：itemId 指回 `mem_items`；day / snippet 只用于展示，字段缺了就整条丢 */
+function isMemoryCitation(value: unknown): value is ChainAskMemoryCitation {
   if (typeof value !== 'object' || value === null) return false
+  const item = value as Record<string, unknown>
+  return (
+    typeof item.itemId === 'number' &&
+    Number.isInteger(item.itemId) &&
+    item.itemId > 0 &&
+    typeof item.day === 'string' &&
+    typeof item.section === 'string' &&
+    typeof item.why === 'string' &&
+    typeof item.snippet === 'string'
+  )
+}
+
+function isClarify(value: unknown): value is { question: string; options: string[] } {  if (typeof value !== 'object' || value === null) return false
   const clarify = value as Record<string, unknown>
   return (
     typeof clarify.question === 'string' &&
@@ -144,9 +174,19 @@ function isTrace(value: unknown): value is ChainAskTrace {
   return Array.isArray(trace.steps) && trace.steps.every(isTraceStep)
 }
 
+/** 附件元信息校验（老记录没有这个字段；坏条目只丢这一条） */
+function isAttachment(value: unknown): value is AskHistoryAttachment {
+  if (typeof value !== 'object' || value === null) return false
+  const item = value as Record<string, unknown>
+  if (item.kind !== 'image' && item.kind !== 'file') return false
+  if (item.name !== undefined && typeof item.name !== 'string') return false
+  if (item.path !== undefined && typeof item.path !== 'string') return false
+  if (item.chars !== undefined && typeof item.chars !== 'number') return false
+  return true
+}
+
 /** 单行校验：坏行（旧格式 / 手改 / 写了一半）返回 null，读到就跳过、不整份作废 */
-export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
-  if (typeof value !== 'object' || value === null) return null
+export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  if (typeof value !== 'object' || value === null) return null
   const data = value as Record<string, unknown>
   if (typeof data.id !== 'string' || data.id === '') return null
   if (typeof data.at !== 'number' || !Number.isFinite(data.at)) return null
@@ -157,12 +197,18 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
   if (data.related !== undefined && (!Array.isArray(data.related) || !data.related.every(isRelated))) {
     return null
   }
+  if (data.memories !== undefined && (!Array.isArray(data.memories) || !data.memories.every(isMemoryCitation))) {
+    return null
+  }
   if (!isStats(data.stats)) return null
   if ((data.kind === 'answer' || data.kind === 'insufficient') && typeof data.answer !== 'string') {
     return null
   }
   if (data.imagePath !== undefined && (typeof data.imagePath !== 'string' || data.imagePath === '')) {
     return null
+  }
+  if (data.attachments !== undefined) {
+    if (!Array.isArray(data.attachments) || !data.attachments.every(isAttachment)) return null
   }
   if (data.answer !== undefined && typeof data.answer !== 'string') return null
   if (data.reason !== undefined && typeof data.reason !== 'string') return null
@@ -184,8 +230,10 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {
     kind: data.kind as AskHistoryEntry['kind'],
     ...(typeof data.conversationId === 'string' ? { conversationId: data.conversationId } : {}),
     ...(typeof data.imagePath === 'string' ? { imagePath: data.imagePath } : {}),
+    ...(Array.isArray(data.attachments) ? { attachments: data.attachments as AskHistoryAttachment[] } : {}),
     ...(typeof data.answer === 'string' ? { answer: data.answer } : {}),
     citations: data.citations,
+    ...(Array.isArray(data.memories) ? { memories: data.memories as ChainAskMemoryCitation[] } : {}),
     ...(Array.isArray(data.related) ? { related: data.related as ChainAskRelatedSegment[] } : {}),
     ...(isClarify(data.clarify) ? { clarify: data.clarify } : {}),
     ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
@@ -237,7 +285,8 @@ export function toHistoryEntry(
   result: ChainAskResult,
   at: number,
   conversationId?: string,
-  imagePath?: string
+  imagePath?: string,
+  attachments?: readonly AskHistoryAttachment[]
 ): AskHistoryEntry {
   const base = {
     id: `${at.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
@@ -246,11 +295,18 @@ export function toHistoryEntry(
     stats: result.stats,
     ...(conversationId ? { conversationId } : {}),
     ...(imagePath ? { imagePath } : {}),
+    ...(attachments && attachments.length > 0 ? { attachments: [...attachments] } : {}),
     // 过程（D55 ③）：所有出口都带（暂停轮不落历史，最终结果会带完整 steps）
     ...(result.trace ? { trace: result.trace } : {})
   }
   if (result.kind === 'answer') {
-    return { ...base, kind: 'answer', answer: result.answer, citations: result.citations }
+    return {
+      ...base,
+      kind: 'answer',
+      answer: result.answer,
+      citations: result.citations,
+      ...(result.memories && result.memories.length > 0 ? { memories: result.memories } : {})
+    }
   }
   if (result.kind === 'insufficient') {
     return {
@@ -258,6 +314,7 @@ export function toHistoryEntry(
       kind: 'insufficient',
       answer: result.answer,
       citations: result.citations,
+      ...(result.memories && result.memories.length > 0 ? { memories: result.memories } : {}),
       ...(result.related.length > 0 ? { related: result.related } : {})
     }
   }
@@ -292,6 +349,7 @@ export function toHistoryEntry(
     ...base,
     kind: 'no-evidence',
     citations: result.citations ?? [],
+    ...(result.memories && result.memories.length > 0 ? { memories: result.memories } : {}),
     ...(result.note ? { note: result.note } : {}),
     ...(result.related && result.related.length > 0 ? { related: result.related } : {})
   }

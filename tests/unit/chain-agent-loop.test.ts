@@ -90,7 +90,7 @@ const searchCall = (arguments_: Record<string, unknown>): { toolCalls: Array<{ n
 })
 
 describe('问记忆 · 工具循环（主路径）', () => {
-  it('一次检索 + 最终答复：引用的事实由服务端从段行补，usage 结束时一次入账', async () => {
+  it('一次检索 + 最终答复：没打开正文就没有引用，usage 结束时一次入账', async () => {
     const seg = seed({
       pid: 1,
       app: 'Visual Studio Code',
@@ -105,7 +105,7 @@ describe('问记忆 · 工具循环（主路径）', () => {
       {
         json: {
           answer: '你当时在 09:00 的〈Visual Studio Code〉里编译原生模块，撞上 LNK1104。',
-          citations: [{ segmentId: seg, why: '报 LNK1104 的那一次' }]
+          citations: []
         },
         usage: { promptTokens: 300, completionTokens: 40 }
       }
@@ -119,15 +119,9 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
     expect(result.answer).toContain('LNK1104')
-    expect(result.citations).toHaveLength(1)
-    // at / app / title 是服务端补的（毫秒时间戳 + 段行字段），不是模型给的
-    expect(result.citations[0]).toMatchObject({
-      segmentId: seg,
-      at: at(0),
-      app: 'Visual Studio Code',
-      title: 'gotcha — src/chain'
-    })
-    expect(result.stats).toMatchObject({ hits: 1, evidence: 1, cited: 1, turns: 2, toolCalls: 1 })
+    // 只检索、没 read_segment：没有引用（引用只来自「真的打开过」）
+    expect(result.citations).toEqual([])
+    expect(result.stats).toMatchObject({ hits: 1, evidence: 1, cited: 0, turns: 2, toolCalls: 1 })
     // usage 是两轮累计、只发一次
     expect(usages).toHaveLength(1)
     expect(usages[0]).toMatchObject({ promptTokens: 300, completionTokens: 40 })
@@ -226,7 +220,8 @@ describe('问记忆 · 工具循环（主路径）', () => {
     const result = await askChain(buildDeps(client), 'LNK1104 和 Electron')
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
-    expect(result.citations).toHaveLength(3)
+    // 只检索、没打开正文：模型自己写的 citations 不再采信
+    expect(result.citations).toEqual([])
 
     // 本地 RRF：双词同段的段名次最前（两路各 rank 1，分数翻倍）
     const toolResult = client.askLoopRequests[1].turns[0].toolResult as {
@@ -235,7 +230,7 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(toolResult.hits.map((hit) => hit.segmentId)).toEqual([both, onlyError, onlyLink])
   })
 
-  it('编造的 segmentId 整条丢弃：白名单 = search_info 返回过的段', async () => {
+  it('模型给的引用一律不采信：没打开正文就没有引用', async () => {
     const seg = seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: 'LNK1104 的记录' })
     const client = new FakeLlmClient([
       searchCall({ keywords: ['LNK1104'] }),
@@ -252,18 +247,19 @@ describe('问记忆 · 工具循环（主路径）', () => {
     const result = await askChain(buildDeps(client), 'LNK1104')
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
-    expect(result.citations.map((citation) => citation.segmentId)).toEqual([seg])
-    expect(result.stats.cited).toBe(2)
+    expect(result.citations).toEqual([])
+    expect(result.stats.cited).toBe(0)
   })
 
-  it('answer 宣称没找到却带引用：按没找到收口，但保留说明与可点证据（根因 7）', async () => {
+  it('answer 宣称没找到但打开过段：按没找到收口，但保留说明与已读证据（根因 7）', async () => {
     const seg = seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: 'LNK1104 的记录' })
     const client = new FakeLlmClient([
       searchCall({ keywords: ['LNK1104'] }),
+      { toolCalls: [{ name: 'read_segment', arguments: { segmentId: seg } }] },
       {
         json: {
           answer: '信息链里没找到相关记录。',
-          citations: [{ segmentId: seg, why: '不该出现的引用' }]
+          citations: []
         }
       }
     ])
@@ -277,8 +273,8 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(result.note).toBe('信息链里没找到相关记录。')
     expect(result.citations?.map((citation) => citation.segmentId)).toEqual([seg])
     expect(logs.some((message) => message.includes('按没找到保留说明'))).toBe(true)
-    // LLM 确实被调用了两轮（检索 + 答复），只是结果被归一
-    expect(client.askLoopRequests).toHaveLength(2)
+    // LLM 确实被调用了三轮（检索 + 打开 + 答复），只是结果被归一
+    expect(client.askLoopRequests).toHaveLength(3)
   })
 
   it('问「第一次问你的是啥」：查过 ask_history 后允许无引用的对话回答', async () => {
@@ -311,12 +307,14 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(historyTool.entries[0].question).toBe('刚刚我在干啥')
   })
 
-  it('没有对话上下文时，无引用的「回答」仍按没找到处理（不放宽引用门）', async () => {
+  it('没有对话上下文时，无引用也照常回答（不再按没找到处理）', async () => {
     const client = new FakeLlmClient([
       { json: { answer: '你之前问过很多事情。', citations: [], conversation: true } }
     ])
     const result = await askChain(buildDeps(client), '我之前问过什么')
-    expect(result.kind).toBe('no-evidence')
+    expect(result.kind).toBe('answer')
+    if (result.kind !== 'answer') return
+    expect(result.citations).toEqual([])
   })
 
   it('段正文里的网址随命中带出：snippet 截断也不丢地址栏 URL', async () => {
@@ -385,7 +383,7 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(read.truncated).toBe(false)
   })
 
-  it('脱敏整条挡下的段：不出现在送云摘要里，也不能被引用', async () => {
+  it('脱敏整条挡下的段：不出现在送云摘要里，也不能被打开', async () => {
     const blocked = seed({
       pid: 1,
       app: '1password.exe',
@@ -398,6 +396,7 @@ describe('问记忆 · 工具循环（主路径）', () => {
 
     const client = new FakeLlmClient([
       searchCall({ keywords: ['LNK1104'] }),
+      { toolCalls: [{ name: 'read_segment', arguments: { segmentId: blocked } }] },
       {
         json: {
           answer: '两段都算数。',
@@ -411,13 +410,22 @@ describe('问记忆 · 工具循环（主路径）', () => {
     const result = await askChain(buildDeps(client), 'LNK1104')
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
-    expect(result.citations.map((citation) => citation.segmentId)).toEqual([visible])
+    // 被挡的段打不开 → 没有引用；模型自己写的引用也不再采信
+    expect(result.citations).toEqual([])
 
-    // 送云摘要里没有密码类应用的段：模型没见过的段不能引用
+    // 送云摘要里没有密码类应用的段：模型没见过的段不能打开
     const toolResult = client.askLoopRequests[1].turns[0].toolResult as {
       hits: Array<{ segmentId: number }>
     }
     expect(toolResult.hits.map((hit) => hit.segmentId)).toEqual([visible])
+
+    // read_segment 越权门：被挡的段不在白名单里，直接拒绝
+    const readResult = client.askLoopRequests[2].turns[1].toolResult as {
+      kind: string
+      message?: string
+    }
+    expect(readResult.kind).toBe('error')
+    expect(readResult.message).toContain('只能展开')
   })
 
   it('开着的段也能检到（includeOpen 硬编码），freshness 的开段口径算「现在」', async () => {
@@ -442,7 +450,8 @@ describe('问记忆 · 工具循环（主路径）', () => {
 
     const client = new FakeLlmClient([
       searchCall({ keywords: ['LNK1104'] }),
-      { json: { answer: '08:55 的〈WeChat〉里聊过。', citations: [{ segmentId: openId, why: '开段命中' }] } }
+      { toolCalls: [{ name: 'read_segment', arguments: { segmentId: openId } }] },
+      { json: { answer: '08:55 的〈WeChat〉里聊过。' } }
     ])
     const result = await askChain(buildDeps(client), 'LNK1104')
     expect(result.kind).toBe('answer')
@@ -733,10 +742,15 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(result.stats).toMatchObject({ toolCalls: firstBatch })
   })
 
-  it('解析失败（结构不对）：unparseable，不静默当空结果', async () => {
+  it('自由文本（不是 JSON）当答复收下；对象但缺 answer 仍算结构不对', async () => {
     seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: 'LNK1104 的记录' })
-    const client = new FakeLlmClient([searchCall({ keywords: ['LNK1104'] }), { json: '不是对象' }])
-    const result = await askChain(buildDeps(client), 'LNK1104')
+    const freeText = new FakeLlmClient([searchCall({ keywords: ['LNK1104'] }), { json: '我记得你查过这个。' }])
+    const answer = await askChain(buildDeps(freeText), 'LNK1104')
+    expect(answer.kind).toBe('answer')
+    if (answer.kind === 'answer') expect(answer.answer).toContain('查过这个')
+
+    const badShape = new FakeLlmClient([searchCall({ keywords: ['LNK1104'] }), { json: { foo: 1 } }])
+    const result = await askChain(buildDeps(badShape), 'LNK1104')
     expect(result.kind).toBe('error')
     if (result.kind !== 'error') return
     expect(result.reason).toBe('unparseable')
@@ -803,7 +817,7 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(client.askLoopRequests[0].freshness).toEqual({ latestEvidenceTs: null, captureRunning: false })
   })
 
-  it('确定性假 LLM 的循环脚本（E2E 用的那条）：检索最近段后引用第一段作答', async () => {
+  it('确定性假 LLM 的循环脚本（E2E 用的那条）：检索 → 打开第一段 → 作答，引用自动带出', async () => {
     const seg = seed({ pid: 1, app: 'Firefox', title: '文档', from: at(0), to: at(60), text: '看文档' })
     const { client, counters } = createDeterministicFakeLlm()
     const result = await askChain(buildDeps(client), '我刚才在干什么')
@@ -811,9 +825,9 @@ describe('问记忆 · 工具循环（主路径）', () => {
     expect(result.kind).toBe('answer')
     if (result.kind !== 'answer') return
     expect(result.citations.map((citation) => citation.segmentId)).toEqual([seg])
-    // 两轮：先 search_info（按时间倒序列最近的段），再引用第一段作答
-    expect(counters.requests).toBe(2)
-    expect(result.stats).toMatchObject({ turns: 2, toolCalls: 1 })
+    // 三轮：先 search_info（按时间倒序列最近的段），再 read_segment，最后纯文本作答
+    expect(counters.requests).toBe(3)
+    expect(result.stats).toMatchObject({ turns: 3, toolCalls: 2 })
   })
 })
 

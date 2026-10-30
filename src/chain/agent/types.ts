@@ -173,6 +173,17 @@ export type ChainAskResult =
       related?: ChainAskRelatedSegment[]
       trace?: ChainAskTrace
     }
+  /**
+   * 本地命令（`/help`、`/backup`…）的回执（memory-life M1）：
+   * 不走模型、不进问答历史、不计生命，只是一条给界面看的纯文本。
+   * 仍然带 `stats`（全 0），这样界面 / 落盘工具不必为它分叉。
+   */
+  | {
+      kind: 'command'
+      text: string
+      stats: ChainAskStats
+      trace?: ChainAskTrace
+    }
   | {
       kind: 'error'
       reason: ChainAskErrorReason

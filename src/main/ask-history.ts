@@ -388,6 +388,16 @@ export function toHistoryEntry(
       clarify: { question: result.question, options: result.options }
     }
   }
+  if (result.kind === 'command') {
+    // 命令回执正常不进历史（主进程直接返回，不过 settle）；真被记下来时按一条普通答复存，
+    // 至少内容不丢，也不会在历史类型里多出一个只读的分支。
+    return {
+      ...base,
+      kind: 'answer',
+      answer: result.text,
+      citations: []
+    }
+  }
   if (result.kind === 'error') {
     return {
       ...base,

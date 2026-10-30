@@ -1011,7 +1011,9 @@ describe('工具循环 · 对话记录兼容', () => {
           ? 'error'
           : result.kind === 'continue-ask'
             ? 'clarify'
-            : result.kind,
+            : result.kind === 'command'
+              ? 'answer'
+              : result.kind,
       citations: [],
       stats: result.stats
     })

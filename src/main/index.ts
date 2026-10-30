@@ -129,6 +129,9 @@ import {
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
 import { createAskConversationRegistry } from './ask-conversation'
+import { createCommandHandler, memoryDayKey } from './commands'
+import { ensureLineage, lineageSnapshot, readLineage } from './lineage'
+import { createMemoryRepo } from './memory-repo'
 import {
   appendAskHistory,
   ASK_HISTORY_FILE,
@@ -1974,11 +1977,56 @@ if (primaryInstance) {
       return images.length > 0 || files.length > 0 ? { images, files } : undefined
     }
     /**
-     * 会话存储（D64，只追加）：桌面窗口 / QQ 用户各自一个 conversationId。
-     * 第一问从问答历史播种（只含问答），之后由工具循环把「问题 → <now> → 工具轮 → 答复」
-     * 原样存下，下一问只追加——system 前缀不变，缓存才命中。
+     * 记忆仓（memory-life M1）：ta 的记忆是一个本地 git 仓库。
+     * - 家谱权威在仓外（`memory-lineage.json`），仓里只放只读快照；
+     * - 会话落 `conversations/<会话 id>.jsonl`，图片按内容哈希存 `conversations/assets/` 二进制；
+     * - git 不可用不阻塞任何事：ask 照常跑，`/help` 如实报不可用。
      */
-    const askConversations = createAskConversationRegistry()
+    const memoryRepo = createMemoryRepo({
+      root: join(app.getPath('userData'), 'memory-repo'),
+      log: (level, message, data) => captureLog(level, message, data)
+    })
+    const lineageFile = join(app.getPath('userData'), 'memory-lineage.json')
+    /**
+     * 会话存储（D64，只追加）：桌面窗口 / QQ 用户各自一个 conversationId。
+     * 接了记忆仓就从当前节点的 `conversations/` 恢复（重启不断片），下一问只追加；
+     * system 前缀不变，缓存才命中。
+     */
+    const askConversations = createAskConversationRegistry({
+      root: memoryRepo.root,
+      log: (level, message, data) => captureLog(level, message, data)
+    })
+    /** 启动自检：家谱（缺就建 / 坏就备份重建）+ 记忆仓（缺就 init）+ 快照进仓 */
+    const ensureMemoryRepo = async (): Promise<void> => {
+      try {
+        const lineage = await ensureLineage(lineageFile)
+        if (lineage.recovered) {
+          captureLog('warn', 'memory lineage recovered', { backup: lineage.backupPath ?? '' })
+        }
+        const status = await memoryRepo.ensure()
+        if (!status.ok) {
+          captureLog('warn', 'memory repo unavailable', { reason: status.reason })
+          return
+        }
+        await memoryRepo.writeFile('lineage.snapshot.json', lineageSnapshot(lineage.lineage))
+        captureLog('info', 'memory repo ready', { branch: status.branch, head: status.head ?? '' })
+      } catch (error) {
+        captureLog('warn', 'memory repo startup failed', { error: String(error) })
+      }
+    }
+    void ensureMemoryRepo()
+    /** 每轮问答之后：一天一个提交（不阻塞回答；失败只记日志） */
+    const commitMemoryDay = (): void => {
+      void (async () => {
+        const lineage = await readLineage(lineageFile)
+        if (lineage.status === 'ok') {
+          await memoryRepo.writeFile('lineage.snapshot.json', lineageSnapshot(lineage.lineage))
+        }
+        const result = await memoryRepo.commitDay(memoryDayKey(Date.now()))
+        if (result.committed) captureLog('info', 'memory day committed', { hash: result.hash ?? '' })
+        else if (result.reason === 'failed') captureLog('warn', 'memory day commit failed', {})
+      })().catch((error) => captureLog('warn', 'memory day commit failed', { error: String(error) }))
+    }
     /**
      * 开场注入（D61，2026-10-30 收敛）：
      * - 「此刻」= 本地确定规则（时间 / 今天说过几句 / 上次多久前 / 日记记到哪天），**每轮都重算**
@@ -2234,6 +2282,7 @@ if (primaryInstance) {
           text
         )
         rememberQqTurn(conversationId, text, result)
+        commitMemoryDay()
         return result
       }
     })
@@ -2326,7 +2375,14 @@ if (primaryInstance) {
           }
         }
         return askChain(askOptionsFor(db, context, await askOpeningFor(db, question, context)), question)
+          .then((result) => {
+            // 记忆落仓不阻塞回答：一天一个提交（M1），失败了只是这次没进仓
+            commitMemoryDay()
+            return result
+          })
       },
+      // 本地命令（M1）：/help、/backup；命中就本地执行，不调模型、不进问答历史
+      command: createCommandHandler({ repo: memoryRepo, lineageFile }),
       // 「还要继续查吗」→ 恢复暂停的循环（问题用检查点里的原话，续查通道不再传）
       resume: async (resumeId, decision, context) => {
         prepareAskUploads(context)
@@ -2383,7 +2439,10 @@ if (primaryInstance) {
           .filter((turn) => turn.answer !== '')
       },
       history: () => readAskHistory(askHistoryPath),
-      clearHistory: () => {
+      clearHistory: async () => {
+        // 清空是破坏性操作：先从 git 留一份（失败也照清，只是少了这层保险）
+        const committed = await memoryRepo.commit('memory: 清空问答历史前')
+        if (committed.reason === 'failed') captureLog('warn', 'memory pre-clear commit failed', {})
         clearAskHistory(askHistoryPath)
         // 问答历史清了，只追加的会话也不能留着旧的（否则下一问会「记得」已删的对话）
         askConversations.clear()

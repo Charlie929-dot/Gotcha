@@ -136,6 +136,11 @@ function historyAttachments(
 export interface AskIpcDeps {
   getWindow: () => BrowserWindow | null
   ask: (question: string, context: AskQueryContext) => Promise<ChainAskResult>
+  /**
+   * 本地命令（memory-life M1）：`/help`、`/backup`…
+   * 返回非 null = 命中命令（回执直接给界面，不调模型、不进历史）；null = 不是命令，照常提问。
+   */
+  command?: (text: string) => Promise<ChainAskResult | null>
   segment: (segmentId: number) => SegmentEvidence | null
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
@@ -163,8 +168,8 @@ export interface AskIpcDeps {
   conversationHistory?: (conversationId: string) => readonly ChainAskTurnContext[]
   /** 全部历史（最新在前） */
   history: () => AskHistoryEntry[]
-  /** 清空历史 */
-  clearHistory: () => void
+  /** 清空历史（接记忆仓时会先提交一次再删会话文件，允许返回 Promise） */
+  clearHistory: () => void | Promise<void>
   /**
    * D53：设置抽屉（供应商 / 密钥 / 出网确认）。
    * 与图谱窗口共用主进程实现——两边校验、密钥落盘路径、热键重绑必须是同一套。
@@ -318,6 +323,17 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         if (typeof rawQuestion !== 'string') return failure('问题不合法')
         const asked = rawQuestion.trim()
         if (asked === '') return failure('问题是空的')
+        // 本地命令先过（方案 §6）：命中就在本地执行、回一条文本，不调模型、不写会话 / 历史。
+        // 放在问题长度校验之前：命令的参数长度不该受「提问 500 字」限制。
+        if (deps.command) {
+          try {
+            const handled = await deps.command(asked)
+            if (handled !== null) return handled
+          } catch (error) {
+            deps.log('warn', 'ask command failed', { error: String(error) })
+            return failure('命令执行失败，细节看日志')
+          }
+        }
         if (asked.length > ASK_QUESTION_MAX_CHARS) {
           return failure(`问题太长（上限 ${ASK_QUESTION_MAX_CHARS} 字）`)
         }
@@ -801,10 +817,10 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     ],
     [
       'ask:history:clear',
-      (event) => {
+      async (event) => {
         if (!ensureSender(event)) return false
         try {
-          deps.clearHistory()
+          await deps.clearHistory()
           return true
         } catch (error) {
           deps.log('error', 'ask:history:clear failed', { error: String(error) })

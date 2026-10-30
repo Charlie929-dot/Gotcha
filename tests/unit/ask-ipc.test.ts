@@ -266,20 +266,20 @@ describe('ask IPC：对话记录', () => {
     expect(handler(broken, 'ask:history')(SENDER_OK as never)).toEqual([])
   })
 
-  it('清空通道：调 deps.clearHistory；越权 / 写失败返回 false', () => {
+  it('清空通道：调 deps.clearHistory；越权 / 写失败返回 false', async () => {
     const clearHistory = vi.fn()
     const deps = buildDeps({ clearHistory })
-    expect(handler(deps, 'ask:history:clear')(SENDER_OK as never)).toBe(true)
+    expect(await handler(deps, 'ask:history:clear')(SENDER_OK as never)).toBe(true)
     expect(clearHistory).toHaveBeenCalledTimes(1)
     expect(
-      handler(deps, 'ask:history:clear')({ sender: { id: 9 }, senderFrame: MAIN_FRAME } as never)
+      await handler(deps, 'ask:history:clear')({ sender: { id: 9 }, senderFrame: MAIN_FRAME } as never)
     ).toBe(false)
     const broken = buildDeps({
       clearHistory: () => {
         throw new Error('权限')
       }
     })
-    expect(handler(broken, 'ask:history:clear')(SENDER_OK as never)).toBe(false)
+    expect(await handler(broken, 'ask:history:clear')(SENDER_OK as never)).toBe(false)
   })
 })
 

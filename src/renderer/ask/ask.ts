@@ -428,6 +428,7 @@ function statusOf(result: ChainAskResult): { kind: 'idle' | 'error'; text: strin
   if (result.kind === 'no-evidence') {
     return { kind: 'idle', text: `${hitsText(result.stats)}，但证据不足以回答` }
   }
+  if (result.kind === 'command') return { kind: 'idle', text: '命令已执行' }
   const memoryCount = result.memories?.length ?? 0
   const memoryText = memoryCount > 0 ? `，日记引用 ${memoryCount} 条` : ''
   return {
@@ -997,6 +998,29 @@ function renderContinueCard(result: ContinueAskResult): void {
   threadEl.scrollTop = threadEl.scrollHeight
 }
 
+/**
+ * 本地命令回执（`/help`、`/backup`）：不落历史，所以不能走 `renderThread()`
+ * （会把刚画出来的回执一起重建掉）——只把等待卡换成一张普通回答卡。
+ */
+function renderCommandResult(result: Extract<ChainAskResult, { kind: 'command' }>): void {
+  const pending = threadEl.querySelector('.card.pending')?.closest('.msg') ?? null
+  const wrap = element('div', 'msg assistant')
+  const card = element('div', 'card answer')
+  const head = element('div', 'card-head')
+  const label = element('span', 'card-label')
+  label.textContent = '命令'
+  const meta = element('span', 'muted')
+  meta.textContent = formatClock(Date.now())
+  head.append(label, meta)
+  const body = element('p', 'answer-text')
+  body.textContent = result.text
+  card.append(head, body)
+  wrap.append(card)
+  if (pending) pending.replaceWith(wrap)
+  else threadEl.append(wrap)
+  threadEl.scrollTop = threadEl.scrollHeight
+}
+
 /** 用户点了「继续查 / 按现有结果回答」：恢复主进程里暂停的循环 */
 async function resumeContinue(
   resumeId: string | undefined,
@@ -1154,6 +1178,12 @@ async function ask(
       renderContinueCard(result)
       const status = statusOf(result)
       setStatus(status.kind, status.text)
+      return
+    }
+    if (result.kind === 'command') {
+      // 命令回执不落历史，不能走 refreshHistory / renderThread（否则刚画的回执会被重建掉）
+      renderCommandResult(result)
+      setStatus('idle', '命令已执行')
       return
     }
     const status = statusOf(result)

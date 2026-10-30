@@ -11,8 +11,10 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  ASK_MODE_LABELS,
   ASK_MODE_PRESET_ORDER,
   ASK_MODE_PRESETS,
+  askModePresetFromName,
   askModePresetOf,
   askToolGroupsOf,
   asksMemoryContext,
@@ -37,6 +39,19 @@ describe('模式预设', () => {
     expect(askModePresetOf({ screen: true, diary: true, card: false })).toBe('memory')
     expect(askModePresetOf({ screen: false, diary: true, card: true })).toBe('chat')
     expect(askModePresetOf({ screen: true, diary: false, card: true })).toBeNull()
+  })
+
+  it('/mode 的别名：mem / chat / ask，另收 memory / plain / 中文名', () => {
+    expect(askModePresetFromName('mem')).toBe('memory')
+    expect(askModePresetFromName('MEMORY')).toBe('memory')
+    expect(askModePresetFromName(' 问记忆 ')).toBe('memory')
+    expect(askModePresetFromName('chat')).toBe('chat')
+    expect(askModePresetFromName('聊天')).toBe('chat')
+    expect(askModePresetFromName('ask')).toBe('plain')
+    expect(askModePresetFromName('plain')).toBe('plain')
+    expect(askModePresetFromName('提问')).toBe('plain')
+    expect(askModePresetFromName('随便')).toBeNull()
+    expect(ASK_MODE_LABELS).toEqual({ memory: '问记忆', chat: '聊天', plain: '提问' })
   })
 })
 

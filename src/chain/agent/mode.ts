@@ -40,6 +40,36 @@ export type AskModePreset = keyof typeof ASK_MODE_PRESETS
 /** 界面按这个顺序展示预设（也是「新会话沿用上次」的合法值） */
 export const ASK_MODE_PRESET_ORDER: readonly AskModePreset[] = ['memory', 'chat', 'plain']
 
+/** 中文名（`/mode` 回执、界面提示共用；不要在别处再抄一份） */
+export const ASK_MODE_LABELS: Readonly<Record<AskModePreset, string>> = {
+  memory: '问记忆',
+  chat: '聊天',
+  plain: '提问'
+}
+
+/**
+ * `/mode` 的别名（2026-10-30）：命令行里用短英文，中文名也认。
+ * `mem` = 问记忆、`chat` = 聊天、`ask` = 提问（plain）。
+ */
+const ASK_MODE_ALIASES: Readonly<Record<string, AskModePreset>> = {
+  mem: 'memory',
+  memory: 'memory',
+  '问记忆': 'memory',
+  chat: 'chat',
+  '聊天': 'chat',
+  ask: 'plain',
+  plain: 'plain',
+  '提问': 'plain'
+}
+
+/** 命令 / 设置里给的名字 → 预设；不认识返回 null（不静默回落） */
+export function askModePresetFromName(raw: string): AskModePreset | null {
+  const key = raw.trim().toLowerCase()
+  return Object.prototype.hasOwnProperty.call(ASK_MODE_ALIASES, key)
+    ? ASK_MODE_ALIASES[key]
+    : null
+}
+
 export const DEFAULT_ASK_MODE: AskModeConfig = { ...ASK_MODE_PRESETS.memory }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

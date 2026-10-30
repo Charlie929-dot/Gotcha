@@ -1184,7 +1184,9 @@ async function ask(
     if (result.kind === 'command') {
       // 命令回执不落历史，不能走 refreshHistory / renderThread（否则刚画的回执会被重建掉）
       renderCommandResult(result)
-      setStatus('idle', '命令已执行')
+      // `/mode`：主进程算好目标模式，界面落地（localStorage + 模式条），下一条生效
+      if (result.mode) setAskMode(result.mode)
+      else setStatus('idle', '命令已执行')
       return
     }
     const status = statusOf(result)

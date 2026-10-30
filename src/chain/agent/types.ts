@@ -5,6 +5,8 @@
  * 这一层只做「问题 → 检索证据 → 出云 → 一段回答 + 引用段」，不含 UI。
  */
 
+import type { AskModeConfig } from './mode'
+
 /** 一条引用：段身份 + 服务端补的事实（前端不用再查库）+ 模型给的一句「那是什么」 */
 export interface ChainAskCitation {
   segmentId: number
@@ -182,6 +184,11 @@ export type ChainAskResult =
       kind: 'command'
       text: string
       stats: ChainAskStats
+      /**
+       * 命令要求切换模式（`/mode`）：界面收到后写 localStorage + 刷新模式条，
+       * 下一条消息生效（D62）。不带 = 这条命令不改模式。
+       */
+      mode?: AskModeConfig
       trace?: ChainAskTrace
     }
   | {

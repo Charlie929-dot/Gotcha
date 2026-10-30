@@ -652,6 +652,26 @@ describe('ask IPC：模式（D62）', () => {
     expect(ask.mock.calls[0]![1].mode).toEqual({ screen: true, diary: true, card: false })
   })
 
+  it('命令上下文带当前模式（/mode 要知道切之前是什么）', async () => {
+    const command = vi.fn(async (): Promise<ChainAskResult> => ({
+      kind: 'command',
+      text: '模式：聊天',
+      stats: { hits: 0, evidence: 0, cited: 0, questionChars: 0 },
+      mode: { screen: false, diary: true, card: true }
+    }))
+    const query = handler(buildDeps({ command }), 'ask:query')
+    const result = await query(SENDER_OK as never, {
+      question: '/mode chat',
+      conversationId: 'conv-1',
+      mode: { screen: false, diary: true, card: true }
+    })
+    expect(command).toHaveBeenCalledWith('/mode chat', {
+      conversationId: 'conv-1',
+      mode: { screen: false, diary: true, card: true }
+    })
+    expect(result).toMatchObject({ kind: 'command', mode: { screen: false, diary: true, card: true } })
+  })
+
   it('聊天 / 组合模式原样交给主进程（缺字段按关）', async () => {
     const ask = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => noEvidence)
     const query = handler(buildDeps({ ask }), 'ask:query')

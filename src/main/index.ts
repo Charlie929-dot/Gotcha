@@ -5,9 +5,15 @@ import Database from 'better-sqlite3'
 import log from 'electron-log/main'
 import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
 import { getNumberSetting, getSetting, setSetting } from '../db/settings'
-import { memoryStats, previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
+import { memoryDayRange, previewMemoryProfile, readMemoryDay, recallMemory, syncVault } from '../memory/store'
 import { buildSituation, splitRecallKeywords } from '../memory/opening'
-import { indexDiaryVectors, countPendingVectors, pruneOrphanVectors } from '../memory/vectors'
+import {
+  countPendingVectors,
+  hasDiaryVectors,
+  indexDiaryVectors,
+  pruneOrphanVectors,
+  recallDiaryByVector
+} from '../memory/vectors'
 import { buildPersonaPrompt, personaCardDir, readPersona, readPersonaCard, resolveVaultDir, savePersonaCard } from '../memory/persona'
 import {
   applyMemoryPatch,
@@ -1974,49 +1980,88 @@ if (primaryInstance) {
      */
     const askConversations = createAskConversationRegistry()
     /**
-     * 开场注入（D61）：
+     * 开场注入（D61，2026-10-30 收敛）：
      * - 「此刻」= 本地确定规则（时间 / 今天说过几句 / 上次多久前 / 日记记到哪天），**每轮都重算**
      *   （时间会走，旧数字会变成假话），不调模型；
-     * - 「想到的」= 只在新对话第一问按问题关键词本地回想 3 条日记（联想，不是证据；引用仍只由
-     *   read_diary 生成）；续问不重新联想，避免同一条记忆每轮换一个说法。
+     * - 「想到的」= 只在新对话第一问回想 3 条日记（联想，不是证据；引用仍只由 read_diary 生成）；
+     *   续问不重新联想，避免同一条记忆每轮换一个说法。
      * 两段都随载荷过脱敏墙（云端策略在边界）。
+     *
+     * 取数只走三个入口，不再每问摸全表：
+     * - 说话时刻：`talkTimes` 由调用方给（桌面 = 问答历史，QQ = 本通道自己的时刻；
+     *   以前 QQ 报的是桌面的数字）；
+     * - 日记记到哪天：`memoryDayRange`（两个聚合），不再跑 `memoryStats` 的整表统计；
+     * - 想到的：优先向量（索引已有），拿不到再回落关键词。
      */
-    const askOpeningFor = (
+    const askOpeningFor = async (
       db: ChainDb,
       question: string,
-      context: AskQueryContext
-    ): RedactableAskOpening | undefined => {
+      context: AskQueryContext,
+      talkTimes?: readonly number[]
+    ): Promise<RedactableAskOpening | undefined> => {
       const mode = context.mode ?? DEFAULT_ASK_MODE
       // 纯提问模式（无工具、无卡）：不带「此刻 / 想到的」，否则它会显得知道你的记忆
       if (!asksMemoryContext(mode)) return undefined
       const now = Date.now()
       const facts = buildSituation({
         now,
-        talkTimes: readAskHistory(askHistoryPath).map((entry) => entry.at),
-        lastDiaryDay: memoryStats(db).lastDay
+        talkTimes: talkTimes ?? readAskHistory(askHistoryPath).map((entry) => entry.at),
+        lastDiaryDay: memoryDayRange(db).lastDay
       })
       const firstTurn = question.trim() !== '' && (context.history?.length ?? 0) === 0
       // 「想到的」要翻日记：这次没开日记工具（自定义勾选）就不联想，免得给了片段又查不了
-      const keywords = firstTurn && mode.diary ? splitRecallKeywords(question) : []
-      const remembered =
-        keywords.length === 0
-          ? []
-          : diaryToolsFor(db)
-              .recall({ keywords, limit: 3 })
-              .map((hit) => ({
-                day: hit.day,
-                snippet: hit.text.replace(/\s+/gu, ' ').trim().slice(0, 120)
-              }))
-              .filter((hit) => hit.snippet !== '')
+      const recalled =
+        firstTurn && mode.diary
+          ? await recallOpening(db, question, now)
+          : { items: [], source: 'none' as const }
       // 只记日期不记正文：排查「开场有没有生效」用，别把日记写进日志
       captureLog('info', 'ask opening', {
         facts,
-        rememberedDays: remembered.map((hit) => hit.day)
+        rememberedDays: recalled.items.map((hit) => hit.day),
+        recallSource: recalled.source
       })
       return {
         facts,
-        ...(remembered.length > 0 ? { remembered } : {})
+        ...(recalled.items.length > 0 ? { remembered: recalled.items } : {})
       }
+    }
+    /**
+     * 第一问的「想到的」：向量优先，关键词兜底。
+     *
+     * 两条路返回同一形状，调用方（以及送云的载荷）不用分两套。向量只在索引已经有货时
+     * 才加载 embedder（没有向量时加载模型纯属白等）；embed 失败 / 维度不对 / 没过阈值
+     * 都回落到关键词——「没向量」不等于「没想到」。`source` 只进日志，方便真机核对走了哪条路。
+     */
+    const recallOpening = async (
+      db: ChainDb,
+      question: string,
+      now: number
+    ): Promise<{
+      items: Array<{ day: string; snippet: string }>
+      source: 'vector' | 'keyword'
+    }> => {
+      if (hasDiaryVectors(db)) {
+        const embedder = await loadChainEmbedder()
+        if (embedder !== null) {
+          const vectorHits = await recallDiaryByVector(db, embedder, question, { now, topK: 3 })
+          if (vectorHits !== null && vectorHits.length > 0) {
+            return {
+              items: vectorHits.map((hit) => ({ day: hit.day, snippet: hit.snippet })),
+              source: 'vector'
+            }
+          }
+        }
+      }
+      const keywords = splitRecallKeywords(question)
+      if (keywords.length === 0) return { items: [], source: 'keyword' }
+      const items = diaryToolsFor(db)
+        .recall({ keywords, limit: 3 })
+        .map((hit) => ({
+          day: hit.day,
+          snippet: hit.text.replace(/\s+/gu, ' ').trim().slice(0, 120)
+        }))
+        .filter((hit) => hit.snippet !== '')
+      return { items, source: 'keyword' }
     }
     const askOptionsFor = (
       db: ChainDb,
@@ -2124,6 +2169,11 @@ if (primaryInstance) {
      * - 默认关闭，设置里开了才占端口；没白名单 / 没 token 一律不起（fail-closed）。
      */
     const qqHistories = new Map<string, ChainAskTurnContext[]>()
+    /**
+     * QQ 通道自己的「说话时刻」：桌面问答历史不记 QQ 的话，以前 QQ 开场报的是
+     * 「桌面今天说过几句」——数字是别人的。这里按会话单独记，只用于开场事实。
+     */
+    const qqTalkTimes = new Map<string, number[]>()
     /** 通道配置：从没建过库（A3）就当关闭，不为 QQ 建库 */
     const qqChannelConfig = (): QqChannelConfig => {
       const db = connections.queryDb()
@@ -2144,6 +2194,9 @@ if (primaryInstance) {
       question: string,
       result: ChainAskResult
     ): void => {
+      // 说话时刻先记：哪怕这条没答出来（澄清 / 报错），用户确实说过话
+      const talks = qqTalkTimes.get(conversationId) ?? []
+      qqTalkTimes.set(conversationId, [...talks, Date.now()].slice(-200))
       const answer =
         result.kind === 'answer' || result.kind === 'insufficient' ? result.answer : ''
       if (answer.trim() === '') return
@@ -2168,7 +2221,11 @@ if (primaryInstance) {
           signal,
           mode: DEFAULT_ASK_MODE
         }
-        const options = askOptionsFor(db, context, askOpeningFor(db, text, context))
+        const options = askOptionsFor(
+          db,
+          context,
+          await askOpeningFor(db, text, context, qqTalkTimes.get(conversationId) ?? [])
+        )
         // QQ 发来的图片：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
         const result = await askChain(
           images !== undefined && images.length > 0
@@ -2268,7 +2325,7 @@ if (primaryInstance) {
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
           }
         }
-        return askChain(askOptionsFor(db, context, askOpeningFor(db, question, context)), question)
+        return askChain(askOptionsFor(db, context, await askOpeningFor(db, question, context)), question)
       },
       // 「还要继续查吗」→ 恢复暂停的循环（问题用检查点里的原话，续查通道不再传）
       resume: async (resumeId, decision, context) => {
@@ -2282,7 +2339,7 @@ if (primaryInstance) {
         }
         return askChain(
           {
-            ...askOptionsFor(db, context, askOpeningFor(db, '', context)),
+            ...askOptionsFor(db, context, await askOpeningFor(db, '', context)),
             resume: { id: resumeId, decision }
           },
           ''

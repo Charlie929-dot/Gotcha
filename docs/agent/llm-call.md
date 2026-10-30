@@ -424,7 +424,7 @@ CREATE TABLE mem_reflections (
 
 1. v0.2 设计（本文，现为 v0.3）。
 2. ✅ **解析 + 写入 + 评论 + 备份 + 测试（不依赖 LLM）**（2026-10-29）：`src/memory/marks.ts`（`[❤️]()` / `[❤️](评论)` / `[💬]` 解析、作者判定、线程、格式化）、`src/memory/write.ts`（`appendDiary` / `appendPlan` / `insertComment`，备份 + 原子写 + mtime/size 冲突重试 + BOM/CRLF 保留）、`vault.ts` 条目带 `author/comments/replies`（不落库、读时重解析）。**未接**：工具层与 UI（等 §12 第 4 步）、真日记写入（第 7 步）。
-3. ✅ **向量索引 + 回想**（2026-10-29）：排序层 `src/memory/recall.ts`（余弦 + 90 天半衰期 + `dedupeKey` 去重 + MMR + `textHash`）；索引层 `src/memory/vectors.ts` + schema **v10** 的 `mem_vectors`（增量按 `text_hash`、孤儿按「`item_id` 不在 `mem_items`」清、坏维度跳过）；组合根在**每次同步后**后台排一次（5s 防抖、一次 200 条、最多 20 档、复用 chain 的 bge 会话）。**未接**：`recall_diary` / act 的注入（第 4 步），`conversation` / `observation` / `self` 的向量还没写。
+3. ✅ **向量索引 + 回想**（2026-10-29）：排序层 `src/memory/recall.ts`（余弦 + 90 天半衰期 + `dedupeKey` 去重 + MMR + `textHash`）；索引层 `src/memory/vectors.ts` + schema **v10** 的 `mem_vectors`（增量按 `text_hash`、孤儿按「`item_id` 不在 `mem_items`」清、坏维度跳过）；组合根在**每次同步后**后台排一次（5s 防抖、一次 200 条、最多 20 档、复用 chain 的 bge 会话）。**2026-10-30 收敛**：`recallDiaryByVector` 接进第一问的「想到的」（向量优先、关键词兜底，日志 `askOpening.recallSource`），索引不再白算。**未接**：`recall_diary` 仍是关键词路、act 的注入（第 4 步），`conversation` / `observation` / `self` 的向量还没写。
 4. perceive/act 第一次调用 + 快照。
 5. **体验关口**：真机感受 perceive/act 手感、调提示词；手感对了再进下一步（2026-10-29 拍板）。
 6. 任务记忆 + 调度器 + `schedule_task` + follow-up review。

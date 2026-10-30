@@ -20,6 +20,7 @@ import {
   forgetVault,
   listMemoryItems,
   listMemorySources,
+  memoryDayRange,
   memoryStats,
   readMemoryDay,
   readObservations,
@@ -329,6 +330,23 @@ describe('sources / forgetVault：按目录清理', () => {
     syncVault(db, dir, { now: 1_000 })
     expect(forgetVault(db, join(dir, 'not-this-vault'))).toBe(0)
     expect(memoryStats(db).items).toBe(4)
+  })
+})
+
+// 开场每问都要「日记记到哪天」：只查首末日期，不读条目（2026-10-30 收敛）
+describe('memoryDayRange：只取首末日期', () => {
+  it('空库两头都是 null', () => {
+    expect(memoryDayRange(db)).toEqual({ firstDay: null, lastDay: null })
+  })
+
+  it('有数据时取最早 / 最晚的 day_key，与 memoryStats 的口径一致', () => {
+    write('2026-09-29.md', dayA)
+    write('2026-10-02.md', dayB)
+    syncVault(db, dir, { now: 1_000 })
+    expect(memoryDayRange(db)).toEqual({ firstDay: '2026-09-29', lastDay: '2026-10-02' })
+    const stats = memoryStats(db)
+    expect(memoryDayRange(db).lastDay).toBe(stats.lastDay)
+    expect(memoryDayRange(db).firstDay).toBe(stats.firstDay)
   })
 })
 

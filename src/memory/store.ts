@@ -730,6 +730,20 @@ function pruneDeleted(db: Db): void {
 /* 画像 / 观测                                                          */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 日记的日期范围（首日 / 末日）：只查两个聚合，不读条目。
+ *
+ * 开场的「他的日记记到哪天」只要最后一个日期；用 `memoryStats` 会顺带把
+ * 全部条目读一遍、逐条解析 tags / refs、再排一遍标签榜——那是「关于我」页面的活，
+ * 不该挂在每句话前面（2026-10-30 收敛：每问一次全表扫 → 一次聚合）。
+ */
+export function memoryDayRange(db: Db): { firstDay: string | null; lastDay: string | null } {
+  const row = db
+    .prepare('SELECT MIN(day_key) AS firstDay, MAX(day_key) AS lastDay FROM mem_items')
+    .get() as { firstDay: string | null; lastDay: string | null }
+  return { firstDay: row.firstDay ?? null, lastDay: row.lastDay ?? null }
+}
+
 export function memoryStats(db: Db): MemoryStats {
   const total = (db.prepare('SELECT COUNT(*) AS count FROM mem_items').get() as { count: number }).count
   const dayRow = db

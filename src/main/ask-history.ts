@@ -8,7 +8,7 @@
  * 只存「问过什么 / 答了什么 / 引用了哪几段」；截图与正文仍从段证据现读，
  * 所以段被保留期清掉之后，历史里只剩文字，引用点开可能读不到证据（如实报，不编）。
  */
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type {
   ChainAskCitation,
@@ -244,12 +244,57 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
   }
 }
 
+/**
+ * 解析结果的进程内缓存（2026-10-30 收敛）：文件是**只追加**的，每问都要拿一次时间戳。
+ * 以前每问 `readFileSync` + 逐行 `JSON.parse` 整个文件（永久保留、无界增长）；
+ * 现在按 `path + mtime + size` 命中缓存，自己追加/清空时顺手推进缓存，
+ * 只有文件被外部改过（手工编辑 / 拷回）才重解析。
+ *
+ * 缓存只留一份：问答历史只有一个文件，多份缓存反而会各自过期、互相打架。
+ */
+interface AskHistoryCache {
+  path: string
+  mtimeMs: number
+  size: number
+  /** 最新在前（与 `readAskHistory` 的返回顺序一致） */
+  entries: AskHistoryEntry[]
+}
+
+let historyCache: AskHistoryCache | null = null
+
+/** 用当前 stat 覆盖缓存头（追加 / 清空后调用；stat 失败就当缓存不可用） */
+function refreshCacheHeader(filePath: string, entries: AskHistoryEntry[]): void {
+  try {
+    const stat = statSync(filePath)
+    historyCache = { path: filePath, mtimeMs: stat.mtimeMs, size: stat.size, entries }
+  } catch {
+    historyCache = null
+  }
+}
+
 /** 读全部记录（**最新在前**）；文件不存在 / 读失败 / 坏行都按「没有」处理，不抛错、不建文件 */
 export function readAskHistory(filePath: string): AskHistoryEntry[] {
+  let stat: ReturnType<typeof statSync>
+  try {
+    stat = statSync(filePath)
+  } catch {
+    historyCache = null
+    return []
+  }
+  if (
+    historyCache !== null &&
+    historyCache.path === filePath &&
+    historyCache.mtimeMs === stat.mtimeMs &&
+    historyCache.size === stat.size
+  ) {
+    // 返回浅拷贝：调用方拿去做 filter / map，别让人改到缓存本体
+    return historyCache.entries.slice()
+  }
   let raw: string
   try {
     raw = readFileSync(filePath, 'utf8')
   } catch {
+    historyCache = null
     return []
   }
   const entries: AskHistoryEntry[] = []
@@ -265,18 +310,25 @@ export function readAskHistory(filePath: string): AskHistoryEntry[] {
     if (entry) entries.push(entry)
   }
   // 文件是追加写的，天然按时间正序；列表要最新在前
-  return entries.reverse()
+  const newestFirst = entries.reverse()
+  historyCache = { path: filePath, mtimeMs: stat.mtimeMs, size: stat.size, entries: newestFirst }
+  return newestFirst.slice()
 }
 
 export function appendAskHistory(filePath: string, entry: AskHistoryEntry): void {
   mkdirSync(dirname(filePath), { recursive: true })
   appendFileSync(filePath, `${JSON.stringify(entry)}\n`, 'utf8')
+  // 自己追加：把新条目推进缓存并刷新文件头，下一问就不用重读整个文件
+  if (historyCache !== null && historyCache.path === filePath) {
+    refreshCacheHeader(filePath, [entry, ...historyCache.entries])
+  }
 }
 
 /** 清空 = 截断成空文件（保留文件本身，下一条继续追加） */
 export function clearAskHistory(filePath: string): void {
   mkdirSync(dirname(filePath), { recursive: true })
   writeFileSync(filePath, '', 'utf8')
+  refreshCacheHeader(filePath, [])
 }
 
 /** 把一次问答结果折成一条记录；id 只要在同一进程内唯一即可（时刻 + 随机后缀） */

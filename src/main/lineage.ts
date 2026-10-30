@@ -14,11 +14,25 @@
 import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
+import {
+  defaultToolsForBranchKind,
+  normalizeAskTools,
+  type AskToolName
+} from '../chain/agent/tool-catalog'
+
 export const LINEAGE_VERSION = 1
 /** 一条命的上下文额度（方案 §5.1） */
 export const LINEAGE_LIFE_TOKENS = 500_000
 
 export type BranchStatus = 'alive' | 'dead' | 'frozen'
+
+/**
+ * 分支的种类（D72「分支即模式」）：
+ * - `persona`：普通节点 / 一代鱼，注入 persona，**默认全工具**；
+ * - `assistant`：助手记忆（`/mode ask`），无 persona，**默认无工具**，`/new` 开空分支；
+ * - `life`：出生主干（M4 传承写出生提交的地方），不能删、不参与模式切换。
+ */
+export type BranchKind = 'persona' | 'assistant' | 'life'
 
 export interface LineageGeneration {
   id: string
@@ -45,15 +59,29 @@ export interface LineageBranch {
    * 按**节点**记而不是按代：同一代的不同分支各有各的上下文（方案 §4 / §5.1）。
    */
   life_tokens_used: number
+  /** 分支种类（D72）；旧家谱缺省按 persona 读 */
+  kind: BranchKind
+  /**
+   * 这个分支挂的工具（元素名，D72）。缺省 = 按 kind 的默认值（persona 全开 / assistant 全关）；
+   * 用户 `/tool add|rm` 之后才显式出现。
+   */
+  tools?: AskToolName[]
+}
+
+/** 上次用的模式分支（D72）：`/mode ask|chat` 切回去的那一条 */
+export interface LineageLastMode {
+  ask?: string
+  chat?: string
 }
 
 export interface Lineage {
   version: typeof LINEAGE_VERSION
   life_tokens: number
-  /** 当前节点（分支名） */
+  /** 当前节点（分支名）；模式 = 它的 kind */
   active: string
   generations: LineageGeneration[]
   branches: LineageBranch[]
+  last?: LineageLastMode
 }
 
 export type LineageRead =
@@ -71,6 +99,18 @@ function readString(value: unknown): string | null {
 
 function readNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/** 旧家谱没有 kind：`life` 按主干读，其余一律 persona（M4 之前的节点都是普通节点） */
+function readBranchKind(value: unknown, branch: string): BranchKind {
+  if (value === 'persona' || value === 'assistant' || value === 'life') return value
+  return branch === 'life' ? 'life' : 'persona'
+}
+
+/** 只有「显式存过」才算配置过；缺省交给调用方按 kind 取默认值 */
+function readTools(value: unknown): AskToolName[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return normalizeAskTools(value)
 }
 
 function parseGeneration(value: unknown): LineageGeneration | null {
@@ -102,6 +142,7 @@ function parseBranch(value: unknown): LineageBranch | null {
   const status = value.status
   if (branch === null || generation === null || createdAt === null) return null
   if (status !== 'alive' && status !== 'dead' && status !== 'frozen') return null
+  const tools = readTools(value.tools)
   return {
     branch,
     generation,
@@ -109,7 +150,9 @@ function parseBranch(value: unknown): LineageBranch | null {
     created_at: createdAt,
     status,
     // M2 之前写的家谱没有这个字段：缺省 0（旧节点从下一次请求开始计）
-    life_tokens_used: readNumber(value.life_tokens_used) ?? 0
+    life_tokens_used: readNumber(value.life_tokens_used) ?? 0,
+    kind: readBranchKind(value.kind, branch),
+    ...(tools !== undefined ? { tools } : {})
   }
 }
 
@@ -135,7 +178,32 @@ export function parseLineage(raw: unknown): Lineage | null {
   }
   if (generations.length === 0 || branches.length === 0) return null
   if (!branches.some((branch) => branch.branch === active)) return null
-  return { version: LINEAGE_VERSION, life_tokens: lifeTokens, active, generations, branches }
+  const last = parseLastMode(raw.last, branches)
+  return {
+    version: LINEAGE_VERSION,
+    life_tokens: lifeTokens,
+    active,
+    generations,
+    branches,
+    ...(last !== undefined ? { last } : {})
+  }
+}
+
+/** `last` 里指向不存在的分支就当没记过（删节点 / 手改文件后不会切到空气） */
+function parseLastMode(
+  value: unknown,
+  branches: readonly LineageBranch[]
+): LineageLastMode | undefined {
+  if (!isRecord(value)) return undefined
+  const exists = (raw: unknown): string | undefined => {
+    const name = readString(raw)
+    if (name === null) return undefined
+    return branches.some((item) => item.branch === name) ? name : undefined
+  }
+  const ask = exists(value.ask)
+  const chat = exists(value.chat)
+  if (ask === undefined && chat === undefined) return undefined
+  return { ...(ask !== undefined ? { ask } : {}), ...(chat !== undefined ? { chat } : {}) }
 }
 
 export function emptyLineage(now: number): Lineage {
@@ -162,7 +230,8 @@ export function emptyLineage(now: number): Lineage {
         parent: null,
         created_at: now,
         status: 'alive',
-        life_tokens_used: 0
+        life_tokens_used: 0,
+        kind: 'persona'
       }
     ]
   }
@@ -270,10 +339,31 @@ export interface AddBranchInput {
   /** 从哪个节点分出来；第一代 / 代分支为 null */
   parent: string | null
   at: number
+  /** 分支种类（D72）；缺省 persona */
+  kind?: BranchKind
+  /** 显式工具集（D72）；缺省按 kind 的默认值 */
+  tools?: readonly AskToolName[]
 }
 
 export function findBranch(lineage: Lineage, branch: string): LineageBranch | null {
   return lineage.branches.find((item) => item.branch === branch) ?? null
+}
+
+/** 某分支的种类；分支不存在返回 null */
+export function branchKindOf(lineage: Lineage, branch: string): BranchKind | null {
+  return findBranch(lineage, branch)?.kind ?? null
+}
+
+/**
+ * 某分支实际生效的工具：显式配置优先，缺省按 kind 取默认值（D72）。
+ * 分支不存在返回空表。
+ */
+export function toolsOfBranch(lineage: Lineage, branch: string): AskToolName[] {
+  const node = findBranch(lineage, branch)
+  if (node === null) return []
+  return node.tools !== undefined
+    ? normalizeAskTools(node.tools)
+    : defaultToolsForBranchKind(node.kind)
 }
 
 export function generationOf(lineage: Lineage, branch: string): LineageGeneration | null {
@@ -303,9 +393,33 @@ export function withBranchAdded(lineage: Lineage, input: AddBranchInput): Lineag
         parent: input.parent,
         created_at: input.at,
         status: 'alive',
-        life_tokens_used: 0
+        life_tokens_used: 0,
+        kind: input.kind ?? 'persona',
+        ...(input.tools !== undefined ? { tools: normalizeAskTools(input.tools) } : {})
       }
     ]
+  }
+}
+
+/** 记下「上次这个模式用的分支」（D72：`/mode ask|chat` 切回去） */
+export function withLastMode(lineage: Lineage, kind: 'ask' | 'chat', branch: string): Lineage {
+  const last: LineageLastMode = { ...lineage.last, [kind]: branch }
+  return { ...lineage, last }
+}
+
+/** 改某个分支的工具集（D72 `/tool add|rm`）；分支不存在 / 名字非法返回 null */
+export function withBranchTools(
+  lineage: Lineage,
+  branch: string,
+  tools: readonly AskToolName[]
+): Lineage | null {
+  if (findBranch(lineage, branch) === null) return null
+  const next = normalizeAskTools(tools)
+  return {
+    ...lineage,
+    branches: lineage.branches.map((item) =>
+      item.branch === branch ? { ...item, tools: next } : item
+    )
   }
 }
 
@@ -316,13 +430,32 @@ export function withActive(lineage: Lineage, branch: string): Lineage | null {
   return { ...lineage, active: branch }
 }
 
-/** 删除一条节点：当前节点 / 代的主分支 / 有子节点的都不许删，返回 null 由调用方报原因。 */
+/** 删除一条节点：当前节点 / 代的主分支 / 有子节点 / life 主干都不许删，返回 null 由调用方报原因。 */
 export function withBranchRemoved(lineage: Lineage, branch: string): Lineage | null {
-  if (findBranch(lineage, branch) === null) return null
+  const node = findBranch(lineage, branch)
+  if (node === null) return null
   if (lineage.active === branch) return null
+  if (node.kind === 'life') return null
   if (lineage.generations.some((item) => item.branch === branch)) return null
   if (lineage.branches.some((item) => item.parent === branch)) return null
-  return { ...lineage, branches: lineage.branches.filter((item) => item.branch !== branch) }
+  const last =
+    lineage.last === undefined
+      ? undefined
+      : {
+          ...(lineage.last.ask !== branch && lineage.last.ask !== undefined
+            ? { ask: lineage.last.ask }
+            : {}),
+          ...(lineage.last.chat !== branch && lineage.last.chat !== undefined
+            ? { chat: lineage.last.chat }
+            : {})
+        }
+  return {
+    ...lineage,
+    branches: lineage.branches.filter((item) => item.branch !== branch),
+    ...(last !== undefined && (last.ask !== undefined || last.chat !== undefined)
+      ? { last }
+      : { last: undefined })
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -388,9 +521,11 @@ export function withGenerationAdded(lineage: Lineage, input: AddGenerationInput)
         parent: null,
         created_at: input.at,
         status: 'alive',
-        life_tokens_used: 0
+        life_tokens_used: 0,
+        kind: 'persona'
       }
-    ]
+    ],
+    last: { ...lineage.last, chat: input.branch }
   }
 }
 
@@ -448,8 +583,9 @@ export async function recordLineageUsage(
   const read = await readLineage(filePath)
   if (read.status !== 'ok') return false
   const node = findBranch(read.lineage, branch)
-  // 只给活着的节点记账：传承后母亲已 dead，恢复中的最后一问不该把用量记到下一代头上
-  if (node === null || node.status !== 'alive') return false
+  // 只给活着的节点记账：传承后母亲已 dead，恢复中的最后一问不该把用量记到下一代头上；
+  // assistant 分支（D72）没有生命，也不记账。
+  if (node === null || node.status !== 'alive' || node.kind === 'assistant') return false
   const used = Math.max(0, Math.round(Number.isFinite(tokens) ? tokens : 0))
   const next: Lineage = {
     ...read.lineage,

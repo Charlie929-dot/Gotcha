@@ -207,6 +207,10 @@
 | `git checkout --orphan` 不等于空树 | 2026-10-30 M4：`--orphan` 只换 HEAD，旧文件还留在索引 / 工作区；直接提交会把母亲的 `conversations/` 带进女儿分支 | `switchCreateOrphan` 里执行 `git rm -rf --ignore-unmatch .` 清空，再写回 `.gitattributes` / `.gitignore` / 三个目录脚手架；单测见 `main-memory-repo.test.ts` 的 orphan 用例 |
 | 传承后母亲最后一问的 usage 会记到女儿头上 | 2026-10-30 M4：`onUsage` 以前在回调时现读 `lineage.active`，而传承会把 active 切到女儿；母亲那一问的用量就记成了女儿的生命 | 在 `askOptionsFor` 里捕获**这一问开始时**的 `life.branch` 传给 `onUsage`；`recordLineageUsage` 再拒绝 `status !== 'alive'` 的节点（恢复中的边角也挡住） |
 | 第一代不能套「出生日之后」的日记过滤 | 2026-10-30 M4：`lineage` 第一代 `born_at` 是建谱时间（今天），若给所有代都设 `sinceDay`，第一代会看不到今天的日记 | 只有 `generation.mother !== null`（女儿代）才算出生日边界；第一代 `bornDay` 不传，照常读全部日记 |
+| 切模式不会自动换会话：问答历史要按分支筛 | 2026-10-31 D72：会话文件在仓里、`checkout` 天然按分支隔离；但 `ask-history.jsonl` 是仓外单文件，只按 `conversationId` 取会把 chat 的问答带进 ask（反过来也一样） | `AskHistoryEntry` 加了 `branch` 字段：`record` 写入时的活动分支、`conversationHistory` / `ask_history` 工具按当前分支过滤；渲染层会话列表也按分支过滤 |
+| assistant 分支不能有生命 | 2026-10-31 D72：assistant 是「助手会话」不是一条鱼；若照常记账，`/mode ask` 聊到 500K 会突然冻结、被要求传承 | `askStateNow` 对 assistant 不返回 life（无 `<now>` 生命行）、`lifeEndedText` 直接放行、`recordLineageUsage` 拒绝 assistant；`conceive_daughter` 只在 persona 分支且工具非空时出现 |
+| `switch` 前要先提交：/mode 也会 checkout | 2026-10-31 D72：`/mode ask|chat` 本质是切分支，和 `/use` 同一条纪律——工作区脏就切不了 | 复用 `saveBefore()`（提交失败就不切）；新建 assistant 分支前也先提交当前节点，orphan 落一个出生提交（否则 unborn branch 不会出现在 `/log`） |
+| 工具白名单空表 ≠ 「不传」 | 2026-10-31 D72：链层 / 云端的 `tools` 不传 = 全开（老调用方与测试行为不变）；assistant 分支要显式传 `[]` 才是纯模型 | 组合根按分支 `toolsOfBranch()` 取值（assistant 默认 `[]`），链层默认值 `ASK_TOOL_NAMES`；`/tool rm` 可以合法清空，别把 `[]` 当 falsy 丢掉 |
 
 ## 规则
 

@@ -1,94 +1,116 @@
 /**
- * 问记忆 · 模式（D62）
+ * 问记忆 · 模式与工具目录（D72「分支即模式」）
  *
- * 三个预设只是起点：屏幕记忆 / 日记 / 人格卡是三个独立开关。
- * 这里守三件事：
- * 1. 预设的值就是拍板人说的组合；
- * 2. 渲染层 / 持久化来的脏值不炸，缺字段按关处理（不静默升级成「全开」）；
- * 3. 无工具模式真的没有工具（单轮请求的前提）。
+ * 守四件事：
+ * 1. 两档的名字 / 别名（ask = 纯模型，chat = 带 persona；mem / 问记忆 落到 chat）；
+ * 2. 分支 kind ↔ 模式档位；只有 chat 注入「此刻 / 想到的」；
+ * 3. 工具目录：集合 / 元素 / 说明齐全，`/tool` 的规范化丢掉不认识的名字；
+ * 4. 默认工具：persona 全开（老行为），assistant 全关（纯模型）。
  */
 
 import { describe, expect, it } from 'vitest'
 
 import {
   ASK_MODE_LABELS,
-  ASK_MODE_PRESET_ORDER,
-  ASK_MODE_PRESETS,
-  askModePresetFromName,
-  askModePresetOf,
-  askToolGroupsOf,
+  askModeKindFromName,
+  askModeKindOfBranch,
   asksMemoryContext,
-  DEFAULT_ASK_MODE,
-  hasAskTools,
-  normalizeAskMode
+  modeSummary
 } from '../../src/chain/agent/mode'
+import {
+  ASK_TOOL_DIARY_NAMES,
+  ASK_TOOL_LABELS,
+  ASK_TOOL_NAMES,
+  ASK_TOOL_SCREEN_NAMES,
+  ASK_TOOL_SETS,
+  askToolSetOf,
+  defaultToolsForBranchKind,
+  hasDiaryTools,
+  hasScreenTools,
+  isAskToolName,
+  normalizeAskTools
+} from '../../src/chain/agent/tool-catalog'
 
-describe('模式预设', () => {
-  it('问记忆 = 屏幕 + 日记；聊天 = 日记 + 卡；提问 = 全关', () => {
-    expect(ASK_MODE_PRESETS.memory).toEqual({ screen: true, diary: true, card: false })
-    expect(ASK_MODE_PRESETS.chat).toEqual({ screen: false, diary: true, card: true })
-    expect(ASK_MODE_PRESETS.plain).toEqual({ screen: false, diary: false, card: false })
-    expect(ASK_MODE_PRESET_ORDER).toEqual(['memory', 'chat', 'plain'])
-  })
-
-  it('默认是问记忆（老调用方不传模式时行为不变）', () => {
-    expect(DEFAULT_ASK_MODE).toEqual(ASK_MODE_PRESETS.memory)
-  })
-
-  it('组合与预设的对应：完全一致才算某个预设', () => {
-    expect(askModePresetOf({ screen: true, diary: true, card: false })).toBe('memory')
-    expect(askModePresetOf({ screen: false, diary: true, card: true })).toBe('chat')
-    expect(askModePresetOf({ screen: true, diary: false, card: true })).toBeNull()
-  })
-
-  it('/mode 的别名：mem / chat / ask，另收 memory / plain / 中文名', () => {
-    expect(askModePresetFromName('mem')).toBe('memory')
-    expect(askModePresetFromName('MEMORY')).toBe('memory')
-    expect(askModePresetFromName(' 问记忆 ')).toBe('memory')
-    expect(askModePresetFromName('chat')).toBe('chat')
-    expect(askModePresetFromName('聊天')).toBe('chat')
-    expect(askModePresetFromName('ask')).toBe('plain')
-    expect(askModePresetFromName('plain')).toBe('plain')
-    expect(askModePresetFromName('提问')).toBe('plain')
-    expect(askModePresetFromName('随便')).toBeNull()
-    expect(ASK_MODE_LABELS).toEqual({ memory: '问记忆', chat: '聊天', plain: '提问' })
+describe('/mode 的名称', () => {
+  it('两档 + 中文名 + 旧别名', () => {
+    expect(ASK_MODE_LABELS).toEqual({ ask: '纯模型', chat: '聊天' })
+    expect(askModeKindFromName('ask')).toBe('ask')
+    expect(askModeKindFromName('pure')).toBe('ask')
+    expect(askModeKindFromName(' 纯模型 ')).toBe('ask')
+    expect(askModeKindFromName('chat')).toBe('chat')
+    expect(askModeKindFromName('聊天')).toBe('chat')
+    // D62 的三个旧名字：mem / memory / 问记忆 都落到 chat（带 persona 的记忆模式）
+    expect(askModeKindFromName('mem')).toBe('chat')
+    expect(askModeKindFromName('MEMORY')).toBe('chat')
+    expect(askModeKindFromName('问记忆')).toBe('chat')
+    expect(askModeKindFromName('随便')).toBeNull()
   })
 })
 
-describe('normalizeAskMode', () => {
-  it('不是对象 → 默认；对象里缺字段 → 关（不猜用户想开）', () => {
-    expect(normalizeAskMode(undefined)).toEqual(ASK_MODE_PRESETS.memory)
-    expect(normalizeAskMode('chat')).toEqual(ASK_MODE_PRESETS.memory)
-    expect(normalizeAskMode({ card: true })).toEqual({ screen: false, diary: false, card: true })
-    expect(normalizeAskMode({ screen: true, diary: false, card: true })).toEqual({
-      screen: true,
-      diary: false,
-      card: true
-    })
+describe('分支 kind ↔ 模式', () => {
+  it('assistant = ask，persona / life = chat', () => {
+    expect(askModeKindOfBranch('assistant')).toBe('ask')
+    expect(askModeKindOfBranch('persona')).toBe('chat')
+    expect(askModeKindOfBranch('life')).toBe('chat')
   })
 
-  it('非布尔值一律按关处理', () => {
-    expect(normalizeAskMode({ screen: 'yes', diary: 1, card: null })).toEqual({
-      screen: false,
-      diary: false,
-      card: false
-    })
+  it('只有 chat 带「此刻 / 想到的」开场', () => {
+    expect(asksMemoryContext('chat')).toBe(true)
+    expect(asksMemoryContext('ask')).toBe(false)
+  })
+
+  it('一行摘要带分支与工具数', () => {
+    expect(
+      modeSummary({ kind: 'ask', branch: 'assistant', tools: [] })
+    ).toBe('纯模型（分支 assistant · 无工具）')
+    expect(
+      modeSummary({ kind: 'chat', branch: 'default', tools: [...ASK_TOOL_SCREEN_NAMES] })
+    ).toBe('聊天（分支 default · 4 个工具）')
   })
 })
 
-describe('工具组与上下文', () => {
-  it('卡不影响工具组', () => {
-    expect(askToolGroupsOf({ screen: true, diary: true, card: true })).toEqual({
-      screen: true,
-      diary: true
-    })
-    expect(hasAskTools({ screen: false, diary: false, card: true })).toBe(false)
-    expect(hasAskTools({ screen: true, diary: false, card: false })).toBe(true)
+describe('工具目录', () => {
+  it('两个集合：屏幕记忆 4 个 / 日记 3 个，编号顺序固定', () => {
+    expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual(['screen', 'diary'])
+    expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual(['屏幕记忆', '日记'])
+    expect(ASK_TOOL_SCREEN_NAMES).toEqual([
+      'search_info',
+      'get_freshness',
+      'read_segment',
+      'ask_history'
+    ])
+    expect(ASK_TOOL_DIARY_NAMES).toEqual(['recall_diary', 'read_diary', 'memory_profile'])
+    expect(ASK_TOOL_NAMES).toHaveLength(7)
   })
 
-  it('纯提问不带「此刻 / 想到的」；有屏幕或卡才带', () => {
-    expect(asksMemoryContext(ASK_MODE_PRESETS.plain)).toBe(false)
-    expect(asksMemoryContext(ASK_MODE_PRESETS.memory)).toBe(true)
-    expect(asksMemoryContext(ASK_MODE_PRESETS.chat)).toBe(true)
+  it('每个元素都有说明，且只属于一个集合', () => {
+    for (const name of ASK_TOOL_NAMES) {
+      expect(ASK_TOOL_LABELS[name]).toBeTruthy()
+      expect(askToolSetOf(name)?.tools).toContain(name)
+    }
+    expect(askToolSetOf('conceive_daughter')).toBeNull()
+  })
+
+  it('规范化：丢掉不认识的、去重、按目录顺序', () => {
+    expect(normalizeAskTools(['memory_profile', 'nope', 'search_info', 'search_info'])).toEqual([
+      'search_info',
+      'memory_profile'
+    ])
+    expect(normalizeAskTools([])).toEqual([])
+    expect(isAskToolName('read_diary')).toBe(true)
+    expect(isAskToolName('conceive_daughter')).toBe(false)
+  })
+
+  it('屏幕 / 日记判定按元素算，不按整个集合', () => {
+    expect(hasScreenTools(['get_freshness'])).toBe(true)
+    expect(hasScreenTools(['read_diary'])).toBe(false)
+    expect(hasDiaryTools(['memory_profile'])).toBe(true)
+    expect(hasDiaryTools(['search_info'])).toBe(false)
+  })
+
+  it('默认值：persona / life 全开，assistant 全关', () => {
+    expect(defaultToolsForBranchKind('persona')).toEqual([...ASK_TOOL_NAMES])
+    expect(defaultToolsForBranchKind('life')).toEqual([...ASK_TOOL_NAMES])
+    expect(defaultToolsForBranchKind('assistant')).toEqual([])
   })
 })

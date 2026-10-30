@@ -117,10 +117,10 @@ export interface LlmCompleteOptions {
    */
   personaPrompt?: string
   /**
-   * 工具循环给哪些工具组（D62 模式）：`screen` = 屏幕记忆工具，`diary` = 日记工具。
-   * 缺省两组都开（老行为）。两组都关时：不带 tools、不写「数据边界 / 工具」段。
+   * 工具循环发哪些工具（D72 分支工具白名单）：元素名（`search_info` / `recall_diary`…）。
+   * 缺省空表 = 纯模型：不带 tools、不写「数据边界 / 工具」段。
    */
-  toolGroups?: { screen: boolean; diary: boolean }
+  toolElements?: readonly string[]
   /**
    * 传承（M4）：生命 ≤15% 时才带 `conceive_daughter` 这个工具（以及 system 里的一行说明）。
    * 缺省 false = 不给模型这个入口。

@@ -1,5 +1,5 @@
 /**
- * 问记忆 · 本地命令（memory-life M1/M2，2026-10-30）
+ * 问记忆 · 本地命令（memory-life M1/M2/M3/M5，2026-10-30）
  *
  * 命令是**一条普通消息**：文本以 `/` 开头就先过这里；命中就在本地执行、回一条文本，
  * 不经过模型、不进问答历史、不计生命、不占 QQ 限流（方案 §6 / §6.2）。
@@ -7,10 +7,12 @@
  * M1：`/help` / `/backup`。
  * M2：`/log` `/new` `/use` `/del`——节点（git 分支）的看 / 开 / 切 / 删，
  * 外加历史提交只读查看（detached；第一次提问时由组合根自动分叉）。
+ * M5（D72）：`/mode ask|chat` 切分支（分支即模式）、`/tool set|ele|add|rm` 改分支的工具白名单。
  *
- * 两条纪律：
+ * 三条纪律：
  * - 任何切换前先提交当前节点；提交失败就**不切**（宁可报错，不可丢记忆）；
- * - 节点名统一走拼音 slug（`/new 春天` → `spring`），git 分支名只含 `[a-z0-9-]`。
+ * - 节点名统一走拼音 slug（`/new 春天` → `spring`），git 分支名只含 `[a-z0-9-]`；
+ * - 家谱（权威）最后写：先让 git 就位，再改 active，免得家谱与 HEAD 打架。
  */
 
 import { pinyin } from 'pinyin-pro'
@@ -18,23 +20,37 @@ import { pinyin } from 'pinyin-pro'
 import type { ChainAskResult, ChainAskStats } from '../chain/agent/types'
 import {
   ASK_MODE_LABELS,
-  ASK_MODE_PRESETS,
-  askModePresetFromName,
-  askModePresetOf,
-  DEFAULT_ASK_MODE,
-  type AskModeConfig
+  askModeKindFromName,
+  askModeKindOfBranch,
+  modeSummary,
+  type AskModeKind,
+  type AskModeState
 } from '../chain/agent/mode'
 import {
+  ASK_TOOL_LABELS,
+  ASK_TOOL_NAMES,
+  ASK_TOOL_SETS,
+  defaultToolsForBranchKind,
+  normalizeAskTools,
+  type AskToolName,
+  type AskToolSet
+} from '../chain/agent/tool-catalog'
+import {
+  branchKindOf,
   childBranches,
   ensureLineage,
   findBranch,
   generationOf,
   lineageSnapshot,
   readLineage,
+  toolsOfBranch,
   withActive,
   withBranchAdded,
   withBranchRemoved,
+  withBranchTools,
+  withLastMode,
   writeLineage,
+  type BranchKind,
   type Lineage,
   type LineageRead
 } from './lineage'
@@ -90,10 +106,32 @@ export type CompactOutcome =
     }
 
 /** 方案里定义过的命令（含未实现的）：用于区分「拼错」与「还没做」 */
-export const KNOWN_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact', 'mode'] as const
+export const KNOWN_COMMANDS = [
+  'help',
+  'log',
+  'new',
+  'use',
+  'del',
+  'backup',
+  'cancel',
+  'compact',
+  'mode',
+  'tool'
+] as const
 
 /** 当前已经接上的命令 */
-export const READY_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact', 'mode'] as const
+export const READY_COMMANDS = [
+  'help',
+  'log',
+  'new',
+  'use',
+  'del',
+  'backup',
+  'cancel',
+  'compact',
+  'mode',
+  'tool'
+] as const
 
 /** 命名 / 删除确认的等待时限（方案 §6.2：60 秒超时，可 /cancel） */
 export const COMMAND_WAIT_TIMEOUT_MS = 60_000
@@ -129,21 +167,9 @@ export function slugifyNodeName(name: string): string | null {
 }
 
 /** 命令回执：形状与问答复保持一致，界面当一条普通答复显示 */
-export function commandResult(text: string, mode?: AskModeConfig): ChainAskResult {
+export function commandResult(text: string, mode?: AskModeState): ChainAskResult {
   const stats: ChainAskStats = { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
   return { kind: 'command', text, stats, ...(mode !== undefined ? { mode } : {}) }
-}
-
-/** 模式的人话摘要（`/mode` 回执用）：`聊天（屏幕记忆关 · 日记开 · 人格卡开）` */
-function modeSummary(mode: AskModeConfig): string {
-  const preset = askModePresetOf(mode)
-  const label = preset === null ? '组合' : ASK_MODE_LABELS[preset]
-  const parts = [
-    mode.screen ? '屏幕记忆开' : '屏幕记忆关',
-    mode.diary ? '日记开' : '日记关',
-    mode.card ? '人格卡开' : '人格卡关'
-  ]
-  return `${label}（${parts.join(' · ')}）`
 }
 
 function pad2(value: number): string {
@@ -222,11 +248,19 @@ function orderBranches(lineage: Lineage | null, branches: readonly MemoryBranchI
   return out
 }
 
-async function syncActive(deps: CommandDeps, lineage: Lineage | null, branch: string): Promise<void> {
-  if (lineage === null) return
-  const next = withActive(lineage, branch)
-  if (next === null || next === lineage) return
-  await writeLineageQuietly(deps, next)
+/** 切活动节点（顺手记下「上次这个模式用的分支」）；返回更新后的家谱（无家谱 / 失败返回 undefined） */
+async function syncActive(
+  deps: CommandDeps,
+  lineage: Lineage | null,
+  branch: string,
+  kind?: AskModeKind
+): Promise<Lineage | undefined> {
+  if (lineage === null) return undefined
+  const activated = withActive(lineage, branch)
+  if (activated === null) return undefined
+  const next = kind !== undefined ? withLastMode(activated, kind, branch) : activated
+  if (next !== lineage) await writeLineageQuietly(deps, next)
+  return next
 }
 
 async function writeLineageQuietly(deps: CommandDeps, lineage: Lineage): Promise<void> {
@@ -255,21 +289,23 @@ async function helpText(deps: CommandDeps): Promise<string> {
     read = { status: 'invalid', detail: 'read' }
   }
   const active = read.status === 'ok' ? read.lineage.active : 'default'
+  const activeKind = read.status === 'ok' ? branchKindOf(read.lineage, active) : 'persona'
   return [
-    '问记忆 · 记忆仓（M3 节点 + 生命）',
+    '问记忆 · 记忆仓（M5 节点 + 生命 + 分支即模式）',
     '',
     '可用命令：',
     '  /help            看这一页',
     '  /log             看记忆节点（编号给 /use 用）',
-    '  /new <名字>      从当前节点开新分支（中文转拼音）',
+    '  /new <名字>      从当前节点开新分支（assistant 分支 = 开空会话）',
     '  /use <名字|编号|提交>  切节点；切历史提交 = 只读查看',
     '  /del <名字>      删节点（要回 confirm）',
+    '  /mode ask|chat   切模式（ask = 纯模型，chat = 带 persona；切分支）',
+    '  /tool            看当前分支的工具；set / ele / add / rm',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
-    '  /mode [chat|ask|mem]  切模式（问记忆 / 聊天 / 提问；下一条生效）',
     '  /backup          立即提交记忆；配了远端就推送',
     '  /cancel          取消等待中的命名 / 删除',
     '',
-    `当前节点：${active}`,
+    `当前节点：${active}（${activeKind === 'assistant' ? '纯模型' : '聊天'}）`,
     `记忆仓：${repoLine}`
   ].join('\n')
 }
@@ -290,9 +326,15 @@ async function logText(deps: CommandDeps): Promise<string> {
     if (info === undefined) return
     const node = lineage === null ? null : findBranch(lineage, branch)
     const parentText = node?.parent ? `（从 ${node.parent} 分叉）` : ''
+    const kindText = node === null ? '' : node.kind === 'assistant' ? '  [纯模型]' : node.kind === 'life' ? '  [主干]' : ''
     const current = head.branch === branch ? '  ← 当前' : ''
-    lines.push(`[${index + 1}] ${branch}${parentText}${current}`)
-    lines.push(`    ${info.sha}  ${info.subject}`)
+    lines.push(`[${index + 1}] ${branch}${kindText}${parentText}${current}`)
+    const toolCount = lineage === null ? null : toolsOfBranch(lineage, branch).length
+    lines.push(
+      toolCount === null
+        ? `    ${info.sha}  ${info.subject}`
+        : `    ${info.sha}  ${info.subject}  · 工具 ${toolCount} 个`
+    )
   })
   if (head.detached && head.sha !== null) {
     lines.push('')
@@ -302,43 +344,193 @@ async function logText(deps: CommandDeps): Promise<string> {
   return lines.join('\n')
 }
 
-async function createNode(deps: CommandDeps, slug: string, at: number): Promise<string> {
+/** 家谱里某分支的模式描述（`/mode`、`/use`、`ask:mode` 共用） */
+export function modeStateOf(lineage: Lineage, branch: string): AskModeState {
+  const kind = branchKindOf(lineage, branch) ?? 'persona'
+  return { kind: askModeKindOfBranch(kind), branch, tools: toolsOfBranch(lineage, branch) }
+}
+
+/** 当前模式（命令回执 / 界面模式条用）：家谱读不到就按 default + persona 兜底，不编造别的分支 */
+export async function currentModeState(deps: CommandDeps): Promise<AskModeState> {
+  const read = await readLineage(deps.lineageFile)
+  if (read.status === 'ok') return modeStateOf(read.lineage, read.lineage.active)
+  return { kind: 'chat', branch: 'default', tools: defaultToolsForBranchKind('persona') }
+}
+
+/** 家谱里没有、但 git 里有（M4 出生线）：补一条 life 节点，别让它变成幽灵分支 */
+async function adoptLifeBranch(deps: CommandDeps, lineage: Lineage, at: number): Promise<Lineage | null> {
+  if (findBranch(lineage, 'life') !== null) return lineage
+  const branches = await deps.repo.listBranches()
+  if (!branches.some((entry) => entry.branch === 'life')) return lineage
+  return withBranchAdded(lineage, {
+    branch: 'life',
+    generation: lineage.generations[0]?.id ?? 'gen-1',
+    parent: lineage.generations[0]?.branch ?? 'default',
+    at,
+    kind: 'life'
+  })
+}
+
+/** 确保 `life` 主干存在（出生提交写在这里）；返回更新后的家谱 */
+async function ensureLifeBranch(
+  deps: CommandDeps,
+  lineage: Lineage,
+  at: number
+): Promise<{ lineage: Lineage; error?: string }> {
+  const adopted = await adoptLifeBranch(deps, lineage, at)
+  if (adopted === null) return { lineage, error: 'life 主干加不进家谱（细节看日志）。' }
+  if (findBranch(adopted, 'life') !== null) return { lineage: adopted }
+
+  const saved = await saveBefore(deps, 'new')
+  if (saved !== null) return { lineage, error: saved }
+  const created = await deps.repo.switchCreateOrphan('life')
+  if (!created.ok) return { lineage, error: failureReasonText(created, '开出 life 主干') }
+  const added = withBranchAdded(adopted, {
+    branch: 'life',
+    generation: adopted.generations[0]?.id ?? 'gen-1',
+    parent: adopted.generations[0]?.branch ?? 'default',
+    at,
+    kind: 'life'
+  })
+  if (added === null) return { lineage, error: 'life 主干加不进家谱（细节看日志）。' }
+  await writeLineageQuietly(deps, added)
+  await deps.repo.commit('memory: life')
+  return { lineage: added }
+}
+
+/** assistant 分支的候选名：`assistant` / `assistant-2` / … */
+function nextAssistantName(lineage: Lineage, taken: readonly MemoryBranchInfo[]): string {
+  const used = new Set<string>([
+    ...lineage.branches.map((item) => item.branch),
+    ...taken.map((item) => item.branch)
+  ])
+  if (!used.has('assistant')) return 'assistant'
+  for (let index = 2; index < 1_000; index += 1) {
+    const name = `assistant-${index}`
+    if (!used.has(name)) return name
+  }
+  return `assistant-${Date.now().toString(36)}`
+}
+
+/** 开一条 assistant 空分支（orphan 空树：只有会话，没有别的记忆） */
+async function createAssistantBranch(
+  deps: CommandDeps,
+  lineage: Lineage,
+  at: number
+): Promise<{ lineage?: Lineage; branch?: string; error?: string }> {
   const status = await deps.repo.status()
-  if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
+  if (!status.ok) return { error: `记忆仓不可用：${repoReasonText(status.reason)}` }
+  const ensured = await ensureLifeBranch(deps, lineage, at)
+  if (ensured.error !== undefined) return { error: ensured.error }
+  const base = ensured.lineage
+
+  const saved = await saveBefore(deps, 'new')
+  if (saved !== null) return { error: saved }
+  const name = nextAssistantName(base, await deps.repo.listBranches())
+  const created = await deps.repo.switchCreateOrphan(name)
+  if (!created.ok) return { error: failureReasonText(created, `开出 ${name}`) }
+
+  const added = withBranchAdded(base, {
+    branch: name,
+    generation: base.generations[0]?.id ?? 'gen-1',
+    parent: findBranch(base, 'life') !== null ? 'life' : null,
+    at,
+    kind: 'assistant'
+  })
+  if (added === null) return { error: 'assistant 分支加不进家谱（细节看日志）。' }
+  const next = withLastMode(withActive(added, name) ?? added, 'ask', name)
+  await writeLineageQuietly(deps, next)
+  // orphan 分支还没有提交：先落一个出生提交，否则 `/log` 看不到它（unborn branch）
+  await deps.repo.commit(`memory: assistant ${name}`)
+  deps.reloadConversations?.()
+  return { lineage: next, branch: name }
+}
+
+async function createNode(
+  deps: CommandDeps,
+  slug: string,
+  at: number
+): Promise<{ text: string; mode?: AskModeState }> {
+  const status = await deps.repo.status()
+  if (!status.ok) return { text: `记忆仓不可用：${repoReasonText(status.reason)}` }
   const head = await deps.repo.head()
   if (head.detached) {
-    return '当前停在历史提交上——先发一句话从这里分叉，或 /use 回一个节点，再 /new。'
+    return { text: '当前停在历史提交上——先发一句话从这里分叉，或 /use 回一个节点，再 /new。' }
   }
   const current = head.branch ?? status.branch
   const branches = await deps.repo.listBranches()
   if (branches.some((entry) => entry.branch === slug)) {
-    return `节点 ${slug} 已经存在（/log 看看有哪些）。`
+    return { text: `节点 ${slug} 已经存在（/log 看看有哪些）。` }
   }
-
-  const saved = await saveBefore(deps, 'new')
-  if (saved !== null) return saved
-
-  const created = await deps.repo.switchCreate(slug)
-  if (!created.ok) return failureReasonText(created, `开出节点 ${slug}`)
 
   const read = await ensureLineage(deps.lineageFile, { now: at })
   const lineage = read.lineage
+  const currentKind = branchKindOf(lineage, current) ?? 'persona'
+  // assistant 分支的 `/new` = 开一条完全空的分支（只有会话，没有上下文）；persona 仍从当前节点分叉
+  if (currentKind === 'assistant') {
+    const saved = await saveBefore(deps, 'new')
+    if (saved !== null) return { text: saved }
+    const created = await deps.repo.switchCreateOrphan(slug)
+    if (!created.ok) return { text: failureReasonText(created, `开出空会话 ${slug}`) }
+    const tools = toolsOfBranch(lineage, current)
+    const added = withBranchAdded(lineage, {
+      branch: slug,
+      generation: generationOf(lineage, current)?.id ?? lineage.generations[0]?.id ?? 'gen-1',
+      parent: findBranch(lineage, 'life') !== null ? 'life' : null,
+      at,
+      kind: 'assistant',
+      tools
+    })
+    if (added === null) return { text: '分支加不进家谱（细节看日志）。' }
+    const next = withLastMode(withActive(added, slug) ?? added, 'ask', slug)
+    await writeLineageQuietly(deps, next)
+    await deps.repo.commit(`memory: assistant ${slug}`)
+    deps.reloadConversations?.()
+    return {
+      text: [
+        `===this is ${slug}===`,
+        `新会话 ${slug} 已开出（空分支：只有之后的对话，没有之前的记忆）。`,
+        '发一句话就开始记；/use 可以回以前的会话。'
+      ].join('\n'),
+      mode: modeStateOf(next, slug)
+    }
+  }
+
+  const saved = await saveBefore(deps, 'new')
+  if (saved !== null) return { text: saved }
+
+  const created = await deps.repo.switchCreate(slug)
+  if (!created.ok) return { text: failureReasonText(created, `开出节点 ${slug}`) }
+
   const parent = findBranch(lineage, current) !== null ? current : lineage.active
   const generation = generationOf(lineage, parent)?.id ?? lineage.generations[0]?.id ?? 'gen-1'
-  const added = withBranchAdded(lineage, { branch: slug, generation, parent, at })
-  if (added !== null) await writeLineageQuietly(deps, added)
+  const added = withBranchAdded(lineage, {
+    branch: slug,
+    generation,
+    parent,
+    at,
+    kind: 'persona'
+  })
+  if (added !== null) await writeLineageQuietly(deps, withActive(added, slug) ?? added)
   deps.reloadConversations?.()
 
-  return [
-    `===this is ${slug}===`,
-    `新节点 ${slug} 已从 ${parent} 开出，当前在这里。`,
-    '发一句话就开始记到这条线上；/use 可以切回去。'
-  ].join('\n')
+  return {
+    text: [
+      `===this is ${slug}===`,
+      `新节点 ${slug} 已从 ${parent} 开出，当前在这里。`,
+      '发一句话就开始记到这条线上；/use 可以切回去。'
+    ].join('\n'),
+    ...(added !== null ? { mode: modeStateOf(added, slug) } : {})
+  }
 }
 
-async function useNode(deps: CommandDeps, target: string, at: number): Promise<string> {
+async function useNode(
+  deps: CommandDeps,
+  target: string,
+  at: number
+): Promise<{ text: string; mode?: AskModeState }> {
   const status = await deps.repo.status()
-  if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
+  if (!status.ok) return { text: `记忆仓不可用：${repoReasonText(status.reason)}` }
   const head = await deps.repo.head()
   const branches = await deps.repo.listBranches()
   const read = await readLineage(deps.lineageFile)
@@ -348,39 +540,48 @@ async function useNode(deps: CommandDeps, target: string, at: number): Promise<s
   if (/^\d+$/u.test(target)) {
     const index = Number(target) - 1
     branchName = orderBranches(lineage, branches)[index] ?? null
-    if (branchName === null) return `没有第 ${target} 个节点（/log 看看有哪些）。`
+    if (branchName === null) return { text: `没有第 ${target} 个节点（/log 看看有哪些）。` }
   } else if (branches.some((entry) => entry.branch === target)) {
     branchName = target
   }
 
   if (branchName !== null) {
+    const mode = lineage !== null ? modeStateOf(lineage, branchName) : undefined
     if (head.branch === branchName) {
-      await syncActive(deps, lineage, branchName)
-      return `===this is ${branchName}===\n已经在 ${branchName}。`
+      const synced = await syncActive(deps, lineage, branchName, mode?.kind)
+      return {
+        text: `===this is ${branchName}===\n已经在 ${branchName}。`,
+        ...(synced !== undefined ? { mode: modeStateOf(synced, branchName) } : mode !== undefined ? { mode } : {})
+      }
     }
     const saved = await saveBefore(deps, 'use')
-    if (saved !== null) return saved
+    if (saved !== null) return { text: saved }
     const switched = await deps.repo.switchBranch(branchName)
-    if (!switched.ok) return failureReasonText(switched, `切到 ${branchName}`)
-    await syncActive(deps, lineage, branchName)
+    if (!switched.ok) return { text: failureReasonText(switched, `切到 ${branchName}`) }
+    const synced = await syncActive(deps, lineage, branchName, mode?.kind)
     deps.reloadConversations?.()
-    return `===this is ${branchName}===\n已切到节点 ${branchName}。这一问开始用它的记忆。`
+    return {
+      text: `===this is ${branchName}===\n已切到节点 ${branchName}。这一问开始用它的记忆。`,
+      ...(synced !== undefined ? { mode: modeStateOf(synced, branchName) } : {})
+    }
   }
 
   const sha = await deps.repo.revParse(target)
-  if (sha === null) return `没找到节点或提交「${target}」（/log 看看有哪些）。`
+  if (sha === null) return { text: `没找到节点或提交「${target}」（/log 看看有哪些）。` }
   const saved = await saveBefore(deps, 'use')
-  if (saved !== null) return saved
+  if (saved !== null) return { text: saved }
   const checkedOut = await deps.repo.checkoutCommit(sha)
-  if (!checkedOut.ok) return failureReasonText(checkedOut, `切到提交 ${sha}`)
+  if (!checkedOut.ok) return { text: failureReasonText(checkedOut, `切到提交 ${sha}`) }
   deps.reloadConversations?.()
 
   const from = head.branch ?? lineage?.active ?? 'default'
-  return [
-    `===this is 历史提交 ${sha}===`,
-    `已停在 ${sha}——这里是只读的旧位置，家谱不变。`,
-    `发第一句话会从这里分叉成 ${from}-<序号>；只看不聊不会留下分支。`
-  ].join('\n')
+  return {
+    text: [
+      `===this is 历史提交 ${sha}===`,
+      `已停在 ${sha}——这里是只读的旧位置，家谱不变。`,
+      `发第一句话会从这里分叉成 ${from}-<序号>；只看不聊不会留下分支。`
+    ].join('\n')
+  }
 }
 
 interface DeletableOk {
@@ -409,6 +610,7 @@ async function checkDeletable(deps: CommandDeps, slug: string): Promise<Deletabl
     return { ok: true, branch: slug }
   }
   if (slug === head.branch) return { ok: false, message: '不能删当前节点。' }
+  if (node.kind === 'life') return { ok: false, message: 'life 是出生主干，不能删。' }
   if (lineage.generations.some((item) => item.branch === slug)) {
     return { ok: false, message: `${slug} 是一代鱼的主分支，不能删。` }
   }
@@ -438,30 +640,229 @@ async function deleteNode(deps: CommandDeps, branch: string): Promise<string> {
 
 type Pending = { kind: 'name' } | { kind: 'delete'; branch: string } | null
 
-/** 命令上下文：`/compact` 要知道压哪个会话（桌面窗口的 conversationId）；`/mode` 要知道当前模式 */
+/** 命令上下文：`/compact` 要知道压哪个会话（桌面窗口的 conversationId）；模式按家谱现算 */
 export interface CommandContext {
   conversationId?: string
-  /** 渲染层这次提问带的模式（D62）；`/mode` 无参数时据此报「当前」 */
-  mode?: AskModeConfig
 }
 
-/** `/mode`：不带参数报当前；带名字切预设，回执里带目标模式由界面落地 */
-function modeText(context: CommandContext | undefined, args: readonly string[]): ChainAskResult {
-  const current = context?.mode ?? DEFAULT_ASK_MODE
-  const currentText = modeSummary(current)
-  const name = args.join(' ').trim()
-  if (name === '') {
-    return commandResult(
-      `当前模式：${currentText}\n用法：/mode [chat|ask|mem]（切了从下一条消息生效）`
-    )
+/* ------------------------------------------------------------------ */
+/* `/mode`（D72：分支即模式）与 `/tool`（D72：按分支的工具白名单）        */
+/* ------------------------------------------------------------------ */
+
+function describeTools(tools: readonly AskToolName[]): string {
+  return tools.length === 0 ? '无工具' : tools.join('、')
+}
+
+/** 目标分支：上次用过的那个还在就用它；否则 chat 回 default，ask 需要新建 */
+function modeTarget(
+  lineage: Lineage,
+  branches: readonly MemoryBranchInfo[],
+  kind: AskModeKind
+): string | null {
+  const has = (name: string | undefined): name is string =>
+    name !== undefined &&
+    branches.some((entry) => entry.branch === name) &&
+    findBranch(lineage, name) !== null
+  if (kind === 'ask') {
+    const last = lineage.last?.ask
+    if (has(last) && branchKindOf(lineage, last) === 'assistant') return last
+    return null
   }
-  const preset = askModePresetFromName(name)
-  if (preset === null) {
-    return commandResult(`不认识「${name}」。用法：/mode [chat|ask|mem]\n当前：${currentText}`)
+  const last = lineage.last?.chat
+  if (has(last) && branchKindOf(lineage, last) !== 'assistant') return last
+  if (has('default')) return 'default'
+  return (
+    lineage.branches.find(
+      (node) => node.kind !== 'assistant' && branches.some((entry) => entry.branch === node.branch)
+    )?.branch ?? null
+  )
+}
+
+async function switchMode(deps: CommandDeps, kind: AskModeKind, at: number): Promise<ChainAskResult> {
+  const status = await deps.repo.status()
+  if (!status.ok) return commandResult(`记忆仓不可用：${repoReasonText(status.reason)}`)
+  const head = await deps.repo.head()
+  if (head.detached) {
+    return commandResult('当前停在历史提交上——先 /use 回一个节点，再 /mode。')
   }
-  const next = ASK_MODE_PRESETS[preset]
-  const cardHint = preset === 'chat' ? '\n（聊天模式用人格卡；还没启用卡时先用默认人设）' : ''
-  return commandResult(`模式：${modeSummary(next)}（下一条生效）${cardHint}`, next)
+  const ensured = await ensureLineage(deps.lineageFile, { now: at })
+  const lineage = ensured.lineage
+  const branches = await deps.repo.listBranches()
+  const target = modeTarget(lineage, branches, kind)
+
+  if (target === null) {
+    if (kind === 'ask') {
+      const created = await createAssistantBranch(deps, lineage, at)
+      if (created.error !== undefined || created.branch === undefined || created.lineage === undefined) {
+        return commandResult(created.error ?? '开 assistant 分支失败（细节看日志）。')
+      }
+      const mode = modeStateOf(created.lineage, created.branch)
+      return commandResult(
+        [
+          `===this is ${created.branch}===`,
+          `模式：${modeSummary(mode)}（新开的 assistant 分支；只有之后的对话，没有之前的记忆）`,
+          '可以直接问了；/mode chat 切回带 persona 的那条线。'
+        ].join('\n'),
+        mode
+      )
+    }
+    return commandResult('家谱里没有可用的聊天分支（/log 看看有哪些）。')
+  }
+
+  const mode = modeStateOf(lineage, target)
+  if (target === lineage.active) {
+    await syncActive(deps, lineage, target, kind)
+    return commandResult(`===this is ${target}===\n已经在 ${modeSummary(mode)}。`, mode)
+  }
+  const saved = await saveBefore(deps, 'use')
+  if (saved !== null) return commandResult(saved)
+  const switched = await deps.repo.switchBranch(target)
+  if (!switched.ok) return commandResult(failureReasonText(switched, `切到 ${target}`))
+  const next = await syncActive(deps, lineage, target, kind)
+  deps.reloadConversations?.()
+  return commandResult(
+    [
+      `===this is ${target}===`,
+      `模式：${modeSummary(next !== undefined ? modeStateOf(next, target) : mode)}。`,
+      kind === 'ask'
+        ? '纯模型：不注 persona、默认不带工具；要工具就 /tool add。'
+        : '带 persona：人格卡 / 默认人设，工具按这个分支的 /tool 配置。'
+    ].join('\n'),
+    next !== undefined ? modeStateOf(next, target) : mode
+  )
+}
+
+/** 工具集 / 元素的编号：`/tool set` 与 `/tool ele` 共用，避免两套序号 */
+function toolSetLine(index: number, set: AskToolSet): string {
+  return `[${index}] ${set.id} · ${set.label}（${set.tools.length} 个）`
+}
+
+function toolSetText(): string {
+  return [
+    '工具集合（/tool ele <集合> 看元素）：',
+    ...ASK_TOOL_SETS.map((set, index) => toolSetLine(index + 1, set)),
+    '',
+    'conceive_daughter 不在里面：生命 ≤15% 时自动出现。'
+  ].join('\n')
+}
+
+function toolEleText(args: readonly string[]): string {
+  const want = args.join(' ').trim()
+  let sets = ASK_TOOL_SETS
+  if (want !== '') {
+    const set = resolveToolSet(want)
+    if (set === null) return `没有集合「${want}」（/tool set 看看有哪些）。`
+    sets = [set]
+  }
+  const lines = ['工具元素：']
+  for (const set of sets) {
+    const setIndex = ASK_TOOL_SETS.indexOf(set) + 1
+    lines.push(`[${setIndex}] ${set.id} · ${set.label}`)
+    set.tools.forEach((name, index) => {
+      lines.push(`    [${index + 1}] ${name} · ${ASK_TOOL_LABELS[name]}`)
+    })
+  }
+  lines.push('', '用法：/tool add screen:search_info,read_segment;diary；/tool rm 2')
+  return lines.join('\n')
+}
+
+function resolveToolSet(token: string): AskToolSet | null {
+  const raw = token.trim()
+  if (raw === '') return null
+  if (/^\d+$/u.test(raw)) return ASK_TOOL_SETS[Number(raw) - 1] ?? null
+  return (
+    ASK_TOOL_SETS.find(
+      (set) => set.id === raw.toLowerCase() || set.label === raw
+    ) ?? null
+  )
+}
+
+type ToolSpecParse =
+  | { ok: true; tools: AskToolName[] }
+  | { ok: false; message: string }
+
+/**
+ * `/tool add|rm` 的参数：`screen:search_info,read_segment;diary` 或 `1:1,3;2`。
+ * 集合可以写序号 / id / 中文名；元素可以写组内序号 / 名字；只写集合 = 整组。
+ */
+function parseToolSpec(raw: string): ToolSpecParse {
+  const text = raw.trim()
+  if (text === '') return { ok: false, message: '要一个工具集合（/tool set 看看有哪些）。' }
+  const picked: AskToolName[] = []
+  for (const group of text.split(';')) {
+    if (group.trim() === '') continue
+    const [setToken, eleToken] = group.split(':', 2)
+    const set = resolveToolSet(setToken ?? '')
+    if (set === null) return { ok: false, message: `没有集合「${(setToken ?? '').trim()}」（/tool set 看看有哪些）。` }
+    const elems = (eleToken ?? '').split(',').map((item) => item.trim()).filter((item) => item !== '')
+    if (elems.length === 0) {
+      picked.push(...set.tools)
+      continue
+    }
+    for (const elem of elems) {
+      const name = /^\d+$/u.test(elem) ? set.tools[Number(elem) - 1] : elem
+      if (name === undefined || !(set.tools as readonly string[]).includes(name)) {
+        return {
+          ok: false,
+          message: `「${set.id}」里没有「${elem}」（/tool ele ${set.id} 看看）。`
+        }
+      }
+      picked.push(name as AskToolName)
+    }
+  }
+  if (picked.length === 0) return { ok: false, message: '没解析出任何工具（/tool set 看看有哪些）。' }
+  return { ok: true, tools: normalizeAskTools(picked) }
+}
+
+async function toolSummary(deps: CommandDeps): Promise<string> {
+  const read = await readLineage(deps.lineageFile)
+  if (read.status !== 'ok') return '家谱读不出来（细节看日志）。'
+  const branch = read.lineage.active
+  const node = findBranch(read.lineage, branch)
+  const tools = toolsOfBranch(read.lineage, branch)
+  const kind = askModeKindOfBranch(node?.kind ?? 'persona')
+  return [
+    `当前分支：${branch}（${ASK_MODE_LABELS[kind]}）· ${tools.length} 个工具`,
+    tools.length === 0 ? '  （无工具：纯模型）' : `  ${describeTools(tools)}`,
+    '',
+    '用法：',
+    '  /tool set            列集合（带编号）',
+    '  /tool ele [集合]     列元素（带组内编号）',
+    '  /tool add screen:search_info,read_segment;diary',
+    '  /tool rm diary:memory_profile',
+    '改完从下一条消息生效；按分支存，/use 到别的节点不串。'
+  ].join('\n')
+}
+
+async function toolEdit(
+  deps: CommandDeps,
+  action: 'add' | 'rm',
+  raw: string,
+  at: number
+): Promise<string> {
+  const parsed = parseToolSpec(raw)
+  if (!parsed.ok) return parsed.message
+  const ensured = await ensureLineage(deps.lineageFile, { now: at })
+  const lineage = ensured.lineage
+  const branch = lineage.active
+  if (findBranch(lineage, branch) === null) return `家谱里没有当前分支 ${branch}（细节看日志）。`
+  const current = toolsOfBranch(lineage, branch)
+  const wanted = new Set<string>(action === 'add' ? current : current)
+  for (const name of parsed.tools) {
+    if (action === 'add') wanted.add(name)
+    else wanted.delete(name)
+  }
+  const next = normalizeAskTools([...wanted])
+  if (next.length === current.length && next.every((name, index) => name === current[index])) {
+    return `工具没变：${describeTools(next)}。`
+  }
+  const updated = withBranchTools(lineage, branch, next)
+  if (updated === null) return '工具写不进家谱（细节看日志）。'
+  await writeLineageQuietly(deps, updated)
+  return [
+    `工具（${next.length} 个）：${describeTools(next)}`,
+    `改在分支 ${branch} 上，下一条消息生效。`
+  ].join('\n')
 }
 
 /**
@@ -488,7 +889,8 @@ export function createCommandHandler(
     if (slug === null) {
       return commandResult(`「${raw}」转不出可用的节点名（用英文 / 数字 / 短一些的中文名）。`)
     }
-    return commandResult(await createNode(deps, slug, at))
+    const out = await createNode(deps, slug, at)
+    return commandResult(out.text, out.mode)
   }
 
   const handleCompact = async (context: CommandContext | undefined): Promise<ChainAskResult> => {
@@ -561,15 +963,47 @@ export function createCommandHandler(
       }
       case 'compact':
         return handleCompact(context)
-      case 'mode':
-        return modeText(context, parsed.args)
+      case 'mode': {
+        const name = parsed.args.join(' ').trim()
+        if (name === '') {
+          const mode = await currentModeState(deps)
+          return commandResult(
+            `当前模式：${modeSummary(mode)}\n用法：/mode ask|chat（切分支；mem / 问记忆 = chat）`
+          )
+        }
+        const kind = askModeKindFromName(name)
+        if (kind === null) {
+          return commandResult(`不认识「${name}」。用法：/mode ask|chat`)
+        }
+        return switchMode(deps, kind, at)
+      }
+      case 'tool': {
+        const sub = (parsed.args[0] ?? '').toLowerCase()
+        const raw = parsed.args.slice(1).join(' ').trim()
+        if (sub === '') return commandResult(await toolSummary(deps))
+        if (sub === 'set') return commandResult(toolSetText())
+        if (sub === 'ele' || sub === 'element' || sub === 'elements') {
+          return commandResult(toolEleText(parsed.args.slice(1)))
+        }
+        if (sub === 'add') {
+          if (raw === '') return commandResult('用法：/tool add screen:search_info,read_segment;diary')
+          return commandResult(await toolEdit(deps, 'add', raw, at))
+        }
+        if (sub === 'rm' || sub === 'remove' || sub === 'del') {
+          if (raw === '') return commandResult('用法：/tool rm screen / /tool rm diary:memory_profile')
+          return commandResult(await toolEdit(deps, 'rm', raw, at))
+        }
+        return commandResult(
+          `不认识 /tool ${sub}。用法：/tool [set|ele|add|rm]\n（/tool set 看集合，/tool ele 看元素）`
+        )
+      }
       case 'new': {
         const name = parsed.args.join(' ').trim()
         if (name === '') {
           pending = { kind: 'name' }
           pendingAt = at
           return commandResult(
-            '给新节点起个名字（中文会转成拼音，例如「春天」→ chun-tian），60 秒内发给我。'
+            '给新节点起个名字（中文会转成拼音，例如「春天」→ chun-tian），60 秒内发给我。\n（assistant 分支上 /new = 开一条只有会话的空分支）'
           )
         }
         return handleNodeName(name, at)
@@ -579,7 +1013,8 @@ export function createCommandHandler(
         if (target === '') {
           return commandResult('用法：/use <节点名|编号|提交>（先 /log 看看有哪些）')
         }
-        return commandResult(await useNode(deps, target, at))
+        const out = await useNode(deps, target, at)
+        return commandResult(out.text, out.mode)
       }
       case 'del': {
         const raw = parsed.args.join(' ').trim()

@@ -16,6 +16,7 @@
  */
 
 import type { CloudAskConversationTurn } from './conversation'
+import { ASK_TOOL_NAMES, hasScreenTools } from './tool-catalog'
 
 /** 出云文本的剥离结果（策略实现返回；核心只消费，不认识具体规则） */
 export interface AskTextRedaction {
@@ -440,8 +441,8 @@ export interface ChainAskLoopBuildInput {
   systemTime: string
   /** 与 `systemTime` 同一刻的毫秒值；缺省从字符串解析（测试 / 老调用方只给字符串也能用） */
   systemTimeMs?: number
-  /** 这次给哪些工具组（决定 `<now>` 里有没有数据边界 / 最近段；缺省两组都开） */
-  tools?: { screen: boolean; diary: boolean }
+  /** 这次给哪些工具（元素名，D72；决定 `<now>` 里有没有数据边界 / 最近段） */
+  tools?: readonly string[]
   freshness: AskLoopFreshness
   turns: readonly RedactableAskLoopTurn[]
   /** 同一会话之前的几轮（新对话不传；仅在没给 `conversation` 时用来播种） */
@@ -806,8 +807,8 @@ function renderNowText(
     lines.push('你想到的（只是联想，不一定对；想核对就用 recall_diary / read_diary）：')
     for (const item of opening.remembered) lines.push(`- [${item.day}] ${item.snippet}`)
   }
-  const groups = input.tools ?? { screen: true, diary: true }
-  if (groups.screen) {
+  const groups = input.tools ?? ASK_TOOL_NAMES
+  if (hasScreenTools(groups)) {
     const latest = input.freshness.latestEvidenceTs
     lines.push(
       `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${input.freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`

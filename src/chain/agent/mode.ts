@@ -1,116 +1,72 @@
 /**
- * 问记忆 · 模式（2026-10-30，D62）
+ * 问记忆 · 模式（2026-10-30，D72：「分支即模式」）
  *
- * 拍板人原话：「界面可以选择模式，问记忆模式（给工具，无人格卡）、聊天模式（人格卡，
- * 无电脑使用的记忆工具）、提问模式（无工具和人格卡），可以组合选择……不会每次都全量注入」。
+ * 两档，落成两种分支：
+ * - `ask`：纯模型（assistant 分支，不注入 persona、不读日记 / 屏幕记忆；
+ *   工具可 `/tool add`，但默认全关）；
+ * - `chat`：带 persona（persona 分支，人格卡或默认人设；工具默认全开）。
  *
- * 三个预设只是起点，底下是三个独立开关：
- * - `screen`：屏幕记忆工具（search_info / read_segment / ask_history / get_freshness）
- * - `diary` ：日记工具（recall_diary / read_diary / memory_profile）
- * - `card`  ：人格卡（整张卡注入 system）
+ * 模式不再随每条消息传（旧 D62 的 `AskModeConfig` 已删）：主进程按**当前分支的 kind**
+ * 现算，界面只显示、不决定。`/mode ask|chat` 是 `/use` 的语义化别名——切分支，
+ * 会话上下文跟着分支走（会话文件在仓里，一个分支一份）。
  *
- * 这个模块只做「模式 → 开关」的纯映射，不碰提示词、不碰 IPC：
- * 主进程按它决定传哪些依赖，链层按它决定发不发工具，云端策略按它拼 system 段。
+ * 这个模块只做「名字 ↔ 档位」和「这一档要不要注入记忆开场」的纯映射，不碰提示词、不碰 IPC。
  */
 
-export interface AskModeConfig {
-  /** 屏幕记忆工具 */
-  screen: boolean
-  /** 日记工具 */
-  diary: boolean
-  /** 人格卡 */
-  card: boolean
+import type { AskToolName } from './tool-catalog'
+
+export type AskModeKind = 'ask' | 'chat'
+
+/** 界面上「当前模式」的完整描述（命令回执 / `ask:mode` 共用） */
+export interface AskModeState {
+  kind: AskModeKind
+  /** 当前分支名（模式就是它） */
+  branch: string
+  /** 这个分支实际生效的工具（已按目录规范化） */
+  tools: readonly AskToolName[]
 }
 
-/** 工具组（链层 / 云端只需要这两个开关；卡不影响工具） */
-export interface AskToolGroups {
-  screen: boolean
-  diary: boolean
+/** 中文名（`/mode` 回执、模式条共用；不要在别处再抄一份） */
+export const ASK_MODE_LABELS: Readonly<Record<AskModeKind, string>> = {
+  ask: '纯模型',
+  chat: '聊天'
 }
 
-/** 预设：问记忆 = 屏幕 + 日记；聊天 = 日记 + 卡；提问 = 全关 */
-export const ASK_MODE_PRESETS = {
-  memory: { screen: true, diary: true, card: false },
-  chat: { screen: false, diary: true, card: true },
-  plain: { screen: false, diary: false, card: false }
-} as const satisfies Record<string, AskModeConfig>
-
-export type AskModePreset = keyof typeof ASK_MODE_PRESETS
-
-/** 界面按这个顺序展示预设（也是「新会话沿用上次」的合法值） */
-export const ASK_MODE_PRESET_ORDER: readonly AskModePreset[] = ['memory', 'chat', 'plain']
-
-/** 中文名（`/mode` 回执、界面提示共用；不要在别处再抄一份） */
-export const ASK_MODE_LABELS: Readonly<Record<AskModePreset, string>> = {
-  memory: '问记忆',
-  chat: '聊天',
-  plain: '提问'
-}
-
-/**
- * `/mode` 的别名（2026-10-30）：命令行里用短英文，中文名也认。
- * `mem` = 问记忆、`chat` = 聊天、`ask` = 提问（plain）。
- */
-const ASK_MODE_ALIASES: Readonly<Record<string, AskModePreset>> = {
-  mem: 'memory',
-  memory: 'memory',
-  '问记忆': 'memory',
+/** 别名：命令行短英文 + 中文名都认；`mem` / `memory` / 问记忆 落到 chat（带 persona 的记忆模式） */
+const ASK_MODE_ALIASES: Readonly<Record<string, AskModeKind>> = {
+  ask: 'ask',
+  pure: 'ask',
+  '纯模型': 'ask',
   chat: 'chat',
   '聊天': 'chat',
-  ask: 'plain',
-  plain: 'plain',
-  '提问': 'plain'
+  mem: 'chat',
+  memory: 'chat',
+  '问记忆': 'chat'
 }
 
-/** 命令 / 设置里给的名字 → 预设；不认识返回 null（不静默回落） */
-export function askModePresetFromName(raw: string): AskModePreset | null {
+/** 命令里给的名字 → 档位；不认识返回 null（不静默回落） */
+export function askModeKindFromName(raw: string): AskModeKind | null {
   const key = raw.trim().toLowerCase()
   return Object.prototype.hasOwnProperty.call(ASK_MODE_ALIASES, key)
     ? ASK_MODE_ALIASES[key]
     : null
 }
 
-export const DEFAULT_ASK_MODE: AskModeConfig = { ...ASK_MODE_PRESETS.memory }
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+/** 分支 kind → 模式档位（life 主干按 persona 算：它是出生线，聊起来也是同一条鱼） */
+export function askModeKindOfBranch(branchKind: 'persona' | 'assistant' | 'life'): AskModeKind {
+  return branchKind === 'assistant' ? 'ask' : 'chat'
 }
 
 /**
- * 把渲染层 / 持久化里存的模式钳成合法值：**不做静默升级**——
- * 不是对象就回落默认（问记忆），对象里缺的字段按关处理（用户确实只勾了那几项）。
+ * 要不要注入「此刻 / 想到的」开场：只有 chat 要。
+ * 纯模型档带这些会显得它知道你的记忆（D61 / D72）。
  */
-export function normalizeAskMode(raw: unknown): AskModeConfig {
-  if (!isPlainObject(raw)) return { ...DEFAULT_ASK_MODE }
-  return { screen: raw.screen === true, diary: raw.diary === true, card: raw.card === true }
+export function asksMemoryContext(kind: AskModeKind): boolean {
+  return kind === 'chat'
 }
 
-/** 这个模式是否正好等于某个预设（界面按钮高亮用） */
-export function askModePresetOf(mode: AskModeConfig): AskModePreset | null {
-  for (const name of ASK_MODE_PRESET_ORDER) {
-    const preset = ASK_MODE_PRESETS[name]
-    if (
-      preset.screen === mode.screen &&
-      preset.diary === mode.diary &&
-      preset.card === mode.card
-    ) {
-      return name
-    }
-  }
-  return null
-}
-
-/** 有没有任何工具（没有 = 单轮请求，不进工具循环） */
-export function hasAskTools(mode: AskModeConfig): boolean {
-  return mode.screen || mode.diary
-}
-
-/** 工具组：模式里卡不影响工具 */
-export function askToolGroupsOf(mode: AskModeConfig): AskToolGroups {
-  return { screen: mode.screen, diary: mode.diary }
-}
-
-/** 这个模式要不要注入开场（「此刻」/「想到的」）：纯提问不需要，否则会显得它知道你的记忆 */
-export function asksMemoryContext(mode: AskModeConfig): boolean {
-  return mode.screen || mode.card
+/** 一行摘要：`聊天（分支 default · 7 个工具）` */
+export function modeSummary(state: AskModeState): string {
+  const tools = state.tools.length === 0 ? '无工具' : `${state.tools.length} 个工具`
+  return `${ASK_MODE_LABELS[state.kind]}（分支 ${state.branch} · ${tools}）`
 }

@@ -49,15 +49,8 @@
 
         <div class="ask-modes" role="group" aria-label="模式">
           <span class="muted">模式</span>
-          <button type="button" class="mode-btn" data-mode="memory" title="屏幕记忆 + 日记，不带人格卡">问记忆</button>
-          <button type="button" class="mode-btn" data-mode="chat" title="人格卡 + 日记，不翻电脑记录">聊天</button>
-          <button type="button" class="mode-btn" data-mode="plain" title="不带工具、不带人格卡">提问</button>
-          <button type="button" id="mode-extra-toggle" class="ghost" aria-expanded="false" title="自由组合开关">组合</button>
-          <div id="mode-extra" class="mode-extra" hidden>
-            <label class="check"><input id="mode-screen" type="checkbox" /> 屏幕记忆</label>
-            <label class="check"><input id="mode-diary" type="checkbox" /> 日记</label>
-            <label class="check"><input id="mode-card" type="checkbox" /> 人格卡</label>
-          </div>
+          <button type="button" class="mode-btn" data-mode="chat" title="带 persona（人格卡 / 默认人设）；工具按 /tool 配置">聊天</button>
+          <button type="button" class="mode-btn" data-mode="ask" title="纯模型：不注 persona、默认不带工具；/tool 可加">纯模型</button>
           <span id="mode-note" class="muted"></span>
         </div>
 

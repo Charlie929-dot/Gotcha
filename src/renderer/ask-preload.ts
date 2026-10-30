@@ -8,7 +8,7 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision } from '../chain/agent/types'
-import type { AskModeConfig } from '../chain/agent/mode'
+import type { AskModeState } from '../chain/agent/mode'
 import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskConsentView, AskAttachmentInput } from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
@@ -32,9 +32,10 @@ export interface AskApi {
     question: string,
     conversationId?: string,
     imagePath?: string,
-    attachments?: readonly AskAttachmentInput[],
-    mode?: AskModeConfig
+    attachments?: readonly AskAttachmentInput[]
   ): Promise<ChainAskResult>
+  /** 当前模式（D72：模式 = 当前分支） */
+  mode(): Promise<AskModeState | null>
   /**
    * 「还要继续查吗」的选择：continue = 再给一轮检索预算，stop = 按现有结果收尾。
    * `resumeId` 来自 `continue-ask` 结果；过期 / 重开窗口后失效。
@@ -94,14 +95,14 @@ export interface AskApi {
 }
 
 const api: AskApi = {
-  query: (question, conversationId, imagePath, attachments, mode) =>
+  query: (question, conversationId, imagePath, attachments) =>
     ipcRenderer.invoke('ask:query', {
       question,
       ...(conversationId ? { conversationId } : {}),
       ...(imagePath ? { imagePath } : {}),
-      ...(attachments && attachments.length > 0 ? { attachments } : {}),
-      ...(mode ? { mode } : {})
+      ...(attachments && attachments.length > 0 ? { attachments } : {})
     }) as Promise<ChainAskResult>,
+  mode: () => ipcRenderer.invoke('ask:mode:get') as Promise<AskModeState | null>,
   resume: (resumeId, decision) =>
     ipcRenderer.invoke('ask:resume', { resumeId, decision }) as Promise<ChainAskResult>,
   cancel: () => ipcRenderer.invoke('ask:cancel') as Promise<boolean>,

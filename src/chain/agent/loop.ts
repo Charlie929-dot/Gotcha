@@ -52,6 +52,7 @@ import {
 } from '../../understand/cloud/llm-client'
 import type { ChainAskClientResolution, ChainAskLog } from './ask'
 import { readChainFreshness } from './freshness'
+import { ASK_TOOL_NAMES } from './tool-catalog'
 import { isNoEvidenceAnswer, memorySnippet, parseChainReply, parseChainReplyText, type CitationMeta } from './parse'
 import {
   type ChainAskCitation,
@@ -141,10 +142,10 @@ export interface AskLoopContext {
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 用默认的回忆助手口吻） */
   personaPrompt?: string
   /**
-   * 这次给哪些工具组（D62 模式）。不传 = 两组都开。
-   * 两组都关 = 单轮请求：不跑工具预算、不带 tools、不产生收尾轮。
+   * 这次给哪些工具（元素名，D72；来自当前分支的 `/tool` 配置）。
+   * 不传 = 空表 = 纯模型：单轮请求，不跑工具预算、不带 tools、不产生收尾轮。
    */
-  tools?: { screen: boolean; diary: boolean }
+  tools?: readonly string[]
   /**
    * 开场注入：「此刻」事实（每轮现算）+ 第一问的「想到的」日记片段。
    * 由组合根给出；载荷层统一过策略后再送云。
@@ -324,9 +325,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   }
   const systemTime = formatSystemTime(now)
   const systemTimeMs = now
-  /** 工具组（D62）：两组都关 = 单轮请求，不跑预算、不等待续查 */
-  const toolGroups = ctx.tools ?? { screen: true, diary: true }
-  const toolsAvailable = toolGroups.screen || toolGroups.diary
+  /** 工具白名单（D72）：缺省 = 全开（老调用方 / 测试行为不变）；空数组 = 纯模型 */
+  const tools = ctx.tools ?? ASK_TOOL_NAMES
+  const toolsAvailable = tools.length > 0
   /** 会话里之前的轮次（只追加的基底）；没有存储时为空 */
   const priorConversation = ctx.conversation?.load() ?? emptyAskConversation()
 
@@ -335,7 +336,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     question,
     systemTime,
     systemTimeMs,
-    tools: toolGroups,
+    tools,
     freshness,
     turns: [],
     ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
@@ -454,7 +455,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       question,
       systemTime,
       systemTimeMs,
-      tools: toolGroups,
+      tools,
       freshness,
       turns,
       ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
@@ -491,8 +492,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         ...(ctx.image ? { image: ctx.image } : {}),
         ...(ctx.personaPrompt ? { personaPrompt: ctx.personaPrompt } : {}),
-        // 工具组必须每轮都传：两组都关时客户端要据此摘掉「数据边界 / 工具」段
-        toolGroups,
+        // 工具白名单必须每轮都传：空表时客户端据此摘掉「数据边界 / 工具」段
+        toolElements: tools,
         // 传承（M4）：生命 ≤15% 才把 conceive_daughter 放进 tools + 工具清单
         ...(ctx.conceive ? { conceive: true } : {}),
         // 母亲的信：只有女儿代才有；放进 system 的 <mom_letter>

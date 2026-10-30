@@ -39,6 +39,11 @@ export interface AskHistoryEntry {
   id: string
   /** 所属会话（同一会话的多轮追问共用；老记录没有这个字段 = 单条会话） */
   conversationId?: string
+  /**
+   * 提问时所在的分支（D72 分支即模式）：上下文 / ask_history 只认同一个分支，
+   * 切 `/mode ask` 后不会把 chat 的记录带过去。老记录没有这个字段 = default。
+   */
+  branch?: string
   /** 提问时刻（毫秒） */
   at: number
   question: string
@@ -222,6 +227,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
   if (data.conversationId !== undefined && (typeof data.conversationId !== 'string' || data.conversationId === '')) {
     return null
   }
+  if (data.branch !== undefined && (typeof data.branch !== 'string' || data.branch === '')) return null
   if (data.conceived !== undefined && typeof data.conceived !== 'boolean') return null
   if (data.trace !== undefined && !isTrace(data.trace)) return null
   if (data.kind === 'clarify') {
@@ -235,6 +241,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
     question: data.question,
     kind: data.kind as AskHistoryEntry['kind'],
     ...(typeof data.conversationId === 'string' ? { conversationId: data.conversationId } : {}),
+    ...(typeof data.branch === 'string' ? { branch: data.branch } : {}),
     ...(typeof data.imagePath === 'string' ? { imagePath: data.imagePath } : {}),
     ...(Array.isArray(data.attachments) ? { attachments: data.attachments as AskHistoryAttachment[] } : {}),
     ...(typeof data.answer === 'string' ? { answer: data.answer } : {}),
@@ -366,7 +373,8 @@ export function toHistoryEntry(
   at: number,
   conversationId?: string,
   imagePath?: string,
-  attachments?: readonly AskHistoryAttachment[]
+  attachments?: readonly AskHistoryAttachment[],
+  branch?: string
 ): AskHistoryEntry {
   const base = {
     id: `${at.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
@@ -374,6 +382,7 @@ export function toHistoryEntry(
     question,
     stats: result.stats,
     ...(conversationId ? { conversationId } : {}),
+    ...(branch ? { branch } : {}),
     ...(imagePath ? { imagePath } : {}),
     ...(attachments && attachments.length > 0 ? { attachments: [...attachments] } : {}),
     // 过程（D55 ③）：所有出口都带（暂停轮不落历史，最终结果会带完整 steps）

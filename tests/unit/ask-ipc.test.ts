@@ -628,36 +628,31 @@ describe('ask IPC：记忆条目（浏览 / 删除 / 撤销）', () => {
   })
 })
 
-describe('ask IPC：模式（D62）', () => {
+describe('ask IPC：模式与分支（D72）', () => {
   const noEvidence: ChainAskResult = {
     kind: 'no-evidence',
     stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 }
   }
 
-  it('模式不是对象：直接拒，不静默猜', async () => {
-    const ask = vi.fn(async (): Promise<ChainAskResult> => noEvidence)
+  it('渲染层不再传模式：多余字段被忽略，不报错', async () => {
+    const ask = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => noEvidence)
     const query = handler(buildDeps({ ask }), 'ask:query')
     for (const mode of ['chat', 42, null, ['chat']]) {
       expect(await query(SENDER_OK as never, { question: '问', mode })).toMatchObject({
-        kind: 'error',
-        message: '模式不合法'
+        kind: 'no-evidence'
       })
     }
-    expect(ask).not.toHaveBeenCalled()
+    expect(ask).toHaveBeenCalledTimes(4)
+    // 上下文里只有会话 / 历史 / 信号（模式由主进程按分支现算）
+    expect(Object.keys(ask.mock.calls[0]![1])).not.toContain('mode')
   })
 
-  it('不传模式 = 问记忆（老调用方行为不变）', async () => {
-    const ask = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => noEvidence)
-    await handler(buildDeps({ ask }), 'ask:query')(SENDER_OK as never, { question: '问' })
-    expect(ask.mock.calls[0]![1].mode).toEqual({ screen: true, diary: true, card: false })
-  })
-
-  it('命令上下文带当前模式（/mode 要知道切之前是什么）', async () => {
+  it('命令上下文只带 conversationId（/compact 用；/mode 自己读家谱）', async () => {
     const command = vi.fn(async (): Promise<ChainAskResult> => ({
       kind: 'command',
       text: '模式：聊天',
       stats: { hits: 0, evidence: 0, cited: 0, questionChars: 0 },
-      mode: { screen: false, diary: true, card: true }
+      mode: { kind: 'chat', branch: 'default', tools: [] }
     }))
     const query = handler(buildDeps({ command }), 'ask:query')
     const result = await query(SENDER_OK as never, {
@@ -665,23 +660,32 @@ describe('ask IPC：模式（D62）', () => {
       conversationId: 'conv-1',
       mode: { screen: false, diary: true, card: true }
     })
-    expect(command).toHaveBeenCalledWith('/mode chat', {
-      conversationId: 'conv-1',
-      mode: { screen: false, diary: true, card: true }
+    expect(command).toHaveBeenCalledWith('/mode chat', { conversationId: 'conv-1' })
+    expect(result).toMatchObject({
+      kind: 'command',
+      mode: { kind: 'chat', branch: 'default', tools: [] }
     })
-    expect(result).toMatchObject({ kind: 'command', mode: { screen: false, diary: true, card: true } })
   })
 
-  it('聊天 / 组合模式原样交给主进程（缺字段按关）', async () => {
-    const ask = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => noEvidence)
-    const query = handler(buildDeps({ ask }), 'ask:query')
-    await query(SENDER_OK as never, { question: '问', mode: { screen: false, diary: true, card: true } })
-    expect(ask.mock.calls[0]![1].mode).toEqual({ screen: false, diary: true, card: true })
-    await query(SENDER_OK as never, { question: '问', mode: { card: true } })
-    expect(ask.mock.calls[1]![1].mode).toEqual({ screen: false, diary: false, card: true })
+  it('ask:mode:get 返回当前模式；没接 / 越权时回 null', async () => {
+    const mode = vi.fn(async () => ({
+      kind: 'ask' as const,
+      branch: 'assistant',
+      tools: []
+    }))
+    const handlers = createAskIpcHandlers(buildDeps({ mode }))
+    expect(await handlers.get('ask:mode:get')!(SENDER_OK as never)).toEqual({
+      kind: 'ask',
+      branch: 'assistant',
+      tools: []
+    })
+    expect(await handlers.get('ask:mode:get')!({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never)).toBeNull()
+
+    const noMode = createAskIpcHandlers(buildDeps())
+    expect(await noMode.get('ask:mode:get')!(SENDER_OK as never)).toBeNull()
   })
 
-  it('续查沿用暂停时的模式（不会从聊天悄悄变回问记忆）', async () => {
+  it('续查沿用暂停时的会话（不再存模式，模式按当前分支现算）', async () => {
     const paused: ChainAskResult = {
       kind: 'continue-ask',
       question: '还要接着查吗？',
@@ -689,7 +693,10 @@ describe('ask IPC：模式（D62）', () => {
       stats: { hits: 1, evidence: 1, cited: 0, questionChars: 2 },
       resumeId: 'rabc123'
     }
-    const resume = vi.fn(async (): Promise<ChainAskResult> => noEvidence)
+    const resume = vi.fn(
+      async (_id: string, _decision: unknown, _context: AskQueryContext): Promise<ChainAskResult> =>
+        noEvidence
+    )
     const handlers = createAskIpcHandlers(
       buildDeps({
         ask: async () => paused,
@@ -699,14 +706,17 @@ describe('ask IPC：模式（D62）', () => {
     )
     await handlers.get('ask:query')!(SENDER_OK as never, {
       question: '问',
-      conversationId: 'conv-1',
-      mode: { screen: false, diary: true, card: true }
+      conversationId: 'conv-1'
     })
     await handlers.get('ask:resume')!(SENDER_OK as never, { resumeId: 'rabc123', decision: 'continue' })
     expect(resume).toHaveBeenCalledWith(
       'rabc123',
       'continue',
-      expect.objectContaining({ mode: { screen: false, diary: true, card: true } })
+      expect.objectContaining({
+        conversationId: 'conv-1',
+        history: []
+      })
     )
+    expect(Object.keys(resume.mock.calls[0]![2])).not.toContain('mode')
   })
 })

@@ -65,7 +65,7 @@ describe('家谱', () => {
       active: 'spring',
       branches: [
         ...first.branches,
-        { branch: 'spring', generation: 'gen-1', parent: 'default', created_at: 2000, status: 'alive' as const, life_tokens_used: 0 }
+        { branch: 'spring', generation: 'gen-1', parent: 'default', created_at: 2000, status: 'alive' as const, life_tokens_used: 0, kind: 'persona' as const }
       ]
     }
     expect(await writeLineage(file, second)).toBe(true)

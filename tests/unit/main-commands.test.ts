@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 本地命令（memory-life M1/M2/M3）：解析 / /help / /log / /new / /use / /del / /compact / /backup / 未知。
  * 用假仓，不碰真 git（真仓行为在 main-memory-repo.test.ts）。
  */
@@ -20,13 +20,14 @@ import {
 import {
   ensureLineage,
   readLineage,
+  toolsOfBranch,
   withBranchAdded,
   writeLineage,
   type Lineage
 } from '../../src/main/lineage'
 import type { MemoryRepo } from '../../src/main/memory-repo'
 import type { ChainAskResult } from '../../src/chain/agent/types'
-import { ASK_MODE_PRESETS } from '../../src/chain/agent/mode'
+import { ASK_TOOL_NAMES } from '../../src/chain/agent/tool-catalog'
 
 const dirs: string[] = []
 
@@ -154,7 +155,7 @@ describe('命令执行', () => {
     expect(textOf(await run('/help'))).toContain('记忆仓：不可用 · 没找到 git')
   })
 
-  it('/mode 切换预设，回执带上目标模式（界面据此落地）', async () => {
+  it('/mode chat 切到 persona 分支；/mode ask 开一条 assistant 空分支（纯模型、无工具）', async () => {
     const lineageFile = tempLineageFile()
     await ensureLineage(lineageFile, { now: 1 })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
@@ -162,20 +163,32 @@ describe('命令执行', () => {
     expect(chatted?.kind).toBe('command')
     if (chatted?.kind !== 'command') return
     expect(chatted.text).toContain('聊天')
-    expect(chatted.text).toContain('下一条生效')
-    expect(chatted.mode).toEqual(ASK_MODE_PRESETS.chat)
-    expect(textOf(await run('/mode mem'))).toContain('问记忆')
-    expect(textOf(await run('/mode ask'))).toContain('提问')
+    expect(chatted.mode).toEqual({ kind: 'chat', branch: 'default', tools: [...ASK_TOOL_NAMES] })
+
+    const asked = await run('/mode ask')
+    expect(asked?.kind).toBe('command')
+    if (asked?.kind !== 'command') return
+    expect(asked.text).toContain('纯模型')
+    expect(asked.mode).toEqual({ kind: 'ask', branch: 'assistant', tools: [] })
+    // 家谱真的写进去了：assistant 节点 + life 主干
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.active).toBe('assistant')
+    expect(read.lineage.branches.map((node) => node.branch)).toEqual(
+      expect.arrayContaining(['life', 'assistant'])
+    )
+    expect(read.lineage.last).toEqual({ ask: 'assistant', chat: 'default' })
   })
 
   it('/mode 不带参数报当前模式；未知名字不切换', async () => {
     const lineageFile = tempLineageFile()
     await ensureLineage(lineageFile, { now: 1 })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
-    const current = await run('/mode', { mode: ASK_MODE_PRESETS.chat })
+    const current = await run('/mode')
     expect(current?.kind).toBe('command')
     if (current?.kind !== 'command') return
-    expect(current.text).toContain('当前模式：聊天')
+    expect(current.text).toContain('当前模式：聊天（分支 default')
     expect(current.mode).toBeUndefined()
 
     const unknown = await run('/mode 随便')
@@ -183,6 +196,34 @@ describe('命令执行', () => {
     if (unknown?.kind !== 'command') return
     expect(unknown.text).toContain('不认识')
     expect(unknown.mode).toBeUndefined()
+  })
+
+  it('/tool 列集合 / 元素；add / rm 改的是当前分支的工具', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    expect(textOf(await run('/tool set'))).toContain('[1] screen · 屏幕记忆（4 个）')
+    expect(textOf(await run('/tool ele 1'))).toContain('[1] search_info')
+    expect(textOf(await run('/tool'))).toContain('7 个工具')
+
+    // 默认分支（persona）全开 → 先 rm 掉整组日记
+    expect(textOf(await run('/tool rm diary'))).toContain('工具（4 个）')
+    expect(textOf(await run('/tool add diary:recall_diary,memory_profile'))).toContain('工具（6 个）')
+    expect(textOf(await run('/tool rm screen:get_freshness'))).toContain('工具（5 个）')
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(toolsOfBranch(read.lineage, 'default')).toEqual([
+      'search_info',
+      'read_segment',
+      'ask_history',
+      'recall_diary',
+      'memory_profile'
+    ])
+    // 不认识的名字 / 集合如实报错
+    expect(textOf(await run('/tool add nope'))).toContain('没有集合')
+    expect(textOf(await run('/tool add screen:nope'))).toContain('没有「nope」')
+    expect(textOf(await run('/tool wat'))).toContain('不认识 /tool wat')
   })
 
   it('/log 列出节点、标出当前与分叉来源', async () => {

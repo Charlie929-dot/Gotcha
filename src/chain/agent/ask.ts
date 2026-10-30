@@ -117,10 +117,10 @@ export interface ChainAskOptions {
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 默认回忆助手口吻） */
   personaPrompt?: string
   /**
-   * 这次问答给哪些工具组（D62 模式）。不传 = 两组都开（老行为）。
-   * 两组都关时循环只发一次请求、不带 tools（提问 / 纯聊天），不再有收尾轮。
+   * 这次问答给哪些工具（元素名，D72）：来自当前分支的 `/tool` 配置。
+   * 不传 / 空表 = 纯模型：循环只发一次请求、不带 tools（提问 / 纯聊天）。
    */
-  tools?: { screen: boolean; diary: boolean }
+  tools?: readonly string[]
   /**
    * 开场注入：「此刻」事实每轮刷新（由调用方现算），「想到的」日记片段只在
    * 新对话第一问出现；续查时片段从检查点沿用。没传 = 这个客户端不看这些。

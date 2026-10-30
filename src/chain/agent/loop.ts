@@ -64,7 +64,13 @@ import {
   type ChainAskTurnContext,
   MAX_CITATIONS
 } from './types'
-import { createAskToolExecutor, type AskHistorySummary, type DiaryToolDeps, type MemoryCitationMeta } from './tools'
+import {
+  createAskToolExecutor,
+  type AskHistorySummary,
+  type ConceiveDaughterResult,
+  type DiaryToolDeps,
+  type MemoryCitationMeta
+} from './tools'
 import type { ChainDb } from '../store'
 import type { ChainSearchBatchQuery, ChainSearchBatchResult } from '../query'
 
@@ -98,6 +104,8 @@ export interface AskLoopResumeState {
   readSegments?: ReadonlyMap<number, CitationMeta>
   /** 暂停前真正打开过的日记条目（read_diary）：恢复后引用仍要自动带出 */
   readMemories?: ReadonlyMap<number, MemoryCitationMeta>
+  /** 暂停前已经传承过（M4）：恢复后仍不能把这一问写进女儿的分支 */
+  conceived?: boolean
 }
 
 export interface AskLoopContext {
@@ -118,6 +126,13 @@ export interface AskLoopContext {
   searchBatch?: (query: ChainSearchBatchQuery) => Promise<ChainSearchBatchResult>
   /** 日记记忆（第二本账）；不传 = 没有接入，三个记忆工具会如实报错 */
   diary?: DiaryToolDeps
+  /**
+   * 传承（M4）：只有在生命 ≤15% 且模式带工具时由组合根注入；
+   * 不传 = 模型调 `conceive_daughter` 会回「现在还不能传承」。
+   */
+  conceive?: (nickname: string, letter?: string) => Promise<ConceiveDaughterResult>
+  /** 母亲留下的信（`<mom_letter>`，M4）：只有女儿代才有；不传 = 不写这一段 */
+  momLetter?: string
   /**
    * read_segment 的截图读取（主进程注入）。**没开「历史截图出云」时不要传**：
    * 核心拿不到图，读段就只回 UIA 文字。
@@ -280,8 +295,13 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
 
   /** 过程（D55 ③）：每轮思考 + 工具调用摘要；恢复时先继承暂停前的步骤 */
   const steps: ChainAskTraceStep[] = resume ? [...resume.steps] : []
-  const withTrace = (result: ChainAskResult): ChainAskResult =>
-    steps.length === 0 ? result : { ...result, trace: { steps } }
+  /** 这一问里传承成功（M4）：答复只显示，不写会话；下一问从空白开始 */
+  let conceived = resume?.conceived === true
+  const withTrace = (result: ChainAskResult): ChainAskResult => ({
+    ...result,
+    ...(conceived ? { conceived: true as const } : {}),
+    ...(steps.length > 0 ? { trace: { steps } } : {})
+  })
 
   const executor = createAskToolExecutor({
     db: ctx.db,
@@ -291,6 +311,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.readAskHistory ? { readAskHistory: ctx.readAskHistory } : {}),
     ...(ctx.searchBatch ? { searchBatch: ctx.searchBatch } : {}),
     ...(ctx.diary ? { diary: ctx.diary } : {}),
+    ...(ctx.conceive ? { conceive: ctx.conceive } : {}),
     ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId)
@@ -355,6 +376,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
    */
   const persistConversation = (payload: ChainAskLoopPayload, answer: string): void => {
     if (!ctx.conversation) return
+    // 传承那一问不落会话：母亲最后的答复不进女儿的分支（M4）
+    if (conceived) return
     const text = answer.trim()
     if (text === '') return
     // 图片（选区截图 / 用户附件 / QQ 图片 / 工具截图）一律原样存：少一张，这条 user 消息的
@@ -469,7 +492,11 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         ...(ctx.image ? { image: ctx.image } : {}),
         ...(ctx.personaPrompt ? { personaPrompt: ctx.personaPrompt } : {}),
         // 工具组必须每轮都传：两组都关时客户端要据此摘掉「数据边界 / 工具」段
-        toolGroups
+        toolGroups,
+        // 传承（M4）：生命 ≤15% 才把 conceive_daughter 放进 tools + 工具清单
+        ...(ctx.conceive ? { conceive: true } : {}),
+        // 母亲的信：只有女儿代才有；放进 system 的 <mom_letter>
+        ...(ctx.momLetter ? { momLetter: ctx.momLetter } : {})
       })
     } catch (error) {
       // 用户点「停止」：不算失败，如实回 aborted
@@ -532,6 +559,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         if (call.name === 'ask_history') usedAskHistory = true
         const toolStartedAt = Date.now()
         const outcome = await executor.execute({ name: call.name, arguments: call.arguments })
+        if (outcome.result.kind === 'conceive_daughter') conceived = true
         const toolMs = Date.now() - toolStartedAt
         turns.push({
           toolCall: { name: call.name, arguments: call.arguments },
@@ -599,7 +627,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           steps: [...steps],
           memoryWhitelist: new Map(memoryWhitelist),
           readSegments: new Map(readSegments),
-          readMemories: new Map(readMemories)
+          readMemories: new Map(readMemories),
+          ...(conceived ? { conceived: true } : {})
         })
         log('info', 'chain ask loop: 轮数用尽，等用户决定是否继续', {
           turns: globalTurn,

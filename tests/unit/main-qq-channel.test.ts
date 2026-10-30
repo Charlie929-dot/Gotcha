@@ -22,6 +22,8 @@ class FakeTransport implements QqTransport {
   sent: { userId: number; text: string }[] = []
   /** file → get_image 回执（测试按需塞） */
   images = new Map<string, { base64?: string; url?: string }>()
+  /** 改过的昵称（M4 传承） */
+  profiles: string[] = []
   private state = { listening: false, connections: 0, port: null as number | null }
 
   async start(options: {
@@ -48,6 +50,10 @@ class FakeTransport implements QqTransport {
     const got = this.images.get(file)
     if (!got) throw new Error('no such image')
     return got
+  }
+
+  async setProfile(nickname: string): Promise<void> {
+    this.profiles.push(nickname)
   }
 
   status(): { listening: boolean; connections: number; port: number | null } {
@@ -285,5 +291,17 @@ describe('图片（D63 追加）', () => {
     expect(asked[0]?.images).toBeUndefined()
     expect(transport.sent[0]?.text).toContain('没看到图')
     expect(logs.some((entry) => entry.message === 'qq image skipped')).toBe(true)
+  })
+
+  it('传承改名：setProfile 转给 transport（M4）', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, {
+      ask: async () => answer('在。'),
+      log: () => undefined,
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.setProfile?.('xiao-yu')
+    expect(transport.profiles).toEqual(['xiao-yu'])
   })
 })

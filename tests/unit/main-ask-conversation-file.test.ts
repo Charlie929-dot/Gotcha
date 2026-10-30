@@ -188,4 +188,13 @@ describe('会话落盘', () => {
     // 文件没被删
     expect(readdirSync(join(root, 'conversations')).some((name) => name === 'c1.jsonl')).toBe(true)
   })
+
+  it('clear 只清内存：这一问之后的会话从空白开始（M4 传承）', () => {
+    const root = tempRoot()
+    const store = createAskConversationFileStore({ root, conversationId: 'c1', log: () => undefined })
+    store.save(conversation())
+    expect(store.load().turns).toHaveLength(2)
+    store.clear?.()
+    expect(store.load()).toEqual({ digest: '', turns: [] })
+  })
 })

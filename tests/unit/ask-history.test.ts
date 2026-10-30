@@ -15,6 +15,7 @@ import {
   clearAskHistory,
   parseAskHistoryEntry,
   readAskHistory,
+  removeAskHistoryConversation,
   toHistoryEntry,
   type AskHistoryEntry
 } from '../../src/main/ask-history'
@@ -300,5 +301,36 @@ describe('对话记录：折条', () => {
     }
     const ids = new Set(Array.from({ length: 20 }, () => toHistoryEntry('问', result, 1_000).id))
     expect(ids.size).toBe(20)
+  })
+})
+
+describe('传承（M4）：conceived 与按会话删除', () => {
+  it('conceived 随记录落盘 / 读回', () => {
+    const path = tempFile()
+    const result: ChainAskResult = {
+      kind: 'answer',
+      answer: '我会记得你。',
+      citations: [],
+      stats: { hits: 0, evidence: 0, cited: 0, questionChars: 6 },
+      conceived: true
+    }
+    appendAskHistory(path, toHistoryEntry('快没电了', result, 1_000, 'conv-1'))
+    const [entry] = readAskHistory(path)
+    expect(entry).toMatchObject({ conceived: true, question: '快没电了' })
+    // 普通记录没有这个字段
+    appendAskHistory(path, toHistoryEntry('普通问题', { kind: 'no-evidence', stats: { hits: 0, evidence: 0, cited: 0, questionChars: 4 } }, 2_000, 'conv-2'))
+    expect(readAskHistory(path).find((item) => item.question === '普通问题')?.conceived).toBeUndefined()
+  })
+
+  it('removeAskHistoryConversation 只删该会话，其他会话 / 文件顺序不变', () => {
+    const path = tempFile()
+    appendAskHistory(path, { ...entry(1_000, '旧一'), conversationId: 'conv-1' })
+    appendAskHistory(path, { ...entry(2_000, '旧二'), conversationId: 'conv-2' })
+    appendAskHistory(path, { ...entry(3_000, '旧三'), conversationId: 'conv-1' })
+    expect(removeAskHistoryConversation(path, 'conv-1')).toBe(2)
+    const list = readAskHistory(path)
+    expect(list.map((item) => item.question)).toEqual(['旧二'])
+    // 再删一次：没有可删的
+    expect(removeAskHistoryConversation(path, 'conv-1')).toBe(0)
   })
 })

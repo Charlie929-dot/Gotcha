@@ -316,16 +316,92 @@ export function withActive(lineage: Lineage, branch: string): Lineage | null {
   return { ...lineage, active: branch }
 }
 
-/**
- * 删除一条节点：当前节点 / 代的主分支 / 有子节点的都不许删，返回 null 由调用方报原因。
- * （git 层的 `branch -D` 不检查后代，这层是唯一防线。）
- */
+/** 删除一条节点：当前节点 / 代的主分支 / 有子节点的都不许删，返回 null 由调用方报原因。 */
 export function withBranchRemoved(lineage: Lineage, branch: string): Lineage | null {
   if (findBranch(lineage, branch) === null) return null
   if (lineage.active === branch) return null
   if (lineage.generations.some((item) => item.branch === branch)) return null
   if (lineage.branches.some((item) => item.parent === branch)) return null
   return { ...lineage, branches: lineage.branches.filter((item) => item.branch !== branch) }
+}
+
+/* ------------------------------------------------------------------ */
+/* 传承（M4）：新的一代 + 母亲置 dead + 活动节点切女儿                    */
+/* ------------------------------------------------------------------ */
+
+export interface AddGenerationInput {
+  /** 女儿的分支名（昵称 slug） */
+  branch: string
+  /** 女儿的名字（显示用；与分支名同口径） */
+  nickname: string
+  /** 母亲节点（分支名）；必须存在且 alive */
+  mother: string
+  /** 出生时刻（毫秒） */
+  at: number
+  /** 母亲的信（仓内相对路径）；没有就是 null */
+  letter?: string | null
+}
+
+/**
+ * 追加一代：新 generation + 新 branch（parent=null，代根），母亲那一代记 died_at、
+ * 母亲分支置 dead，活动节点切到女儿。任一条不合法返回 null，由调用方报原因。
+ */
+export function withGenerationAdded(lineage: Lineage, input: AddGenerationInput): Lineage | null {
+  if (input.branch.trim() === '' || input.nickname.trim() === '') return null
+  if (findBranch(lineage, input.branch) !== null) return null
+  const motherBranch = findBranch(lineage, input.mother)
+  if (motherBranch === null || motherBranch.status !== 'alive') return null
+  const motherGeneration = generationOf(lineage, input.mother)
+  if (motherGeneration === null) return null
+
+  const numbers = lineage.generations
+    .map((item) => /^gen-(\d+)$/u.exec(item.id)?.[1])
+    .filter((value): value is string => value !== undefined)
+    .map(Number)
+  const generationId = `gen-${(numbers.length > 0 ? Math.max(...numbers) : 0) + 1}`
+
+  return {
+    ...lineage,
+    active: input.branch,
+    generations: [
+      ...lineage.generations.map((item) =>
+        item.id === motherGeneration.id ? { ...item, died_at: input.at } : item
+      ),
+      {
+        id: generationId,
+        branch: input.branch,
+        nickname: input.nickname,
+        mother: motherGeneration.id,
+        born_at: input.at,
+        died_at: null,
+        life_tokens_used: 0,
+        letter: input.letter ?? null
+      }
+    ],
+    branches: [
+      ...lineage.branches.map((item) =>
+        item.branch === input.mother ? { ...item, status: 'dead' as const } : item
+      ),
+      {
+        branch: input.branch,
+        generation: generationId,
+        parent: null,
+        created_at: input.at,
+        status: 'alive',
+        life_tokens_used: 0
+      }
+    ]
+  }
+}
+
+/** 某节点的出生日（本地 `yyyy-mm-dd`）；不是代分支 / 时间坏掉返回 null */
+export function birthDayOf(lineage: Lineage, branch: string): string | null {
+  const generation = generationOf(lineage, branch)
+  if (generation === null) return null
+  const date = new Date(generation.born_at)
+  if (Number.isNaN(date.getTime())) return null
+  const pad2 = (value: number): string => (value < 10 ? `0${value}` : String(value))
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
 }
 
 /* ------------------------------------------------------------------ */
@@ -371,7 +447,9 @@ export async function recordLineageUsage(
 ): Promise<boolean> {
   const read = await readLineage(filePath)
   if (read.status !== 'ok') return false
-  if (findBranch(read.lineage, branch) === null) return false
+  const node = findBranch(read.lineage, branch)
+  // 只给活着的节点记账：传承后母亲已 dead，恢复中的最后一问不该把用量记到下一代头上
+  if (node === null || node.status !== 'alive') return false
   const used = Math.max(0, Math.round(Number.isFinite(tokens) ? tokens : 0))
   const next: Lineage = {
     ...read.lineage,

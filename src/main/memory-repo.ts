@@ -135,6 +135,11 @@ export interface MemoryRepo {
   switchBranch(name: string): Promise<MemorySwitchResult>
   /** 从当前 HEAD 开新分支并切过去；名字已存在就 exists */
   switchCreate(name: string): Promise<MemorySwitchResult>
+  /**
+   * 从**空树**开一条 orphan 分支并切过去（M4 传承：女儿从空白开始）。
+   * 会清掉工作区里的旧文件，只留脚手架；调用方必须先把母亲节点提交干净。
+   */
+  switchCreateOrphan(name: string): Promise<MemorySwitchResult>
   /** 切到历史提交（detached）；不存在就 not-found */
   checkoutCommit(ref: string): Promise<MemorySwitchResult>
   /** 删分支；当前分支 / 不存在分开报（「有后代不许删」由家谱层拦） */
@@ -326,6 +331,28 @@ export function createMemoryRepo(options: {
     return { ok: true, head: await headInner() }
   }
 
+  /**
+   * orphan 分支（M4 传承）：从空树开一条没有任何父提交的分支。
+   * `checkout --orphan` 只换 HEAD，旧文件还留在索引里；必须再 `git rm -rf .` 清空，
+   * 然后写回脚手架（`.gitattributes` 等）——否则女儿的仓会带母亲的会话文件。
+   */
+  const orphanInner = async (name: string): Promise<MemorySwitchResult> => {
+    const status = await ensure()
+    if (!status.ok) return { ok: false, reason: 'unavailable' }
+    if (await isDirty()) return { ok: false, reason: 'dirty', detail: '工作区有未提交改动' }
+    const created = await run(['checkout', '--orphan', name])
+    if (!created.ok) {
+      const detail = firstLine(created.stderr) || firstLine(created.stdout)
+      return { ok: false, reason: classifySwitchError(detail), detail }
+    }
+    const cleared = await run(['rm', '-rf', '--ignore-unmatch', '.'])
+    if (!cleared.ok) {
+      return { ok: false, reason: 'failed', detail: firstLine(cleared.stderr) }
+    }
+    if (!(await scaffoldInner())) return { ok: false, reason: 'failed', detail: 'scaffold failed' }
+    return { ok: true, head: await headInner() }
+  }
+
   const checkoutCommitInner = async (ref: string): Promise<MemorySwitchResult> => {
     const status = await ensure()
     if (!status.ok) return { ok: false, reason: 'unavailable' }
@@ -414,6 +441,24 @@ export function createMemoryRepo(options: {
     await run(['config', 'user.email', 'gotcha@local'])
   }
 
+  /** 仓脚手架（`.gitattributes` / `.gitignore` / 三个目录占位）；init 与 orphan 分支共用 */
+  const scaffoldInner = async (): Promise<boolean> => {
+    try {
+      for (const dir of SCAFFOLD_DIRS) {
+        await mkdir(resolve(root, dir), { recursive: true })
+        const keep = resolve(root, dir, '.gitkeep')
+        if (!existsSync(keep)) await writeFile(keep, '', 'utf8')
+      }
+      await writeFile(resolve(root, '.gitattributes'), GITATTRIBUTES, 'utf8')
+      // 半截写入留下的 .tmp 不入库（正常路径 rename 后就没了）
+      await writeFile(resolve(root, '.gitignore'), '*.tmp\n', 'utf8')
+      return true
+    } catch (error) {
+      log?.('warn', 'memory repo scaffold failed', { error: String(error) })
+      return false
+    }
+  }
+
   const ensureInner = async (): Promise<MemoryRepoStatus> => {
     try {
       await mkdir(root, { recursive: true })
@@ -438,14 +483,7 @@ export function createMemoryRepo(options: {
         }
         await run(['symbolic-ref', 'HEAD', 'refs/heads/default'])
       }
-      for (const dir of SCAFFOLD_DIRS) {
-        await mkdir(resolve(root, dir), { recursive: true })
-        const keep = resolve(root, dir, '.gitkeep')
-        if (!existsSync(keep)) await writeFile(keep, '', 'utf8')
-      }
-      await writeFile(resolve(root, '.gitattributes'), GITATTRIBUTES, 'utf8')
-      // 半截写入留下的 .tmp 不入库（正常路径 rename 后就没了）
-      await writeFile(resolve(root, '.gitignore'), '*.tmp\n', 'utf8')
+      await scaffoldInner()
       await ensureIdentity()
       // 首提：有脚手架才能提交；失败也不判定整个仓不可用（后面的 /backup 会再试）
       const add = await run(['add', '-A'])
@@ -587,6 +625,7 @@ export function createMemoryRepo(options: {
     head: () => exclusive(headInner),
     switchBranch: (name) => exclusive(() => switchInner(['checkout', name])),
     switchCreate: (name) => exclusive(() => switchInner(['checkout', '-b', name])),
+    switchCreateOrphan: (name) => exclusive(() => orphanInner(name)),
     checkoutCommit: (ref) => exclusive(() => checkoutCommitInner(ref)),
     deleteBranch: (name) => exclusive(() => deleteBranchInner(name)),
     listBranches: () => exclusive(listBranchesInner),

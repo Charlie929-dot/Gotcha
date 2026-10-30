@@ -138,6 +138,43 @@ describe('工具过滤', () => {
   it('两组都关：一个工具都不发', () => {
     expect(names({ screen: false, diary: false })).toEqual([])
   })
+
+  it('传承工具只在 conceive=true 时出现（生命 ≤15% 才由组合根打开）', () => {
+    expect(names({ screen: true, diary: true })).not.toContain('conceive_daughter')
+    expect(names({ screen: false, diary: true })).not.toContain('conceive_daughter')
+    const withLife = askLoopToolsFor({ screen: true, diary: true }, { conceive: true }).map(
+      (tool) => tool.function.name
+    )
+    expect(withLife).toContain('conceive_daughter')
+  })
+})
+
+describe('女儿代：<mom_letter>', () => {
+  it('信放在 persona 之后、工具 / 规则之前', () => {
+    const messages = buildChainAskLoopMessages(
+      payloadOf({ screen: true, diary: true }),
+      {},
+      undefined,
+      '你叫「贴心大肥鱼」。',
+      { screen: true, diary: true },
+      { momLetter: '给女儿的话' }
+    )
+    const system = messages[0]?.content ?? ''
+    expect(system).toContain('<mom_letter>\n给女儿的话\n</mom_letter>')
+    expect(system.indexOf('<persona>')).toBeLessThan(system.indexOf('<mom_letter>'))
+    expect(system.indexOf('<mom_letter>')).toBeLessThan(system.indexOf('<tools>'))
+  })
+
+  it('没有信就不写这一段', () => {
+    const messages = buildChainAskLoopMessages(
+      payloadOf({ screen: true, diary: true }),
+      {},
+      undefined,
+      '你叫「贴心大肥鱼」。',
+      { screen: true, diary: true }
+    )
+    expect(messages[0]?.content).not.toContain('<mom_letter>')
+  })
 })
 
 function loopDeps(client: FakeLlmClient, tools: { screen: boolean; diary: boolean }) {

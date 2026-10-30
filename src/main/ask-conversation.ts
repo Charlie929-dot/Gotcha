@@ -55,6 +55,9 @@ export function createAskConversationStore(): AskConversationPort {
     load: () => state,
     save: (next) => {
       state = { digest: next.digest, turns: [...next.turns] }
+    },
+    clear: () => {
+      state = emptyAskConversation()
     }
   }
 }
@@ -318,6 +321,11 @@ export function createAskConversationFileStore(options: {
     save: (next) => {
       state = { digest: next.digest, turns: [...next.turns] }
       writeToDisk(root, conversationId, state, log)
+    },
+    clear: () => {
+      // 只清内存：M4 传承时调用方已经切到女儿分支，盘上的旧会话不在这个分支里。
+      // 不主动写空文件——女儿的第一条消息应该从干净的空会话开始（不是一条空 JSONL）。
+      state = emptyAskConversation()
     }
   }
 }

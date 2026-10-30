@@ -27,6 +27,18 @@ export const LINEAGE_LIFE_TOKENS = 500_000
 export type BranchStatus = 'alive' | 'dead' | 'frozen'
 
 /**
+ * 出生主干的分支名（D73：原 `life` 改名 `ask`）。
+ * 旧仓里已经有 `life` 的继续认作主干、不迁移数据；新建的仓用 `ask`。
+ */
+export const TRUNK_BRANCH = 'ask'
+export const LEGACY_TRUNK_BRANCH = 'life'
+
+/** 主干名（新 / 旧）不能当节点名 / 女儿名 */
+export function isTrunkName(name: string): boolean {
+  return name === TRUNK_BRANCH || name === LEGACY_TRUNK_BRANCH
+}
+
+/**
  * 分支的种类（D72「分支即模式」）：
  * - `persona`：普通节点 / 一代鱼，注入 persona，**默认全工具**；
  * - `assistant`：助手记忆（`/mode ask`），无 persona，**默认无工具**，`/new` 开空分支；

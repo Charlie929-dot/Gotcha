@@ -211,6 +211,7 @@
 | assistant 分支不能有生命 | 2026-10-31 D72：assistant 是「助手会话」不是一条鱼；若照常记账，`/mode ask` 聊到 500K 会突然冻结、被要求传承 | `askStateNow` 对 assistant 不返回 life（无 `<now>` 生命行）、`lifeEndedText` 直接放行、`recordLineageUsage` 拒绝 assistant；`conceive_daughter` 只在 persona 分支且工具非空时出现 |
 | `switch` 前要先提交：/mode 也会 checkout | 2026-10-31 D72：`/mode ask|chat` 本质是切分支，和 `/use` 同一条纪律——工作区脏就切不了 | 复用 `saveBefore()`（提交失败就不切）；新建 assistant 分支前也先提交当前节点，orphan 落一个出生提交（否则 unborn branch 不会出现在 `/log`） |
 | 工具白名单空表 ≠ 「不传」 | 2026-10-31 D72：链层 / 云端的 `tools` 不传 = 全开（老调用方与测试行为不变）；assistant 分支要显式传 `[]` 才是纯模型 | 组合根按分支 `toolsOfBranch()` 取值（assistant 默认 `[]`），链层默认值 `ASK_TOOL_NAMES`；`/tool rm` 可以合法清空，别把 `[]` 当 falsy 丢掉 |
+| 主干改名后「找主干」不能只认一个名字 | 2026-10-31 D73：主干 `life` → `ask`，但旧仓里已经有 `life`；只查 `ask` 会在旧仓里再开一条空主干，assistant 挂错、传承的出生提交也写错分支 | 统一用 `lineage.ts` 的 `TRUNK_BRANCH` / `LEGACY_TRUNK_BRANCH`（`isTrunkName`）：先看 git 是否有 `ask`，没有就用 `life`；两条都不能当节点名 / 女儿名 |
 
 ## 规则
 

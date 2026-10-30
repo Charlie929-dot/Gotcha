@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 本地命令（memory-life M1/M2/M3）：解析 / /help / /log / /new / /use / /del / /compact / /backup / 未知。
  * 用假仓，不碰真 git（真仓行为在 main-memory-repo.test.ts）。
  */
@@ -170,15 +170,38 @@ describe('命令执行', () => {
     if (asked?.kind !== 'command') return
     expect(asked.text).toContain('纯模型')
     expect(asked.mode).toEqual({ kind: 'ask', branch: 'assistant', tools: [] })
-    // 家谱真的写进去了：assistant 节点 + life 主干
+    // 家谱真的写进去了：assistant 节点 + ask 主干（D73：原 life 改名）
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
     expect(read.lineage.active).toBe('assistant')
     expect(read.lineage.branches.map((node) => node.branch)).toEqual(
-      expect.arrayContaining(['life', 'assistant'])
+      expect.arrayContaining(['ask', 'assistant'])
     )
+    expect(read.lineage.branches.find((node) => node.branch === 'assistant')?.parent).toBe('ask')
     expect(read.lineage.last).toEqual({ ask: 'assistant', chat: 'default' })
+  })
+
+  it('/mode ask 认旧仓的 life 主干：不迁移数据，assistant 仍挂在 life 下', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        listBranches: async () => [
+          { branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 },
+          { branch: 'life', sha: 'def5678', subject: 'memory: birth', at: 2 }
+        ]
+      }),
+      lineageFile
+    })
+    const asked = await run('/mode ask')
+    expect(asked?.kind).toBe('command')
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.branches.find((node) => node.branch === 'life')?.kind).toBe('life')
+    expect(read.lineage.branches.find((node) => node.branch === 'assistant')?.parent).toBe('life')
+    expect(read.lineage.branches.some((node) => node.branch === 'ask')).toBe(false)
   })
 
   it('/mode 不带参数报当前模式；未知名字不切换', async () => {

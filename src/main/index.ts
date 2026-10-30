@@ -130,7 +130,8 @@ import {
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
 import { createAskConversationRegistry } from './ask-conversation'
-import { createCommandHandler, currentModeState, memoryDayKey, slugifyNodeName, type CompactOutcome } from './commands'
+import { createCommandHandler, currentModeState, memoryDayKey, type CompactOutcome } from './commands'
+import { conceiveDaughter as conceiveOnRepo } from './conceive'
 import {
   birthDayOf,
   branchKindOf,
@@ -141,9 +142,7 @@ import {
   lineageSnapshot,
   readLineage,
   recordLineageUsage,
-  toolsOfBranch,
-  withGenerationAdded,
-  writeLineage
+  toolsOfBranch
 } from './lineage'
 import { createMemoryRepo } from './memory-repo'
 import { forkDetachedIfNeeded } from './node-fork'
@@ -2384,8 +2383,7 @@ if (primaryInstance) {
                 conceiveDaughter({
                   nickname,
                   ...(letter !== undefined ? { letter } : {}),
-                  motherBranch: life.branch,
-                  conversationId: context.conversationId
+                  motherBranch: life.branch
                 })
             }
           : {}),
@@ -2458,124 +2456,42 @@ if (primaryInstance) {
      */
     const qqTalkTimes = new Map<string, number[]>()
     /**
-     * 传承（M4）：母亲写信（可选）→ life 主干出生提交 → 女儿 orphan 分支 → 家谱新代。
-     * 由工具 `conceive_daughter` 在 ask 循环里调用；只有生命 ≤15% 时工具才会出现，
-     * 这里再校验一次（模型可能伪造调用 / 旧检查点恢复）。
+     * 传承（M4 / D73）：真正的动作抽到 `conceive.ts`（真实 git 仓可独立验收，不弹窗口）；
+     * 这里只做组合根的事：女儿出生后重读会话、清 QQ 内存上下文、在线改 QQ 名。
      *
-     * 纪律：先提交母亲，任何一步失败都不写权威家谱（宁可报错，不可丢记忆）；
-     * 女儿的会话 / 该会话的问答历史在这里清掉，下一问从空白开始。
+     * 只有生命 ≤15% 时工具才会出现，这里再校验一次（模型可能伪造调用 / 旧检查点恢复）。
      */
     const conceiveDaughter = async (input: {
       nickname: string
       letter?: string
       motherBranch: string
-      conversationId: string
     }): Promise<ConceiveDaughterResult> => {
-      const status = await memoryRepo.status()
-      if (!status.ok) {
-        return { ok: false, message: '记忆仓不可用，现在生不了（记忆不会丢）。' }
-      }
-      const read = await readLineage(lineageFile)
-      if (read.status !== 'ok') {
-        return { ok: false, message: '家谱读不出来，先不传承（细节看日志）。' }
-      }
-      const lineage = read.lineage
-      if (input.motherBranch !== lineage.active) {
-        return { ok: false, message: '当前节点已经切走了，先 /use 回来再传承。' }
-      }
-      const mother = findBranch(lineage, input.motherBranch)
-      if (mother === null || mother.status !== 'alive') {
-        return { ok: false, message: '当前这一代不是活着的节点，不能传承。' }
-      }
-      const motherLife = lifeOf(lineage, input.motherBranch)
-      if (motherLife === null || motherLife.used < motherLife.limit * 0.85) {
-        return { ok: false, message: '还没到传承的时候（生命剩得还多）。' }
-      }
-      const slug = slugifyNodeName(input.nickname)
-      if (slug === null) {
-        return { ok: false, message: '这个名字转不出可用的分支名（用英文 / 数字 / 短一些的中文）。' }
-      }
-      if (slug === 'life') {
-        return { ok: false, message: 'life 是出生线（主干），不能当女儿的名字。' }
-      }
-      if (findBranch(lineage, slug) !== null) {
-        return { ok: false, message: `节点 ${slug} 已经存在，换一个名字。` }
-      }
-      const branches = await memoryRepo.listBranches()
-      if (branches.some((entry) => entry.branch === slug)) {
-        return { ok: false, message: `分支 ${slug} 已经存在，换一个名字。` }
-      }
+      const result = await conceiveOnRepo(
+        { repo: memoryRepo, lineageFile },
+        {
+          nickname: input.nickname,
+          ...(input.letter !== undefined ? { letter: input.letter } : {}),
+          motherBranch: input.motherBranch
+        }
+      )
+      if (!result.ok) return result
 
-      const at = Date.now()
-      const letter = input.letter?.trim() ?? ''
-      const letterPath = letter === '' ? null : `letters/${slug}.md`
-      const saved = await memoryRepo.commit(`memory: save before birth ${slug}`)
-      if (!saved.committed && saved.reason !== 'clean') {
-        return { ok: false, message: '先保存当前节点失败，没有传承（记忆不会丢）。' }
-      }
-
-      const next = withGenerationAdded(lineage, {
-        branch: slug,
-        nickname: slug,
-        mother: input.motherBranch,
-        at,
-        letter: letterPath
-      })
-      if (next === null) return { ok: false, message: '家谱加不进新的一代。' }
-      const snapshot = lineageSnapshot(next)
-
-      // 1) life 主干：先落出生提交（没有 life 就从空树建）
-      const hasLife = branches.some((entry) => entry.branch === 'life')
-      const lifeBranch = hasLife
-        ? await memoryRepo.switchBranch('life')
-        : await memoryRepo.switchCreateOrphan('life')
-      if (!lifeBranch.ok) {
-        return { ok: false, message: '切到 life 主干失败，没有传承（记忆不会丢）。' }
-      }
-      await memoryRepo.writeFile('lineage.snapshot.json', snapshot)
-      await memoryRepo.commit(`memory: birth ${slug}`)
-
-      // 2) 女儿：orphan 分支（空树），写母亲的信 + 家谱快照，首个提交
-      const daughter = await memoryRepo.switchCreateOrphan(slug)
-      if (!daughter.ok) {
-        await memoryRepo.switchBranch(input.motherBranch)
-        return { ok: false, message: '开女儿分支失败，没有传承（记忆不会丢）。' }
-      }
-      if (letterPath !== null) await memoryRepo.writeFile(letterPath, `${letter}\n`)
-      await memoryRepo.writeFile('lineage.snapshot.json', snapshot)
-      const born = await memoryRepo.commit(`memory: born ${slug}`)
-      if (!born.committed) {
-        await memoryRepo.switchBranch(input.motherBranch)
-        return { ok: false, message: '女儿分支的首个提交失败，没有传承（记忆不会丢）。' }
-      }
-
-      // 3) 权威家谱最后写：git 已经一致，写失败就退回母亲节点，别让 active 与 HEAD 打架
-      if (!(await writeLineage(lineageFile, next))) {
-        await memoryRepo.switchBranch(input.motherBranch)
-        return { ok: false, message: '家谱写不进去，传承没有生效（细节看日志）。' }
-      }
-
-      // 4) 女儿从空白开始：换分支了，会话注册表内存缓存全部重读（D72）
-      //    会话文件在仓里、问答历史按分支筛，所以不必再删/清母女的任何记录：
-      //    母亲的最后一问留在母亲分支，女儿从新分支的空会话开始。
+      // 女儿从空白开始：换分支了，会话注册表内存缓存全部重读（D72）
+      // 会话文件在仓里、问答历史按分支筛，所以不必删母女的任何记录。
       askConversations.reload()
       qqHistories.clear()
       qqTalkTimes.clear()
 
-      // 5) QQ 在线（有连接）就改名；离线不调，免得等 action 超时；失败只记日志
+      // QQ 在线（有连接）就改名；离线不调，免得等 action 超时；失败只记日志
       const qqOnline =
         qqChannel !== null && qqChannel.setProfile !== undefined && qqChannel.status().connections > 0
-      if (qqOnline && qqChannel?.setProfile !== undefined) {
+      if (qqOnline && qqChannel?.setProfile !== undefined && result.nickname !== undefined) {
         void qqChannel
-          .setProfile(slug)
+          .setProfile(result.nickname)
           .catch((error) => captureLog('warn', 'qq profile rename failed', { error: String(error) }))
       }
 
-      return {
-        ok: true,
-        nickname: slug,
-        message: `女儿 ${slug} 已出生；这一代到这里，之后从空白开始。`
-      }
+      return result
     }
     /** 通道配置：从没建过库（A3）就当关闭，不为 QQ 建库 */
     const qqChannelConfig = (): QqChannelConfig => {

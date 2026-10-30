@@ -41,9 +41,12 @@ import {
   ensureLineage,
   findBranch,
   generationOf,
+  isTrunkName,
+  LEGACY_TRUNK_BRANCH,
   lineageSnapshot,
   readLineage,
   toolsOfBranch,
+  TRUNK_BRANCH,
   withActive,
   withBranchAdded,
   withBranchRemoved,
@@ -357,13 +360,18 @@ export async function currentModeState(deps: CommandDeps): Promise<AskModeState>
   return { kind: 'chat', branch: 'default', tools: defaultToolsForBranchKind('persona') }
 }
 
-/** 家谱里没有、但 git 里有（M4 出生线）：补一条 life 节点，别让它变成幽灵分支 */
-async function adoptLifeBranch(deps: CommandDeps, lineage: Lineage, at: number): Promise<Lineage | null> {
-  if (findBranch(lineage, 'life') !== null) return lineage
+/** 家谱里没有、但 git 里有（M4 出生线）：补一条主干节点，别让它变成幽灵分支 */
+async function adoptTrunkBranch(
+  deps: CommandDeps,
+  lineage: Lineage,
+  at: number,
+  trunk: string
+): Promise<Lineage | null> {
+  if (findBranch(lineage, trunk) !== null) return lineage
   const branches = await deps.repo.listBranches()
-  if (!branches.some((entry) => entry.branch === 'life')) return lineage
+  if (!branches.some((entry) => entry.branch === trunk)) return lineage
   return withBranchAdded(lineage, {
-    branch: 'life',
+    branch: trunk,
     generation: lineage.generations[0]?.id ?? 'gen-1',
     parent: lineage.generations[0]?.branch ?? 'default',
     at,
@@ -371,31 +379,52 @@ async function adoptLifeBranch(deps: CommandDeps, lineage: Lineage, at: number):
   })
 }
 
-/** 确保 `life` 主干存在（出生提交写在这里）；返回更新后的家谱 */
-async function ensureLifeBranch(
+/**
+ * 确保出生主干存在（出生提交写在这里）；返回更新后的家谱与主干名。
+ * D73：新仓用 `ask`；旧仓只有 `life` 就继续用 `life`（不迁移数据）。
+ */
+async function ensureTrunkBranch(
   deps: CommandDeps,
   lineage: Lineage,
   at: number
-): Promise<{ lineage: Lineage; error?: string }> {
-  const adopted = await adoptLifeBranch(deps, lineage, at)
-  if (adopted === null) return { lineage, error: 'life 主干加不进家谱（细节看日志）。' }
-  if (findBranch(adopted, 'life') !== null) return { lineage: adopted }
+): Promise<{ lineage: Lineage; trunk: string; error?: string }> {
+  const branches = await deps.repo.listBranches()
+  const has = (name: string): boolean => branches.some((entry) => entry.branch === name)
+  const trunk = has(TRUNK_BRANCH)
+    ? TRUNK_BRANCH
+    : has(LEGACY_TRUNK_BRANCH)
+      ? LEGACY_TRUNK_BRANCH
+      : TRUNK_BRANCH
+
+  const adopted = await adoptTrunkBranch(deps, lineage, at, trunk)
+  if (adopted === null) return { lineage, trunk, error: '主干加不进家谱（细节看日志）。' }
+  if (findBranch(adopted, trunk) !== null) return { lineage: adopted, trunk }
 
   const saved = await saveBefore(deps, 'new')
-  if (saved !== null) return { lineage, error: saved }
-  const created = await deps.repo.switchCreateOrphan('life')
-  if (!created.ok) return { lineage, error: failureReasonText(created, '开出 life 主干') }
+  if (saved !== null) return { lineage, trunk, error: saved }
+  const created = await deps.repo.switchCreateOrphan(trunk)
+  if (!created.ok) {
+    return { lineage, trunk, error: failureReasonText(created, `开出 ${trunk} 主干`) }
+  }
   const added = withBranchAdded(adopted, {
-    branch: 'life',
+    branch: trunk,
     generation: adopted.generations[0]?.id ?? 'gen-1',
     parent: adopted.generations[0]?.branch ?? 'default',
     at,
     kind: 'life'
   })
-  if (added === null) return { lineage, error: 'life 主干加不进家谱（细节看日志）。' }
+  if (added === null) return { lineage, trunk, error: '主干加不进家谱（细节看日志）。' }
   await writeLineageQuietly(deps, added)
-  await deps.repo.commit('memory: life')
-  return { lineage: added }
+  await deps.repo.commit(`memory: ${trunk}`)
+  return { lineage: added, trunk }
+}
+
+/** 家谱里的主干节点名（新 `ask` / 旧 `life`），没有返回 null */
+function trunkNodeOf(lineage: Lineage): string | null {
+  const ask = findBranch(lineage, TRUNK_BRANCH)
+  if (ask !== null) return ask.branch
+  const life = findBranch(lineage, LEGACY_TRUNK_BRANCH)
+  return life !== null ? life.branch : null
 }
 
 /** assistant 分支的候选名：`assistant` / `assistant-2` / … */
@@ -420,7 +449,7 @@ async function createAssistantBranch(
 ): Promise<{ lineage?: Lineage; branch?: string; error?: string }> {
   const status = await deps.repo.status()
   if (!status.ok) return { error: `记忆仓不可用：${repoReasonText(status.reason)}` }
-  const ensured = await ensureLifeBranch(deps, lineage, at)
+  const ensured = await ensureTrunkBranch(deps, lineage, at)
   if (ensured.error !== undefined) return { error: ensured.error }
   const base = ensured.lineage
 
@@ -433,7 +462,7 @@ async function createAssistantBranch(
   const added = withBranchAdded(base, {
     branch: name,
     generation: base.generations[0]?.id ?? 'gen-1',
-    parent: findBranch(base, 'life') !== null ? 'life' : null,
+    parent: trunkNodeOf(base),
     at,
     kind: 'assistant'
   })
@@ -459,6 +488,9 @@ async function createNode(
   }
   const current = head.branch ?? status.branch
   const branches = await deps.repo.listBranches()
+  if (isTrunkName(slug)) {
+    return { text: `${slug} 是出生主干，不能当节点名。` }
+  }
   if (branches.some((entry) => entry.branch === slug)) {
     return { text: `节点 ${slug} 已经存在（/log 看看有哪些）。` }
   }
@@ -476,7 +508,7 @@ async function createNode(
     const added = withBranchAdded(lineage, {
       branch: slug,
       generation: generationOf(lineage, current)?.id ?? lineage.generations[0]?.id ?? 'gen-1',
-      parent: findBranch(lineage, 'life') !== null ? 'life' : null,
+      parent: trunkNodeOf(lineage),
       at,
       kind: 'assistant',
       tools
@@ -610,7 +642,9 @@ async function checkDeletable(deps: CommandDeps, slug: string): Promise<Deletabl
     return { ok: true, branch: slug }
   }
   if (slug === head.branch) return { ok: false, message: '不能删当前节点。' }
-  if (node.kind === 'life') return { ok: false, message: 'life 是出生主干，不能删。' }
+  if (node.kind === 'life') {
+    return { ok: false, message: `${node.branch} 是出生主干（出生提交写在这里），不能删。` }
+  }
   if (lineage.generations.some((item) => item.branch === slug)) {
     return { ok: false, message: `${slug} 是一代鱼的主分支，不能删。` }
   }

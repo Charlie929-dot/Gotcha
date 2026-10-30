@@ -172,4 +172,20 @@ describe('会话落盘', () => {
     // 清完再取是新会话，不会「记得」已删的对话
     expect(registry.for('c1').load()).toEqual({ digest: '', turns: [] })
   })
+
+  it('reload 只清内存缓存：盘上内容变了再取会重读（切节点用）', () => {
+    const root = tempRoot()
+    const registry = createAskConversationRegistry({ root, log: () => undefined })
+    registry.for('c1').save({ digest: '旧节点', turns: [] })
+
+    // 模拟 checkout：盘上同名文件被换成另一个节点的内容
+    createAskConversationFileStore({ root, conversationId: 'c1' }).save({ digest: '新节点', turns: [] })
+
+    // 不 reload 时仍是内存里的旧内容（前缀缓存不变）
+    expect(registry.for('c1').load().digest).toBe('旧节点')
+    registry.reload()
+    expect(registry.for('c1').load().digest).toBe('新节点')
+    // 文件没被删
+    expect(readdirSync(join(root, 'conversations')).some((name) => name === 'c1.jsonl')).toBe(true)
+  })
 })

@@ -68,6 +68,45 @@ export interface MemoryPushResult {
   detail?: string
 }
 
+/** 当前 HEAD（M2）：分支名 / 是否 detached / 短 sha；空仓时 sha 为 null */
+export interface MemoryHead {
+  branch: string | null
+  detached: boolean
+  sha: string | null
+}
+
+export type MemorySwitchReason =
+  | 'unavailable'
+  | 'dirty'
+  | 'not-found'
+  | 'exists'
+  | 'invalid'
+  | 'current'
+  | 'failed'
+
+export interface MemorySwitchResult {
+  ok: boolean
+  reason?: MemorySwitchReason
+  detail?: string
+  /** 切换成功后的 HEAD */
+  head?: MemoryHead
+}
+
+/** 本地分支一览（`/log` 用）：最近一次提交的主题与时间 */
+export interface MemoryBranchInfo {
+  branch: string
+  sha: string
+  subject: string
+  /** 最近提交时间（毫秒）；读不到为 0 */
+  at: number
+}
+
+export interface MemoryBranchCommit {
+  hash: string
+  subject: string
+  at: number
+}
+
 export interface MemoryRepo {
   readonly root: string
   /** 确认 / 建立仓（幂等；结果缓存在进程内） */
@@ -87,6 +126,25 @@ export interface MemoryRepo {
   readFile(relativePath: string): Promise<string | null>
   /** 删仓内文件（不存在也算成功） */
   deleteFile(relativePath: string): Promise<boolean>
+
+  /* ---- M2 节点（分支）操作 ---- */
+
+  /** 当前 HEAD：分支 / 是否 detached / 短 sha */
+  head(): Promise<MemoryHead>
+  /** 切分支；工作区有未提交改动就拒绝（调用方先 commit） */
+  switchBranch(name: string): Promise<MemorySwitchResult>
+  /** 从当前 HEAD 开新分支并切过去；名字已存在就 exists */
+  switchCreate(name: string): Promise<MemorySwitchResult>
+  /** 切到历史提交（detached）；不存在就 not-found */
+  checkoutCommit(ref: string): Promise<MemorySwitchResult>
+  /** 删分支；当前分支 / 不存在分开报（「有后代不许删」由家谱层拦） */
+  deleteBranch(name: string): Promise<MemorySwitchResult>
+  /** 本地分支列表（按名字排序） */
+  listBranches(): Promise<MemoryBranchInfo[]>
+  /** 某个分支最近几条提交（默认 5 条） */
+  branchLog(name: string, limit?: number): Promise<MemoryBranchCommit[]>
+  /** 短 sha → 验证并解析；不存在返回 null */
+  revParse(ref: string): Promise<string | null>
 }
 
 const DEFAULT_GIT_TIMEOUT_MS = 20_000
@@ -219,6 +277,133 @@ export function createMemoryRepo(options: {
     const [hash = '', subject = ''] = result.stdout.split('\n')
     if (hash.trim() === '') return null
     return { hash: hash.trim(), subject: subject.trim() }
+  }
+
+  /* ---- M2：节点（分支）操作 ---- */
+
+  const headInner = async (): Promise<MemoryHead> => {
+    // 空仓时 symbolic-ref 仍返回分支名（HEAD 指向还没出生的分支），rev-parse 才失败
+    const symbolic = await run(['symbolic-ref', '--short', '-q', 'HEAD'])
+    const shaResult = await run(['rev-parse', '--short', 'HEAD'])
+    const sha = shaResult.ok && shaResult.stdout.trim() !== '' ? shaResult.stdout.trim() : null
+    return symbolic.ok && symbolic.stdout.trim() !== ''
+      ? { branch: symbolic.stdout.trim(), detached: false, sha }
+      : { branch: null, detached: true, sha }
+  }
+
+  /** 读不出状态也按「脏」处理：宁可不切，也不在状态不明时动工作区 */
+  const isDirty = async (): Promise<boolean> => {
+    const porcelain = await run(['status', '--porcelain'])
+    return !porcelain.ok || porcelain.stdout.trim() !== ''
+  }
+
+  const classifySwitchError = (detail: string): MemorySwitchReason => {
+    const text = detail.toLowerCase()
+    if (text.includes('already exists')) return 'exists'
+    if (text.includes('is not a valid branch name')) return 'invalid'
+    if (text.includes('not a valid object name') || text.includes('unknown revision')) return 'not-found'
+    if (
+      text.includes('did not match any file') ||
+      text.includes('pathspec') ||
+      text.includes('not found')
+    ) {
+      return 'not-found'
+    }
+    if (text.includes('would be overwritten') || text.includes('your local changes')) return 'dirty'
+    return 'failed'
+  }
+
+  /** checkout 类操作的共同前置：仓可用 + 工作区干净 */
+  const switchInner = async (args: readonly string[]): Promise<MemorySwitchResult> => {
+    const status = await ensure()
+    if (!status.ok) return { ok: false, reason: 'unavailable' }
+    if (await isDirty()) return { ok: false, reason: 'dirty', detail: '工作区有未提交改动' }
+    const result = await run([...args])
+    if (!result.ok) {
+      const detail = firstLine(result.stderr) || firstLine(result.stdout)
+      return { ok: false, reason: classifySwitchError(detail), detail }
+    }
+    return { ok: true, head: await headInner() }
+  }
+
+  const checkoutCommitInner = async (ref: string): Promise<MemorySwitchResult> => {
+    const status = await ensure()
+    if (!status.ok) return { ok: false, reason: 'unavailable' }
+    const resolved = await run(['rev-parse', '--short', '--verify', `${ref}^{commit}`])
+    if (!resolved.ok || resolved.stdout.trim() === '') {
+      return { ok: false, reason: 'not-found', detail: `没找到提交 ${ref}` }
+    }
+    const sha = resolved.stdout.trim()
+    if (await isDirty()) return { ok: false, reason: 'dirty', detail: '工作区有未提交改动' }
+    const result = await run(['checkout', '--detach', sha])
+    if (!result.ok) {
+      const detail = firstLine(result.stderr) || firstLine(result.stdout)
+      return { ok: false, reason: classifySwitchError(detail), detail }
+    }
+    return { ok: true, head: await headInner() }
+  }
+
+  const deleteBranchInner = async (name: string): Promise<MemorySwitchResult> => {
+    const status = await ensure()
+    if (!status.ok) return { ok: false, reason: 'unavailable' }
+    const head = await headInner()
+    if (head.branch !== null && head.branch === name) {
+      return { ok: false, reason: 'current', detail: '不能删除当前所在的分支' }
+    }
+    const result = await run(['branch', '-D', name])
+    if (!result.ok) {
+      const detail = firstLine(result.stderr) || firstLine(result.stdout)
+      if (detail.toLowerCase().includes('not found')) return { ok: false, reason: 'not-found', detail }
+      return { ok: false, reason: 'failed', detail }
+    }
+    return { ok: true }
+  }
+
+  const listBranchesInner = async (): Promise<MemoryBranchInfo[]> => {
+    const status = await ensure()
+    if (!status.ok) return []
+    const result = await run([
+      'for-each-ref',
+      '--format=%(refname:short)%00%(objectname:short)%00%(subject)%00%(committerdate:unix)',
+      'refs/heads'
+    ])
+    if (!result.ok) return []
+    const out: MemoryBranchInfo[] = []
+    for (const line of result.stdout.split('\n')) {
+      if (line === '') continue
+      const [branch = '', sha = '', subject = '', at = '0'] = line.split('\0')
+      if (branch === '' || sha === '') continue
+      out.push({
+        branch,
+        sha,
+        subject,
+        at: Number(at) > 0 ? Number(at) * 1000 : 0
+      })
+    }
+    return out.sort((a, b) => a.branch.localeCompare(b.branch))
+  }
+
+  const branchLogInner = async (name: string, limit: number): Promise<MemoryBranchCommit[]> => {
+    const status = await ensure()
+    if (!status.ok) return []
+    const result = await run(['log', name, `-n${Math.max(1, limit)}`, '--format=%h%x00%s%x00%ct'])
+    if (!result.ok) return []
+    const out: MemoryBranchCommit[] = []
+    for (const line of result.stdout.split('\n')) {
+      if (line === '') continue
+      const [hash = '', subject = '', at = '0'] = line.split('\0')
+      if (hash === '') continue
+      out.push({ hash, subject, at: Number(at) > 0 ? Number(at) * 1000 : 0 })
+    }
+    return out
+  }
+
+  const revParseInner = async (ref: string): Promise<string | null> => {
+    const status = await ensure()
+    if (!status.ok) return null
+    const result = await run(['rev-parse', '--short', '--verify', `${ref}^{commit}`])
+    if (!result.ok || result.stdout.trim() === '') return null
+    return result.stdout.trim()
   }
 
   const ensureIdentity = async (): Promise<void> => {
@@ -398,6 +583,14 @@ export function createMemoryRepo(options: {
           // 不存在也算成功（重复清理不该报错）
           return (error as NodeJS.ErrnoException).code === 'ENOENT'
         }
-      })
+      }),
+    head: () => exclusive(headInner),
+    switchBranch: (name) => exclusive(() => switchInner(['checkout', name])),
+    switchCreate: (name) => exclusive(() => switchInner(['checkout', '-b', name])),
+    checkoutCommit: (ref) => exclusive(() => checkoutCommitInner(ref)),
+    deleteBranch: (name) => exclusive(() => deleteBranchInner(name)),
+    listBranches: () => exclusive(listBranchesInner),
+    branchLog: (name, limit = 5) => exclusive(() => branchLogInner(name, limit)),
+    revParse: (ref) => exclusive(() => revParseInner(ref))
   }
 }

@@ -132,6 +132,7 @@ import { createAskConversationRegistry } from './ask-conversation'
 import { createCommandHandler, memoryDayKey } from './commands'
 import { ensureLineage, lineageSnapshot, readLineage } from './lineage'
 import { createMemoryRepo } from './memory-repo'
+import { forkDetachedIfNeeded } from './node-fork'
 import {
   appendAskHistory,
   ASK_HISTORY_FILE,
@@ -2254,7 +2255,13 @@ if (primaryInstance) {
     qqChannel = createQqChannel(new QqOb11Server(), {
       log: (level, message, data) => captureLog(level, message, data),
       ask: async ({ text, conversationId, signal, images }) => {
-        // 与桌面提问同一套前置：先同步日记（节流），再取只读连接
+        // 与桌面同一套前置：历史提交只读查看中先分叉（M2），再同步日记、取只读连接
+        await forkDetachedIfNeeded({
+          repo: memoryRepo,
+          lineageFile,
+          reloadConversations: () => askConversations.reload(),
+          log: (level, message, data) => captureLog(level, message, data)
+        })
         syncMemoryIfDue()
         const db = connections.queryDb()
         if (!db) {
@@ -2361,6 +2368,13 @@ if (primaryInstance) {
     disposeAskIpc = registerAskIpc({
       getWindow: () => askWindow,
       ask: async (question, context) => {
+        // 历史提交只读查看中：第一句话先从这里分叉成自己的节点（M2）；失败不阻塞提问
+        await forkDetachedIfNeeded({
+          repo: memoryRepo,
+          lineageFile,
+          reloadConversations: () => askConversations.reload(),
+          log: (level, message, data) => captureLog(level, message, data)
+        })
         // 先把日记目录的增量同步进来（节流；失败只记日志，不挡住提问）。
         // **必须在取 queryDb 之前**：同步要开写连接，会把只读连接关掉，
         // 先取再同步会拿到一个已经关闭的句柄。
@@ -2381,8 +2395,12 @@ if (primaryInstance) {
             return result
           })
       },
-      // 本地命令（M1）：/help、/backup；命中就本地执行，不调模型、不进问答历史
-      command: createCommandHandler({ repo: memoryRepo, lineageFile }),
+      // 本地命令（M1/M2）：/help /log /new /use /del /backup；命中就本地执行，不调模型、不进问答历史
+      command: createCommandHandler({
+        repo: memoryRepo,
+        lineageFile,
+        reloadConversations: () => askConversations.reload()
+      }),
       // 「还要继续查吗」→ 恢复暂停的循环（问题用检查点里的原话，续查通道不再传）
       resume: async (resumeId, decision, context) => {
         prepareAskUploads(context)

@@ -199,6 +199,9 @@
 | 手动起 NapCat 的正确姿势 | 2026-10-30：`NapCatWinBootMain.exe` 不是双击就能用——launcher 会设五个环境变量（`NAPCAT_PATCH_PACKAGE` / `NAPCAT_LOAD_PATH` / `NAPCAT_INJECT_PATH` / `NAPCAT_LAUNCHER_PATH` / `NAPCAT_MAIN_PATH`）并传 `<QQ.exe> <NapCatWinBootHook.dll>`；少一个 QQ 起来也不加载 NapCat | 见 `src/main/qq/napcat.ts` 的 `spawnNapcat`；cwd 必须是 Shell 目录，QQ 路径取注册表 `UninstallString` 的目录 + `QQ.exe` |
 | NapCat 目录 1.2GB ≠ 安装包大小 | 2026-10-30：`D:\NapCat\OneKey\NapCat.52230.Shell` 1.2GB，大头是它自己的 `versions/9.9.33` QQ 运行时；官方 `NapCat.Shell.zip` 只有 ~36MB，登录后自己补 QQ 运行时 / 复用本机 QQ | 「嵌入 Gotcha」只托管进程、不把目录塞进仓库；设置抽屉下载的是 `NapCat.Shell.zip`，解压到 `<userData>/napcat/NapCat.Shell` |
 | 退出 Gotcha 后 NapCat 还在跑 | 2026-10-30 拍板「退出不关」：NapCat/QQ 是用户自己的账号，不能随 Gotcha 一起收口 | `dispose()` 只清轮询；下次启动用 `isConnected` / `NapCatWinBootMain.exe` 检测并接管，不重复拉进程；「停止」只 `taskkill /T /F` 自己拉起的树，附着的第三方实例只断开并提示 |
+| `status.branch` 在 detached 时是 `'HEAD'`，不是 null | 2026-10-30 做 M2 节点命令：`/use <提交>` 后判「是否停在历史提交」，用 `status.branch === null` 永远不成立——`readStatus` 里 `symbolic-ref` 失败会回退 `rev-parse --abbrev-ref HEAD`，detached 时它返回字符串 `HEAD` | 判 detached 一律用 `repo.head()`（`symbolic-ref --short -q HEAD`，失败即 detached、`branch` 为 null）；`status.branch` 只适合显示，不适合做状态判断 |
+| 切节点后不重载会话 = 换了个盘、还在聊旧记忆 | 2026-10-30 M2：`git checkout` 会把 `conversations/` 整份换成目标节点的文件，但注册表里 `for(id)` 的 store 有内存缓存，不 `reload()` 的话下一问仍是旧节点的上下文（模型「记得」切走前的话） | 切 / 分叉成功后调 `askConversations.reload()`（只清 Map、不删文件）；`reload()` 与 `clear()` 别混用，后者连盘上文件一起删 |
+| 真 git 单测在并行下会超 vitest 默认 5s | 2026-10-30 M2：`main-memory-repo.test.ts` 单个用例（init + 提交 + checkout）串起来接近 20s，全量并行（152 worker）时默认 5s 会随机红 | 这类 describe 写 `{ timeout: 30_000 }`；产品里的仓超时仍是 20s / 推送 60s，两套数不要混 |
 
 ## 规则
 

@@ -53,6 +53,7 @@
     "better-sqlite3": "13.0.3",
     "electron-log": "5.4.4",
     "onnxruntime-node": "^1.30.0",
+    "pinyin-pro": "^3.29.5",
     "ws": "^8.22.0"
   }
 }

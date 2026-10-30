@@ -20,6 +20,8 @@ class FakeTransport implements QqTransport {
   started: { host: string; port: number; accessToken: string; onMessage: (inbound: QqInbound) => void } | null =
     null
   sent: { userId: number; text: string }[] = []
+  /** file → get_image 回执（测试按需塞） */
+  images = new Map<string, { base64?: string; url?: string }>()
   private state = { listening: false, connections: 0, port: null as number | null }
 
   async start(options: {
@@ -42,10 +44,20 @@ class FakeTransport implements QqTransport {
     this.sent.push({ userId, text })
   }
 
+  async getImage(file: string): Promise<{ base64?: string; url?: string }> {
+    const got = this.images.get(file)
+    if (!got) throw new Error('no such image')
+    return got
+  }
+
   status(): { listening: boolean; connections: number; port: number | null } {
     return this.state
   }
 }
+
+/** 1×1 PNG（只验 mime / data URL，不验像素） */
+const TINY_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
 function config(overrides: Partial<QqChannelConfig> = {}): QqChannelConfig {
   return {
@@ -59,8 +71,15 @@ function config(overrides: Partial<QqChannelConfig> = {}): QqChannelConfig {
   }
 }
 
-function inbound(text: string, userId = 20002): QqInbound {
-  return { userId, nickname: '测试', text, messageId: Math.floor(Math.random() * 1e9), at: Date.now() }
+function inbound(text: string, userId = 20002, images?: QqInbound['images']): QqInbound {
+  return {
+    userId,
+    nickname: '测试',
+    text,
+    messageId: Math.floor(Math.random() * 1e9),
+    at: Date.now(),
+    ...(images !== undefined ? { images } : {})
+  }
 }
 
 function answer(text: string): ChainAskResult {
@@ -221,5 +240,50 @@ describe('一次问答', () => {
     expect(asked).toBe(2)
     const warnings = transport.sent.filter((item) => item.text.includes('太多了'))
     expect(warnings).toHaveLength(1)
+  })
+})
+
+describe('图片（D63 追加）', () => {
+  it('get_image 返回 base64 → ask 收到 data URL，文本仍带 [图片]', async () => {
+    const transport = new FakeTransport()
+    transport.images.set('pic-1', { base64: TINY_PNG })
+    const asked: { text: string; images?: readonly string[] }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ text, images }) => {
+        asked.push({ text, ...(images !== undefined ? { images } : {}) })
+        return answer('看到了，是一张白图。')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('看看这个 [图片]', 20002, [{ file: 'pic-1' }]))
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.text).toContain('[图片]')
+    expect(asked[0]?.images).toHaveLength(1)
+    expect(asked[0]?.images?.[0]).toMatch(/^data:image\/png;base64,/)
+    expect(transport.sent[0]?.text).toContain('看到了')
+  })
+
+  it('取不到图 → 只按文字问，不阻断回答', async () => {
+    const transport = new FakeTransport()
+    const logs: { message: string; data?: Record<string, unknown> }[] = []
+    const asked: { text: string; images?: readonly string[] }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ text, images }) => {
+        asked.push({ text, ...(images !== undefined ? { images } : {}) })
+        return answer('没看到图，只看到文字。')
+      },
+      log: (level, message, data) => logs.push({ message, ...(data !== undefined ? { data } : {}) }),
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('看看 [图片]', 20002, [{ file: 'missing' }]))
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.images).toBeUndefined()
+    expect(transport.sent[0]?.text).toContain('没看到图')
+    expect(logs.some((entry) => entry.message === 'qq image skipped')).toBe(true)
   })
 })

@@ -118,6 +118,106 @@ describe('只追加：消息前缀稳定', () => {
   })
 })
 
+describe('图片：只有压缩才删', () => {
+  const TINY =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+  const turnWithImage = (index: number): CloudAskConversationTurn => ({
+    question: `问 ${index}`,
+    now: '当前时间：2026-10-30 14:00 周五',
+    turns: [],
+    answer: `答 ${index}`,
+    attachments: { images: [TINY], files: [] }
+  })
+
+  function payloadWith(conversation: readonly CloudAskConversationTurn[]) {
+    const { payload } = createLocalAskOutbound().buildLoop({
+      question: '再问',
+      systemTime: '2026-10-30 14:00 周五',
+      freshness: { latestEvidenceTs: null, captureRunning: false },
+      turns: [],
+      conversation
+    })
+    return payload
+  }
+
+  it('用户附件图片原样进会话、下一问重放', () => {
+    const conversation = appendAskConversationTurn(emptyAskConversation(), turnWithImage(0))
+    expect(conversation.turns[0]?.attachments?.images).toEqual([TINY])
+    const messages = buildChainAskLoopMessages(payloadWith(conversation.turns))
+    expect(messages[1]).toMatchObject({ role: 'user', images: [TINY] })
+  })
+
+  it('工具截图（read_segment）原样进会话、下一问重放', () => {
+    const turn: CloudAskConversationTurn = {
+      question: '看图',
+      now: '',
+      turns: [
+        {
+          toolCall: { name: 'get_freshness', arguments: {} },
+          toolResult: {
+            kind: 'get_freshness',
+            freshness: { latestEvidenceTs: null, captureRunning: false }
+          },
+          images: [TINY]
+        }
+      ],
+      answer: '看到'
+    }
+    const conversation = appendAskConversationTurn(emptyAskConversation(), turn)
+    expect(conversation.turns[0]?.turns[0]?.images).toEqual([TINY])
+    const messages = buildChainAskLoopMessages(payloadWith(conversation.turns))
+    const imageMessage = messages.find((message) => message.images?.includes(TINY))
+    expect(imageMessage).toMatchObject({ role: 'user' })
+  })
+
+  it('没超预算：图片一张都不删', () => {
+    const conversation = appendAskConversationTurn(emptyAskConversation(), turnWithImage(0), {
+      maxChars: 1_000_000,
+      keepTurns: 8
+    })
+    expect(conversation.turns[0]?.attachments?.images).toEqual([TINY])
+  })
+
+  it('askChain 的附件图片进会话，并在下一问重放（前缀不断）', async () => {
+    const store = createAskConversationStore()
+    const client = new FakeLlmClient([{ json: '第一答' }, { json: '第二答' }])
+    await askChain(
+      {
+        db,
+        outbound: createLocalAskOutbound(),
+        resolveClient: () => ({ ok: true, client }),
+        now: () => NOW,
+        captureRunning: () => false,
+        canSend: () => true,
+        conversation: store,
+        attachments: { images: [TINY] }
+      },
+      '看图'
+    )
+    await ask(store, client, '第二问')
+    expect(client.askLoopRequests[0]?.attachments?.images).toEqual([TINY])
+    const second = buildChainAskLoopMessages(client.askLoopRequests[1]!)
+    expect(second.some((message) => message.images?.includes(TINY))).toBe(true)
+  })
+
+  it('压缩时整轮丢弃（图片随轮走）；保留轮的图片一张都不删', () => {
+    let conversation = appendAskConversationTurn(emptyAskConversation(), turnWithImage(0), {
+      maxChars: 50,
+      keepTurns: 1
+    })
+    conversation = appendAskConversationTurn(conversation, turnWithImage(1), {
+      maxChars: 50,
+      keepTurns: 1
+    })
+    expect(conversation.turns).toHaveLength(1)
+    expect(conversation.digest).toContain('问 0')
+    // 保留轮（第 1 轮）的图必须还在：删图会改前缀、缓存失效
+    expect(conversation.turns[0]?.attachments?.images).toEqual([TINY])
+    expect(conversation.turns[0]?.answer).toContain('答 1')
+  })
+})
+
 describe('只追加：裁剪与摘要', () => {
   const turn = (index: number): CloudAskConversationTurn => ({
     question: `问 ${index} ${'q'.repeat(40)}`,
@@ -143,16 +243,19 @@ describe('只追加：裁剪与摘要', () => {
     expect(conversation.digest).toContain('答 0')
   })
 
-  it('digest 挂在 system 尾部（不单独发 user，避免连续 user）', () => {
+  it('digest 挂在第一条 user 消息里（system 永不改；没有连续 user）', () => {
     const client = new FakeLlmClient([{ json: '答' }])
     const store = createAskConversationStore()
     store.save({ digest: '- 问：旧问题 → 答：旧回答', turns: [] })
     return ask(store, client, '新问题').then(() => {
       const messages = buildChainAskLoopMessages(client.askLoopRequests[0]!)
       expect(messages[0]?.role).toBe('system')
-      expect(messages[0]?.content).toContain('<archived_session_summary>')
-      expect(messages[0]?.content).toContain('问：旧问题')
-      expect(messages[1]).toMatchObject({ role: 'user' })
+      // system 只提到标签名，不含真正的摘要内容；摘要挂在第一条 user 里
+      expect(messages[0]?.content).not.toContain('问：旧问题')
+      expect(messages[0]?.content).not.toContain('旧回答')
+      expect(messages[1]?.role).toBe('user')
+      expect(messages[1]?.content).toContain('<archived_session_summary>')
+      expect(messages[1]?.content).toContain('问：旧问题')
     })
   })
 })

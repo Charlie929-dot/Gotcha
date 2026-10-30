@@ -10,14 +10,15 @@
  * - 不能再过一次脱敏墙（否则 `[已脱敏]` 会被二次处理，前缀就变了）；
  * - 它们只能由 `buildAskLoopPayload()` 产出，主进程只负责按会话存取。
  *
- * 裁剪是确定性的（不调模型）：超过字符预算时，从最旧的一轮开始丢，
+ * 裁剪是确定性的（不调模型）：超过**文字**预算时，从最旧的一轮开始丢，
  * 把「问 / 答」压成一行摘要放进 `digest`；最近 `KEEP_TURNS` 轮永远保留全文。
+ * 图片不计入预算，也不会单独删：只有整轮被压缩掉时，图才随轮一起走。
  * 不做 LLM 摘要（多一次出云、多一份账单，先让结构跑通）。
  */
 
-import type { CloudAskLoopTurn } from './payload'
+import type { CloudAskAttachments, CloudAskLoopTurn } from './payload'
 
-/** 会话里的一轮：问题 + 当时的 <now> + 工具轮 + 最终答复 */
+/** 会话里的一轮：问题 + 当时的 <now> + 工具轮 + 最终答复 + 随问题发出去的附件 */
 export interface CloudAskConversationTurn {
   /** 用户问题（已过策略） */
   readonly question: string
@@ -27,6 +28,11 @@ export interface CloudAskConversationTurn {
   readonly turns: readonly CloudAskLoopTurn[]
   /** 最终答复正文（模型原话） */
   readonly answer: string
+  /**
+   * 随问题一起发出去的附件（用户上传 / QQ 图片 / 选区截图）。**回放时必须原样带上**：
+   * 少一张图，这条 user 消息的字节就变了，后面的前缀缓存全断。
+   */
+  readonly attachments?: CloudAskAttachments
 }
 
 /** 一次会话的完整可见历史：更早的部分压成 digest，最近的在 turns 里 */
@@ -55,9 +61,21 @@ export function emptyAskConversation(): CloudAskConversation {
   return { digest: '', turns: [] }
 }
 
-/** 一轮的字符量（JSON 形态，和真正发出去的消息量级一致） */
+/** 一轮的**文字**字符量：图片不计入预算（图片只在整轮被压缩掉时随轮删除） */
 export function askConversationTurnChars(turn: CloudAskConversationTurn): number {
-  return JSON.stringify(turn).length
+  const turns = turn.turns.map((item) => {
+    if (item.images === undefined) return item
+    const { images: _images, ...rest } = item
+    return rest
+  })
+  const attachments = turn.attachments
+    ? { images: [] as string[], files: turn.attachments.files }
+    : undefined
+  return JSON.stringify({
+    ...turn,
+    turns,
+    ...(attachments !== undefined ? { attachments } : {})
+  }).length
 }
 
 export function askConversationChars(conversation: CloudAskConversation): number {
@@ -91,6 +109,10 @@ export interface AppendAskConversationOptions {
 /**
  * 追加一轮并按预算裁剪：只丢最旧的，最近 `keepTurns` 轮即使超预算也保留。
  * 纯函数——主进程 / 测试同一套口径，不依赖时间与模型。
+ *
+ * 压缩是**唯一**允许替换历史的时机（2026-10-30 拍板）：只整轮丢弃（图片随轮一起走），
+ * 保留轮里的图片一张都不删——删图同样会让前缀字节变化、缓存失效。
+ * 预算只算文字：图片不计入，否则一张图就会立刻触发压缩、把缓存打掉。
  */
 export function appendAskConversationTurn(
   previous: CloudAskConversation,

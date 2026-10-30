@@ -58,11 +58,12 @@ describe('入站解析', () => {
     expect(parsePrivateMessageEvent('x')).toBeNull()
   })
 
-  it('CQ 字符串回退：图片留占位、@ 与回复丢掉、转义还原', () => {
+  it('CQ 字符串回退：图片留占位并带引用、@ 与回复丢掉、转义还原', () => {
     const inbound = parsePrivateMessageEvent(
-      event({ message: '[CQ:reply,id=1]看这个[CQ:image,file=a.png] &amp; [CQ:face,id=1]' })
+      event({ message: '[CQ:reply,id=1]看这个[CQ:image,file=a.png,url=http://x/a.png] &amp; [CQ:face,id=1]' })
     )
     expect(inbound?.text).toBe('看这个[图片] & [表情]')
+    expect(inbound?.images).toEqual([{ file: 'a.png', url: 'http://x/a.png' }])
   })
 
   it('段数组：非文字段只留占位符，at 不参与文本', () => {
@@ -75,6 +76,23 @@ describe('入站解析', () => {
         { type: 'bogus', data: {} }
       ])
     ).toBe('帮我找[图片][语音]')
+  })
+
+  it('图片引用：去重、最多 4 张；纯图消息也能进（文本是 [图片]）', () => {
+    const parsed = parsePrivateMessageEvent(
+      event({
+        message: [
+          { type: 'image', data: { file: 'a.png' } },
+          { type: 'image', data: { file: 'a.png' } },
+          { type: 'image', data: { file: 'b.png' } },
+          { type: 'image', data: { file: 'c.png' } },
+          { type: 'image', data: { file: 'd.png' } },
+          { type: 'image', data: { file: 'e.png' } }
+        ]
+      })
+    )
+    expect(parsed?.text).toBe('[图片][图片][图片][图片][图片][图片]')
+    expect(parsed?.images?.map((ref) => ref.file)).toEqual(['a.png', 'b.png', 'c.png', 'd.png'])
   })
 })
 

@@ -1,13 +1,13 @@
 /**
  * 信息链 · 问记忆工具循环的驱动层（toolloop）
  *
- * 消息协议：system（纪律 + 当前时间 + 数据边界）→ user（问题）→
- * assistant tool_calls → tool 结果摘要 → … → 最终 assistant JSON
- * `{answer, citations:[{segmentId, why}]}`（与单发路径同形）。
+ * 消息协议（D64）：system（固定人设 / 工具清单 / 规则）→ user（问题 + `<now>`）→
+ * assistant tool_calls → tool 结果摘要 → … → 最终 assistant 自由文本。
  *
- * 上限（2026-10-27 调整）：**8 轮可以调工具、工具调用总数 ≤16**；第 9 轮是
- * **强制收尾轮**——不再发 tools，要求模型直接给最终 JSON。这样「轮数用尽」
- * 只会变成「基于已查到的内容作答 / 如实说没找到」，不会变成「问记忆出错了」。
+ * 上限（2026-10-30 调整）：**8 轮可以调工具、工具调用总数 ≤16**。
+ * **不再有「第 9 轮强制收尾」**：模型不调工具的那一轮就是收尾；
+ * 预算用尽时仍想调工具 → 先问用户（`continue-ask`），用户选收尾才发一轮不带 tools 的请求。
+ * 这样所有正常请求的 messages / tools 前缀都一致，缓存不会因末轮指令失效。
  * 只有工具调用数超限、或客户端真的失败，才按 `failed` 收口。
  *
  * 2026-10-27 再调：加 `read_segment` 后模型需要多走一步「展开命中段看全文」，
@@ -69,7 +69,7 @@ import type { ChainSearchBatchQuery, ChainSearchBatchResult } from '../query'
 
 /** 允许模型调用工具的轮数上限（用户点一次「继续查」就再批这么多） */
 export const ASK_LOOP_MAX_TOOL_TURNS = 8
-/** assistant 调用总上限：8 轮工具 + 1 轮强制收尾（收尾轮不带 tools） */
+/** assistant 调用总上限：8 轮工具 + 1 轮用户选择的收尾（不带 tools；正常流程不会自动走到） */
 export const ASK_LOOP_MAX_TURNS = ASK_LOOP_MAX_TOOL_TURNS + 1
 /** 工具调用总数上限（跨轮累计）：read_segment 让单轮内多开几段成为常态 */
 export const ASK_LOOP_MAX_TOOL_CALLS = 16
@@ -340,8 +340,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   /** 本轮（含恢复前）还能调工具的全局轮数 / 调用次数 */
   const toolTurnBudget = toolsAvailable ? ASK_LOOP_MAX_TOOL_TURNS * (1 + grants) : 0
   const toolCallBudget = toolsAvailable ? ASK_LOOP_MAX_TOOL_CALLS * (1 + grants) : 0
-  /** 本地循环上限：全局预算 + 收尾轮 - 已经用掉的轮数；无工具时只有一轮 */
-  const localTurnLimit = toolsAvailable ? Math.max(1, toolTurnBudget + 1 - turnsUsed) : 1
+  /** 本地循环上限：只给工具预算本身，不再多一发「强制收尾轮」（没有 tool call 就是收尾） */
+  const localTurnLimit = toolsAvailable ? Math.max(1, toolTurnBudget - turnsUsed) : 1
   /** 本轮是否查过问答记录：决定「关于对话本身」的答案能否不带屏幕引用 */
   let usedAskHistory = resume?.usedAskHistory ?? false
 
@@ -353,18 +353,26 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     if (!ctx.conversation) return
     const text = answer.trim()
     if (text === '') return
-    // 截图（data URL）不进会话：一张几 MB，重放时也基本用不上；工具结果与文字照常保留。
-    // 代价：带图那一问的前缀在下次请求里会断在「图」的位置，缓存只命中到图之前。
-    const turns = payload.turns.map((turn) => {
-      if (turn.images === undefined) return turn
-      const { images: _images, ...rest } = turn
-      return rest
-    })
+    // 图片（选区截图 / 用户附件 / QQ 图片 / 工具截图）一律原样存：少一张，这条 user 消息的
+    // 字节就变了，后面的前缀缓存全断。只有压缩（appendAskConversationTurn）才允许删图。
+    const images = [
+      ...(ctx.image !== undefined ? [ctx.image.dataUrl] : []),
+      ...(payload.attachments?.images ?? [])
+    ]
+    const files = payload.attachments?.files ?? []
+    const attachments =
+      images.length > 0 || files.length > 0 ? { images, files } : undefined
     try {
       ctx.conversation.save(
         appendAskConversationTurn(
           { digest: payload.digest ?? '', turns: payload.conversation ?? [] },
-          { question: payload.question, now: payload.now, turns, answer: text }
+          {
+            question: payload.question,
+            now: payload.now,
+            turns: payload.turns,
+            answer: text,
+            ...(attachments !== undefined ? { attachments } : {})
+          }
         )
       )
     } catch (error) {
@@ -409,13 +417,12 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       settleUsage()
       return withTrace({ kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(turnsUsed + turn - 1, toolCallCount) })
     }
-    // 收尾轮：不再给工具，逼模型用已看到的段作答（不带 tools 的请求也不可能回 tool_calls）。
-    // 用户选「先按现在的结果回答」时，恢复后的第一轮就是这个收尾轮。
+    // 用户选「先按现在的结果回答」时，恢复后的第一轮不带工具；其余轮都给 tools。
     // 无工具模式（D62）一开始就没有工具，也不该走「轮数用尽」的收尾语义。
+    // 工具预算内都给 tools；只有用户明确选「先按现在的结果回答」时才不带工具。
+    // 没有单独的「收尾轮」：模型不再调工具的那一轮就是收尾（缓存前缀不额外断一次）。
     const allowTools =
-      toolsAvailable &&
-      globalTurn <= toolTurnBudget &&
-      !(turn === 1 && ctx.resumeDecision === 'stop')
+      toolsAvailable && globalTurn <= toolTurnBudget && !(turn === 1 && ctx.resumeDecision === 'stop')
     const built = ctx.outbound.buildLoop({
       question,
       systemTime,

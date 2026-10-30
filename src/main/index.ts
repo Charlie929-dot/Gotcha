@@ -2144,7 +2144,7 @@ if (primaryInstance) {
     }
     qqChannel = createQqChannel(new QqOb11Server(), {
       log: (level, message, data) => captureLog(level, message, data),
-      ask: async ({ text, conversationId, signal }) => {
+      ask: async ({ text, conversationId, signal, images }) => {
         // 与桌面提问同一套前置：先同步日记（节流），再取只读连接
         syncMemoryIfDue()
         const db = connections.queryDb()
@@ -2160,8 +2160,12 @@ if (primaryInstance) {
           signal,
           mode: DEFAULT_ASK_MODE
         }
+        const options = askOptionsFor(db, context, askOpeningFor(db, text, context))
+        // QQ 发来的图片：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
         const result = await askChain(
-          askOptionsFor(db, context, askOpeningFor(db, text, context)),
+          images !== undefined && images.length > 0
+            ? { ...options, attachments: { images } }
+            : options,
           text
         )
         rememberQqTurn(conversationId, text, result)

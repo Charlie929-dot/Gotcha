@@ -486,8 +486,7 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskLoopToolName, string>> = {
  */
 function buildAskLoopSystemPrompt(
   personaPrompt?: string,
-  toolGroups: { screen: boolean; diary: boolean } = { screen: true, diary: true },
-  digest?: string
+  toolGroups: { screen: boolean; diary: boolean } = { screen: true, diary: true }
 ): string {
   const tools = askLoopToolsFor(toolGroups)
   const lines: string[] = []
@@ -509,18 +508,14 @@ function buildAskLoopSystemPrompt(
     '- `<archived_session_summary>` 是更早对话的压缩摘要，只当参考；细节以当前对话与工具结果为准。',
     '</rules>'
   )
-  // 更早会话的摘要放在 system 尾部：它只在「裁剪发生」时变一次，
-  // 不会每轮漂移；单独发一条 user 会和「用户消息」连在一起，DeepSeek reasoner 不收连续 user。
-  if (digest !== undefined && digest.trim() !== '') {
-    lines.push(
-      '',
-      '<archived_session_summary>',
-      '更早的对话（已压缩，仅供参考）：',
-      digest.trim(),
-      '</archived_session_summary>'
-    )
-  }
   return lines.join('\n')
+}
+
+/** 更早会话的摘要：只在压缩后出现，挂在**第一条 user 消息**前面（system 永不改） */
+function digestBlock(digest: string): string {
+  const text = digest.trim()
+  if (text === '') return ''
+  return `<archived_session_summary>\n更早的对话（已压缩，仅供参考）：\n${text}\n</archived_session_summary>`
 }
 
 /**
@@ -533,14 +528,16 @@ function buildAskLoopSystemPrompt(
 function userMessageContent(
   question: string,
   files: readonly { readonly name: string; readonly text: string }[] | undefined,
-  now: string
+  now: string,
+  prefix?: string
 ): string {
   const body = JSON.stringify({
     question,
     ...(files !== undefined && files.length > 0 ? { files } : {})
   })
   const text = now.trim()
-  return text === '' ? body : `${body}\n\n<now>\n${text}\n</now>`
+  const nowPart = text === '' ? '' : `<now>\n${text}\n</now>`
+  return [prefix ?? '', body, nowPart].filter((part) => part !== '').join('\n\n')
 }
 
 /**
@@ -548,7 +545,7 @@ function userMessageContent(
  *
  *   system（固定；更早会话的压缩摘要挂在它尾部）
  *   之前每轮：user(问题 + <now>) → assistant(tool_calls) / tool(结果) … → assistant(答复)
- *   本轮：user(问题 + <now>) → 工具往返 … → [user(<final>)]
+ *   本轮：user(问题 + <now>) → 工具往返 …（模型不调工具的那一轮就是最终答复）
  *
  * `<now>` 与问题合并在同一条 user 里（DeepSeek reasoner 拒绝连续 user）；
  * 调用 id 用全局序号造（会话回放 + 本轮工具轮在同一串里，不能撞）。
@@ -568,10 +565,11 @@ export function buildChainAskLoopMessages(
   const messages: LlmMessage[] = [
     {
       role: 'system',
-      content: buildAskLoopSystemPrompt(personaPrompt, groups, payload.digest)
+      content: buildAskLoopSystemPrompt(personaPrompt, groups)
     }
   ]
 
+  const digest = payload.digest !== undefined ? digestBlock(payload.digest) : ''
   let callIndex = 0
   const pushTurns = (turns: ChainAskLoopPayload['turns']): void => {
     for (const turn of turns) {
@@ -597,8 +595,18 @@ export function buildChainAskLoopMessages(
   }
 
   // 之前轮次：原样重放（这些消息当时就是按这个形态发出去的）
+  let firstPrior = true
   for (const turn of payload.conversation ?? []) {
-    messages.push({ role: 'user', content: userMessageContent(turn.question, undefined, turn.now) })
+    const files = turn.attachments?.files
+    const attachments = turn.attachments
+    messages.push({
+      role: 'user',
+      content: userMessageContent(turn.question, files, turn.now, firstPrior ? digest : ''),
+      ...(attachments !== undefined && attachments.images.length > 0
+        ? { images: attachments.images }
+        : {})
+    })
+    firstPrior = false
     pushTurns(turn.turns)
     if (turn.answer.trim() !== '') messages.push({ role: 'assistant', content: turn.answer })
   }
@@ -606,7 +614,12 @@ export function buildChainAskLoopMessages(
   // 本轮：user（问题 + <now>）→ 工具往返
   messages.push({
     role: 'user',
-    content: userMessageContent(payload.question, payload.attachments?.files, payload.now),
+    content: userMessageContent(
+      payload.question,
+      payload.attachments?.files,
+      payload.now,
+      firstPrior ? digest : ''
+    ),
     ...(images.length > 0 ? { images } : {})
   })
   pushTurns(payload.turns)
@@ -742,7 +755,7 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
  * 一次请求的三种形状：
  * - `json`：普通结构化调用（response_format=json_object）
  * - `ask-loop`：工具轮（带 tools、不发 response_format，可能回 tool_calls）
- * - `ask-loop-final`：收尾轮（不带 tools、发 response_format 强制 JSON，仍容忍围栏）
+ * - `ask-loop-final`：用户选「先按现在的结果回答」/ 无工具模式（带同一份 tools + tool_choice:none，或 tools 为空）
  */
 type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
 
@@ -1006,8 +1019,8 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
 
     /**
      * 问记忆 · 工具循环（toolloop）：branded 循环上下文 → 本轮 toolCalls 或最终 JSON。
-     * 工具轮不带 response_format（会禁掉 tool_calls）；`allowTools: false` 是收尾轮：
-     * 不带 tools、改发 response_format，并把「只剩最后一步、直接作答」写进 system。
+     * 工具轮不带 response_format（会禁掉 tool_calls）；`allowTools: false` 是用户选的收尾轮：
+     * 仍带同一份 tools + `tool_choice:'none'`（或无工具模式不带 tools），保住前缀缓存。
      *
      * 2026-10-30（D62）：`toolGroups` 决定发哪些工具；两组都关时**只发一次请求**
      * （模式层已经把轮数预算压成 0），system 里也不写「工具 / 数据边界 / 收尾」。

@@ -129,6 +129,18 @@ import {
   readAskHistory,
   toHistoryEntry
 } from './ask-history'
+import { createQqChannel, QQ_REPLY_DEFAULT_CHARS, type QqChannel, type QqChannelConfig } from './qq/channel'
+import { QqOb11Server } from './qq/ob11'
+import {
+  applyQqPatch,
+  buildQqSettingsView,
+  parseQqPatch,
+  QQ_DEFAULT_PORT,
+  readQqConfig,
+  type QqSettingsSaveResult,
+  type QqSettingsView
+} from './qq/qq-settings'
+import type { ChainAskResult, ChainAskTurnContext } from '../chain/agent/types'
 import { listThemeMerges, revertThemeMerge } from '../understand/theme-merge'
 import { validateApiKey, writeEnvKey } from './provider-keys'
 import {
@@ -239,6 +251,8 @@ let momentRuntime: MomentRuntime | null = null
 let themeOnlineRuntime: ThemeOnlineRuntime | null = null
 let disposeGraphIpc: (() => void) | null = null
 let disposeAskIpc: (() => void) | null = null
+/** QQ 通道（D63）：默认关闭；挂在这里是为了 before-quit 能直接收口端口 */
+let qqChannel: QqChannel | null = null
 /**
  * 信息链接线（D42）：跟采集开关同一条命。启动时加载原生事件源（失败就降级成不采集），
  * 采集 running 时开、stopping 时收口并等在途截图落库。
@@ -1133,6 +1147,9 @@ app.on('before-quit', (event) => {
   tempJanitor = null
   disposeGraphIpc?.()
   disposeAskIpc?.()
+  // QQ 通道先释放端口（不等回执；在途问答随进程退出一起收口）
+  void qqChannel?.stop()
+  qqChannel = null
   ballMenuShell?.dispose()
   ballMenuShell = null
   inductionRuntime?.dispose()
@@ -2079,6 +2096,105 @@ if (primaryInstance) {
       }
     }
 
+    /**
+     * QQ 通道（D63）：参考 `dsh-onebot-qq` 的 OneBot 11 口径——NapCat 反向 WS 拨入本机 127.0.0.1，
+     * 我们只做「私聊文字 → 问记忆 → 纯文本回话」。
+     *
+     * 不复刻参考插件的插件形态（多账号 / 群聊 / 媒体 / t2i / 斜杠命令），M1 只借协议与 NapCat 对接方式：
+     * - 问答复用桌面同一条链路（`askChain` → 同一份出云策略、日额度、脱敏墙）与「问记忆」模式；
+     * - 上下文按 QQ 用户各自留最近 6 轮（内存，重启即弃；不写桌面问答历史，免得两套记录互相污染）；
+     * - 默认关闭，设置里开了才占端口；没白名单 / 没 token 一律不起（fail-closed）。
+     */
+    const qqHistories = new Map<string, ChainAskTurnContext[]>()
+    /** 通道配置：从没建过库（A3）就当关闭，不为 QQ 建库 */
+    const qqChannelConfig = (): QqChannelConfig => {
+      const db = connections.queryDb()
+      if (!db) {
+        return {
+          enabled: false,
+          port: QQ_DEFAULT_PORT,
+          accessToken: '',
+          allowUsers: [],
+          replyMaxChars: QQ_REPLY_DEFAULT_CHARS
+        }
+      }
+      return readQqConfig(db)
+    }
+    const rememberQqTurn = (
+      conversationId: string,
+      question: string,
+      result: ChainAskResult
+    ): void => {
+      const answer =
+        result.kind === 'answer' || result.kind === 'insufficient' ? result.answer : ''
+      if (answer.trim() === '') return
+      const previous = qqHistories.get(conversationId) ?? []
+      qqHistories.set(conversationId, [...previous, { question, answer }].slice(-6))
+    }
+    qqChannel = createQqChannel(new QqOb11Server(), {
+      log: (level, message, data) => captureLog(level, message, data),
+      ask: async ({ text, conversationId, signal }) => {
+        // 与桌面提问同一套前置：先同步日记（节流），再取只读连接
+        syncMemoryIfDue()
+        const db = connections.queryDb()
+        if (!db) {
+          return {
+            kind: 'no-evidence',
+            stats: { hits: 0, evidence: 0, cited: 0, questionChars: text.length }
+          }
+        }
+        const context: AskQueryContext = {
+          conversationId,
+          history: qqHistories.get(conversationId) ?? [],
+          signal,
+          mode: DEFAULT_ASK_MODE
+        }
+        const result = await askChain(
+          askOptionsFor(db, context, askOpeningFor(db, text, context)),
+          text
+        )
+        rememberQqTurn(conversationId, text, result)
+        return result
+      }
+    })
+    const refreshQqChannel = async (): Promise<{ ok: boolean; error?: string }> => {
+      if (!qqChannel) return { ok: false, error: 'qq channel unavailable' }
+      try {
+        const result = await qqChannel.start(qqChannelConfig())
+        if (!result.ok) captureLog('warn', 'qq channel not started', { error: result.error })
+        return result
+      } catch (error) {
+        captureLog('error', 'qq channel refresh failed', { error: String(error) })
+        return { ok: false, error: String(error) }
+      }
+    }
+    const readQqSettings = (): QqSettingsView | { error: string } => {
+      const db = connections.queryDb()
+      if (!db) return { error: 'db-unavailable' }
+      return buildQqSettingsView(db, qqChannel?.status())
+    }
+    const saveQqSettings = async (patch: unknown): Promise<QqSettingsSaveResult> => {
+      const parsed = parseQqPatch(patch)
+      if (!parsed.ok) return { ok: false, error: parsed.error }
+      let db: Db
+      try {
+        db = connections.ensureWritable().db
+      } catch (error) {
+        captureLog('warn', 'qq settings save: db unavailable', { error: String(error) })
+        return { ok: false, error: '数据库暂不可用，设置没有保存' }
+      }
+      try {
+        ensureChainSchema(db)
+        applyQqPatch(db, parsed.patch)
+      } catch (error) {
+        captureLog('error', 'qq settings save failed', { error: String(error) })
+        return { ok: false, error: '保存设置失败' }
+      }
+      // 保存即生效：起停端口 / 换 token 都在这里热切换；起不来也把设置留着（界面显示未运行 + 原因）
+      await refreshQqChannel()
+      return { ok: true, view: buildQqSettingsView(db, qqChannel?.status()) }
+    }
+
     disposeAskIpc = registerAskIpc({
       getWindow: () => askWindow,
       ask: async (question, context) => {
@@ -2225,8 +2341,13 @@ if (primaryInstance) {
           return { ok: false, error: '数据库暂不可用，没有恢复' }
         }
       },
+      qqSettings: readQqSettings,
+      saveQqSettings,
       log: (level, message, data) => captureLog(level, message, data)
     })
+
+    // QQ 通道（D63）：启动时按设置起停（默认关闭 → 不占端口，不产生任何网络行为）
+    void refreshQqChannel()
 
     // 启动后在后台同步一遍日记（不阻塞窗口；第一次问记忆时通常已经就绪）
     setTimeout(syncMemoryIfDue, 2_000)

@@ -185,6 +185,9 @@
 | 问记忆「缩进 / 括号又没了」 | 2026-10-29 22:46 真机：`提取代码` 的 `.keys()` 变 `.keys`、缩进被压成一个空格，像是 D59 的清洗又回来了 | **先看跑的是哪份主进程**：`electron-vite dev` 只重建 `out/`，不会重启已启动的 Electron；当时进程仍是 21:41 起的旧实例（`Get-CimInstance Win32_Process` 看 `CreationDate`），22:43 的新 build 根本没加载。重启应用后复测；`out/main/index.js` 的 mtime 晚于源码 ≠ 已生效 |
 | DeepSeek 图片只能放 `user` 消息 | 2026-10-29 实测：`tool` 消息的 content 里塞 `image_url` → **400**；把图作为单独 `user` 消息夹在 tool 结果后面（包括多个 tool_calls 之间）→ 200，模型能读出图里的文字 | `read_segment` 的截图不要塞进 tool 结果；由 `buildChainAskLoopMessages` 在 tool 消息后补一条 `{role:'user', images}`。带 tools 的请求仍须回传历史 `reasoning_content`，否则 400 的错会是 reasoning 而不是图 |
 | OCR 糊 / 乱码被当证据 | 2026-10-29：vmware 段 UIA 只 106 字，OCR 265 字还是糊的；模型只能对着糊字说「OCR 糊了」 | 2026-10-29 拍板（D60）：**OCR 只用于检索命中**；`read_segment` 只回 `source='uia'` 的文字 + 最近一张截图，不再回 OCR 正文。截图默认不出云（`graph.ask_history_shots` 默认 0），开启后才附 |
+| QQ 通道「连上了但不回话」 | 2026-10-30 实现 M1（D63）：反向 WS 起来后 NapCat 显示已连接，但发私聊没反应。常见原因三种：① NapCat 的 ws-reverse 端口与设置里不一致；② `access_token` 两边不一致——服务端直接 1008 关闭，日志只有 `qq ws rejected`；③ 白名单为空或没填自己的 QQ 号——日志 `qq message from non-allowlisted user dropped`，**故意不回话**（不让任何人探测通道存在） | 先看 `main.log` 里 `qq ws listening` 的端口、有没有 `qq ws connected`；再核对 token 与 NapCat 一致（≥8 位、无空白）；白名单填 5–12 位 QQ 号。设置抽屉状态行会显示「运行中 / 已开启但没起来（原因）」 |
+| QQ 通道端口起不来 | 2026-10-30：`qq channel start failed`，界面状态行「已开启但没起来（端口 X 起不来…）」。多是端口被别的进程（或上一次没退干净的实例）占着 | 换端口并在 NapCat 同步改；退出应用会在 `before-quit` 调 `channel.stop()` 释放端口。单实例锁只防二次启动，不防端口被别人占 |
+| QQ 通道是「真的出网」，不是本机功能 | 2026-10-30 设计取舍：开通道后回答经 NapCat → 腾讯服务器，**属于新增出网路径**（回答文本离开设备）；入站 QQ 文本也属于外部内容 | 默认关 + 白名单 fail-closed + 设置抽屉里写明；`access_token` 只存本机 settings、不进日志；通道层不解析任何「命令」，模型拿到的仍只有只读检索工具（D63） |
 
 ## 规则
 

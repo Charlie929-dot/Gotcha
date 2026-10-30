@@ -16,6 +16,7 @@ import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-s
 import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
 import type { MemoryDeleteView, MemoryListView, MemoryRestoreView } from '../main/memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
+import type { QqSettingsSaveResult, QqSettingsView } from '../main/qq/qq-settings'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -78,6 +79,9 @@ export interface AskApi {
   }): Promise<MemoryListView>
   memoryDelete(id: number): Promise<MemoryDeleteView>
   memoryRestore(uid: string): Promise<MemoryRestoreView>
+  /* ---- QQ 通道（D63）：NapCat 反向 WS 拨入本机；默认关闭 ---- */
+  qqSettings(): Promise<QqSettingsView | { error: string }>
+  saveQqSettings(patch: unknown): Promise<QqSettingsSaveResult>
   /** 托盘 / 球右键的「设置」：打开窗口就展开抽屉 */
   onOpenSettings(handler: () => void): () => void
 }
@@ -127,6 +131,9 @@ const api: AskApi = {
   memoryDelete: (id) => ipcRenderer.invoke('ask:memory:delete', { id }) as Promise<MemoryDeleteView>,
   memoryRestore: (uid) =>
     ipcRenderer.invoke('ask:memory:restore', { uid }) as Promise<MemoryRestoreView>,
+  qqSettings: () => ipcRenderer.invoke('ask:qq:get') as Promise<QqSettingsView | { error: string }>,
+  saveQqSettings: (patch) =>
+    ipcRenderer.invoke('ask:qq:save', patch) as Promise<QqSettingsSaveResult>,
   onOpenSettings: (handler) => {
     const listener = (): void => handler()
     ipcRenderer.on('ask:open-settings', listener)

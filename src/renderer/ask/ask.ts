@@ -31,6 +31,7 @@ import {
 import type { AskHistoryEntry } from '../../main/ask-history'
 import type { MemorySettingsView } from '../../main/memory-settings'
 import type { MemoryListItemView } from '../../main/memory-admin'
+import type { QqSettingsView } from '../../main/qq/qq-settings'
 import type { AskApi } from '../ask-preload'
 import { createSettingsPanel } from '../graph/graph-settings-panel'
 
@@ -102,6 +103,15 @@ const personaCardFileInput = must<HTMLInputElement>('persona-card-file')
 const personaCardOpenButton = must<HTMLButtonElement>('persona-card-open')
 const personaCardStatus = must<HTMLElement>('persona-card-status')
 const personaCardMsg = must<HTMLElement>('persona-card-msg')
+/* ---- 设置抽屉 · QQ 通道（D63） ---- */
+const qqStatusEl = must<HTMLElement>('qq-status')
+const qqEnabledInput = must<HTMLInputElement>('set-qq-enabled')
+const qqPortInput = must<HTMLInputElement>('set-qq-port')
+const qqTokenInput = must<HTMLInputElement>('set-qq-token')
+const qqAllowInput = must<HTMLTextAreaElement>('set-qq-allow')
+const qqMaxCharsInput = must<HTMLInputElement>('set-qq-maxchars')
+const qqSaveButton = must<HTMLButtonElement>('qq-save')
+const qqMsg = must<HTMLElement>('qq-msg')
 
 /** 列表一次最多画多少条会话（永久保留，记录可能很多；搜索用来缩小范围） */
 const HISTORY_RENDER_LIMIT = 200
@@ -1424,6 +1434,7 @@ async function refreshMemorySettings(note = ''): Promise<void> {
 function openSettingsDrawer(): void {
   void settingsPanel?.open()
   void refreshMemorySettings()
+  void refreshQqSettings()
   void loadMemoryList(true)
 }
 
@@ -1532,8 +1543,76 @@ if (api) {
 }
 
 /* ------------------------------------------------------------------ */
-/* 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销）                            */
+/* 设置抽屉 · QQ 通道（D63：OneBot 11 反向 WS，默认关）                */
 /* ------------------------------------------------------------------ */
+
+function fillQqSettings(view: QqSettingsView): void {
+  qqEnabledInput.checked = view.enabled
+  qqPortInput.value = String(view.port)
+  qqTokenInput.value = view.accessToken
+  qqAllowInput.value = view.allowUsers.join(', ')
+  qqMaxCharsInput.value = String(view.replyMaxChars)
+  qqStatusEl.textContent = view.running
+    ? `运行中：127.0.0.1:${view.port} · NapCat 已连 ${view.connections} 条`
+    : view.enabled
+      ? `已开启但没起来${view.lastError !== undefined ? `（${view.lastError}）` : ''}`
+      : '未开启（不监听任何端口）'
+  qqStatusEl.style.color = view.enabled && !view.running ? 'var(--error)' : ''
+}
+
+/** 读一次 QQ 通道设置并回填（开抽屉 / 保存后都走这里） */
+async function refreshQqSettings(note = ''): Promise<void> {
+  if (!api) return
+  qqMsg.textContent = note
+  qqMsg.style.color = ''
+  try {
+    const view = await api.qqSettings()
+    if ('error' in view) {
+      qqStatusEl.textContent =
+        view.error === 'db-unavailable'
+          ? '还没有记忆库（开始采集或同步一次日记后可用）'
+          : '读取 QQ 通道设置失败'
+      return
+    }
+    fillQqSettings(view)
+  } catch (error) {
+    qqStatusEl.textContent = `读取 QQ 通道设置失败：${String(error)}`
+  }
+}
+
+if (api) {
+  qqSaveButton.addEventListener('click', async () => {
+    qqSaveButton.disabled = true
+    qqMsg.style.color = ''
+    qqMsg.textContent = '保存中…'
+    try {
+      const result = await api!.saveQqSettings({
+        enabled: qqEnabledInput.checked,
+        port: Number(qqPortInput.value),
+        accessToken: qqTokenInput.value,
+        allowUsers: qqAllowInput.value,
+        replyMaxChars: Number(qqMaxCharsInput.value)
+      })
+      if (!result.ok) {
+        qqMsg.textContent = `没有保存：${result.error}`
+        qqMsg.style.color = 'var(--error)'
+        return
+      }
+      fillQqSettings(result.view)
+      qqMsg.textContent = result.view.running
+        ? '已保存并开始监听（NapCat 里填好同样的端口与 token）'
+        : '已保存；未运行，原因见上面那行状态'
+    } catch (error) {
+      qqMsg.textContent = `保存失败：${String(error)}`
+      qqMsg.style.color = 'var(--error)'
+    } finally {
+      qqSaveButton.disabled = false
+    }
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/* 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销）                            *//* ------------------------------------------------------------------ */
 
 /** 一页多少条（主进程 `memory-admin` 的上限 50；抽屉里 20 条一屏差不多） */
 const MEMORY_PAGE_SIZE = 20

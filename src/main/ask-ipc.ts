@@ -33,6 +33,7 @@ import type {
   MemoryRestoreView
 } from './memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
+import type { QqSettingsSaveResult, QqSettingsView } from './qq/qq-settings'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -195,6 +196,12 @@ export interface AskIpcDeps {
   memoryList?: (query: unknown) => MemoryListView
   memoryDelete?: (input: unknown) => MemoryDeleteView
   memoryRestore?: (input: unknown) => MemoryRestoreView
+  /**
+   * QQ 通道（D63）：读设置视图 / 保存并热生效。
+   * 保存会起停本机 WS 端口（默认关），失败原因随 `view.lastError` 回界面，不抛异常。
+   */
+  qqSettings?: () => QqSettingsView | { error: string }
+  saveQqSettings?: (patch: unknown) => QqSettingsSaveResult | Promise<QqSettingsSaveResult>
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -564,6 +571,33 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask memory restore failed', { error: String(error) })
           return { ok: false, error: '撤销失败' } satisfies MemoryRestoreView
+        }
+      }
+    ],
+    [
+      'ask:qq:get',
+      (event) => {
+        if (!ensureSender(event)) return { error: 'forbidden' }
+        try {
+          return deps.qqSettings?.() ?? { error: 'unsupported' }
+        } catch (error) {
+          deps.log('error', 'ask qq settings read failed', { error: String(error) })
+          return { error: 'qq-settings-read-failed' }
+        }
+      }
+    ],
+    [
+      'ask:qq:save',
+      async (event, patch) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' } satisfies QqSettingsSaveResult
+        if (!deps.saveQqSettings) {
+          return { ok: false, error: '当前版本不支持 QQ 通道' } satisfies QqSettingsSaveResult
+        }
+        try {
+          return await deps.saveQqSettings(patch)
+        } catch (error) {
+          deps.log('error', 'ask qq settings save failed', { error: String(error) })
+          return { ok: false, error: '保存失败' } satisfies QqSettingsSaveResult
         }
       }
     ],

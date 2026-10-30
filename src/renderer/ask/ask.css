@@ -956,6 +956,31 @@ button.stop {
   margin: 0;
 }
 
+/* ---- QQ 通道 · NapCat 托管（D66）：二维码要白底、像素别糊 ---- */
+
+.qq-napcat {
+  margin: 8px 0 4px;
+  padding: 8px 10px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.qq-napcat-qr {
+  display: block;
+  width: 180px;
+  height: 180px;
+  margin: 6px 0;
+  padding: 6px;
+  background: #fff;
+  border-radius: 6px;
+  image-rendering: pixelated;
+}
+
+.qq-napcat progress {
+  width: 100%;
+  margin: 4px 0;
+}
+
 /* ---- 个人记忆 · 记忆条目（浏览 / 删除；一条一行小卡片） ---- */
 
 .memory-browse {

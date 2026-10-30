@@ -17,6 +17,7 @@ import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memor
 import type { MemoryDeleteView, MemoryListView, MemoryRestoreView } from '../main/memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from '../main/qq/qq-settings'
+import type { NapcatView } from '../main/qq/napcat'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -82,6 +83,12 @@ export interface AskApi {
   /* ---- QQ 通道（D63）：NapCat 反向 WS 拨入本机；默认关闭 ---- */
   qqSettings(): Promise<QqSettingsView | { error: string }>
   saveQqSettings(patch: unknown): Promise<QqSettingsSaveResult>
+  /* ---- NapCat 托管（D66）：状态 / 二维码 / 启动停止 / 下载安装 / 选目录 ---- */
+  qqNapcatStatus(): Promise<NapcatView | { error: string }>
+  qqNapcatStart(): Promise<{ ok: boolean; error?: string }>
+  qqNapcatStop(): Promise<{ ok: boolean; error?: string }>
+  qqNapcatInstall(): Promise<{ ok: boolean; error?: string }>
+  qqNapcatChooseDir(): Promise<{ ok: boolean; error?: string; view?: NapcatView }>
   /** 托盘 / 球右键的「设置」：打开窗口就展开抽屉 */
   onOpenSettings(handler: () => void): () => void
 }
@@ -134,6 +141,20 @@ const api: AskApi = {
   qqSettings: () => ipcRenderer.invoke('ask:qq:get') as Promise<QqSettingsView | { error: string }>,
   saveQqSettings: (patch) =>
     ipcRenderer.invoke('ask:qq:save', patch) as Promise<QqSettingsSaveResult>,
+  qqNapcatStatus: () =>
+    ipcRenderer.invoke('ask:qq:napcat:get') as Promise<NapcatView | { error: string }>,
+  qqNapcatStart: () =>
+    ipcRenderer.invoke('ask:qq:napcat:start') as Promise<{ ok: boolean; error?: string }>,
+  qqNapcatStop: () =>
+    ipcRenderer.invoke('ask:qq:napcat:stop') as Promise<{ ok: boolean; error?: string }>,
+  qqNapcatInstall: () =>
+    ipcRenderer.invoke('ask:qq:napcat:install') as Promise<{ ok: boolean; error?: string }>,
+  qqNapcatChooseDir: () =>
+    ipcRenderer.invoke('ask:qq:napcat:dir') as Promise<{
+      ok: boolean
+      error?: string
+      view?: NapcatView
+    }>,
   onOpenSettings: (handler) => {
     const listener = (): void => handler()
     ipcRenderer.on('ask:open-settings', listener)

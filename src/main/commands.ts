@@ -60,6 +60,7 @@ import {
   type LineageRead
 } from './lineage'
 import type { MemoryBranchInfo, MemoryRepo, MemorySwitchResult } from './memory-repo'
+import { nextForkName } from './node-fork'
 
 export interface ParsedCommand {
   /** 命令名，已转小写（`/HELP` 与 `/help` 一样） */
@@ -456,11 +457,15 @@ function labelCommitSubject(line: string): string {
   return out
 }
 
-/** 家谱树的一行：`[0-1] default · 7 个工具  ← 当前`（`life` 不显示工具数，D75 的样例口径） */
+/**
+ * 家谱树的一行：`[0-1] default · 7 个工具  ← 当前`（`life` 不显示工具数，D75 的样例口径）。
+ * 停在历史提交时，家谱 `active` 那个节点标 `← 正在看`（表明这一问会从它分叉）。
+ */
 function genealogyLine(
   lineage: Lineage | null,
   node: GenealogyNode,
-  headBranch: string | null
+  headBranch: string | null,
+  viewedBranch: string | null
 ): string {
   const info = lineage === null ? null : findBranch(lineage, node.branch)
   let suffix = ''
@@ -471,8 +476,13 @@ function genealogyLine(
       suffix += ` · ${toolsOfBranch(lineage, node.branch).length} 个工具`
     }
   }
-  const current = headBranch === node.branch ? '  ← 当前' : ''
-  return `[${node.id}] ${node.branch}${suffix}${current}`
+  const marker =
+    headBranch === node.branch
+      ? '  ← 当前'
+      : viewedBranch === node.branch
+        ? '  ← 正在看'
+        : ''
+  return `[${node.id}] ${node.branch}${suffix}${marker}`
 }
 
 /** 短 sha 比较：`%h` 与 `rev-parse --short` 的位数可能不同，按前缀认同一个提交 */
@@ -506,13 +516,17 @@ async function historyText(
 /**
  * `/log`（D75）：家谱树——父子关系来自家谱 `parent`，编号是 `[父]-[在兄弟里的第几个]`。
  * 不再画 `git log --graph`：树是给「这家谱长什么样」看的，`/log <编号>` 才看具体记忆。
+ * 返回 `node` = 这次看的是哪个节点的历史（`/use <sha>` 靠它知道该从哪分叉）。
  */
-async function logText(deps: CommandDeps, target: string): Promise<string> {
+async function logText(
+  deps: CommandDeps,
+  target: string
+): Promise<{ text: string; node?: string }> {
   const status = await deps.repo.status()
-  if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
+  if (!status.ok) return { text: `记忆仓不可用：${repoReasonText(status.reason)}` }
   const head = await deps.repo.head()
   const branches = await deps.repo.listBranches()
-  if (branches.length === 0) return '记忆仓里还没有节点。'
+  if (branches.length === 0) return { text: '记忆仓里还没有节点。' }
   const read = await readLineage(deps.lineageFile)
   const lineage = read.status === 'ok' ? read.lineage : null
   const flat = flattenGenealogy(genealogyTree(lineage, branches))
@@ -520,18 +534,22 @@ async function logText(deps: CommandDeps, target: string): Promise<string> {
   if (target !== '') {
     const hit =
       flat.find((node) => node.id === target) ?? flat.find((node) => node.branch === target)
-    if (hit === undefined) return `没有节点 ${target}（/log 看家谱）。`
-    return historyText(deps, hit.branch, {
-      current: head.branch === hit.branch,
-      sha: head.sha
-    })
+    if (hit === undefined) return { text: `没有节点 ${target}（/log 看家谱）。` }
+    return {
+      text: await historyText(deps, hit.branch, {
+        current: head.branch === hit.branch,
+        sha: head.sha
+      }),
+      node: hit.branch
+    }
   }
 
-  const lines = flat.map((node) => genealogyLine(lineage, node, head.branch))
+  const viewed = head.detached ? (lineage?.active ?? null) : null
+  const lines = flat.map((node) => genealogyLine(lineage, node, head.branch, viewed))
   if (head.detached && head.sha !== null) {
     lines.push('', `HEAD 停在历史提交 ${head.sha}（只读查看；发第一句话会从这里分叉）`)
   }
-  return lines.join('\n')
+  return { text: lines.join('\n') }
 }
 
 /** 家谱里某分支的模式描述（`/mode`、`/use`、`ask:mode` 共用） */
@@ -753,7 +771,15 @@ interface MemoryOutcome {
  */
 type MemoryAction =
   | { kind: 'branch'; branch: string; mode?: AskModeState }
-  | { kind: 'commit'; sha: string; from: string }
+  | {
+      kind: 'commit'
+      sha: string
+      from: string
+      /** 这条提交属于哪个节点（`/use <sha>` 之前在看的那页；没有就沿用 active） */
+      owner?: string
+      /** 下一句会分叉出来的名字（`<owner>-<n>`） */
+      forkName?: string
+    }
   | { kind: 'backup' }
 
 /** `/use` 的 `-d`：带上就用默认时间戳名，不带则回执起名（D75）；名字只走回执，不跟在命令上 */
@@ -789,12 +815,32 @@ async function finishMemoryAction(
   if (action.kind === 'commit') {
     const checkedOut = await deps.repo.checkoutCommit(action.sha)
     if (!checkedOut.ok) return { text: failureReasonText(checkedOut, `切到提交 ${action.sha}`) }
+    // 记下「正在看哪个节点」：下一句自动分叉就从它出发（D76）；
+    // 只写权威家谱，不动仓里的快照——detached 时写快照会让工作区变脏，`/use` 就切不回去了
+    if (action.owner !== undefined) {
+      const read = await readLineage(deps.lineageFile)
+      if (read.status === 'ok') {
+        const next = withActive(read.lineage, action.owner)
+        if (next !== null && next !== read.lineage) {
+          await writeLineage(deps.lineageFile, next)
+        }
+      }
+    }
     deps.reloadConversations?.()
+    if (action.owner === undefined) {
+      return {
+        text: [
+          `===this is 历史提交 ${action.sha}===`,
+          `已停在 ${action.sha}——这里是只读的旧位置，家谱不变。`,
+          `发第一句话会从这里分叉成 ${action.from}-<序号>；只看不聊不会留下分支。`
+        ].join('\n')
+      }
+    }
     return {
       text: [
         `===this is 历史提交 ${action.sha}===`,
-        `已停在 ${action.sha}——这里是只读的旧位置，家谱不变。`,
-        `发第一句话会从这里分叉成 ${action.from}-<序号>；只看不聊不会留下分支。`
+        `已停在 ${action.sha}——只读旧位置，家谱当前节点记作 ${action.owner}。`,
+        `发第一句话会从 ${action.owner} 分叉${action.forkName !== undefined ? `成 ${action.forkName}` : ''}；只看不聊不会留下分支。`
       ].join('\n')
     }
   }
@@ -815,7 +861,8 @@ async function useNode(
   deps: CommandDeps,
   target: string,
   at: number,
-  defaultName: boolean
+  defaultName: boolean,
+  viewedNode: string | null
 ): Promise<MemoryOutcome & { pending?: MemoryAction }> {
   const status = await deps.repo.status()
   if (!status.ok) return { text: `记忆仓不可用：${repoReasonText(status.reason)}` }
@@ -860,10 +907,24 @@ async function useNode(
 
   const sha = await deps.repo.revParse(target)
   if (sha === null) return { text: `没找到节点或提交「${target}」（/log 看家谱）。` }
+  // 这条提交属于哪个节点（D76）：优先用刚 `/log <节点>` 看的那页，其次沿用自己的当前节点
+  const owner =
+    viewedNode !== null && lineage !== null && findBranch(lineage, viewedNode) !== null
+      ? viewedNode
+      : (lineage?.active ?? null)
+  const forkName =
+    owner !== null
+      ? nextForkName(
+          owner,
+          branches.map((entry) => entry.branch)
+        )
+      : undefined
   const plan: MemoryAction = {
     kind: 'commit',
     sha,
-    from: head.branch ?? lineage?.active ?? 'default'
+    from: head.branch ?? lineage?.active ?? 'default',
+    ...(owner !== null ? { owner } : {}),
+    ...(forkName !== undefined ? { forkName } : {})
   }
   if (needsSave && !defaultName) return { text: namePromptText('use', at), pending: plan }
   return finishMemoryAction(deps, plan, at)
@@ -1170,6 +1231,8 @@ export function createCommandHandler(
   const slugify = deps.slugify ?? slugifyNodeName
   let pending: Pending = null
   let pendingAt = 0
+  /** 最近一次 `/log <节点>` 看的是哪个节点（D76：`/use <sha>` 之后从它分叉） */
+  let viewedNode: string | null = null
 
   /**
    * 超时的等待：命名等待（D75）按默认名把动作做完（切换 / 备份照做），
@@ -1260,8 +1323,11 @@ export function createCommandHandler(
     switch (parsed.name) {
       case 'help':
         return commandResult(await helpText(deps))
-      case 'log':
-        return commandResult(await logText(deps, parsed.args.join(' ').trim()))
+      case 'log': {
+        const out = await logText(deps, parsed.args.join(' ').trim())
+        if (out.node !== undefined) viewedNode = out.node
+        return commandResult(out.text)
+      }
       case 'backup': {
         const args = parsed.args.filter((arg) => arg !== '')
         const defaultName = args.some((arg) => arg === '-d' || arg === '--default')
@@ -1331,7 +1397,7 @@ export function createCommandHandler(
         if (target === '') {
           return commandResult('用法：/use <编号|名字|提交> [-d]（先 /log 看家谱）')
         }
-        const out = await useNode(deps, target, at, defaultName)
+        const out = await useNode(deps, target, at, defaultName, viewedNode)
         if (out.pending !== undefined) {
           pending = { kind: 'memory', action: out.pending }
           pendingAt = at

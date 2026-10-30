@@ -216,6 +216,7 @@
 | 快照相同 = 没有 diff：分叉后首个提交会「无变化」 | 2026-10-31 D74：女儿从出生提交分叉，`lineage.snapshot.json` 内容与父提交相同；若没写信，`commit` 会返回 clean、传承失败 | 女儿首个提交固定写 `birth.json`（昵称 / 母亲 / 出生时刻）；空会话分支靠「家谱新增节点 → 快照变化」产生 diff |
 | `/use` 起名等待没有后台定时器 | 2026-10-31 D75：`/use`（脏工作区）/ `/backup`（不带 `-d`）先回执起名，切换 / 提交推迟到回执；超时不会自己发生——进程只在收到消息时看 `pendingAt` | 超时在**下一条输入**到达时补做（`takeExpired` → 默认时间戳名），别另起定时器去 commit/switch（会和用户正在做的事打架）；`/cancel` 是唯一放弃等待的出口 |
 | `memory: <日>` 与 `memory: <日> <时>` 不能混用 | 2026-10-31 D75：`commitDay` 按「最后一次提交主题 === `memory: <日>`」判断今天已提交；切换保存 / 手动备份若也用 `memory: <日>`，每日提交会误判为已做，`labelCommitSubject` 也分不出两者 | 切换保存 / `/backup` 一律 `memory: <日> <时>`（`defaultMemoryName()`，到分钟）；每日固定提交保持 `memory: <日>`（23:59 口径不带时间） |
+| `/use <sha>` 是「看历史」不是「切分支」：分叉会挂到旧节点下 | 2026-10-31 D76：`/use <sha>` 只 checkout、不写 active；下一句由 `forkDetachedIfNeeded` 按 active 分叉，于是从 test 的历史提交聊出来的东西挂到了 `assistant-2`，test 的历史页里永远看不到 | `/log <节点>` 记住这一页，`/use <sha>` 把 active 记成它（D76）；detached 时**只写权威家谱**、不写仓内快照（否则工作区脏、切不回去）；快照在分叉 / 每日提交时补 |
 
 ## 规则
 

@@ -582,7 +582,7 @@ describe('命令执行', () => {
     expect(switched).toEqual(['spring'])
   })
 
-  it('/use 短 sha：切到历史提交（detached），不写家谱 active', async () => {
+  it('/use 短 sha：切到历史提交（只读），家谱记作当前节点', async () => {
     const lineageFile = tempLineageFile()
     const seeded = await seededLineage(lineageFile)
     let checkedOut: string | null = null
@@ -599,13 +599,55 @@ describe('命令执行', () => {
     })
     const text = textOf(await run('/use abc1234'))
     expect(text).toContain('===this is 历史提交 abc1234===')
-    expect(text).toContain('分叉成 default-<序号>')
+    expect(text).toContain('家谱当前节点记作 default')
+    expect(text).toContain('从 default 分叉成 default-2')
     expect(checkedOut).toBe('abc1234')
 
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
     expect(read.lineage.active).toBe(seeded.active)
+  })
+
+  it('/use 短 sha：刚看过哪个节点的历史，就记作那个节点（下一句从它分叉）', async () => {
+    const lineageFile = tempLineageFile()
+    await seededLineage(lineageFile)
+    let checkedOut: string | null = null
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        ...twoBranches(),
+        revParse: async (ref) => (ref === 'abc1234' ? 'abc1234' : null),
+        checkoutCommit: async (ref) => {
+          checkedOut = ref
+          return { ok: true, head: { branch: null, detached: true, sha: ref } }
+        }
+      }),
+      lineageFile
+    })
+    // 先看 spring 的历史（它才是「我 use <sha> 之前在看的那页」）
+    expect(textOf(await run('/log 0-0'))).toContain('[0] spring')
+    const text = textOf(await run('/use abc1234'))
+    expect(text).toContain('家谱当前节点记作 spring')
+    expect(text).toContain('从 spring 分叉成 spring-2')
+    expect(checkedOut).toBe('abc1234')
+
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.active).toBe('spring')
+  })
+
+  it('/log 停在历史提交时，把「正在看」的节点标出来', async () => {
+    const lineageFile = tempLineageFile()
+    await seededLineage(lineageFile)
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        ...twoBranches(),
+        head: async () => ({ branch: null, detached: true, sha: 'abc1234' })
+      }),
+      lineageFile
+    })
+    expect(textOf(await run('/log'))).toContain('[0] default · 7 个工具  ← 正在看')
   })
 
   it('/use 不存在的目标如实报错', async () => {

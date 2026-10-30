@@ -219,7 +219,10 @@
             <h3>QQ 通道</h3>
             <p class="hint" id="qq-status">读取中…</p>
             <label class="check">
-              <input id="set-qq-enabled" type="checkbox" /> 开启 QQ 私聊（默认关；开了才在本机 127.0.0.1 上开端口等 NapCat 拨入）
+              <input id="set-qq-enabled" type="checkbox" /> 开启 QQ 私聊（默认关；开了才开端口等 NapCat 拨入）
+            </label>
+            <label class="check">
+              <input id="set-qq-lan" type="checkbox" /> 允许局域网访问（NapCat 在另一台机器时才勾；勾了监听 0.0.0.0，token 仍是唯一门槛）
             </label>
             <label>端口（NapCat「反向 WS」里填的端口）
               <input id="set-qq-port" type="number" min="1024" max="65535" step="1" />
@@ -239,8 +242,9 @@
             </div>
             <p class="hint">
               QQ 私聊里的问题走桌面同一条问记忆链路（同一份出云确认与每日额度），回答按纯文本分条发回；
-              群聊、图片、语音、文件都不接。注意：开了之后回答会经 NapCat 发到腾讯服务器，
-              所以默认关闭、只放行白名单里的号；token 只存在本机设置里，不写日志。
+              群聊、图片、语音、文件都不接。给自己发消息也行（白名单里填自己的号）。
+              注意：开了之后回答会经 NapCat 发到腾讯服务器，所以默认关闭、只放行白名单里的号；
+              token 只存在本机设置里，不写日志。
             </p>
           </section>
 

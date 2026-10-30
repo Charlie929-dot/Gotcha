@@ -135,6 +135,7 @@ import {
   applyQqPatch,
   buildQqSettingsView,
   parseQqPatch,
+  QQ_DEFAULT_HOST,
   QQ_DEFAULT_PORT,
   readQqConfig,
   type QqSettingsSaveResult,
@@ -2112,6 +2113,7 @@ if (primaryInstance) {
       if (!db) {
         return {
           enabled: false,
+          host: QQ_DEFAULT_HOST,
           port: QQ_DEFAULT_PORT,
           accessToken: '',
           allowUsers: [],

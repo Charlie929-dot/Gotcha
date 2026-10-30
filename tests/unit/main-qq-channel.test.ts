@@ -50,6 +50,7 @@ class FakeTransport implements QqTransport {
 function config(overrides: Partial<QqChannelConfig> = {}): QqChannelConfig {
   return {
     enabled: true,
+    host: '127.0.0.1',
     port: 8_643,
     accessToken: 'secret-token-1',
     allowUsers: ['20002'],
@@ -92,6 +93,31 @@ describe('开关与白名单（fail-closed）', () => {
     expect(transport.started).toBeNull()
     expect((await channel.start(config({ accessToken: 'short' }))).ok).toBe(false)
     expect(transport.started).toBeNull()
+  })
+
+  it('监听地址：默认 127.0.0.1；允许局域网时透传 0.0.0.0', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, { ask: async () => answer('x'), log: () => {} })
+    await channel.start(config())
+    expect(transport.started?.host).toBe('127.0.0.1')
+    await channel.start(config({ host: '0.0.0.0' }))
+    expect(transport.started?.host).toBe('0.0.0.0')
+  })
+
+  it('自聊：白名单里填自己的号，自己发给自己也能问（会话按自己号派生）', async () => {
+    const transport = new FakeTransport()
+    const asked: { text: string; conversationId: string }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ text, conversationId }) => {
+        asked.push({ text, conversationId })
+        return answer('在')
+      },
+      log: () => {}
+    })
+    await channel.start(config({ allowUsers: ['10001'] }))
+    await channel.handleMessage(inbound('在吗', 10001))
+    expect(asked).toEqual([{ text: '在吗', conversationId: 'qq-10001' }])
+    expect(transport.sent).toEqual([{ userId: 10001, text: expect.stringContaining('在') }])
   })
 
   it('非白名单号的消息直接丢：不问答、不回话', async () => {

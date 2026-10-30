@@ -46,9 +46,12 @@ describe('入站解析', () => {
     })
   })
 
-  it('群聊 / 自己发给自己 / 空文本 / 非 message 一律 null', () => {
+  it('群聊 / 空文本 / 非 message 一律 null；自己发给自己放行（自聊用法）', () => {
     expect(parsePrivateMessageEvent(event({ message_type: 'group' }))).toBeNull()
-    expect(parsePrivateMessageEvent(event({ user_id: 10001 }))).toBeNull()
+    const self = parsePrivateMessageEvent(event({ user_id: 10001 }))
+    expect(self).not.toBeNull()
+    expect(self?.userId).toBe(10001)
+    expect(self?.text).toBe('我下午在干嘛')
     expect(parsePrivateMessageEvent(event({ message: [] }))).toBeNull()
     expect(parsePrivateMessageEvent(event({ post_type: 'meta_event' }))).toBeNull()
     expect(parsePrivateMessageEvent(null)).toBeNull()
@@ -176,6 +179,41 @@ describe('反向 WS 服务端', () => {
       params: { user_id: 20002, message: [{ type: 'text', data: { text: '收到' } }] }
     })
     await expect(server.sendPrivate(99999, 'x')).rejects.toThrow('OneBot 发送失败（100）')
+    socket.close()
+  })
+
+  it('自聊防回声：自己发出去的消息被回放成 message 事件时按 id 丢弃', async () => {
+    const received: string[] = []
+    server = new QqOb11Server()
+    const { port } = await server.start({
+      port: 0,
+      accessToken: TOKEN,
+      onMessage: (inbound) => received.push(inbound.text)
+    })
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    socket.on('message', (data) => {
+      const frame = JSON.parse(data.toString()) as Record<string, unknown>
+      socket.send(
+        JSON.stringify({
+          status: 'ok',
+          retcode: 0,
+          data: { message_id: 777 },
+          echo: frame['echo']
+        })
+      )
+    })
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+
+    await server.sendPrivate(10001, '收到')
+    // 有的实现会把机器人自己的消息再当成 message 事件回放（自聊时最容易撞上）
+    socket.send(JSON.stringify(event({ user_id: 10001, message_id: 777 })))
+    socket.send(JSON.stringify(event({ user_id: 10001, message_id: 778 })))
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(received).toEqual(['我下午在干嘛'])
     socket.close()
   })
 })

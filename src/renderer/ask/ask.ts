@@ -106,6 +106,7 @@ const personaCardMsg = must<HTMLElement>('persona-card-msg')
 /* ---- 设置抽屉 · QQ 通道（D63） ---- */
 const qqStatusEl = must<HTMLElement>('qq-status')
 const qqEnabledInput = must<HTMLInputElement>('set-qq-enabled')
+const qqLanInput = must<HTMLInputElement>('set-qq-lan')
 const qqPortInput = must<HTMLInputElement>('set-qq-port')
 const qqTokenInput = must<HTMLInputElement>('set-qq-token')
 const qqAllowInput = must<HTMLTextAreaElement>('set-qq-allow')
@@ -1548,12 +1549,14 @@ if (api) {
 
 function fillQqSettings(view: QqSettingsView): void {
   qqEnabledInput.checked = view.enabled
+  qqLanInput.checked = view.allowLan
   qqPortInput.value = String(view.port)
   qqTokenInput.value = view.accessToken
   qqAllowInput.value = view.allowUsers.join(', ')
   qqMaxCharsInput.value = String(view.replyMaxChars)
+  const listen = `${view.allowLan ? '0.0.0.0' : '127.0.0.1'}:${view.port}`
   qqStatusEl.textContent = view.running
-    ? `运行中：127.0.0.1:${view.port} · NapCat 已连 ${view.connections} 条`
+    ? `运行中：${listen} · NapCat 已连 ${view.connections} 条`
     : view.enabled
       ? `已开启但没起来${view.lastError !== undefined ? `（${view.lastError}）` : ''}`
       : '未开启（不监听任何端口）'
@@ -1588,6 +1591,7 @@ if (api) {
     try {
       const result = await api!.saveQqSettings({
         enabled: qqEnabledInput.checked,
+        allowLan: qqLanInput.checked,
         port: Number(qqPortInput.value),
         accessToken: qqTokenInput.value,
         allowUsers: qqAllowInput.value,

@@ -113,7 +113,10 @@ export function parsePrivateMessageEvent(raw: unknown): QqInbound | null {
   const userId = positiveInt(raw['user_id'])
   const selfId = positiveInt(raw['self_id'])
   if (userId === null || selfId === null) return null
-  if (userId === selfId) return null
+  // 不再拒绝「自己发给自己」（userId === selfId）：2026-10-30 拍板「所有你都帮我做吧」——
+  // 自用场景就是拿自己号当机器人，从手机 QQ 给自己发消息。
+  // 防回声交给服务端的「自己发出的 message_id 环」：机器人回的消息若被实现方以 message 事件回放，
+  // 这里按 message_id 丢掉（OneBot 11 正常用 message_sent，本就不解析）。
   const text = segmentsToText(raw['message'])
   if (text === '') return null
   const sender = isPlainObject(raw['sender']) ? raw['sender'] : {}
@@ -133,6 +136,7 @@ interface Ob11Response {
   status?: string
   retcode?: number
   wording?: string
+  data?: unknown
   echo?: string
 }
 
@@ -168,6 +172,12 @@ export class QqOb11Server {
   /** 已处理过的 message_id（去重；上限 200 条，防无限涨） */
   private readonly seenMessages = new Set<number>()
   private readonly seenOrder: number[] = []
+  /**
+   * 我们自己发出去的 message_id（上限 100 条）：同一号自聊时，
+   * 有些 OneBot 实现会把机器人发的消息也当成 `message` 事件回放——按 id 丢掉，防自问自答死循环。
+   */
+  private readonly selfSent = new Set<number>()
+  private readonly selfSentOrder: number[] = []
   private seq = 0
   private port: number | null = null
   private onMessage: ((inbound: QqInbound) => void) | null = null
@@ -267,6 +277,11 @@ export class QqOb11Server {
     }
     if (inbound.messageId > 0) {
       if (this.seenMessages.has(inbound.messageId)) return
+      // 自聊回声：机器人自己发出去的那条又作为 message 事件回来 → 丢掉（否则会自问自答）
+      if (this.selfSent.has(inbound.messageId)) {
+        this.log('info', 'qq own message ignored', { messageId: inbound.messageId })
+        return
+      }
       this.seenMessages.add(inbound.messageId)
       this.seenOrder.push(inbound.messageId)
       if (this.seenOrder.length > 200) {
@@ -298,6 +313,17 @@ export class QqOb11Server {
     })
     if (typeof response.retcode === 'number' && response.retcode !== 0) {
       throw new Error(`OneBot 发送失败（${response.retcode}）${response.wording ?? ''}`)
+    }
+    // 记下自己发出的 message_id：有的实现会把这条再以 message 事件回放
+    const data = isPlainObject(response.data) ? response.data : {}
+    const sentId = positiveInt(data['message_id'])
+    if (sentId !== null) {
+      this.selfSent.add(sentId)
+      this.selfSentOrder.push(sentId)
+      if (this.selfSentOrder.length > 100) {
+        const oldest = this.selfSentOrder.shift()
+        if (oldest !== undefined) this.selfSent.delete(oldest)
+      }
     }
   }
 

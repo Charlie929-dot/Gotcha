@@ -22,6 +22,7 @@ import {
 
 export const QQ_SETTING_KEYS = {
   enabled: 'qq.enabled',
+  host: 'qq.host',
   port: 'qq.port',
   accessToken: 'qq.access_token',
   allowUsers: 'qq.allow_users',
@@ -29,6 +30,9 @@ export const QQ_SETTING_KEYS = {
 } as const
 
 export const QQ_DEFAULT_PORT = 8643
+/** 默认只听本机回环；「允许局域网」= `0.0.0.0`（给 NapCat 在另一台机器时用） */
+export const QQ_DEFAULT_HOST = '127.0.0.1'
+export const QQ_LAN_HOST = '0.0.0.0'
 /** 端口下限：1024 以下要管理员权限，别让用户在这里踩坑 */
 export const QQ_MIN_PORT = 1024
 export const QQ_MAX_PORT = 65_535
@@ -38,6 +42,8 @@ export const QQ_MAX_ALLOW_USERS = 20
 
 export interface QqSettingsView {
   enabled: boolean
+  /** 是否允许局域网访问（存的是 0.0.0.0；界面只给开关，不给任意地址） */
+  allowLan: boolean
   port: number
   accessToken: string
   allowUsers: string[]
@@ -49,6 +55,8 @@ export interface QqSettingsView {
 
 export interface QqSettingsPatch {
   enabled?: boolean
+  /** 只接受布尔：false → 127.0.0.1，true → 0.0.0.0（不让渲染层直接写任意地址） */
+  allowLan?: boolean
   port?: number
   accessToken?: string
   allowUsers?: string[]
@@ -69,12 +77,28 @@ export function normalizeAllowUser(raw: string): string | null {
   return /^\d{5,12}$/u.test(text) ? text : null
 }
 
-/** 逗号 / 空格 / 换行分隔的名单 → 去重后的字符串数组 */
+/** 逗号 / 空格 / 换行分隔的名单 → 去重后的字符串数组（**宽松**：读库用，非法项丢掉） */
 export function parseAllowUsers(raw: string): string[] {
   const out: string[] = []
   for (const piece of raw.split(/[\s,，;；]+/u)) {
     const user = normalizeAllowUser(piece)
     if (user !== null && !out.includes(user)) out.push(user)
+  }
+  return out
+}
+
+/**
+ * 保存设置用的**严格**解析：有一项不是 5–12 位 QQ 号就返回 'invalid'。
+ * 宽松版会把「填错一个字」静默变成空名单，用户会以为存好了、实际通道不起——
+ * 所以保存路径必须报错（2026-10-30 单测抓到的）。
+ */
+export function parseAllowUsersStrict(raw: string): string[] | 'invalid' {
+  const out: string[] = []
+  for (const piece of raw.split(/[\s,，;；]+/u)) {
+    if (piece === '') continue
+    const user = normalizeAllowUser(piece)
+    if (user === null) return 'invalid'
+    if (!out.includes(user)) out.push(user)
   }
   return out
 }
@@ -86,6 +110,10 @@ export function parseQqPatch(raw: unknown): { ok: true; patch: QqSettingsPatch }
   if ('enabled' in raw) {
     if (typeof raw['enabled'] !== 'boolean') return { ok: false, error: '开关必须是布尔值' }
     patch.enabled = raw['enabled']
+  }
+  if ('allowLan' in raw) {
+    if (typeof raw['allowLan'] !== 'boolean') return { ok: false, error: '局域网开关必须是布尔值' }
+    patch.allowLan = raw['allowLan']
   }
   if ('port' in raw) {
     const port = Number(raw['port'])
@@ -105,7 +133,7 @@ export function parseQqPatch(raw: unknown): { ok: true; patch: QqSettingsPatch }
   }
   if ('allowUsers' in raw) {
     const value = raw['allowUsers']
-    const list = typeof value === 'string' ? parseAllowUsers(value) : Array.isArray(value) ? dedupeUsers(value) : null
+    const list = typeof value === 'string' ? parseAllowUsersStrict(value) : Array.isArray(value) ? dedupeUsers(value) : null
     if (list === null) return { ok: false, error: '白名单格式不对' }
     if (list === 'invalid') return { ok: false, error: '白名单里只能是 5–12 位 QQ 号' }
     if (list.length > QQ_MAX_ALLOW_USERS) {
@@ -137,6 +165,9 @@ function dedupeUsers(value: readonly unknown[]): string[] | 'invalid' {
 
 export function applyQqPatch(db: Db, patch: QqSettingsPatch): void {
   if (patch.enabled !== undefined) setSetting(db, QQ_SETTING_KEYS.enabled, patch.enabled ? '1' : '0')
+  if (patch.allowLan !== undefined) {
+    setSetting(db, QQ_SETTING_KEYS.host, patch.allowLan ? QQ_LAN_HOST : QQ_DEFAULT_HOST)
+  }
   if (patch.port !== undefined) setSetting(db, QQ_SETTING_KEYS.port, String(patch.port))
   if (patch.accessToken !== undefined) setSetting(db, QQ_SETTING_KEYS.accessToken, patch.accessToken)
   if (patch.allowUsers !== undefined) setSetting(db, QQ_SETTING_KEYS.allowUsers, patch.allowUsers.join(','))
@@ -149,8 +180,11 @@ export function applyQqPatch(db: Db, patch: QqSettingsPatch): void {
 export function readQqConfig(db: Db): QqChannelConfig {
   const port = Number(getSetting(db, QQ_SETTING_KEYS.port))
   const replyMaxChars = Number(getSetting(db, QQ_SETTING_KEYS.replyMaxChars))
+  const storedHost = getSetting(db, QQ_SETTING_KEYS.host).trim()
   return {
     enabled: getSetting(db, QQ_SETTING_KEYS.enabled) === '1',
+    // 只认两个值：存了别的（手改库 / 旧版本）一律回到回环，不放宽
+    host: storedHost === QQ_LAN_HOST ? QQ_LAN_HOST : QQ_DEFAULT_HOST,
     port: Number.isInteger(port) && port >= QQ_MIN_PORT && port <= QQ_MAX_PORT ? port : QQ_DEFAULT_PORT,
     accessToken: getSetting(db, QQ_SETTING_KEYS.accessToken).trim(),
     allowUsers: parseAllowUsers(getSetting(db, QQ_SETTING_KEYS.allowUsers)),
@@ -167,6 +201,7 @@ export function buildQqSettingsView(db: Db, status?: QqChannelStatus): QqSetting
   const config = readQqConfig(db)
   return {
     enabled: config.enabled,
+    allowLan: config.host === QQ_LAN_HOST,
     port: config.port,
     accessToken: config.accessToken,
     allowUsers: [...config.allowUsers],

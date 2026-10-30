@@ -31,6 +31,8 @@ export interface QqTransport {
 
 export interface QqChannelConfig {
   enabled: boolean
+  /** 监听地址：`127.0.0.1`（默认，只本机）或 `0.0.0.0`（允许局域网 / 跨机 NapCat） */
+  host: string
   port: number
   accessToken: string
   /** 允许私聊问答的 QQ 号（字符串形态，与设置里存的一致） */
@@ -356,7 +358,8 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       }
       try {
         const started = await transport.start({
-          host: '127.0.0.1',
+          // 默认只本机；设置里显式允许局域网才绑 0.0.0.0（token 仍是唯一门槛）
+          host: next.host,
           port: next.port,
           accessToken: next.accessToken,
           onMessage: (inbound) => {
@@ -366,7 +369,11 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
         })
         running = true
         lastError = undefined
-        log('info', 'qq channel started', { port: started.port, allow: next.allowUsers.length })
+        log('info', 'qq channel started', {
+          host: next.host,
+          port: started.port,
+          allow: next.allowUsers.length
+        })
         return { ok: true, port: started.port }
       } catch (error) {
         running = false

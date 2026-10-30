@@ -214,6 +214,8 @@
 | 主干改名后「找主干」不能只认一个名字 | 2026-10-31 D74：主干**固定叫 `life`**（D73 曾改名 `ask`，已撤回——`ask` 现在是纯模型分支，两者会撞名） | 统一用 `lineage.ts` 的 `TRUNK_BRANCH` / `isTrunkName`；`/new` 也拒绝用主干名；纯模型会话名从 `ask` 起、重名自动 `ask-2` |
 | 从父分支分叉会继承 `conversations/` | 2026-10-31 D74：`/new` on ask 用 `switchCreate`（图上是真分支），但会把 ask 的会话文件一起带过去，同一个会话 id 会接上旧上下文 | 分叉后 `clearConversations()`（只留 `.gitkeep`）再提交；女儿不用清，因为出生提交在 life 上、树里本来没有对话 |
 | 快照相同 = 没有 diff：分叉后首个提交会「无变化」 | 2026-10-31 D74：女儿从出生提交分叉，`lineage.snapshot.json` 内容与父提交相同；若没写信，`commit` 会返回 clean、传承失败 | 女儿首个提交固定写 `birth.json`（昵称 / 母亲 / 出生时刻）；空会话分支靠「家谱新增节点 → 快照变化」产生 diff |
+| `/use` 起名等待没有后台定时器 | 2026-10-31 D75：`/use`（脏工作区）/ `/backup`（不带 `-d`）先回执起名，切换 / 提交推迟到回执；超时不会自己发生——进程只在收到消息时看 `pendingAt` | 超时在**下一条输入**到达时补做（`takeExpired` → 默认时间戳名），别另起定时器去 commit/switch（会和用户正在做的事打架）；`/cancel` 是唯一放弃等待的出口 |
+| `memory: <日>` 与 `memory: <日> <时>` 不能混用 | 2026-10-31 D75：`commitDay` 按「最后一次提交主题 === `memory: <日>`」判断今天已提交；切换保存 / 手动备份若也用 `memory: <日>`，每日提交会误判为已做，`labelCommitSubject` 也分不出两者 | 切换保存 / `/backup` 一律 `memory: <日> <时>`（`defaultMemoryName()`，到分钟）；每日固定提交保持 `memory: <日>`（23:59 口径不带时间） |
 
 ## 规则
 

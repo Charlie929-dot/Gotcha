@@ -153,11 +153,6 @@ export interface MemoryRepo {
   listBranches(): Promise<MemoryBranchInfo[]>
   /** 某个分支最近几条提交（默认 5 条） */
   branchLog(name: string, limit?: number): Promise<MemoryBranchCommit[]>
-  /**
-   * 全部提交的图（时间向下、分叉向右；`/log` 用）。返回 `git log --graph` 的原样行，
-   * 分支名 / 提交主题都在里面；空仓 / 出错返回空数组。
-   */
-  graphLog(limit?: number): Promise<string[]>
   /** 短 sha → 验证并解析；不存在返回 null */
   revParse(ref: string): Promise<string | null>
 }
@@ -463,26 +458,6 @@ export function createMemoryRepo(options: {
     }
   }
 
-  /** 全分支提交图（时间向下、分叉向右）：`/log` 直接展示，别自己拼 ASCII 树 */
-  const graphLogInner = async (limit: number): Promise<string[]> => {
-    const status = await ensure()
-    if (!status.ok) return []
-    const capped = Math.max(1, Math.min(200, Math.round(limit)))
-    const result = await run([
-      'log',
-      '--graph',
-      '--all',
-      '--decorate=short',
-      '--date=short',
-      '--pretty=format:%h %ad %s%d',
-      `-n${capped}`
-    ])
-    if (!result.ok) return []
-    return result.stdout
-      .split('\n')
-      .filter((line) => line.trim() !== '')
-  }
-
   const ensureIdentity = async (): Promise<void> => {
     const email = await run(['config', '--get', 'user.email'])
     if (email.ok && email.stdout.trim() !== '') return
@@ -680,7 +655,6 @@ export function createMemoryRepo(options: {
     deleteBranch: (name) => exclusive(() => deleteBranchInner(name)),
     listBranches: () => exclusive(listBranchesInner),
     branchLog: (name, limit = 5) => exclusive(() => branchLogInner(name, limit)),
-    graphLog: (limit = 40) => exclusive(() => graphLogInner(limit)),
     clearConversations: () => exclusive(clearConversationsInner),
     revParse: (ref) => exclusive(() => revParseInner(ref))
   }

@@ -7,6 +7,8 @@
  * M1：`/help` / `/backup`。
  * M2：`/log` `/new` `/use` `/del`——节点（git 分支）的看 / 开 / 切 / 删，
  * 外加历史提交只读查看（detached；第一次提问时由组合根自动分叉）。
+ * D75：`/log` 是家谱树（`[0]` / `[0-1]` 父子编号，按代排序），`/log <编号|名字>` 看该节点的
+ * 记忆历史；切换前保存 / `/backup` 的提交主题默认 `memory: 2026-10-30 18:05`（回执可起名）。
  * M5（D72）：`/mode ask|chat` 切分支（分支即模式）、`/tool set|ele|add|rm` 改分支的工具白名单。
  *
  * 三条纪律：
@@ -54,6 +56,7 @@ import {
   writeLineage,
   type BranchKind,
   type Lineage,
+  type LineageBranch,
   type LineageRead
 } from './lineage'
 import type { MemoryBranchInfo, MemoryRepo, MemorySwitchResult } from './memory-repo'
@@ -189,6 +192,24 @@ function clockOf(at: number): string {
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
 }
 
+/**
+ * 记忆提交的默认名字（D75）：`2026-10-30 18:05`（本地时间到分钟）。
+ * 每日固定提交只到日（`memory: 2026-10-30`），两者在历史里分得开。
+ */
+export function defaultMemoryName(at: number): string {
+  return `${memoryDayKey(at)} ${clockOf(at)}`
+}
+
+/** 自定义记忆名的上限（提交主题别太长，历史里一行放得下） */
+const MEMORY_NAME_MAX = 60
+
+/** 回执里给的名字：空白折叠、去掉首尾空白、截断；空名返回 null（用默认名） */
+export function normalizeMemoryName(raw: string): string | null {
+  const text = raw.replace(/\s+/gu, ' ').trim()
+  if (text === '') return null
+  return text.slice(0, MEMORY_NAME_MAX)
+}
+
 function repoReasonText(reason: 'git-missing' | 'init-failed' | 'broken'): string {
   switch (reason) {
     case 'git-missing':
@@ -219,33 +240,127 @@ function failureReasonText(result: MemorySwitchResult, action: string): string {
   }
 }
 
-/** 当前节点先落一次；干净（clean）也算成功。返回错误文本时不切换。 */
-async function saveBefore(deps: CommandDeps, why: 'new' | 'use' | 'del'): Promise<string | null> {
+/**
+ * 当前节点先落一次；干净（clean）也算成功。返回错误文本时不切换。
+ * 主题默认是时间戳名（`memory: 2026-10-30 18:05`，D75），自定义名由回执命名传进来。
+ */
+async function saveBefore(deps: CommandDeps, at: number, name?: string): Promise<string | null> {
   // detached（历史提交只读查看）没有「当前节点」可保存：直接切，脏树由 repo 层拒绝
   const head = await deps.repo.head()
   if (head.detached) return null
-  const result = await deps.repo.commit(`memory: save before ${why}`)
+  const result = await deps.repo.commit(`memory: ${name ?? defaultMemoryName(at)}`)
   if (result.committed || result.reason === 'clean' || result.reason === 'already') return null
   if (result.reason === 'unavailable') return '记忆仓不可用，没有切换（记忆不会丢）。'
   return `保存当前节点失败${result.detail ? `（${result.detail}）` : ''}，没有切换。`
 }
 
-/** 家谱里的节点顺序（`/log` 的编号与 `/use <编号>` 同一口径），家谱外分支接在后面 */
-function orderBranches(lineage: Lineage | null, branches: readonly MemoryBranchInfo[]): string[] {
-  const out: string[] = []
-  const seen = new Set<string>()
-  if (lineage !== null) {
-    for (const item of lineage.branches) {
-      if (seen.has(item.branch)) continue
-      if (!branches.some((entry) => entry.branch === item.branch)) continue
-      out.push(item.branch)
-      seen.add(item.branch)
+/* ------------------------------------------------------------------ */
+/* 家谱树（D75）：编号 `0` / `0-1` / `0-1-0`，父子关系来自家谱 parent   */
+/* ------------------------------------------------------------------ */
+
+/** 家谱树节点：编号（根 `0`，第 n 个子节点 `<父>-<n>`，从 0 起）、分支名、子节点 */
+export interface GenealogyNode {
+  id: string
+  branch: string
+  children: GenealogyNode[]
+}
+
+/**
+ * 同一层里的顺序（D75）：代 → 种类 → 创建时间。
+ * 「原始代」= assistant 分支（无 persona / 无生命），它跟第一代同属 `gen-1`，
+ * 但用 kind 排在前面：`[0-0] ask · 纯模型` 在 `[0-1] default` 之前。
+ */
+function compareGenealogy(lineage: Lineage, a: LineageBranch, b: LineageBranch): number {
+  const rank = (node: LineageBranch): [number, number, number, string] => {
+    const generation = /^gen-(\d+)$/u.exec(node.generation)
+    return [
+      generation === null ? Number.MAX_SAFE_INTEGER : Number(generation[1]),
+      node.kind === 'assistant' ? 0 : node.kind === 'life' ? 2 : 1,
+      node.created_at,
+      node.branch
+    ]
+  }
+  const [ga, ka, ta, na] = rank(a)
+  const [gb, kb, tb, nb] = rank(b)
+  return ga - gb || ka - kb || ta - tb || na.localeCompare(nb)
+}
+
+/**
+ * 家谱树（`/log` 的渲染与 `/use <编号>` 的同一口径）。
+ * - 根：出生主干 `life` 优先，其次第一代主分支，最后家谱里第一条还在的节点；
+ * - `parent=null` 的代主分支（女儿那一代）与断链的子节点挂到根下，不丢；
+ * - git 有、家谱没有的分支老实列在后面（编号 `1`、`2`…），不编造父子关系。
+ */
+export function genealogyTree(
+  lineage: Lineage | null,
+  branches: readonly MemoryBranchInfo[]
+): GenealogyNode[] {
+  const names = branches.map((item) => item.branch)
+  const nodes = (lineage?.branches ?? []).filter((node) => names.includes(node.branch))
+  if (lineage === null || nodes.length === 0) {
+    return [...names]
+      .sort((a, b) => a.localeCompare(b))
+      .map((branch, index) => ({ id: String(index), branch, children: [] }))
+  }
+
+  const known = new Set(nodes.map((node) => node.branch))
+  const childrenOf = new Map<string, LineageBranch[]>()
+  const roots: LineageBranch[] = []
+  for (const node of nodes) {
+    const parent = node.parent
+    if (parent !== null && parent !== node.branch && known.has(parent)) {
+      const list = childrenOf.get(parent)
+      if (list === undefined) childrenOf.set(parent, [node])
+      else list.push(node)
+    } else {
+      roots.push(node)
     }
   }
-  for (const item of branches) {
-    if (seen.has(item.branch)) continue
-    out.push(item.branch)
-    seen.add(item.branch)
+
+  const firstGeneration = lineage.generations[0]?.branch
+  const rootBranch = names.includes(TRUNK_BRANCH)
+    ? TRUNK_BRANCH
+    : firstGeneration !== undefined && known.has(firstGeneration)
+      ? firstGeneration
+      : (nodes[0]?.branch ?? '')
+
+  const seen = new Set<string>()
+  const build = (list: readonly LineageBranch[], prefix: string): GenealogyNode[] => {
+    const out: GenealogyNode[] = []
+    for (const node of [...list].sort((a, b) => compareGenealogy(lineage, a, b))) {
+      if (seen.has(node.branch)) continue
+      seen.add(node.branch)
+      const id = `${prefix}-${out.length}`
+      out.push({ id, branch: node.branch, children: build(childrenOf.get(node.branch) ?? [], id) })
+    }
+    return out
+  }
+
+  const rootNode = nodes.find((node) => node.branch === rootBranch)
+  const rootChildren =
+    rootNode === undefined
+      ? roots
+      : [...(childrenOf.get(rootBranch) ?? []), ...roots.filter((node) => node.branch !== rootBranch)]
+  seen.add(rootBranch)
+  const out: GenealogyNode[] = [
+    { id: '0', branch: rootBranch, children: build(rootChildren, '0') }
+  ]
+
+  const extra = names
+    .filter((name) => !known.has(name) && name !== rootBranch)
+    .sort((a, b) => a.localeCompare(b))
+  extra.forEach((branch, index) => {
+    out.push({ id: String(index + 1), branch, children: [] })
+  })
+  return out
+}
+
+/** 树 → 逐行（先父后子） */
+export function flattenGenealogy(nodes: readonly GenealogyNode[]): GenealogyNode[] {
+  const out: GenealogyNode[] = []
+  for (const node of nodes) {
+    out.push(node)
+    out.push(...flattenGenealogy(node.children))
   }
   return out
 }
@@ -297,14 +412,14 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '',
     '可用命令：',
     '  /help            看这一页',
-    '  /log             看记忆节点（编号给 /use 用）',
+    '  /log [节点]      看家谱；给编号（0 / 0-1）看那个节点的记忆历史',
     '  /new <名字>      从当前节点开新分支（ask 分支 = 从它分叉并清空会话）',
-    '  /use <名字|编号|提交>  切节点；切历史提交 = 只读查看',
+    '  /use <编号|名字|提交> [-d]  切节点；切历史提交 = 只读查看',
     '  /del <名字>      删节点（要回 confirm）',
     '  /mode ask|chat   切模式（ask = 纯模型，chat = 带 persona；切分支）',
     '  /tool            看当前分支的工具；set / ele / add / rm',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
-    '  /backup          立即提交记忆；配了远端就推送',
+    '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
     '  /cancel          取消等待中的命名 / 删除',
     '',
     `当前节点：${active}（${activeKind === 'assistant' ? '纯模型' : '聊天'}）`,
@@ -312,32 +427,73 @@ async function helpText(deps: CommandDeps): Promise<string> {
   ].join('\n')
 }
 
-/** 提交主题 → 人话（只换 `memory:` 前缀；不认识的原样留着） */
+/**
+ * 提交主题 → 人话（D75：切换前保存 / 备份是时间戳名 `memory: 2026-10-30 18:05`，
+ * 自定义名原样显示；D75 之前的 `save before` 只留一句「记忆（旧）」）。
+ */
 function labelCommitSubject(line: string): string {
   const rules: [RegExp, string][] = [
-    [/memory: birth (\S+)/gu, '出生 $1'],
-    [/memory: born (\S+)/gu, '$1 出生（分支首个提交）'],
-    [/memory: ask (\S+)/gu, '提问会话 $1'],
-    [/memory: ask\b/gu, '提问会话（挂载）'],
+    [/^memory: (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/u, '记忆 $1 $2'],
+    [/^memory: (\d{4}-\d{2}-\d{2})$/u, '记忆 $1'],
+    [/^memory: backup (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/u, '记忆 $1 $2'],
+    [/^memory: save before .*$/u, '记忆（旧）'],
+    [/^memory: birth (\S+)$/u, '出生 $1'],
+    [/^memory: born (\S+)$/u, '$1 出生（分支首个提交）'],
+    [/^memory: ask (\S+)$/u, '提问会话 $1'],
+    [/^memory: ask$/u, '提问会话（挂载）'],
     // D73 / D74 之前建的旧分支：名字还叫 assistant / life，主题也按人话显示
-    [/memory: assistant (\S+)/gu, '提问会话 $1（旧名）'],
-    [/memory: assistant\b/gu, '提问会话（旧挂载）'],
-    [/memory: life\b/gu, '主干建立'],
-    [/memory: save before \w+/gu, '保存（切换前）'],
-    [/memory: compact (\S+)/gu, '压缩 $1'],
-    [/memory: 清空问答历史前/gu, '清空历史前'],
-    [/memory: (\d{4}-\d{2}-\d{2}) .*/gu, '记忆 $1']
+    [/^memory: assistant (\S+)$/u, '提问会话 $1（旧名）'],
+    [/^memory: assistant$/u, '提问会话（旧挂载）'],
+    [/^memory: life$/u, '主干建立'],
+    [/^memory: compact (\S+)$/u, '压缩 $1'],
+    [/^memory: fork (\S+)$/u, '分叉 $1'],
+    [/^memory: 清空问答历史前$/u, '清空历史前'],
+    [/^memory: init$/u, '建仓'],
+    [/^memory: (.+)$/u, '$1']
   ]
   let out = line
   for (const [pattern, text] of rules) out = out.replace(pattern, text)
   return out
 }
 
+/** 家谱树的一行：`[0-1] default · 7 个工具  ← 当前`（`life` 不显示工具数，D75 的样例口径） */
+function genealogyLine(
+  lineage: Lineage | null,
+  node: GenealogyNode,
+  headBranch: string | null
+): string {
+  const info = lineage === null ? null : findBranch(lineage, node.branch)
+  let suffix = ''
+  if (info !== null && lineage !== null) {
+    if (info.kind === 'life') suffix = ' · 主干'
+    else {
+      if (info.kind === 'assistant') suffix = ' · 纯模型'
+      suffix += ` · ${toolsOfBranch(lineage, node.branch).length} 个工具`
+    }
+  }
+  const current = headBranch === node.branch ? '  ← 当前' : ''
+  return `[${node.id}] ${node.branch}${suffix}${current}`
+}
+
+/** `/log <节点>`：这个节点的记忆历史（最近 20 条；编号相对这一页，新到旧） */
+async function historyText(deps: CommandDeps, branch: string): Promise<string> {
+  const limit = 20
+  const commits = await deps.repo.branchLog(branch, limit)
+  const lines = [`[0] ${branch}`]
+  if (commits.length === 0) lines.push('（还没有提交）')
+  else {
+    commits.forEach((commit, index) => {
+      lines.push(`[0-${index}] ${labelCommitSubject(commit.subject)} · ${commit.hash}`)
+    })
+  }
+  return lines.join('\n')
+}
+
 /**
- * `/log`（D74）：`git log --graph --all` 原样画——**时间向下、分叉向右**，
- * 别自己拼 ASCII 树（分支一多就错位）。下面再给一份带编号的节点表（`/use` 用）。
+ * `/log`（D75）：家谱树——父子关系来自家谱 `parent`，编号是 `[父]-[在兄弟里的第几个]`。
+ * 不再画 `git log --graph`：树是给「这家谱长什么样」看的，`/log <编号>` 才看具体记忆。
  */
-async function logText(deps: CommandDeps): Promise<string> {
+async function logText(deps: CommandDeps, target: string): Promise<string> {
   const status = await deps.repo.status()
   if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
   const head = await deps.repo.head()
@@ -345,41 +501,19 @@ async function logText(deps: CommandDeps): Promise<string> {
   if (branches.length === 0) return '记忆仓里还没有节点。'
   const read = await readLineage(deps.lineageFile)
   const lineage = read.status === 'ok' ? read.lineage : null
-  const ordered = orderBranches(lineage, branches)
-  const active = lineage?.active ?? head.branch ?? 'default'
-  const activeKind = lineage === null ? null : branchKindOf(lineage, active)
-  const modeText =
-    activeKind === null ? '' : ` · ${activeKind === 'assistant' ? '纯模型' : '聊天'}`
+  const flat = flattenGenealogy(genealogyTree(lineage, branches))
 
-  const lines = [
-    `问记忆 · 记忆节点（当前 ${active}${modeText}）`,
-    '时间向下、分叉向右（最近 40 个提交；完整看 git log --graph --all）',
-    ''
-  ]
-  const graph = await deps.repo.graphLog(40)
-  if (graph.length === 0) lines.push('（还没有提交）')
-  else for (const line of graph) lines.push(labelCommitSubject(line))
+  if (target !== '') {
+    const hit =
+      flat.find((node) => node.id === target) ?? flat.find((node) => node.branch === target)
+    if (hit === undefined) return `没有节点 ${target}（/log 看家谱）。`
+    return historyText(deps, hit.branch)
+  }
 
-  lines.push('', '节点（/use 用编号 / 名字 / 提交）：')
-  ordered.forEach((branch, index) => {
-    const node = lineage === null ? null : findBranch(lineage, branch)
-    const kindText =
-      node === null
-        ? ''
-        : node.kind === 'assistant'
-          ? ' · 纯模型'
-          : node.kind === 'life'
-            ? ' · 主干'
-            : ''
-    const tools = lineage === null ? null : toolsOfBranch(lineage, branch).length
-    const toolsText = tools === null ? '' : ` · ${tools} 个工具`
-    const current = head.branch === branch ? '  ← 当前' : ''
-    lines.push(`[${index + 1}] ${branch}${kindText}${toolsText}${current}`)
-  })
+  const lines = flat.map((node) => genealogyLine(lineage, node, head.branch))
   if (head.detached && head.sha !== null) {
     lines.push('', `HEAD 停在历史提交 ${head.sha}（只读查看；发第一句话会从这里分叉）`)
   }
-  lines.push('', '用法：/use <编号|名字> 切节点；/use <短 sha> 看历史提交。')
   return lines.join('\n')
 }
 
@@ -431,7 +565,7 @@ async function ensureTrunkBranch(
   if (adopted === null) return { lineage, trunk, error: '主干加不进家谱（细节看日志）。' }
   if (findBranch(adopted, trunk) !== null) return { lineage: adopted, trunk }
 
-  const saved = await saveBefore(deps, 'new')
+  const saved = await saveBefore(deps, at)
   if (saved !== null) return { lineage, trunk, error: saved }
   const created = await deps.repo.switchCreateOrphan(trunk)
   if (!created.ok) {
@@ -481,7 +615,7 @@ async function createAssistantBranch(
   const base = ensured.lineage
   const trunk = ensured.trunk
 
-  const saved = await saveBefore(deps, 'new')
+  const saved = await saveBefore(deps, at)
   if (saved !== null) return { error: saved }
   const onTrunk = await deps.repo.switchBranch(trunk)
   if (!onTrunk.ok) return { error: failureReasonText(onTrunk, `切到 ${trunk} 主干`) }
@@ -530,7 +664,7 @@ async function createNode(
   // 纯模型分支的 `/new` = 从当前 ask 分叉（图上是真分支）+ 清空会话（上下文空白）；
   // persona 分支仍从当前节点分叉，带着它的记忆（D74）
   if (currentKind === 'assistant') {
-    const saved = await saveBefore(deps, 'new')
+    const saved = await saveBefore(deps, at)
     if (saved !== null) return { text: saved }
     const created = await deps.repo.switchCreate(slug)
     if (!created.ok) return { text: failureReasonText(created, `开出空会话 ${slug}`) }
@@ -563,7 +697,7 @@ async function createNode(
     }
   }
 
-  const saved = await saveBefore(deps, 'new')
+  const saved = await saveBefore(deps, at)
   if (saved !== null) return { text: saved }
 
   const created = await deps.repo.switchCreate(slug)
@@ -591,28 +725,105 @@ async function createNode(
   }
 }
 
+interface MemoryOutcome {
+  text: string
+  mode?: AskModeState
+}
+
+/**
+ * 回执命名之后的动作（D75）：先给当前记忆起名，再切换 / 只读查看 / 备份。
+ * 起名之前这些动作一律不做——HEAD 不动、提交不落，超时才按默认名继续。
+ */
+type MemoryAction =
+  | { kind: 'branch'; branch: string; mode?: AskModeState }
+  | { kind: 'commit'; sha: string; from: string }
+  | { kind: 'backup' }
+
+/** `/use` 的 `-d`：带上就用默认时间戳名，不带则回执起名（D75）；名字只走回执，不跟在命令上 */
+function parseUseArgs(args: readonly string[]): { target: string; defaultName: boolean } {
+  const defaultName = args.some((arg) => arg === '-d' || arg === '--default')
+  return {
+    target: args.filter((arg) => arg !== '-d' && arg !== '--default').join(' ').trim(),
+    defaultName
+  }
+}
+
+/** 回执起名的提示：`0`（或空）= 默认时间戳名 */
+function namePromptText(kind: 'use' | 'backup', at: number): string {
+  return [
+    kind === 'use' ? '切换前先把当前记忆存一份。' : '先把当前记忆存一份。',
+    `给它起个名字？回 0 用默认：记忆 ${defaultMemoryName(at)}`,
+    '（60 秒内回；/cancel 放弃这次切换 / 备份）'
+  ].join('\n')
+}
+
+/** 名字到手（或超时用默认名）之后，把保存 + 切换 / 查看 / 备份做完 */
+async function finishMemoryAction(
+  deps: CommandDeps,
+  action: MemoryAction,
+  at: number,
+  name?: string
+): Promise<MemoryOutcome> {
+  if (action.kind === 'backup') return { text: await backupText(deps, at, name) }
+
+  const saved = await saveBefore(deps, at, name)
+  if (saved !== null) return { text: saved }
+
+  if (action.kind === 'commit') {
+    const checkedOut = await deps.repo.checkoutCommit(action.sha)
+    if (!checkedOut.ok) return { text: failureReasonText(checkedOut, `切到提交 ${action.sha}`) }
+    deps.reloadConversations?.()
+    return {
+      text: [
+        `===this is 历史提交 ${action.sha}===`,
+        `已停在 ${action.sha}——这里是只读的旧位置，家谱不变。`,
+        `发第一句话会从这里分叉成 ${action.from}-<序号>；只看不聊不会留下分支。`
+      ].join('\n')
+    }
+  }
+
+  const read = await readLineage(deps.lineageFile)
+  const lineage = read.status === 'ok' ? read.lineage : null
+  const switched = await deps.repo.switchBranch(action.branch)
+  if (!switched.ok) return { text: failureReasonText(switched, `切到 ${action.branch}`) }
+  const synced = await syncActive(deps, lineage, action.branch, action.mode?.kind)
+  deps.reloadConversations?.()
+  return {
+    text: `===this is ${action.branch}===\n已切到节点 ${action.branch}。这一问开始用它的记忆。`,
+    ...(synced !== undefined ? { mode: modeStateOf(synced, action.branch) } : action.mode !== undefined ? { mode: action.mode } : {})
+  }
+}
+
 async function useNode(
   deps: CommandDeps,
   target: string,
-  at: number
-): Promise<{ text: string; mode?: AskModeState }> {
+  at: number,
+  defaultName: boolean
+): Promise<MemoryOutcome & { pending?: MemoryAction }> {
   const status = await deps.repo.status()
   if (!status.ok) return { text: `记忆仓不可用：${repoReasonText(status.reason)}` }
   const head = await deps.repo.head()
   const branches = await deps.repo.listBranches()
   const read = await readLineage(deps.lineageFile)
   const lineage = read.status === 'ok' ? read.lineage : null
+  // 只有「真会落一份提交」时才要起名：干净工作区 / detached 都不用问
+  const needsSave = !head.detached && status.dirty
 
   let branchName: string | null = null
-  if (/^\d+$/u.test(target)) {
-    const index = Number(target) - 1
-    branchName = orderBranches(lineage, branches)[index] ?? null
-    if (branchName === null) return { text: `没有第 ${target} 个节点（/log 看看有哪些）。` }
+  if (/^\d+(?:-\d+)*$/u.test(target)) {
+    const hit = flattenGenealogy(genealogyTree(lineage, branches)).find((node) => node.id === target)
+    if (hit === undefined) return { text: `没有节点 ${target}（/log 看家谱）。` }
+    branchName = hit.branch
   } else if (branches.some((entry) => entry.branch === target)) {
     branchName = target
   }
 
   if (branchName !== null) {
+    if (lineage !== null && branchKindOf(lineage, branchName) === 'life') {
+      return {
+        text: `${branchName} 是出生主干，只放出生提交；先 /new 从它开一条节点再聊。`
+      }
+    }
     const mode = lineage !== null ? modeStateOf(lineage, branchName) : undefined
     if (head.branch === branchName) {
       const synced = await syncActive(deps, lineage, branchName, mode?.kind)
@@ -621,34 +832,24 @@ async function useNode(
         ...(synced !== undefined ? { mode: modeStateOf(synced, branchName) } : mode !== undefined ? { mode } : {})
       }
     }
-    const saved = await saveBefore(deps, 'use')
-    if (saved !== null) return { text: saved }
-    const switched = await deps.repo.switchBranch(branchName)
-    if (!switched.ok) return { text: failureReasonText(switched, `切到 ${branchName}`) }
-    const synced = await syncActive(deps, lineage, branchName, mode?.kind)
-    deps.reloadConversations?.()
-    return {
-      text: `===this is ${branchName}===\n已切到节点 ${branchName}。这一问开始用它的记忆。`,
-      ...(synced !== undefined ? { mode: modeStateOf(synced, branchName) } : {})
+    const plan: MemoryAction = {
+      kind: 'branch',
+      branch: branchName,
+      ...(mode !== undefined ? { mode } : {})
     }
+    if (needsSave && !defaultName) return { text: namePromptText('use', at), pending: plan }
+    return finishMemoryAction(deps, plan, at)
   }
 
   const sha = await deps.repo.revParse(target)
-  if (sha === null) return { text: `没找到节点或提交「${target}」（/log 看看有哪些）。` }
-  const saved = await saveBefore(deps, 'use')
-  if (saved !== null) return { text: saved }
-  const checkedOut = await deps.repo.checkoutCommit(sha)
-  if (!checkedOut.ok) return { text: failureReasonText(checkedOut, `切到提交 ${sha}`) }
-  deps.reloadConversations?.()
-
-  const from = head.branch ?? lineage?.active ?? 'default'
-  return {
-    text: [
-      `===this is 历史提交 ${sha}===`,
-      `已停在 ${sha}——这里是只读的旧位置，家谱不变。`,
-      `发第一句话会从这里分叉成 ${from}-<序号>；只看不聊不会留下分支。`
-    ].join('\n')
+  if (sha === null) return { text: `没找到节点或提交「${target}」（/log 看家谱）。` }
+  const plan: MemoryAction = {
+    kind: 'commit',
+    sha,
+    from: head.branch ?? lineage?.active ?? 'default'
   }
+  if (needsSave && !defaultName) return { text: namePromptText('use', at), pending: plan }
+  return finishMemoryAction(deps, plan, at)
 }
 
 interface DeletableOk {
@@ -693,8 +894,8 @@ async function checkDeletable(deps: CommandDeps, slug: string): Promise<Deletabl
   return { ok: true, branch: slug }
 }
 
-async function deleteNode(deps: CommandDeps, branch: string): Promise<string> {
-  const saved = await saveBefore(deps, 'del')
+async function deleteNode(deps: CommandDeps, branch: string, at: number): Promise<string> {
+  const saved = await saveBefore(deps, at)
   if (saved !== null) return saved
   const removed = await deps.repo.deleteBranch(branch)
   if (!removed.ok) return failureReasonText(removed, `删除 ${branch}`)
@@ -707,7 +908,11 @@ async function deleteNode(deps: CommandDeps, branch: string): Promise<string> {
   return `已删除节点 ${branch}（提交还在仓里，/use 短 sha 仍能找回）。`
 }
 
-type Pending = { kind: 'name' } | { kind: 'delete'; branch: string } | null
+type Pending =
+  | { kind: 'name' }
+  | { kind: 'delete'; branch: string }
+  | { kind: 'memory'; action: MemoryAction }
+  | null
 
 /** 命令上下文：`/compact` 要知道压哪个会话（桌面窗口的 conversationId）；模式按家谱现算 */
 export interface CommandContext {
@@ -783,7 +988,7 @@ async function switchMode(deps: CommandDeps, kind: AskModeKind, at: number): Pro
     await syncActive(deps, lineage, target, kind)
     return commandResult(`===this is ${target}===\n已经在 ${modeSummary(mode)}。`, mode)
   }
-  const saved = await saveBefore(deps, 'use')
+  const saved = await saveBefore(deps, at)
   if (saved !== null) return commandResult(saved)
   const switched = await deps.repo.switchBranch(target)
   if (!switched.ok) return commandResult(failureReasonText(switched, `切到 ${target}`))
@@ -949,8 +1154,15 @@ export function createCommandHandler(
   let pending: Pending = null
   let pendingAt = 0
 
-  const expire = (at: number): void => {
-    if (pending !== null && at - pendingAt > COMMAND_WAIT_TIMEOUT_MS) pending = null
+  /**
+   * 超时的等待：命名等待（D75）按默认名把动作做完（切换 / 备份照做），
+   * 其余（`/new` 起名、删除确认）直接作废。
+   */
+  const takeExpired = (at: number): MemoryAction | null => {
+    if (pending === null || at - pendingAt <= COMMAND_WAIT_TIMEOUT_MS) return null
+    const action = pending.kind === 'memory' ? pending.action : null
+    pending = null
+    return action
   }
 
   const handleNodeName = async (raw: string, at: number): Promise<ChainAskResult> => {
@@ -996,7 +1208,9 @@ export function createCommandHandler(
 
   return async (text, context) => {
     const at = now()
-    expire(at)
+    const expired = takeExpired(at)
+    // 超时的起名等待按默认名做完（切换 / 备份照做），这条输入再照常处理
+    if (expired !== null) await finishMemoryAction(deps, expired, at)
     const trimmed = text.trim()
 
     if (pending !== null && !trimmed.startsWith('/')) {
@@ -1004,10 +1218,18 @@ export function createCommandHandler(
         pending = null
         return handleNodeName(trimmed, at)
       }
+      if (pending.kind === 'memory') {
+        const action = pending.action
+        pending = null
+        const name =
+          trimmed === '' || trimmed === '0' ? undefined : (normalizeMemoryName(trimmed) ?? undefined)
+        const out = await finishMemoryAction(deps, action, at, name)
+        return commandResult(out.text, out.mode)
+      }
       const branch = pending.branch
       if (trimmed.toLowerCase() === 'confirm') {
         pending = null
-        return commandResult(await deleteNode(deps, branch))
+        return commandResult(await deleteNode(deps, branch, at))
       }
       pending = null
       return null
@@ -1022,9 +1244,19 @@ export function createCommandHandler(
       case 'help':
         return commandResult(await helpText(deps))
       case 'log':
-        return commandResult(await logText(deps))
-      case 'backup':
-        return commandResult(await backupText(deps, at))
+        return commandResult(await logText(deps, parsed.args.join(' ').trim()))
+      case 'backup': {
+        const args = parsed.args.filter((arg) => arg !== '')
+        const defaultName = args.some((arg) => arg === '-d' || arg === '--default')
+        const rest = args.filter((arg) => arg !== '-d' && arg !== '--default')
+        if (rest.length > 0) {
+          return commandResult('用法：/backup [-d]\n名字在回执里给（回 0 = 默认名）。')
+        }
+        if (defaultName) return commandResult(await backupText(deps, at))
+        pending = { kind: 'memory', action: { kind: 'backup' } }
+        pendingAt = at
+        return commandResult(namePromptText('backup', at))
+      }
       case 'cancel': {
         if (pending === null) return commandResult('没有等待中的操作。')
         pending = null
@@ -1078,11 +1310,15 @@ export function createCommandHandler(
         return handleNodeName(name, at)
       }
       case 'use': {
-        const target = parsed.args.join(' ').trim()
+        const { target, defaultName } = parseUseArgs(parsed.args)
         if (target === '') {
-          return commandResult('用法：/use <节点名|编号|提交>（先 /log 看看有哪些）')
+          return commandResult('用法：/use <编号|名字|提交> [-d]（先 /log 看家谱）')
         }
-        const out = await useNode(deps, target, at)
+        const out = await useNode(deps, target, at, defaultName)
+        if (out.pending !== undefined) {
+          pending = { kind: 'memory', action: out.pending }
+          pendingAt = at
+        }
         return commandResult(out.text, out.mode)
       }
       case 'del': {
@@ -1104,9 +1340,8 @@ export function createCommandHandler(
   }
 }
 
-async function backupText(deps: CommandDeps, at: number): Promise<string> {
-  const day = memoryDayKey(at)
-  const result = await deps.repo.commit(`memory: backup ${day} ${clockOf(at)}`)
+async function backupText(deps: CommandDeps, at: number, name?: string): Promise<string> {
+  const result = await deps.repo.commit(`memory: ${name ?? defaultMemoryName(at)}`)
   if (!result.committed) {
     switch (result.reason) {
       case 'clean':

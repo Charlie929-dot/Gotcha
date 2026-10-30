@@ -24,7 +24,7 @@ import {
   writeLineage,
   type Lineage
 } from './lineage'
-import { slugifyNodeName } from './commands'
+import { defaultMemoryName, slugifyNodeName } from './commands'
 import type { MemoryRepo } from './memory-repo'
 
 export interface ConceiveDeps {
@@ -110,7 +110,7 @@ export async function conceiveDaughter(
   const at = now()
   const letter = input.letter?.trim() ?? ''
   const letterPath = letter === '' ? null : `letters/${slug}.md`
-  const saved = await deps.repo.commit(`memory: save before birth ${slug}`)
+  const saved = await deps.repo.commit(`memory: ${defaultMemoryName(at)}`)
   if (!saved.committed && saved.reason !== 'clean') {
     return { ok: false, message: '先保存当前节点失败，没有传承（记忆不会丢）。' }
   }

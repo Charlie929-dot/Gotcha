@@ -4,7 +4,7 @@
  * 真 git 仓（临时目录），验证三件事：
  * 1. `/mode ask` 建 `life` 主干（首个提交 = 出生 default）并从它分叉出 `ask`；
  * 2. `ask` 上的 `/new` 从 ask 分叉、**清空会话**（新会话从空白开始）；
- * 3. `/log` 输出时间向下 / 分叉向右的 git 图（`git log --graph`）。
+ * 3. `/log` 画家谱树（D75），`/log <编号>` 看该节点的记忆历史。
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -80,17 +80,17 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
     expect(read.lineage.branches.find((node) => node.branch === 'di-er-hui-hua')?.parent).toBe('ask')
   })
 
-  it('/log：画 git 图（时间向下、分叉向右）并给提交换成人话', async () => {
+  it('/log：画家谱树；/log 0-0 看 ask 的记忆历史', async () => {
     const { repo, lineageFile } = await setup()
     const run = createCommandHandler({ repo, lineageFile })
     await run('/mode ask')
-    const text = textOf(await run('/log'))
-    expect(text).toContain('时间向下、分叉向右')
-    expect(text).toContain('出生 default')
-    expect(text).toContain('提问会话 ask')
-    // git 图的行（* 或 | 开头）+ 节点编号表
-    expect(text).toMatch(/[*|]/)
-    expect(text).toContain('[1] default')
-    expect(text).toContain('ask · 纯模型 · 0 个工具  ← 当前')
+    const tree = textOf(await run('/log'))
+    expect(tree).toBe(
+      ['[0] life · 主干', '[0-0] ask · 纯模型 · 0 个工具  ← 当前', '[0-1] default · 7 个工具'].join('\n')
+    )
+    const history = textOf(await run('/log 0-0'))
+    expect(history.split('\n')[0]).toBe('[0] ask')
+    expect(history).toMatch(/\[0-0\] 提问会话 ask · [0-9a-f]{7,}/u)
+    expect(history).toMatch(/\[0-1\] 出生 default · [0-9a-f]{7,}/u)
   })
 })

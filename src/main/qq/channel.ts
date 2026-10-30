@@ -58,6 +58,8 @@ export interface QqChannelDeps {
   maxQueue?: number
   /** 一次问答的超时（默认 180s） */
   askTimeoutMs?: number
+  /** 分条之间隔多久（默认 200ms；测试传 0） */
+  partGapMs?: number
 }
 
 export interface QqChannelStatus extends QqTransportStatus {
@@ -178,48 +180,60 @@ function formatAskError(reason: string, message: string): string {
 }
 
 /**
- * 长答分条：优先按空行切，其次按行切；单行超长就按码点硬切（不劈坏 emoji）。
- * 超过 `maxParts` 的部分丢掉并补一句「还有更多，到桌面看」，不静默截断。
+ * 回复分条（2026-10-30 拍板人反馈「本来应该是多段消息，但他只发了一个」）：
+ * 一律**按空行分段**，一段一条 QQ 消息；段太长再按行 / 码点硬切（不劈坏 emoji）。
+ * 超过 `maxParts` 条时**不丢内容**：前 `maxParts-1` 条原样，剩下的合并进最后一条。
  */
-export function splitForQq(text: string, maxChars: number, maxParts = 4): string[] {
+export function splitForQq(text: string, maxChars: number, maxParts = 8): string[] {
   const limit = Math.max(QQ_REPLY_MIN_CHARS, Math.min(QQ_REPLY_MAX_CHARS, Math.round(maxChars)))
   const normalized = text.replace(/\r\n/gu, '\n').trim()
   if (normalized === '') return []
-  if (Array.from(normalized).length <= limit) return [normalized]
 
   const chunks: string[] = []
-  let current = ''
-  const flush = (): void => {
-    if (current.trim() !== '') chunks.push(current.trim())
-    current = ''
-  }
-  const pushHard = (line: string): void => {
-    const chars = Array.from(line)
-    while (chars.length > 0) {
-      const room = limit - Array.from(current).length
-      if (room <= 0) {
-        flush()
-        continue
-      }
-      const take = chars.splice(0, room).join('')
-      current += take
-      if (chars.length > 0) flush()
-    }
-  }
-  for (const line of normalized.split('\n')) {
-    if (Array.from(line).length > limit) {
-      flush()
-      pushHard(line)
+  const paragraphs = normalized
+    .split(/\n{2,}/u)
+    .map((part) => part.trim())
+    .filter((part) => part !== '')
+
+  for (const paragraph of paragraphs) {
+    if (Array.from(paragraph).length <= limit) {
+      chunks.push(paragraph)
       continue
     }
-    if (Array.from(current).length + Array.from(line).length + 1 > limit) flush()
-    current += (current === '' ? '' : '\n') + line
+    // 单段超上限：按行累加到 limit，再不行按码点硬切
+    let current = ''
+    const flush = (): void => {
+      if (current.trim() !== '') chunks.push(current.trim())
+      current = ''
+    }
+    const pushHard = (line: string): void => {
+      const chars = Array.from(line)
+      while (chars.length > 0) {
+        const room = limit - Array.from(current).length
+        if (room <= 0) {
+          flush()
+          continue
+        }
+        current += chars.splice(0, room).join('')
+        if (chars.length > 0) flush()
+      }
+    }
+    for (const line of paragraph.split('\n')) {
+      if (Array.from(line).length > limit) {
+        flush()
+        pushHard(line)
+        continue
+      }
+      if (Array.from(current).length + Array.from(line).length + 1 > limit) flush()
+      current += (current === '' ? '' : '\n') + line
+    }
+    flush()
   }
-  flush()
 
+  if (chunks.length === 0) return []
   if (chunks.length <= maxParts) return chunks
-  const kept = chunks.slice(0, maxParts)
-  kept[maxParts - 1] = `${kept[maxParts - 1]}\n（还有更多，到桌面看）`
+  const kept = chunks.slice(0, maxParts - 1)
+  kept.push(chunks.slice(maxParts - 1).join('\n\n'))
   return kept
 }
 
@@ -238,6 +252,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
   const perMinute = Math.max(1, deps.perMinute ?? 6)
   const maxQueue = Math.max(1, deps.maxQueue ?? 8)
   const askTimeoutMs = Math.max(10_000, deps.askTimeoutMs ?? 180_000)
+  const partGapMs = Math.max(0, deps.partGapMs ?? 200)
 
   let config: QqChannelConfig | null = null
   let running = false
@@ -288,6 +303,10 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       const parts = splitForQq(text, config?.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
       for (const part of parts) {
         await transport.sendPrivate(inbound.userId, part)
+        // 段与段之间留一口气：连发太快时 QQ 侧偶发乱序 / 折叠（默认 200ms，测试传 0）
+        if (parts.length > 1 && partGapMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, partGapMs))
+        }
       }
       log('info', 'qq answered', {
         userId: inbound.userId,

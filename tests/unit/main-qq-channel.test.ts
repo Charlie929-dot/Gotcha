@@ -112,12 +112,15 @@ describe('开关与白名单（fail-closed）', () => {
         asked.push({ text, conversationId })
         return answer('在')
       },
-      log: () => {}
+      log: () => {},
+      partGapMs: 0
     })
     await channel.start(config({ allowUsers: ['10001'] }))
     await channel.handleMessage(inbound('在吗', 10001))
     expect(asked).toEqual([{ text: '在吗', conversationId: 'qq-10001' }])
-    expect(transport.sent).toEqual([{ userId: 10001, text: expect.stringContaining('在') }])
+    expect(transport.sent[0]).toEqual({ userId: 10001, text: expect.stringContaining('在') })
+    // 正文与「参考」各成一条，顺序不乱
+    expect(transport.sent.every((item) => item.userId === 10001)).toBe(true)
   })
 
   it('非白名单号的消息直接丢：不问答、不回话', async () => {
@@ -138,7 +141,7 @@ describe('开关与白名单（fail-closed）', () => {
 })
 
 describe('一次问答', () => {
-  it('白名单私聊 → 走注入的 ask（会话 id 按用户派生）→ 回正文 + 参考行', async () => {
+  it('白名单私聊 → 走注入的 ask（会话 id 按用户派生）→ 正文与参考各成一条', async () => {
     const transport = new FakeTransport()
     const asked: { text: string; conversationId: string }[] = []
     const channel = createQqChannel(transport, {
@@ -146,22 +149,43 @@ describe('一次问答', () => {
         asked.push({ text, conversationId })
         return answer('你下午在改 **persona.ts**。')
       },
-      log: () => {}
+      log: () => {},
+      partGapMs: 0
     })
     await channel.start(config())
     await channel.handleMessage(inbound('我下午在干嘛'))
     expect(asked).toEqual([{ text: '我下午在干嘛', conversationId: 'qq-20002' }])
-    expect(transport.sent).toHaveLength(1)
+    // 正文一段 + 「参考：」一段 → 两条 QQ 消息（2026-10-30 拍板人要求多段）
+    expect(transport.sent).toHaveLength(2)
     expect(transport.sent[0]!.text).toContain('你下午在改 persona.ts。')
-    expect(transport.sent[0]!.text).toContain('参考：')
-    expect(transport.sent[0]!.text).toContain('Chrome')
+    expect(transport.sent[1]!.text).toContain('参考：')
+    expect(transport.sent[1]!.text).toContain('Chrome')
   })
 
-  it('长答自动分条，每条不超过上限', async () => {
+  it('多段回答分条发送（每段一条），长段落仍按上限切', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, {
+      ask: async () =>
+        answer(['第一段。', '第二段。', '第三段。'].join('\n\n')),
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('分段'))
+    expect(transport.sent.map((item) => item.text)).toEqual([
+      '第一段。',
+      '第二段。',
+      '第三段。',
+      expect.stringContaining('参考：')
+    ])
+  })
+
+  it('长答按上限分条，每条不超过上限', async () => {
     const transport = new FakeTransport()
     const channel = createQqChannel(transport, {
       ask: async () => answer(Array.from({ length: 30 }, (_, i) => `第 ${i} 行：` + '字'.repeat(80)).join('\n')),
-      log: () => {}
+      log: () => {},
+      partGapMs: 0
     })
     await channel.start(config({ replyMaxChars: 400 }))
     await channel.handleMessage(inbound('长一点'))

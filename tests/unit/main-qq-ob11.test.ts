@@ -91,24 +91,31 @@ describe('回复成形', () => {
     expect(stripMarkdown(text)).toBe('标题\n结论：你下午在改 persona.ts。\n见 文档\nconst a = 1')
   })
 
-  it('短答不分条；长答按行切成多条且每条不超过上限', () => {
+  it('按空行分段：多段回答 → 多条消息（2026-10-30 拍板人反馈）', () => {
+    const text = '第一段。\n\n第二段，稍长一点。\n\n第三段。'
+    expect(splitForQq(text, 1_800)).toEqual(['第一段。', '第二段，稍长一点。', '第三段。'])
+  })
+
+  it('短答不分条；单段超上限时按行切成多条且每条不超过上限', () => {
     expect(splitForQq('就一句', 1_800)).toEqual(['就一句'])
-    const paragraph = '这是一段话。'.repeat(60) // 360 字
+    const paragraph = '这是一段话。'.repeat(60) // 360 字（单换行 = 同一段）
     const parts = splitForQq(Array(6).fill(paragraph).join('\n'), 400)
     expect(parts.length).toBeGreaterThan(1)
     for (const part of parts) expect(Array.from(part).length).toBeLessThanOrEqual(400)
     expect(parts.join('')).toContain(paragraph.slice(0, 10))
   })
 
-  it('超长单行按码点硬切（不劈坏 emoji），且总条数封顶并提示「到桌面看」', () => {
+  it('超长单行按码点硬切（不劈坏 emoji）；超过条数上限时合并而不是丢内容', () => {
     const text = '🐟'.repeat(50)
-    const parts = splitForQq(text, 200)
-    expect(parts).toEqual(['🐟'.repeat(50)])
+    expect(splitForQq(text, 200)).toEqual(['🐟'.repeat(50)])
 
     const many = Array.from({ length: 12 }, (_, i) => `第 ${i} 条${'字'.repeat(100)}`).join('\n')
     const capped = splitForQq(many, 200, 3)
     expect(capped.length).toBe(3)
-    expect(capped[capped.length - 1]).toContain('（还有更多，到桌面看）')
+    // 不丢内容：最后一条把剩下所有行合并进来
+    expect(capped[0]).toContain('第 0 条')
+    expect(capped[2]).toContain('第 11 条')
+    expect(capped[2]).not.toContain('（还有更多，到桌面看）')
   })
 })
 

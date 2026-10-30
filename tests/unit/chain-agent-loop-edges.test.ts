@@ -1182,7 +1182,7 @@ describe('工具循环 · schema 与执行器一致性', () => {
     }
   })
 
-  it('收尾轮（allowTools:false）：不带 tools、改发 response_format，并在 system 里写明「收尾」', async () => {
+  it('收尾轮（allowTools:false）：仍带同一份 tools + tool_choice:none，不追加任何消息', async () => {
     const payload = buildChainAskLoopPayload({
       question: '随便问问',
       systemTime: SYSTEM_TIME,
@@ -1209,18 +1209,19 @@ describe('工具循环 · schema 与执行器一致性', () => {
     })
     const result = await client.completeAskLoop?.(payload, { allowTools: false })
 
-    // 收尾轮请求不带 tools：模型没有可调的工具，只能给最终 JSON
+    // 收尾轮保住 tools 前缀（缓存不失效），用 tool_choice:none 禁止再调工具
     const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
     const body = JSON.parse(String(init.body)) as {
       tools?: unknown
+      tool_choice?: string
       response_format?: { type?: string }
       messages: Array<{ role: string; content: string }>
     }
-    expect(body.tools).toBeUndefined()
+    expect(Array.isArray(body.tools)).toBe(true)
+    expect(body.tool_choice).toBe('none')
     expect(body.response_format).toEqual({ type: 'json_object' })
-    // D64：收尾不改 system 前缀，改为在末尾追加一条 <final> user 消息
-    expect(body.messages[body.messages.length - 1]?.content).toContain('<final>')
-    expect(body.messages[0]?.content).not.toContain('<final>')
+    // D64：收尾不改消息，也不追加 <final>——没有 tool call 本身就是收尾
+    expect(JSON.stringify(body.messages)).not.toContain('<final>')
     // 收尾轮答复照常解析成 JSON（与普通轮同形）
     expect(result?.json).toMatchObject({ answer: '信息链里没找到' })
   })

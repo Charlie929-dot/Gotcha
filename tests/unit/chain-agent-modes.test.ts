@@ -104,17 +104,14 @@ describe('system 按模式分段（D64：动态事实改放 <now>）', () => {
     expect(text).toContain('不编造')
   })
 
-  it('有工具的收尾轮：system 不变，末尾追加 <final> user 消息', () => {
+  it('有工具的收尾轮：不再追加消息（没有 tool call 本身就是收尾）', () => {
     for (const groups of [
       { screen: true, diary: true },
       { screen: false, diary: true }
     ]) {
       const messages = messagesOf(groups, true)
-      const last = messages[messages.length - 1]
-      expect(last?.role).toBe('user')
-      expect(last?.content).toContain('<final>')
-      // system 与不收尾时一致（不能为了收尾改前缀）
-      expect(messages[0]?.content).toBe(systemText(groups))
+      expect(messages).toEqual(messagesOf(groups, false))
+      expect(messages.some((message) => message.content.includes('<final>'))).toBe(false)
     }
   })
 })

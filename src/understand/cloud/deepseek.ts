@@ -561,7 +561,6 @@ export function buildChainAskLoopMessages(
   toolGroups?: { screen: boolean; diary: boolean }
 ): LlmMessage[] {
   const groups = toolGroups ?? { screen: true, diary: true }
-  const toolsOn = groups.screen || groups.diary
   const images = [
     ...(image ? [image.dataUrl] : []),
     ...(payload.attachments?.images ?? [])
@@ -604,7 +603,7 @@ export function buildChainAskLoopMessages(
     if (turn.answer.trim() !== '') messages.push({ role: 'assistant', content: turn.answer })
   }
 
-  // 本轮：user（问题 + <now>）→ 工具往返 →（收尾指令）
+  // 本轮：user（问题 + <now>）→ 工具往返
   messages.push({
     role: 'user',
     content: userMessageContent(payload.question, payload.attachments?.files, payload.now),
@@ -612,14 +611,9 @@ export function buildChainAskLoopMessages(
   })
   pushTurns(payload.turns)
 
-  // 收尾轮：不改 system（那会毁掉前缀），只在末尾追加一条 user 指令
-  if (options.final === true && toolsOn) {
-    messages.push({
-      role: 'user',
-      content:
-        '<final>检索轮数已经用尽：本轮不要再调用工具，直接基于已经看到的结果回答；证据不够就如实说没有。</final>'
-    })
-  }
+  // 收尾轮不再追加任何消息：没有 tool call 本身就是收尾（2026-10-30 拍板）。
+  // 客户端用 `tool_choice: 'none'` 保住 tools 前缀，缓存不因末轮指令失效。
+  void options
   return messages
 }
 
@@ -798,13 +792,16 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
             // reasoning_content 只在 DeepSeek 端点回传（开 thinking 后带 tools 的请求必须回传，
             // 否则第 2 轮起 400）；严格 OpenAI 兼容网关会因未知字段 400，所以按端点过滤。
             messages: serializeMessages(messages, { reasoningContent: deepSeekEndpoint }),
+            // 工具轮带 tools；收尾轮也带同一份 tools（保住前缀缓存），靠 tool_choice:none 禁止再调。
+            ...(mode === 'ask-loop' ? { tools: tools ?? ASK_LOOP_TOOLS } : {}),
+            ...(mode === 'ask-loop-final' && tools !== undefined && tools.length > 0
+              ? { tools, tool_choice: 'none' }
+              : {}),
             // 工具轮不带 response_format：json_object 会禁止 tool_calls 轮输出；
-            // 收尾轮反过来：不带 tools、发 response_format，逼模型给最终 JSON
-            ...(mode === 'ask-loop'
-              ? { tools: tools ?? ASK_LOOP_TOOLS }
-              : callOptions.freeText === true
-                ? {}
-                : { response_format: { type: 'json_object' } }),
+            // 收尾轮 / 普通调用按 freeText 决定（收尾默认自由文本）。
+            ...(mode === 'ask-loop' || callOptions.freeText === true
+              ? {}
+              : { response_format: { type: 'json_object' } }),
             temperature: callOptions.temperature ?? LLM_DEFAULTS.temperature,
             max_tokens: maxTokens,
             stream: false,

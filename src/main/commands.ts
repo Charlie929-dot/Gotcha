@@ -413,7 +413,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '',
     '可用命令：',
     '  /help            看这一页',
-    '  /log [节点]      看家谱；给编号（0 / 0-1）看那个节点的记忆历史',
+    '  /log [节点]      看家谱；给编号（0 / 0-1）看那个节点的记忆（/log n|l 翻页）',
     '  /new <名字>      从当前节点开新分支（ask 分支 = 从它分叉并清空会话）',
     '  /use <编号|名字|提交> [-d]  切节点；切历史提交 = 只读查看',
     '  /del <名字>      删节点（要回 confirm）',
@@ -491,65 +491,121 @@ function sameCommit(a: string, b: string | null): boolean {
   return a === b || (a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a)))
 }
 
-/**
- * `/log <节点>`：这个节点的记忆历史（最近 20 条；编号相对这一页，新到旧）。
- * 首行标出「是不是现在所在的节点」，节点内正在用的那条记忆（HEAD）标 `← 正在用`。
- */
-async function historyText(
-  deps: CommandDeps,
-  branch: string,
-  head: { current: boolean; sha: string | null }
-): Promise<string> {
-  const limit = 20
-  const commits = await deps.repo.branchLog(branch, limit)
-  const lines = [`[0] ${branch}${head.current ? '  ← 当前' : ''}`]
-  if (commits.length === 0) lines.push('（还没有提交）')
-  else {
-    commits.forEach((commit, index) => {
-      const inUse = head.current && sameCommit(commit.hash, head.sha) ? '  ← 正在用' : ''
-      lines.push(`[0-${index}] ${labelCommitSubject(commit.subject)} · ${commit.hash}${inUse}`)
-    })
+/** `/log <节点>` 一页多少条记忆 */
+const HISTORY_PAGE = 20
+
+/** 从 child 沿家谱 parent 往上走，能否走到 root（只看真正的后代） */
+function descendsFrom(lineage: Lineage, child: string, root: string): boolean {
+  let current = findBranch(lineage, child)
+  for (let guard = 0; current !== null && current.parent !== null && guard < 64; guard += 1) {
+    if (current.parent === root) return true
+    current = findBranch(lineage, current.parent)
   }
-  return lines.join('\n')
+  return false
+}
+
+/** 短 sha（`%h`）与完整 sha（`merge-base`）是不是同一个提交 */
+function sameFullCommit(short: string, full: string): boolean {
+  return short.length >= 7 && full.startsWith(short)
 }
 
 /**
  * `/log`（D75）：家谱树——父子关系来自家谱 `parent`，编号是 `[父]-[在兄弟里的第几个]`。
- * 不再画 `git log --graph`：树是给「这家谱长什么样」看的，`/log <编号>` 才看具体记忆。
- * 返回 `node` = 这次看的是哪个节点的历史（`/use <sha>` 靠它知道该从哪分叉）。
+ * 树只到分支级；具体记忆用 `/log <节点>`（D77 的提交级页）。
  */
-async function logText(
-  deps: CommandDeps,
-  target: string
-): Promise<{ text: string; node?: string }> {
+async function treeText(deps: CommandDeps): Promise<string> {
   const status = await deps.repo.status()
-  if (!status.ok) return { text: `记忆仓不可用：${repoReasonText(status.reason)}` }
+  if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
   const head = await deps.repo.head()
   const branches = await deps.repo.listBranches()
-  if (branches.length === 0) return { text: '记忆仓里还没有节点。' }
+  if (branches.length === 0) return '记忆仓里还没有节点。'
   const read = await readLineage(deps.lineageFile)
   const lineage = read.status === 'ok' ? read.lineage : null
   const flat = flattenGenealogy(genealogyTree(lineage, branches))
-
-  if (target !== '') {
-    const hit =
-      flat.find((node) => node.id === target) ?? flat.find((node) => node.branch === target)
-    if (hit === undefined) return { text: `没有节点 ${target}（/log 看家谱）。` }
-    return {
-      text: await historyText(deps, hit.branch, {
-        current: head.branch === hit.branch,
-        sha: head.sha
-      }),
-      node: hit.branch
-    }
-  }
-
   const viewed = head.detached ? (lineage?.active ?? null) : null
   const lines = flat.map((node) => genealogyLine(lineage, node, head.branch, viewed))
   if (head.detached && head.sha !== null) {
     lines.push('', `HEAD 停在历史提交 ${head.sha}（只读查看；发第一句话会从这里分叉）`)
   }
-  return { text: lines.join('\n') }
+  return lines.join('\n')
+}
+
+/** `/log <节点>` 的节点解析（树编号 / 分支名）；找不到返回 null */
+async function resolveLogNode(deps: CommandDeps, target: string): Promise<string | null> {
+  const branches = await deps.repo.listBranches()
+  if (branches.length === 0) return null
+  const read = await readLineage(deps.lineageFile)
+  const lineage = read.status === 'ok' ? read.lineage : null
+  const flat = flattenGenealogy(genealogyTree(lineage, branches))
+  return (
+    (flat.find((node) => node.id === target) ?? flat.find((node) => node.branch === target))
+      ?.branch ?? null
+  )
+}
+
+/**
+ * `/log <节点>`（D77）：这个节点的记忆页——提交**旧 → 新**；从某条提交分出去的分支
+ * 挂在那条提交下面（只到分支名，它的记忆再 `/log <分支>` 看）。
+ * `offset` 从最旧一条数起；`/log n` 下一页（更新）、`/log l` 上一页（更旧）。
+ */
+async function historyPage(
+  deps: CommandDeps,
+  branch: string,
+  offset: number
+): Promise<{ text: string; offset: number }> {
+  const head = await deps.repo.head()
+  const total = await deps.repo.commitCount(branch)
+  const lastPage = total === 0 ? 0 : Math.floor((total - 1) / HISTORY_PAGE) * HISTORY_PAGE
+  const start = Math.max(0, Math.min(offset, lastPage))
+  const commits = total === 0 ? [] : await deps.repo.branchLog(branch, total - start)
+  const window = [...commits].reverse().slice(0, HISTORY_PAGE)
+
+  const read = await readLineage(deps.lineageFile)
+  const lineage = read.status === 'ok' ? read.lineage : null
+  const names = new Set((await deps.repo.listBranches()).map((item) => item.branch))
+  const forks = new Map<string, string[]>()
+  if (lineage !== null) {
+    for (const child of lineage.branches) {
+      if (child.branch === branch || !names.has(child.branch)) continue
+      if (!descendsFrom(lineage, child.branch, branch)) continue
+      const base = await deps.repo.mergeBase(child.branch, branch)
+      if (base === null) continue
+      const hit = window.find((commit) => sameFullCommit(commit.hash, base))
+      if (hit === undefined) continue
+      const list = forks.get(hit.hash) ?? []
+      list.push(child.branch)
+      forks.set(hit.hash, list)
+    }
+  }
+
+  const lines = [`[0] ${branch}${head.branch === branch ? '  ← 当前' : ''}`]
+  if (window.length === 0) lines.push('（还没有提交）')
+  window.forEach((commit, index) => {
+    const inUse = head.branch === branch && sameCommit(commit.hash, head.sha) ? '  ← 正在用' : ''
+    lines.push(`[0-${index}] ${labelCommitSubject(commit.subject)} · ${commit.hash}${inUse}`)
+    const children = forks.get(commit.hash) ?? []
+    children.forEach((child, childIndex) => {
+      const marker =
+        head.branch === child
+          ? '  ← 当前'
+          : head.detached && lineage?.active === child
+            ? '  ← 正在看'
+            : ''
+      lines.push(`[0-${index}-${childIndex}] ${child}${marker}`)
+    })
+  })
+
+  const hasOlder = start > 0
+  const hasNewer = start + HISTORY_PAGE < total
+  if (hasOlder || hasNewer) {
+    lines.push(
+      '',
+      [hasOlder ? '/log l 上一页（更旧）' : '', hasNewer ? '/log n 下一页（更新）' : '']
+        .filter((item) => item !== '')
+        .join(' · ')
+    )
+  }
+  return { text: lines.join('\n'), offset: start }
 }
 
 /** 家谱里某分支的模式描述（`/mode`、`/use`、`ask:mode` 共用） */
@@ -1233,6 +1289,8 @@ export function createCommandHandler(
   let pendingAt = 0
   /** 最近一次 `/log <节点>` 看的是哪个节点（D76：`/use <sha>` 之后从它分叉） */
   let viewedNode: string | null = null
+  /** 当前翻到哪一页（D77：`/log n` 下一页、`/log l` 上一页） */
+  let history: { node: string; offset: number } | null = null
 
   /**
    * 超时的等待：命名等待（D75）按默认名把动作做完（切换 / 备份照做），
@@ -1324,8 +1382,22 @@ export function createCommandHandler(
       case 'help':
         return commandResult(await helpText(deps))
       case 'log': {
-        const out = await logText(deps, parsed.args.join(' ').trim())
-        if (out.node !== undefined) viewedNode = out.node
+        const target = parsed.args.join(' ').trim()
+        if ((target === 'n' || target === 'l') && history !== null) {
+          const offset =
+            target === 'n'
+              ? history.offset + HISTORY_PAGE
+              : Math.max(0, history.offset - HISTORY_PAGE)
+          const out = await historyPage(deps, history.node, offset)
+          history = { node: history.node, offset: out.offset }
+          return commandResult(out.text)
+        }
+        if (target === '') return commandResult(await treeText(deps))
+        const node = await resolveLogNode(deps, target)
+        if (node === null) return commandResult(`没有节点 ${target}（/log 看家谱）。`)
+        const out = await historyPage(deps, node, 0)
+        history = { node, offset: out.offset }
+        viewedNode = node
         return commandResult(out.text)
       }
       case 'backup': {

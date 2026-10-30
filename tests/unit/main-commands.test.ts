@@ -62,6 +62,8 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     deleteBranch: async () => ({ ok: true }),
     listBranches: async () => [{ branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 }],
     branchLog: async () => [],
+    mergeBase: async () => null,
+    commitCount: async () => 0,
     revParse: async () => null
   }
   return { ...base, ...overrides }
@@ -352,19 +354,20 @@ describe('命令执行', () => {
     )
   })
 
-  it('/log <编号>：看该节点的记忆历史（带短 sha、新到旧）；名字也行', async () => {
+  it('/log <编号>：看该节点的记忆（旧→新、带短 sha）；名字也行', async () => {
     const lineageFile = tempLineageFile()
     await seededTree(lineageFile)
     const run = createCommandHandler({
       repo: fakeRepo({
         ...treeBranches(),
         head: async () => ({ branch: 'default', detached: false, sha: 'bbb2222' }),
-        branchLog: async (name) =>
+        commitCount: async (ref) => (ref === 'default' ? 2 : 0),
+        branchLog: async (name, limit) =>
           name === 'default'
             ? [
                 { hash: 'bbb2222', subject: 'memory: 2026-10-30 18:05', at: 2 },
                 { hash: 'aaa1111', subject: 'memory: 2026-10-30', at: 1 }
-              ]
+              ].slice(0, limit)
             : []
       }),
       lineageFile
@@ -372,13 +375,84 @@ describe('命令执行', () => {
     expect(textOf(await run('/log 0-1'))).toBe(
       [
         '[0] default  ← 当前',
-        '[0-0] 记忆 2026-10-30 18:05 · bbb2222  ← 正在用',
-        '[0-1] 记忆 2026-10-30 · aaa1111'
+        '[0-0] 记忆 2026-10-30 · aaa1111',
+        '[0-1] 记忆 2026-10-30 18:05 · bbb2222  ← 正在用'
       ].join('\n')
     )
     // 不是当前节点：不标节点，也不标「正在用」
     expect(textOf(await run('/log ask')).split('\n')[0]).toBe('[0] ask')
     expect(textOf(await run('/log 9-9'))).toContain('没有节点 9-9')
+  })
+
+  it('/log <节点>：从某条提交分出去的分支挂在那条提交下面', async () => {
+    const lineageFile = tempLineageFile()
+    await seededTree(lineageFile)
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        ...treeBranches(),
+        commitCount: async (ref) => (ref === 'default' ? 3 : 0),
+        branchLog: async (name, limit) =>
+          name === 'default'
+            ? [
+                { hash: 'ccc3333', subject: 'memory: 2026-10-30 20:00', at: 3 },
+                { hash: 'bbb2222', subject: 'memory: 2026-10-30 12:00', at: 2 },
+                { hash: 'aaa1111', subject: 'memory: 2026-10-30', at: 1 }
+              ].slice(0, limit)
+            : [],
+        // spring 是从 default 的 aaa1111 分出去的
+        mergeBase: async (a, b) =>
+          a === 'spring' && b === 'default'
+            ? 'aaa1111ffffffffffffffffffffffffffffffff'
+            : null
+      }),
+      lineageFile
+    })
+    expect(textOf(await run('/log 0-1'))).toBe(
+      [
+        '[0] default  ← 当前',
+        '[0-0] 记忆 2026-10-30 · aaa1111',
+        '[0-0-0] spring',
+        '[0-1] 记忆 2026-10-30 12:00 · bbb2222',
+        '[0-2] 记忆 2026-10-30 20:00 · ccc3333'
+      ].join('\n')
+    )
+  })
+
+  it('/log n / /log l：一页 20 条，旧→新翻页', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    // 最新在前（跟 branchLog 一致）：all[0] = m24，all[24] = m0（最旧）
+    const all = Array.from({ length: 25 }, (_, index) => {
+      const n = 24 - index
+      return {
+        hash: `h${String(n).padStart(6, '0')}`,
+        subject: `memory: m${n}`,
+        at: n
+      }
+    })
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        commitCount: async (ref) => (ref === 'default' ? all.length : 0),
+        branchLog: async (_name, limit) => all.slice(0, limit)
+      }),
+      lineageFile
+    })
+    const first = textOf(await run('/log 0'))
+    const firstLines = first.split('\n')
+    expect(firstLines[0]).toBe('[0] default  ← 当前')
+    expect(firstLines[1]).toBe('[0-0] m0 · h000000')
+    expect(firstLines[20]).toBe('[0-19] m19 · h000019')
+    expect(first).toContain('/log n 下一页（更新）')
+
+    const second = textOf(await run('/log n'))
+    expect(second.split('\n')[1]).toBe('[0-0] m20 · h000020')
+    expect(second.split('\n')[5]).toBe('[0-4] m24 · h000024')
+    expect(second).toContain('/log l 上一页（更旧）')
+    expect(second).not.toContain('/log n 下一页（更新）')
+
+    const back = textOf(await run('/log l'))
+    expect(back.split('\n')[1]).toBe('[0-0] m0 · h000000')
+    expect(back).toContain('/log n 下一页（更新）')
   })
 
   it('/log 在 detached 时提示「第一句话会分叉」', async () => {

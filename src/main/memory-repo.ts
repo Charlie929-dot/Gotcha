@@ -153,6 +153,13 @@ export interface MemoryRepo {
   listBranches(): Promise<MemoryBranchInfo[]>
   /** 某个分支最近几条提交（默认 5 条） */
   branchLog(name: string, limit?: number): Promise<MemoryBranchCommit[]>
+  /**
+   * 两个 ref 的最近公共祖先（完整 sha；`/log <节点>` 拿它当分叉点，D77）。
+   * 没有共同祖先 / 读不出来返回 null。
+   */
+  mergeBase(a: string, b: string): Promise<string | null>
+  /** 某个 ref 的提交数（`/log <节点>` 分页用）；读不出来返回 0 */
+  commitCount(ref: string): Promise<number>
   /** 短 sha → 验证并解析；不存在返回 null */
   revParse(ref: string): Promise<string | null>
 }
@@ -430,6 +437,24 @@ export function createMemoryRepo(options: {
     return out
   }
 
+  const mergeBaseInner = async (a: string, b: string): Promise<string | null> => {
+    const status = await ensure()
+    if (!status.ok) return null
+    const result = await run(['merge-base', a, b])
+    if (!result.ok) return null
+    const sha = result.stdout.trim()
+    return sha === '' ? null : sha
+  }
+
+  const commitCountInner = async (ref: string): Promise<number> => {
+    const status = await ensure()
+    if (!status.ok) return 0
+    const result = await run(['rev-list', '--count', ref])
+    if (!result.ok) return 0
+    const count = Number(result.stdout.trim())
+    return Number.isFinite(count) && count > 0 ? count : 0
+  }
+
   const revParseInner = async (ref: string): Promise<string | null> => {
     const status = await ensure()
     if (!status.ok) return null
@@ -655,6 +680,8 @@ export function createMemoryRepo(options: {
     deleteBranch: (name) => exclusive(() => deleteBranchInner(name)),
     listBranches: () => exclusive(listBranchesInner),
     branchLog: (name, limit = 5) => exclusive(() => branchLogInner(name, limit)),
+    mergeBase: (a, b) => exclusive(() => mergeBaseInner(a, b)),
+    commitCount: (ref) => exclusive(() => commitCountInner(ref)),
     clearConversations: () => exclusive(clearConversationsInner),
     revParse: (ref) => exclusive(() => revParseInner(ref))
   }

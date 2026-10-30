@@ -90,8 +90,8 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
     )
     const history = textOf(await run('/log 0-0'))
     expect(history.split('\n')[0]).toBe('[0] ask  ← 当前')
-    // ask 的最新提交就是 HEAD：正在用的那条记忆
-    expect(history).toMatch(/\[0-0\] 提问会话 ask · [0-9a-f]{7,}  ← 正在用/u)
-    expect(history).toMatch(/\[0-1\] 出生 default · [0-9a-f]{7,}/u)
+    // 旧 → 新；ask 的最新提交就是 HEAD：正在用的那条记忆
+    expect(history).toMatch(/\[0-0\] 出生 default · [0-9a-f]{7,}/u)
+    expect(history).toMatch(/\[0-1\] 提问会话 ask · [0-9a-f]{7,}  ← 正在用/u)
   })
 })

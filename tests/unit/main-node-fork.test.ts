@@ -45,6 +45,8 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     deleteBranch: async () => ({ ok: true }),
     listBranches: async () => [{ branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 }],
     branchLog: async () => [],
+    mergeBase: async () => null,
+    commitCount: async () => 0,
     revParse: async () => null
   }
   return { ...base, ...overrides } as MemoryRepo

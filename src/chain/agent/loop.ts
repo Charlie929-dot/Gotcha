@@ -32,10 +32,16 @@ import type {
   AskLoopFreshness,
   AskOutbound,
   AskRecentSegment,
+  ChainAskLoopPayload,
   RedactableAskLoopToolResult,
   RedactableAskLoopTurn,
   RedactableAskOpening
 } from './payload'
+import {
+  appendAskConversationTurn,
+  emptyAskConversation,
+  type AskConversationPort
+} from './conversation'
 import {
   LlmAbortError,
   LlmHttpError,
@@ -134,6 +140,11 @@ export interface AskLoopContext {
   recent?: AskRecentSegment
   /** 用户点「停止」时中止在途请求 */
   signal?: AbortSignal
+  /**
+   * 会话存储（D64，只追加）：主进程按 conversationId 注入；不传 = 老行为
+   * （只把 `history` 塞进 system）。
+   */
+  conversation?: AskConversationPort
   /** 选区问答：随本轮问题一起给模型看的截图（data URL；不脱敏，D51 之后的新入口） */
   image?: { readonly dataUrl: string }
   /** 用户随本轮问题上传的图片 / 文本文件（用户主动提供，不过脱敏墙） */
@@ -282,18 +293,33 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     canReadSegment: (segmentId) => whitelist.has(segmentId)
   })
 
+  const now = ctx.now()
   const freshness: AskLoopFreshness = {
-    latestEvidenceTs: readChainFreshness(ctx.db, ctx.now()).latestEvidenceTs,
+    latestEvidenceTs: readChainFreshness(ctx.db, now).latestEvidenceTs,
     captureRunning: ctx.captureRunning()
   }
-  const systemTime = formatSystemTime(ctx.now())
+  const systemTime = formatSystemTime(now)
+  const systemTimeMs = now
+  /** 工具组（D62）：两组都关 = 单轮请求，不跑预算、不等待续查 */
+  const toolGroups = ctx.tools ?? { screen: true, diary: true }
+  const toolsAvailable = toolGroups.screen || toolGroups.diary
+  /** 会话里之前的轮次（只追加的基底）；没有存储时为空 */
+  const priorConversation = ctx.conversation?.load() ?? emptyAskConversation()
 
   // 问题敏感：循环开始前一次判定（与单发路径同口径——宁可答「没找到」，不发敏感问题）
   const probe = ctx.outbound.buildLoop({
     question,
     systemTime,
+    systemTimeMs,
+    tools: toolGroups,
     freshness,
     turns: [],
+    ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
+      ? {
+          conversation: priorConversation.turns,
+          digest: priorConversation.digest
+        }
+      : {}),
     ...(ctx.history ? { history: ctx.history } : {}),
     ...(ctx.recent ? { recent: ctx.recent } : {}),
     ...(ctx.attachments ? { attachments: ctx.attachments } : {})
@@ -311,9 +337,6 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   /** 已经批过的「继续查」次数：每次把轮数 / 调用数预算翻一倍窗口 */
   let grants =
     resume && ctx.resumeDecision === 'continue' ? resume.grants + 1 : resume?.grants ?? 0
-  /** 工具组（D62）：两组都关 = 单轮请求，不跑预算、不等待续查 */
-  const toolGroups = ctx.tools ?? { screen: true, diary: true }
-  const toolsAvailable = toolGroups.screen || toolGroups.diary
   /** 本轮（含恢复前）还能调工具的全局轮数 / 调用次数 */
   const toolTurnBudget = toolsAvailable ? ASK_LOOP_MAX_TOOL_TURNS * (1 + grants) : 0
   const toolCallBudget = toolsAvailable ? ASK_LOOP_MAX_TOOL_CALLS * (1 + grants) : 0
@@ -321,6 +344,34 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   const localTurnLimit = toolsAvailable ? Math.max(1, toolTurnBudget + 1 - turnsUsed) : 1
   /** 本轮是否查过问答记录：决定「关于对话本身」的答案能否不带屏幕引用 */
   let usedAskHistory = resume?.usedAskHistory ?? false
+
+  /**
+   * 成功收口时把这一问追加进会话（失败 / 中止 / 等待续查都不写）。
+   * 只存云端视图：问题、<now>、工具轮、最终答复——下次请求原样重放。
+   */
+  const persistConversation = (payload: ChainAskLoopPayload, answer: string): void => {
+    if (!ctx.conversation) return
+    const text = answer.trim()
+    if (text === '') return
+    // 截图（data URL）不进会话：一张几 MB，重放时也基本用不上；工具结果与文字照常保留。
+    // 代价：带图那一问的前缀在下次请求里会断在「图」的位置，缓存只命中到图之前。
+    const turns = payload.turns.map((turn) => {
+      if (turn.images === undefined) return turn
+      const { images: _images, ...rest } = turn
+      return rest
+    })
+    try {
+      ctx.conversation.save(
+        appendAskConversationTurn(
+          { digest: payload.digest ?? '', turns: payload.conversation ?? [] },
+          { question: payload.question, now: payload.now, turns, answer: text }
+        )
+      )
+    } catch (error) {
+      // 会话存储只是缓存 / 上下文，写不进去不该让这一问失败
+      log('warn', 'chain ask loop: 会话写入失败', { error: String(error) })
+    }
+  }
 
   /**
    * 统计口径（诊断用）：hits / evidence 取**当前已发生**的量——失败收口（客户端抛错 /
@@ -368,8 +419,16 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     const built = ctx.outbound.buildLoop({
       question,
       systemTime,
+      systemTimeMs,
+      tools: toolGroups,
       freshness,
       turns,
+      ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
+        ? {
+            conversation: priorConversation.turns,
+            digest: priorConversation.digest
+          }
+        : {}),
       ...(ctx.history ? { history: ctx.history } : {}),
       ...(ctx.recent ? { recent: ctx.recent } : {}),
       ...(ctx.opening ? { opening: ctx.opening } : {}),
@@ -591,6 +650,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       // 模型选择先问一句：这是正常出口，不是失败；选项已在上限内去重
       log('info', 'chain ask loop: 模型要求确认', { options: parsed.options.length })
       settleUsage()
+      // 澄清也进会话：下一问模型要看到自己问过什么
+      persistConversation(built.payload, [parsed.question, ...parsed.options].join('\n'))
       return withTrace({
         kind: 'clarify',
         question: parsed.question,
@@ -603,6 +664,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     stats.cited = autoCitations.length
     if (parsed.kind === 'insufficient') {
       // 查到了相关段但撑不起结论：保留模型说明，引用 = 已读；再把检索到的段列出来
+      persistConversation(built.payload, parsed.answer)
       return withTrace({
         kind: 'insufficient',
         answer: parsed.answer,
@@ -617,6 +679,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       log('warn', 'chain ask loop: answer 声称没找到但打开过段，按没找到保留说明', {
         cited: autoCitations.length
       })
+      persistConversation(built.payload, parsed.answer)
       return withTrace({
         kind: 'no-evidence',
         note: parsed.answer,
@@ -627,12 +690,14 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     }
     if (isNoEvidenceAnswer(parsed.answer)) {
       // 无引用且自称没找到：维持「没找到」，不把固定文案当回答
+      persistConversation(built.payload, parsed.answer)
       return withTrace({
         kind: 'no-evidence',
         related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
       })
     }
+    persistConversation(built.payload, parsed.answer)
     return withTrace({
       kind: 'answer',
       answer: parsed.answer,

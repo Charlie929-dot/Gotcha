@@ -1218,7 +1218,9 @@ describe('工具循环 · schema 与执行器一致性', () => {
     }
     expect(body.tools).toBeUndefined()
     expect(body.response_format).toEqual({ type: 'json_object' })
-    expect(body.messages[0].content).toContain('【收尾】')
+    // D64：收尾不改 system 前缀，改为在末尾追加一条 <final> user 消息
+    expect(body.messages[body.messages.length - 1]?.content).toContain('<final>')
+    expect(body.messages[0]?.content).not.toContain('<final>')
     // 收尾轮答复照常解析成 JSON（与普通轮同形）
     expect(result?.json).toMatchObject({ answer: '信息链里没找到' })
   })

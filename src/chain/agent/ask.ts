@@ -28,6 +28,7 @@ import type { LlmClient, LlmUsage } from '../../understand/cloud/llm-client'
 import type { AskOutbound, AskRecentSegment, RedactableAskOpening, RedactableChainAskEvidence } from './payload'
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
+import type { AskConversationPort } from './conversation'
 import type { AskHistorySummary, DiaryToolDeps } from './tools'
 import {
   EVIDENCE_TEXT_CHARS,
@@ -127,6 +128,11 @@ export interface ChainAskOptions {
   resume?: { id: string; decision: ChainAskResumeDecision }
   /** 用户点「停止」时中止在途请求 */
   signal?: AbortSignal
+  /**
+   * 会话存储（D64，只追加）：主进程按 conversationId 注入。
+   * 不传 = 老行为（把 history 塞进 system，工具轮不参与下一次前缀）。
+   */
+  conversation?: AskConversationPort
   /**
    * 选区问答：随本轮问题一起给模型看的截图（data URL）。
    * 图是用户在界面上自己框的，不进脱敏（拍板 2026-10-28）；出云门照旧在门口判定。
@@ -304,6 +310,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.imageDataUrl ? { image: { dataUrl: options.imageDataUrl } } : {}),
         ...(options.attachments ? { attachments: options.attachments } : {}),
+        ...(options.conversation ? { conversation: options.conversation } : {}),
         ...(options.onUsage ? { onUsage: options.onUsage } : {}),
         log
       },

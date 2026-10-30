@@ -3,6 +3,10 @@
  *
  * **边界**：本模块只做「协议组装 + 截断 + 品牌」——问题、证据、工具结果怎么排成
  * 一份载荷是核心功能；哪些文本不许出云是安全策略，由调用方注入 `AskTextPolicy`。
+ *
+ * 2026-10-30（D64）：工具循环改成「固定 system + 只追加消息」。本模块负责把
+ * 「此刻 / 数据边界 / 最近段」渲染成一条 `<now>` 正文，并把会话历史原样透传
+ * （`conversation`）；消息怎么排由 `deepseek.ts` 决定。
  * 云端实现见 `understand/cloud/ask-outbound.ts`（`createCloudAskOutbound()`），
  * 本机模型 / 测试可用 `createLocalAskOutbound()` 直通。
  *
@@ -10,6 +14,8 @@
  * 安全规则坏掉 / 还没配好时不会把「问记忆」整条链路卡死；只有真正要出网时，
  * 组合根（`main/index.ts`）才把云端策略接进来。
  */
+
+import type { CloudAskConversationTurn } from './conversation'
 
 /** 出云文本的剥离结果（策略实现返回；核心只消费，不认识具体规则） */
 export interface AskTextRedaction {
@@ -386,6 +392,19 @@ export interface ChainAskLoopPayload {
   readonly turns: readonly CloudAskLoopTurn[]
   /** 同一会话里之前几轮（已处理、已限额；空数组 = 新对话） */
   readonly history: readonly { readonly question: string; readonly answer: string }[]
+  /**
+   * 本轮 `<now>` 正文（当前时间 / 此刻 / 想到的 / 数据边界 / 最近段）。
+   * 它不是用户说的话，拼在 user 消息的问题之后（同一条 user，避免连续 user 被 reasoner 拒）。
+   */
+  readonly now: string
+  /**
+   * 之前轮次（已过策略，回放时逐字节一致）。有它时消息按
+   * 「user(问题 + now) → 工具轮 → assistant」原样重放；没有会话存储时由
+   * `history` 播种（只含问答、无工具轮）。
+   */
+  readonly conversation?: readonly CloudAskConversationTurn[]
+  /** 更早会话被裁掉后的摘要（一行行「问 → 答」；没有就不出现） */
+  readonly digest?: string
   /** 提问前最后一段证据（指代线索；已过策略，阻断则缺省） */
   readonly recent?: AskRecentSegment
   /** 开场注入（新对话第一问才出现；见 `RedactableAskOpening`） */
@@ -398,10 +417,18 @@ export interface ChainAskLoopPayload {
 export interface ChainAskLoopBuildInput {
   question: string
   systemTime: string
+  /** 与 `systemTime` 同一刻的毫秒值；缺省从字符串解析（测试 / 老调用方只给字符串也能用） */
+  systemTimeMs?: number
+  /** 这次给哪些工具组（决定 `<now>` 里有没有数据边界 / 最近段；缺省两组都开） */
+  tools?: { screen: boolean; diary: boolean }
   freshness: AskLoopFreshness
   turns: readonly RedactableAskLoopTurn[]
-  /** 同一会话之前的几轮（新对话不传） */
+  /** 同一会话之前的几轮（新对话不传；仅在没给 `conversation` 时用来播种） */
   history?: readonly RedactableAskLoopConversationTurn[]
+  /** 会话存储给出的更早摘要（已过策略，原样透传） */
+  digest?: string
+  /** 会话存储给出的之前轮次（已过策略，原样透传；给了就不再从 history 播种） */
+  conversation?: readonly CloudAskConversationTurn[]
   /** 提问前最后一段证据（应用 / 标题 / 时刻；送云前过策略） */
   recent?: AskRecentSegment
   /** 开场注入（新对话第一问；送云前逐段过策略） */
@@ -669,6 +696,75 @@ function guardTurnImages(images: readonly string[] | undefined): string[] {
   return out
 }
 
+/* ------------------------------------------------------------------ */
+/* <now>：系统给的处境事实（不是用户说的话）                            */
+/* ------------------------------------------------------------------ */
+
+function pad2(value: number): string {
+  return value < 10 ? `0${value}` : String(value)
+}
+
+/** 'yyyy-mm-dd HH:mm' → 本地毫秒；解析不了返回 null（调用方只给字符串时的回退） */
+function parseSystemTimeMs(text: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/u.exec(text)
+  if (!match) return null
+  const ts = new Date(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5])
+  ).getTime()
+  return Number.isFinite(ts) ? ts : null
+}
+
+/** 毫秒 → 'yyyy-mm-dd HH:mm'（与 system 里同格式，便于模型对齐） */
+function readableTime(ts: number): string {
+  const date = new Date(ts)
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+/** 毫秒 → 'HH:mm'（最近一段证据只报时刻） */
+function clockTime(ts: number): string {
+  const date = new Date(ts)
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+/**
+ * 本轮 `<now>` 正文。只拼已经过策略的字段（opening / recent），本地时间不是隐私；
+ * 没有屏幕工具就不写数据边界 / 最近段（与 D62 的模式口径一致）。
+ */
+function renderNowText(
+  input: ChainAskLoopBuildInput,
+  opening: CloudAskOpening | undefined,
+  recent: AskRecentSegment | undefined
+): string {
+  const ms = input.systemTimeMs ?? parseSystemTimeMs(input.systemTime)
+  const lines: string[] = [
+    `当前时间：${input.systemTime}${ms === null ? '' : `（毫秒时间戳 ${ms}，相对时间先按它换算）`}`
+  ]
+  if (opening?.facts !== undefined && opening.facts !== '') {
+    lines.push(`此刻：${opening.facts}`)
+  }
+  if (opening?.remembered !== undefined && opening.remembered.length > 0) {
+    lines.push('你想到的（只是联想，不一定对；想核对就用 recall_diary / read_diary）：')
+    for (const item of opening.remembered) lines.push(`- [${item.day}] ${item.snippet}`)
+  }
+  const groups = input.tools ?? { screen: true, diary: true }
+  if (groups.screen) {
+    const latest = input.freshness.latestEvidenceTs
+    lines.push(
+      `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${input.freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`
+    )
+    if (recent !== undefined) {
+      lines.push(
+        `最近一段证据：${clockTime(recent.at)} 的〈${recent.app}〉${recent.title ? `《${recent.title}》` : ''}——只当「这个界面 / 刚才那个」的指代线索，不是证据。`
+      )
+    }
+  }
+  return lines.join('\n')
+}
+
 /**
  * 循环载荷的组装。问题与单发口径完全一致（先剥后截、阻断整次不出云）；
  * 每一轮的 toolResult 按 kind 过策略——search_info 的命中被阻断就整条剔掉
@@ -695,6 +791,16 @@ export function buildAskLoopPayload(
     })
   }
 
+  // 会话回放：有会话存储就用它（已过策略，逐字节原样）；没有就用历史问答播种。
+  // 注意：播种只带问答、不带工具轮——第一问没缓存可命中，之后由会话存储接管。
+  // 已有 digest（更早的轮次被裁过）时不再用 history 播种，避免和摘要重复。
+  const conversation: CloudAskConversationTurn[] =
+    input.conversation !== undefined && input.conversation.length > 0
+      ? [...input.conversation]
+      : input.digest !== undefined && input.digest !== ''
+        ? []
+        : history.map((turn) => ({ question: turn.question, now: '', turns: [], answer: turn.answer }))
+
   // 最近一段证据：只当指代线索（app / 标题都过策略；命中阻断的整条不给，免得把密码类标题送出去）
   let recent: AskRecentSegment | undefined
   if (input.recent) {
@@ -704,6 +810,9 @@ export function buildAskLoopPayload(
       recent = { app: app.text, title: title.text, at: input.recent.at }
     }
   }
+
+  // <now>：本轮处境事实（时间 / 此刻 / 想到的 / 数据边界 / 最近段），追加在 user 之后
+  const now = renderNowText(input, opening, recent)
 
   const turns: CloudAskLoopTurn[] = []
   const blockedSegmentIds: number[] = []
@@ -873,6 +982,9 @@ export function buildAskLoopPayload(
       freshness: input.freshness,
       turns,
       history,
+      now,
+      ...(conversation.length > 0 ? { conversation } : {}),
+      ...(input.digest !== undefined && input.digest !== '' ? { digest: input.digest } : {}),
       ...(recent ? { recent } : {}),
       ...(opening ? { opening } : {}),
       ...(attachments ? { attachments } : {})

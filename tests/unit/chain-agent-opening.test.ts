@@ -129,8 +129,8 @@ describe('开场注入：脱敏与上限', () => {
   })
 })
 
-describe('开场注入：拼进 system', () => {
-  it('system 里有「此刻」与「想到的」，没有旧的身份宣言', () => {
+describe('开场注入：拼进 <now>（不再塞 system）', () => {
+  it('payload.now 里有「此刻」与「想到的」，system 里没有这些动态事实', () => {
     const outbound = createLocalAskOutbound()
     const { payload } = outbound.buildLoop({
       question: '在吗',
@@ -139,14 +139,23 @@ describe('开场注入：拼进 system', () => {
       turns: [],
       opening: OPENING
     })
-    const [system] = buildChainAskLoopMessages(payload, {}, undefined, '你叫「贴心大肥鱼」。')
-    const text = system?.content ?? ''
-    expect(text).toContain('此刻：现在是 2026-10-29 23:40')
-    expect(text).toContain('你想到的（只是联想，不一定对')
-    expect(text).toContain('[2026-10-28] 下午编译一直报错')
+    expect(payload.now).toContain('此刻：现在是 2026-10-29 23:40')
+    expect(payload.now).toContain('你想到的（只是联想，不一定对')
+    expect(payload.now).toContain('[2026-10-28] 下午编译一直报错')
+    // 动态事实在 user 消息的 <now> 里，system 固定
+    const messages = buildChainAskLoopMessages(payload, {}, undefined, '你叫「贴心大肥鱼」。')
+    const text = messages[0]?.content ?? ''
+    expect(text).not.toContain('此刻：')
+    expect(text).not.toContain('你想到的（只是联想')
     expect(text).not.toContain('你是这个记忆系统本身')
     expect(text).not.toContain('不是检索工具')
     expect(text).not.toContain('工具就是你的眼睛和手')
     expect(text).not.toContain('客服腔')
+    // <now> 与问题在同一条 user 里（DeepSeek reasoner 不收连续 user）
+    expect(messages[1]?.role).toBe('user')
+    expect(messages[1]?.content).toContain('"question":"在吗"')
+    expect(messages[1]?.content).toContain('<now>')
+    expect(messages[1]?.content).toContain('此刻：现在是 2026-10-29 23:40')
+    expect(messages[2]).toBeUndefined()
   })
 })

@@ -122,6 +122,7 @@ import {
   type ProviderKeySaveResult
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
+import { createAskConversationRegistry } from './ask-conversation'
 import {
   appendAskHistory,
   ASK_HISTORY_FILE,
@@ -1959,6 +1960,12 @@ if (primaryInstance) {
       return images.length > 0 || files.length > 0 ? { images, files } : undefined
     }
     /**
+     * 会话存储（D64，只追加）：桌面窗口 / QQ 用户各自一个 conversationId。
+     * 第一问从问答历史播种（只含问答），之后由工具循环把「问题 → <now> → 工具轮 → 答复」
+     * 原样存下，下一问只追加——system 前缀不变，缓存才命中。
+     */
+    const askConversations = createAskConversationRegistry()
+    /**
      * 开场注入（D61）：
      * - 「此刻」= 本地确定规则（时间 / 今天说过几句 / 上次多久前 / 日记记到哪天），**每轮都重算**
      *   （时间会走，旧数字会变成假话），不调模型；
@@ -2062,6 +2069,8 @@ if (primaryInstance) {
         ...(opening !== undefined ? { opening } : {}),
         // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
         history: context.history,
+        // 会话（D64）：只追加的消息历史（工具轮也在里面），下一问原样重放
+        conversation: askConversations.for(context.conversationId),
         signal: context.signal,
         // 选区问答：截图随本轮问题送给模型。路径只接受 ask-shots 下的文件（用户在界面上自己框的图，不脱敏）
         ...(context.imagePath && isAskShotPath(app.getPath('userData'), context.imagePath)
@@ -2271,7 +2280,11 @@ if (primaryInstance) {
           .filter((turn) => turn.answer !== '')
       },
       history: () => readAskHistory(askHistoryPath),
-      clearHistory: () => clearAskHistory(askHistoryPath),
+      clearHistory: () => {
+        clearAskHistory(askHistoryPath)
+        // 问答历史清了，只追加的会话也不能留着旧的（否则下一问会「记得」已删的对话）
+        askConversations.clear()
+      },
       // D53：设置抽屉（供应商 / 密钥 / 出网确认）与图谱窗口共用同一批实现，
       // 校验 / 落盘 / 副作用都必须一致，否则同一个设置会在两个入口表现不同。
       settings: () => readGraphSettings(connections.queryDb()),

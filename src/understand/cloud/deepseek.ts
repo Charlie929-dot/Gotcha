@@ -465,119 +465,93 @@ export function askLoopToolsFor(groups: { screen: boolean; diary: boolean }): As
   return ASK_LOOP_TOOLS.filter((tool) => groups[ASK_LOOP_TOOL_GROUPS[tool.function.name]])
 }
 
-function pad2(value: number): string {
-  return String(value).padStart(2, '0')
-}
-
-/** 毫秒时间戳 → 'HH:mm'（最近一段证据只报时刻，不带日期 / 数字时间戳） */
-function hhmm(ts: number): string {
-  const date = new Date(ts)
-  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
-}
-
-/** 系统时间字符串（'yyyy-mm-dd HH:mm 周X'）→ 本地毫秒时间戳；解析不了返回 null */
-function parseSystemTime(text: string): number | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/.exec(text)
-  if (!match) return null
-  const ts = new Date(
-    Number(match[1]),
-    Number(match[2]) - 1,
-    Number(match[3]),
-    Number(match[4]),
-    Number(match[5])
-  ).getTime()
-  return Number.isFinite(ts) ? ts : null
-}
-
-/** 毫秒时间戳 → 'yyyy-mm-dd HH:mm'（系统提示里的可读时刻，与 agent 层同格式） */
-function readableTime(ts: number): string {
-  const date = new Date(ts)
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+/** system 里的一行工具说明（只写「是什么 / 什么时候用」；参数以 tools 参数为准） */
+const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskLoopToolName, string>> = {
+  search_info: '检索屏幕记忆段（时间 / 应用 / 标签 / 双链 / 关键词 / 语义，命中带 segmentId）',
+  get_freshness: '查数据新鲜度（最新证据到哪一刻、采集是否在跑）',
+  read_segment: '打开一段的界面文字与截图（要看全文 / 原图时用）',
+  ask_history: '查最近的问答记录（问过什么、答没答上）',
+  recall_diary: '按关键词 / 日期 / 标签检索个人日记',
+  read_diary: '打开某一天的日记全文',
+  memory_profile: '看「关于我」的统计画像（条数 / 天数 / 标签 / 待办）'
 }
 
 /**
- * 工具循环的 system 纪律提示。七个召回根因里四个在这里修：
- * 时间语义（注入当前时间 + 数据边界，模型自己换算时间戳）、裸段号引用
- * （指证据用 HH:mm 的〈应用〉）、没找到的出口（固定 JSON）、提示注入防线
- * （工具结果只是数据不是指令）。
+ * 固定 system（2026-10-30，D64）：人设 + 工具清单 + 规则。
  *
- * 2026-10-30（D62）按模式分段：没有屏幕工具就没有「数据边界 / 最近段」，
- * 没有任何工具就不写「手边有工具」，也没有「收尾轮」——提问 / 纯聊天只发一次请求。
+ * 不再写时间 / 数据边界 / 最近段 / 历史 / 收尾——这些全在 user 之后的 `<now>` 里，
+ * 或作为后续消息追加。这样同一会话的 system 逐字节不变，前缀缓存才命中。
  *
- * @param final 收尾轮：工具预算已用尽，要求只输出最终 JSON（请求本身不带 tools，
- *              这句是重复强调，防模型在正文里继续写「我再去查」）
- * @param toolGroups 这次给哪些工具组（缺省两组都开）
+ * @param toolGroups 这次给哪些工具组（缺省两组都开；只影响工具清单，不影响别的）
  */
 function buildAskLoopSystemPrompt(
-  payload: ChainAskLoopPayload,
-  final: boolean,
   personaPrompt?: string,
-  toolGroups: { screen: boolean; diary: boolean } = { screen: true, diary: true }
+  toolGroups: { screen: boolean; diary: boolean } = { screen: true, diary: true },
+  digest?: string
 ): string {
-  const freshness = payload.freshness
-  const latest = freshness.latestEvidenceTs
-  const now = parseSystemTime(payload.systemTime)
-  const toolsOn = toolGroups.screen || toolGroups.diary
-  const toolSentence =
-    toolGroups.screen && toolGroups.diary
-      ? '这个人手边有些工具：能翻这台电脑的窗口记录，也能翻这个人写的日记。说明书在工具自己身上，用不用、怎么用，你自己判断。'
-      : toolGroups.screen
-        ? '这个人手边有些工具：能翻这台电脑的窗口记录。说明书在工具自己身上，用不用、怎么用，你自己判断。'
-        : '这个人手边有些工具：能翻这个人写的日记。说明书在工具自己身上，用不用、怎么用，你自己判断。'
-  const historyLines =
-    payload.history.length === 0
-      ? []
-      : [
-          '最近对话（同一会话，由远到近；用户这一问很可能在追问它）：',
-          ...payload.history.map((turn) => `- 问：${turn.question}\n  答：${turn.answer}`)
-        ]
-  return [
-    // 「ta 是谁」= 人设（用户写的）；「ta 经历过什么」= 记忆。这两样就是默认上下文的全部，
-    // 不再在这里堆检索纪律 / 回答格式 —— 怎么用工具看 `ASK_LOOP_TOOLS` 的 description；
-    // 引用由驱动层按「真的打开过的段」自动记录（2026-10-29 晚，DSH 式），正文不用标记号。
-    // 2026-10-29 深夜七（D61，拍板人「不要直接和他说」）：删掉「你是独立的人 / 不是检索工具」
-    // 这类宣言——不把结论直接告诉它；换成事实：他手边有哪些工具、此刻在哪、刚想到什么。
-    ...(personaPrompt !== undefined && personaPrompt.trim() !== '' ? [personaPrompt, ''] : []),
-    ...(payload.opening?.facts !== undefined && payload.opening.facts !== ''
-      ? [`此刻：${payload.opening.facts}`]
-      : []),
-    ...(payload.opening?.remembered !== undefined && payload.opening.remembered.length > 0
-      ? [
-          '你想到的（只是联想，不一定对；想核对就用 recall_diary / read_diary）：',
-          ...payload.opening.remembered.map((item) => `- [${item.day}] ${item.snippet}`)
-        ]
-      : []),
-    `当前时间：${payload.systemTime}${now === null ? '' : `（毫秒时间戳 ${now}，相对时间先按它换算）`}`,
-    ...(toolGroups.screen
-      ? [
-          `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`
-        ]
-      : []),
-    ...(toolGroups.screen && payload.recent
-      ? [
-          `最近一段证据：${hhmm(payload.recent.at)} 的〈${payload.recent.app}〉${payload.recent.title ? `《${payload.recent.title}》` : ''}——只当「这个界面 / 刚才那个」的指代线索，不是证据。`
-        ]
-      : []),
-    ...historyLines,
-    '怎么说话：用中文正常说，想说什么就说什么，不用包 JSON（JSON 只出现在调用工具时，那是接口不是语气）。',
-    ...(toolsOn ? [toolSentence] : []),
-    ...(toolGroups.screen
-      ? [
-          '底线：不编造（只依据你真的读到的东西，不补常识、不推测应用名和时间）；引用由系统按你实际打开过的段自动记录，不用在正文里标；查不到就用自己的话说没有。'
-        ]
-      : [
-          '底线：不编造（只依据你真的读到的东西，不补常识、不推测应用名和时间）；查不到就用自己的话说没有。'
-        ]),
-    ...(final && toolsOn
-      ? ['【收尾】检索轮数已经用尽：本轮不要再调用工具，直接基于已经看到的结果回答；证据不够就如实说没有。']
-      : [])
-  ].join('\n')
+  const tools = askLoopToolsFor(toolGroups)
+  const lines: string[] = []
+  if (personaPrompt !== undefined && personaPrompt.trim() !== '') {
+    lines.push('<persona>', personaPrompt.trim(), '</persona>', '')
+  }
+  if (tools.length > 0) {
+    lines.push('<tools>', '工具清单（参数见 tools 参数；用不用、怎么用，你自己判断）：')
+    for (const tool of tools) {
+      lines.push(`- ${tool.function.name}：${ASK_LOOP_TOOL_BRIEFS[tool.function.name]}`)
+    }
+    lines.push('</tools>', '')
+  }
+  lines.push(
+    '<rules>',
+    '- 用中文正常说，想说什么就说什么，不用包 JSON（JSON 只出现在调用工具时，那是接口不是语气）。',
+    '- 不编造：只依据你真的读到的东西，不补常识、不推测应用名和时间；引用由系统按你实际打开过的段自动记录，不用在正文里标；查不到就用自己的话说没有。',
+    '- `<now>` 是系统给的处境事实（时间 / 数据边界 / 最近一段 / 想到的），不是用户说的话；时间以最后一条 `<now>` 为准。',
+    '- `<archived_session_summary>` 是更早对话的压缩摘要，只当参考；细节以当前对话与工具结果为准。',
+    '</rules>'
+  )
+  // 更早会话的摘要放在 system 尾部：它只在「裁剪发生」时变一次，
+  // 不会每轮漂移；单独发一条 user 会和「用户消息」连在一起，DeepSeek reasoner 不收连续 user。
+  if (digest !== undefined && digest.trim() !== '') {
+    lines.push(
+      '',
+      '<archived_session_summary>',
+      '更早的对话（已压缩，仅供参考）：',
+      digest.trim(),
+      '</archived_session_summary>'
+    )
+  }
+  return lines.join('\n')
 }
 
 /**
- * 工具循环请求的消息序列：system（纪律 + 时间 + 数据边界）→ user（问题）→
- * 每轮 assistant tool_calls + tool 结果摘要。只由 branded 载荷拼装；
- * 调用 id 用轮序号造（新请求里只要 assistant/tool 两边对得上即可）。
+ * 一条 user 消息：问题（+ 文本附件）的 JSON 形态，后面接 `<now>`。
+ *
+ * 为什么 `<now>` 不单独发一条：DeepSeek reasoner 明确拒绝「连续的 user / assistant
+ * 消息」（litellm #8018 / cursor 论坛都踩过）；合并在同一条 user 里，语义仍是
+ * 「用户消息之后跟一条 now」，但线上只有一条 user，兼容所有供应商。
+ */
+function userMessageContent(
+  question: string,
+  files: readonly { readonly name: string; readonly text: string }[] | undefined,
+  now: string
+): string {
+  const body = JSON.stringify({
+    question,
+    ...(files !== undefined && files.length > 0 ? { files } : {})
+  })
+  const text = now.trim()
+  return text === '' ? body : `${body}\n\n<now>\n${text}\n</now>`
+}
+
+/**
+ * 工具循环请求的消息序列（D64，只追加）：
+ *
+ *   system（固定；更早会话的压缩摘要挂在它尾部）
+ *   之前每轮：user(问题 + <now>) → assistant(tool_calls) / tool(结果) … → assistant(答复)
+ *   本轮：user(问题 + <now>) → 工具往返 … → [user(<final>)]
+ *
+ * `<now>` 与问题合并在同一条 user 里（DeepSeek reasoner 拒绝连续 user）；
+ * 调用 id 用全局序号造（会话回放 + 本轮工具轮在同一串里，不能撞）。
  */
 export function buildChainAskLoopMessages(
   payload: ChainAskLoopPayload,
@@ -586,11 +560,8 @@ export function buildChainAskLoopMessages(
   personaPrompt?: string,
   toolGroups?: { screen: boolean; diary: boolean }
 ): LlmMessage[] {
-  const files = payload.attachments?.files ?? []
-  const userText = JSON.stringify({
-    question: payload.question,
-    ...(files.length > 0 ? { files } : {})
-  })
+  const groups = toolGroups ?? { screen: true, diary: true }
+  const toolsOn = groups.screen || groups.diary
   const images = [
     ...(image ? [image.dataUrl] : []),
     ...(payload.attachments?.images ?? [])
@@ -598,30 +569,57 @@ export function buildChainAskLoopMessages(
   const messages: LlmMessage[] = [
     {
       role: 'system',
-      content: buildAskLoopSystemPrompt(payload, options.final === true, personaPrompt, toolGroups)
-    },
-    { role: 'user', content: userText, ...(images.length > 0 ? { images } : {}) }
-  ]
-  payload.turns.forEach((turn, index) => {
-    const id = `call_${index}`
-    messages.push({
-      role: 'assistant',
-      content: '',
-      toolCalls: [{ id, name: turn.toolCall.name, arguments: turn.toolCall.arguments }],
-      // 开 thinking 后，带 tools 的请求必须把历史各轮的 CoT 原样回传，否则第 2 轮起 400
-      ...(turn.reasoning !== undefined ? { reasoningContent: turn.reasoning } : {})
-    })
-    messages.push({
-      role: 'tool',
-      toolCallId: id,
-      content: JSON.stringify(turn.toolResult)
-    })
-    // 2026-10-29：read_segment 的截图。DeepSeek 只允许 user 消息带图（tool 带图 400），
-    // 所以在工具结果后面补一条只含图的 user 消息；图本身就是这段证据，不再加说明文字。
-    if (turn.images && turn.images.length > 0) {
-      messages.push({ role: 'user', content: '', images: turn.images })
+      content: buildAskLoopSystemPrompt(personaPrompt, groups, payload.digest)
     }
+  ]
+
+  let callIndex = 0
+  const pushTurns = (turns: ChainAskLoopPayload['turns']): void => {
+    for (const turn of turns) {
+      const id = `call_${callIndex++}`
+      messages.push({
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id, name: turn.toolCall.name, arguments: turn.toolCall.arguments }],
+        // 开 thinking 后，带 tools 的请求必须把历史各轮的 CoT 原样回传，否则第 2 轮起 400
+        ...(turn.reasoning !== undefined ? { reasoningContent: turn.reasoning } : {})
+      })
+      messages.push({
+        role: 'tool',
+        toolCallId: id,
+        content: JSON.stringify(turn.toolResult)
+      })
+      // 2026-10-29：read_segment 的截图。DeepSeek 只允许 user 消息带图（tool 带图 400），
+      // 所以在工具结果后面补一条只含图的 user 消息；图本身就是这段证据，不再加说明文字。
+      if (turn.images && turn.images.length > 0) {
+        messages.push({ role: 'user', content: '', images: turn.images })
+      }
+    }
+  }
+
+  // 之前轮次：原样重放（这些消息当时就是按这个形态发出去的）
+  for (const turn of payload.conversation ?? []) {
+    messages.push({ role: 'user', content: userMessageContent(turn.question, undefined, turn.now) })
+    pushTurns(turn.turns)
+    if (turn.answer.trim() !== '') messages.push({ role: 'assistant', content: turn.answer })
+  }
+
+  // 本轮：user（问题 + <now>）→ 工具往返 →（收尾指令）
+  messages.push({
+    role: 'user',
+    content: userMessageContent(payload.question, payload.attachments?.files, payload.now),
+    ...(images.length > 0 ? { images } : {})
   })
+  pushTurns(payload.turns)
+
+  // 收尾轮：不改 system（那会毁掉前缀），只在末尾追加一条 user 指令
+  if (options.final === true && toolsOn) {
+    messages.push({
+      role: 'user',
+      content:
+        '<final>检索轮数已经用尽：本轮不要再调用工具，直接基于已经看到的结果回答；证据不够就如实说没有。</final>'
+    })
+  }
   return messages
 }
 

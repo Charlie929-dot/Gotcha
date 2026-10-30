@@ -17,6 +17,14 @@ import { pinyin } from 'pinyin-pro'
 
 import type { ChainAskResult, ChainAskStats } from '../chain/agent/types'
 import {
+  ASK_MODE_LABELS,
+  ASK_MODE_PRESETS,
+  askModePresetFromName,
+  askModePresetOf,
+  DEFAULT_ASK_MODE,
+  type AskModeConfig
+} from '../chain/agent/mode'
+import {
   childBranches,
   ensureLineage,
   findBranch,
@@ -82,10 +90,10 @@ export type CompactOutcome =
     }
 
 /** 方案里定义过的命令（含未实现的）：用于区分「拼错」与「还没做」 */
-export const KNOWN_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact'] as const
+export const KNOWN_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact', 'mode'] as const
 
 /** 当前已经接上的命令 */
-export const READY_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact'] as const
+export const READY_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact', 'mode'] as const
 
 /** 命名 / 删除确认的等待时限（方案 §6.2：60 秒超时，可 /cancel） */
 export const COMMAND_WAIT_TIMEOUT_MS = 60_000
@@ -121,9 +129,21 @@ export function slugifyNodeName(name: string): string | null {
 }
 
 /** 命令回执：形状与问答复保持一致，界面当一条普通答复显示 */
-export function commandResult(text: string): ChainAskResult {
+export function commandResult(text: string, mode?: AskModeConfig): ChainAskResult {
   const stats: ChainAskStats = { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
-  return { kind: 'command', text, stats }
+  return { kind: 'command', text, stats, ...(mode !== undefined ? { mode } : {}) }
+}
+
+/** 模式的人话摘要（`/mode` 回执用）：`聊天（屏幕记忆关 · 日记开 · 人格卡开）` */
+function modeSummary(mode: AskModeConfig): string {
+  const preset = askModePresetOf(mode)
+  const label = preset === null ? '组合' : ASK_MODE_LABELS[preset]
+  const parts = [
+    mode.screen ? '屏幕记忆开' : '屏幕记忆关',
+    mode.diary ? '日记开' : '日记关',
+    mode.card ? '人格卡开' : '人格卡关'
+  ]
+  return `${label}（${parts.join(' · ')}）`
 }
 
 function pad2(value: number): string {
@@ -245,6 +265,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /use <名字|编号|提交>  切节点；切历史提交 = 只读查看',
     '  /del <名字>      删节点（要回 confirm）',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
+    '  /mode [chat|ask|mem]  切模式（问记忆 / 聊天 / 提问；下一条生效）',
     '  /backup          立即提交记忆；配了远端就推送',
     '  /cancel          取消等待中的命名 / 删除',
     '',
@@ -417,9 +438,30 @@ async function deleteNode(deps: CommandDeps, branch: string): Promise<string> {
 
 type Pending = { kind: 'name' } | { kind: 'delete'; branch: string } | null
 
-/** 命令上下文：`/compact` 要知道压哪个会话（桌面窗口的 conversationId） */
+/** 命令上下文：`/compact` 要知道压哪个会话（桌面窗口的 conversationId）；`/mode` 要知道当前模式 */
 export interface CommandContext {
   conversationId?: string
+  /** 渲染层这次提问带的模式（D62）；`/mode` 无参数时据此报「当前」 */
+  mode?: AskModeConfig
+}
+
+/** `/mode`：不带参数报当前；带名字切预设，回执里带目标模式由界面落地 */
+function modeText(context: CommandContext | undefined, args: readonly string[]): ChainAskResult {
+  const current = context?.mode ?? DEFAULT_ASK_MODE
+  const currentText = modeSummary(current)
+  const name = args.join(' ').trim()
+  if (name === '') {
+    return commandResult(
+      `当前模式：${currentText}\n用法：/mode [chat|ask|mem]（切了从下一条消息生效）`
+    )
+  }
+  const preset = askModePresetFromName(name)
+  if (preset === null) {
+    return commandResult(`不认识「${name}」。用法：/mode [chat|ask|mem]\n当前：${currentText}`)
+  }
+  const next = ASK_MODE_PRESETS[preset]
+  const cardHint = preset === 'chat' ? '\n（聊天模式用人格卡；还没启用卡时先用默认人设）' : ''
+  return commandResult(`模式：${modeSummary(next)}（下一条生效）${cardHint}`, next)
 }
 
 /**
@@ -519,6 +561,8 @@ export function createCommandHandler(
       }
       case 'compact':
         return handleCompact(context)
+      case 'mode':
+        return modeText(context, parsed.args)
       case 'new': {
         const name = parsed.args.join(' ').trim()
         if (name === '') {

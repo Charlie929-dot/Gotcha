@@ -26,6 +26,7 @@ import {
 } from '../../src/main/lineage'
 import type { MemoryRepo } from '../../src/main/memory-repo'
 import type { ChainAskResult } from '../../src/chain/agent/types'
+import { ASK_MODE_PRESETS } from '../../src/chain/agent/mode'
 
 const dirs: string[] = []
 
@@ -136,6 +137,7 @@ describe('命令执行', () => {
     expect(text).toContain('/new <名字>')
     expect(text).toContain('/use')
     expect(text).toContain('/del')
+    expect(text).toContain('/mode')
     expect(text).toContain('/backup')
   })
 
@@ -149,6 +151,37 @@ describe('命令执行', () => {
       lineageFile
     })
     expect(textOf(await run('/help'))).toContain('记忆仓：不可用 · 没找到 git')
+  })
+
+  it('/mode 切换预设，回执带上目标模式（界面据此落地）', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    const chatted = await run('/mode chat')
+    expect(chatted?.kind).toBe('command')
+    if (chatted?.kind !== 'command') return
+    expect(chatted.text).toContain('聊天')
+    expect(chatted.text).toContain('下一条生效')
+    expect(chatted.mode).toEqual(ASK_MODE_PRESETS.chat)
+    expect(textOf(await run('/mode mem'))).toContain('问记忆')
+    expect(textOf(await run('/mode ask'))).toContain('提问')
+  })
+
+  it('/mode 不带参数报当前模式；未知名字不切换', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    const current = await run('/mode', { mode: ASK_MODE_PRESETS.chat })
+    expect(current?.kind).toBe('command')
+    if (current?.kind !== 'command') return
+    expect(current.text).toContain('当前模式：聊天')
+    expect(current.mode).toBeUndefined()
+
+    const unknown = await run('/mode 随便')
+    expect(unknown?.kind).toBe('command')
+    if (unknown?.kind !== 'command') return
+    expect(unknown.text).toContain('不认识')
+    expect(unknown.mode).toBeUndefined()
   })
 
   it('/log 列出节点、标出当前与分叉来源', async () => {

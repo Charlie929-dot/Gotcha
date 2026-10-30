@@ -137,11 +137,14 @@ export interface AskIpcDeps {
   getWindow: () => BrowserWindow | null
   ask: (question: string, context: AskQueryContext) => Promise<ChainAskResult>
   /**
-   * 本地命令（memory-life M1/M2/M3）：`/help`、`/backup`、`/log`、`/compact`…
+   * 本地命令（memory-life M1/M2/M3 / D70）：`/help`、`/backup`、`/log`、`/compact`、`/mode`…
    * 返回非 null = 命中命令（回执直接给界面，不调模型、不进历史）；null = 不是命令，照常提问。
-   * `context.conversationId` 给 `/compact` 用（压哪个会话）。
+   * `context.conversationId` 给 `/compact` 用（压哪个会话）；`context.mode` 给 `/mode` 报当前。
    */
-  command?: (text: string, context?: { conversationId?: string }) => Promise<ChainAskResult | null>
+  command?: (
+    text: string,
+    context?: { conversationId?: string; mode?: AskModeConfig }
+  ) => Promise<ChainAskResult | null>
   segment: (segmentId: number) => SegmentEvidence | null
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
@@ -330,11 +333,15 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           typeof payload.conversationId === 'string' && CONVERSATION_ID_RE.test(payload.conversationId)
             ? payload.conversationId
             : `c${Date.now().toString(36)}`
+        // 模式（D62）：不是对象就拒（不静默猜），对象里缺的字段按关处理。
+        // 放在命令之前：`/mode` 要知道「当前」是哪个模式，命令回执也可能带新模式。
+        if (payload.mode !== undefined && !isPlainObject(payload.mode)) return failure('模式不合法')
+        const mode = normalizeAskMode(payload.mode)
         // 本地命令先过（方案 §6）：命中就在本地执行、回一条文本，不调模型、不写会话 / 历史。
         // 放在问题长度校验之前：命令的参数长度不该受「提问 500 字」限制。
         if (deps.command) {
           try {
-            const handled = await deps.command(asked, { conversationId })
+            const handled = await deps.command(asked, { conversationId, mode })
             if (handled !== null) return handled
           } catch (error) {
             deps.log('warn', 'ask command failed', { error: String(error) })
@@ -353,9 +360,6 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             : undefined
         const attachments = parseAttachments(payload.attachments)
         if (attachments === null) return failure('附件不合法（只收图片和文本文件，条数 / 大小有上限）')
-        // 模式（D62）：不是对象就拒（不静默猜），对象里缺的字段按关处理
-        if (payload.mode !== undefined && !isPlainObject(payload.mode)) return failure('模式不合法')
-        const mode = normalizeAskMode(payload.mode)
 
         let history: readonly ChainAskTurnContext[] = []
         try {

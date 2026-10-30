@@ -1,13 +1,13 @@
 /**
  * 信息链 · 问记忆工具循环的驱动层（toolloop）
  *
- * 消息协议：system（纪律 + 当前时间 + 数据边界）→ user（问题）→
- * assistant tool_calls → tool 结果摘要 → … → 最终 assistant JSON
- * `{answer, citations:[{segmentId, why}]}`（与单发路径同形）。
+ * 消息协议（D64）：system（固定人设 / 工具清单 / 规则）→ user（问题 + `<now>`）→
+ * assistant tool_calls → tool 结果摘要 → … → 最终 assistant 自由文本。
  *
- * 上限（2026-10-27 调整）：**8 轮可以调工具、工具调用总数 ≤16**；第 9 轮是
- * **强制收尾轮**——不再发 tools，要求模型直接给最终 JSON。这样「轮数用尽」
- * 只会变成「基于已查到的内容作答 / 如实说没找到」，不会变成「问记忆出错了」。
+ * 上限（2026-10-30 调整）：**8 轮可以调工具、工具调用总数 ≤16**。
+ * **不再有「第 9 轮强制收尾」**：模型不调工具的那一轮就是收尾；
+ * 预算用尽时仍想调工具 → 先问用户（`continue-ask`），用户选收尾才发一轮不带 tools 的请求。
+ * 这样所有正常请求的 messages / tools 前缀都一致，缓存不会因末轮指令失效。
  * 只有工具调用数超限、或客户端真的失败，才按 `failed` 收口。
  *
  * 2026-10-27 再调：加 `read_segment` 后模型需要多走一步「展开命中段看全文」，
@@ -32,10 +32,16 @@ import type {
   AskLoopFreshness,
   AskOutbound,
   AskRecentSegment,
+  ChainAskLoopPayload,
   RedactableAskLoopToolResult,
   RedactableAskLoopTurn,
   RedactableAskOpening
 } from './payload'
+import {
+  appendAskConversationTurn,
+  emptyAskConversation,
+  type AskConversationPort
+} from './conversation'
 import {
   LlmAbortError,
   LlmHttpError,
@@ -63,7 +69,7 @@ import type { ChainSearchBatchQuery, ChainSearchBatchResult } from '../query'
 
 /** 允许模型调用工具的轮数上限（用户点一次「继续查」就再批这么多） */
 export const ASK_LOOP_MAX_TOOL_TURNS = 8
-/** assistant 调用总上限：8 轮工具 + 1 轮强制收尾（收尾轮不带 tools） */
+/** assistant 调用总上限：8 轮工具 + 1 轮用户选择的收尾（不带 tools；正常流程不会自动走到） */
 export const ASK_LOOP_MAX_TURNS = ASK_LOOP_MAX_TOOL_TURNS + 1
 /** 工具调用总数上限（跨轮累计）：read_segment 让单轮内多开几段成为常态 */
 export const ASK_LOOP_MAX_TOOL_CALLS = 16
@@ -134,6 +140,11 @@ export interface AskLoopContext {
   recent?: AskRecentSegment
   /** 用户点「停止」时中止在途请求 */
   signal?: AbortSignal
+  /**
+   * 会话存储（D64，只追加）：主进程按 conversationId 注入；不传 = 老行为
+   * （只把 `history` 塞进 system）。
+   */
+  conversation?: AskConversationPort
   /** 选区问答：随本轮问题一起给模型看的截图（data URL；不脱敏，D51 之后的新入口） */
   image?: { readonly dataUrl: string }
   /** 用户随本轮问题上传的图片 / 文本文件（用户主动提供，不过脱敏墙） */
@@ -282,18 +293,33 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     canReadSegment: (segmentId) => whitelist.has(segmentId)
   })
 
+  const now = ctx.now()
   const freshness: AskLoopFreshness = {
-    latestEvidenceTs: readChainFreshness(ctx.db, ctx.now()).latestEvidenceTs,
+    latestEvidenceTs: readChainFreshness(ctx.db, now).latestEvidenceTs,
     captureRunning: ctx.captureRunning()
   }
-  const systemTime = formatSystemTime(ctx.now())
+  const systemTime = formatSystemTime(now)
+  const systemTimeMs = now
+  /** 工具组（D62）：两组都关 = 单轮请求，不跑预算、不等待续查 */
+  const toolGroups = ctx.tools ?? { screen: true, diary: true }
+  const toolsAvailable = toolGroups.screen || toolGroups.diary
+  /** 会话里之前的轮次（只追加的基底）；没有存储时为空 */
+  const priorConversation = ctx.conversation?.load() ?? emptyAskConversation()
 
   // 问题敏感：循环开始前一次判定（与单发路径同口径——宁可答「没找到」，不发敏感问题）
   const probe = ctx.outbound.buildLoop({
     question,
     systemTime,
+    systemTimeMs,
+    tools: toolGroups,
     freshness,
     turns: [],
+    ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
+      ? {
+          conversation: priorConversation.turns,
+          digest: priorConversation.digest
+        }
+      : {}),
     ...(ctx.history ? { history: ctx.history } : {}),
     ...(ctx.recent ? { recent: ctx.recent } : {}),
     ...(ctx.attachments ? { attachments: ctx.attachments } : {})
@@ -311,16 +337,49 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   /** 已经批过的「继续查」次数：每次把轮数 / 调用数预算翻一倍窗口 */
   let grants =
     resume && ctx.resumeDecision === 'continue' ? resume.grants + 1 : resume?.grants ?? 0
-  /** 工具组（D62）：两组都关 = 单轮请求，不跑预算、不等待续查 */
-  const toolGroups = ctx.tools ?? { screen: true, diary: true }
-  const toolsAvailable = toolGroups.screen || toolGroups.diary
   /** 本轮（含恢复前）还能调工具的全局轮数 / 调用次数 */
   const toolTurnBudget = toolsAvailable ? ASK_LOOP_MAX_TOOL_TURNS * (1 + grants) : 0
   const toolCallBudget = toolsAvailable ? ASK_LOOP_MAX_TOOL_CALLS * (1 + grants) : 0
-  /** 本地循环上限：全局预算 + 收尾轮 - 已经用掉的轮数；无工具时只有一轮 */
-  const localTurnLimit = toolsAvailable ? Math.max(1, toolTurnBudget + 1 - turnsUsed) : 1
+  /** 本地循环上限：只给工具预算本身，不再多一发「强制收尾轮」（没有 tool call 就是收尾） */
+  const localTurnLimit = toolsAvailable ? Math.max(1, toolTurnBudget - turnsUsed) : 1
   /** 本轮是否查过问答记录：决定「关于对话本身」的答案能否不带屏幕引用 */
   let usedAskHistory = resume?.usedAskHistory ?? false
+
+  /**
+   * 成功收口时把这一问追加进会话（失败 / 中止 / 等待续查都不写）。
+   * 只存云端视图：问题、<now>、工具轮、最终答复——下次请求原样重放。
+   */
+  const persistConversation = (payload: ChainAskLoopPayload, answer: string): void => {
+    if (!ctx.conversation) return
+    const text = answer.trim()
+    if (text === '') return
+    // 图片（选区截图 / 用户附件 / QQ 图片 / 工具截图）一律原样存：少一张，这条 user 消息的
+    // 字节就变了，后面的前缀缓存全断。只有压缩（appendAskConversationTurn）才允许删图。
+    const images = [
+      ...(ctx.image !== undefined ? [ctx.image.dataUrl] : []),
+      ...(payload.attachments?.images ?? [])
+    ]
+    const files = payload.attachments?.files ?? []
+    const attachments =
+      images.length > 0 || files.length > 0 ? { images, files } : undefined
+    try {
+      ctx.conversation.save(
+        appendAskConversationTurn(
+          { digest: payload.digest ?? '', turns: payload.conversation ?? [] },
+          {
+            question: payload.question,
+            now: payload.now,
+            turns: payload.turns,
+            answer: text,
+            ...(attachments !== undefined ? { attachments } : {})
+          }
+        )
+      )
+    } catch (error) {
+      // 会话存储只是缓存 / 上下文，写不进去不该让这一问失败
+      log('warn', 'chain ask loop: 会话写入失败', { error: String(error) })
+    }
+  }
 
   /**
    * 统计口径（诊断用）：hits / evidence 取**当前已发生**的量——失败收口（客户端抛错 /
@@ -358,18 +417,25 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       settleUsage()
       return withTrace({ kind: 'error', reason: 'aborted', message: '已停止', stats: withLoopDiag(turnsUsed + turn - 1, toolCallCount) })
     }
-    // 收尾轮：不再给工具，逼模型用已看到的段作答（不带 tools 的请求也不可能回 tool_calls）。
-    // 用户选「先按现在的结果回答」时，恢复后的第一轮就是这个收尾轮。
+    // 用户选「先按现在的结果回答」时，恢复后的第一轮不带工具；其余轮都给 tools。
     // 无工具模式（D62）一开始就没有工具，也不该走「轮数用尽」的收尾语义。
+    // 工具预算内都给 tools；只有用户明确选「先按现在的结果回答」时才不带工具。
+    // 没有单独的「收尾轮」：模型不再调工具的那一轮就是收尾（缓存前缀不额外断一次）。
     const allowTools =
-      toolsAvailable &&
-      globalTurn <= toolTurnBudget &&
-      !(turn === 1 && ctx.resumeDecision === 'stop')
+      toolsAvailable && globalTurn <= toolTurnBudget && !(turn === 1 && ctx.resumeDecision === 'stop')
     const built = ctx.outbound.buildLoop({
       question,
       systemTime,
+      systemTimeMs,
+      tools: toolGroups,
       freshness,
       turns,
+      ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
+        ? {
+            conversation: priorConversation.turns,
+            digest: priorConversation.digest
+          }
+        : {}),
       ...(ctx.history ? { history: ctx.history } : {}),
       ...(ctx.recent ? { recent: ctx.recent } : {}),
       ...(ctx.opening ? { opening: ctx.opening } : {}),
@@ -591,6 +657,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       // 模型选择先问一句：这是正常出口，不是失败；选项已在上限内去重
       log('info', 'chain ask loop: 模型要求确认', { options: parsed.options.length })
       settleUsage()
+      // 澄清也进会话：下一问模型要看到自己问过什么
+      persistConversation(built.payload, [parsed.question, ...parsed.options].join('\n'))
       return withTrace({
         kind: 'clarify',
         question: parsed.question,
@@ -603,6 +671,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     stats.cited = autoCitations.length
     if (parsed.kind === 'insufficient') {
       // 查到了相关段但撑不起结论：保留模型说明，引用 = 已读；再把检索到的段列出来
+      persistConversation(built.payload, parsed.answer)
       return withTrace({
         kind: 'insufficient',
         answer: parsed.answer,
@@ -617,6 +686,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       log('warn', 'chain ask loop: answer 声称没找到但打开过段，按没找到保留说明', {
         cited: autoCitations.length
       })
+      persistConversation(built.payload, parsed.answer)
       return withTrace({
         kind: 'no-evidence',
         note: parsed.answer,
@@ -627,12 +697,14 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     }
     if (isNoEvidenceAnswer(parsed.answer)) {
       // 无引用且自称没找到：维持「没找到」，不把固定文案当回答
+      persistConversation(built.payload, parsed.answer)
       return withTrace({
         kind: 'no-evidence',
         related: relatedFromWhitelist(whitelist),
         stats: withLoopDiag(globalTurn, toolCallCount)
       })
     }
+    persistConversation(built.payload, parsed.answer)
     return withTrace({
       kind: 'answer',
       answer: parsed.answer,

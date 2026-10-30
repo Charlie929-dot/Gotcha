@@ -19,7 +19,7 @@
 
 import { WebSocketServer, type WebSocket, type RawData } from 'ws'
 
-/** 一条可处理的私聊消息（已归一：纯文本 + 发送者 + 时刻） */
+/** 一条可处理的私聊消息（已归一：纯文本 + 发送者 + 时刻 + 图片引用） */
 export interface QqInbound {
   userId: number
   nickname: string
@@ -27,7 +27,18 @@ export interface QqInbound {
   messageId: number
   /** 毫秒时间戳（NapCat 给的是秒，这里乘 1000；缺省用收到的时间） */
   at: number
+  /** 这条消息里的图片引用（最多 4 张；拿不到图的会跳过） */
+  images?: readonly QqImageRef[]
 }
+
+/** 图片段里的引用：`file` 可交给 OneBot `get_image`，`url` 是可直接下载的地址 */
+export interface QqImageRef {
+  file?: string
+  url?: string
+}
+
+/** 一条消息里的图片上限（与桌面附件一致） */
+export const QQ_INBOUND_IMAGE_MAX = 4
 
 export type QqLog = (
   level: 'info' | 'warn' | 'error',
@@ -64,11 +75,51 @@ function positiveInt(value: unknown): number | null {
 
 const CQ_RE = /\[CQ:([A-Za-z0-9_.-]+)((?:,[^\]]*)?)\]/gu
 
-/** CQ 字符串 → 纯文本（只留 text 段，其余按占位符；`at` / `reply` 直接丢） */
-function cqToText(raw: string): string {
-  return raw
-    .replace(CQ_RE, (_match: string, type: string) => {
+/** CQ 码参数（`file=xxx,url=yyy`）→ 对象；解码 CQ 转义 */
+function cqParams(raw: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const part of raw.split(',')) {
+    const index = part.indexOf('=')
+    if (index <= 0) continue
+    const key = part.slice(0, index).trim()
+    const value = part
+      .slice(index + 1)
+      .replace(/&#91;/gu, '[')
+      .replace(/&#93;/gu, ']')
+      .replace(/&#44;/gu, ',')
+      .replace(/&amp;/gu, '&')
+    if (key !== '') out[key] = value
+  }
+  return out
+}
+
+/** 图片段 → `QqImageRef`；文件名 / url 都空就当没有 */
+function imageRefOf(data: Record<string, unknown>): QqImageRef | null {
+  const file = typeof data['file'] === 'string' ? data['file'].trim() : ''
+  const url = typeof data['url'] === 'string' ? data['url'].trim() : ''
+  if (file === '' && url === '') return null
+  return {
+    ...(file !== '' ? { file } : {}),
+    ...(url !== '' ? { url } : {})
+  }
+}
+
+function pushImage(images: QqImageRef[], ref: QqImageRef | null): void {
+  if (ref === null || images.length >= QQ_INBOUND_IMAGE_MAX) return
+  if (images.some((item) => item.file === ref.file && item.url === ref.url)) return
+  images.push(ref)
+}
+
+/** CQ 字符串 → 纯文本 + 图片引用（只留 text 段，其余按占位符；`at` / `reply` 直接丢） */
+function parseCqMessage(raw: string): { text: string; images: QqImageRef[] } {
+  const images: QqImageRef[] = []
+  const text = raw
+    .replace(CQ_RE, (_match: string, type: string, params: string) => {
       if (type === 'at' || type === 'reply') return ''
+      if (type === 'image') {
+        pushImage(images, imageRefOf(cqParams(params)))
+        return '[图片]'
+      }
       return SEGMENT_PLACEHOLDER[type] ?? ''
     })
     // CQ 码里的转义（OneBot 11 §CQ 码转义）
@@ -76,18 +127,21 @@ function cqToText(raw: string): string {
     .replace(/&#93;/gu, ']')
     .replace(/&#44;/gu, ',')
     .replace(/&amp;/gu, '&')
+  return { text, images }
 }
 
 /**
- * 报文里的 `message` → 纯文本。
+ * 报文里的 `message` → 纯文本 + 图片引用。
  * 段数组优先（NapCat 的默认形态）；字符串按 CQ 码解析；其它形态当空。
  */
-export function segmentsToText(message: unknown): string {
+export function parseMessageContent(message: unknown): { text: string; images: QqImageRef[] } {
   if (typeof message === 'string') {
-    return cqToText(message).replace(/\r\n/gu, '\n').trim()
+    const parsed = parseCqMessage(message)
+    return { text: parsed.text.replace(/\r\n/gu, '\n').trim(), images: parsed.images }
   }
-  if (!Array.isArray(message)) return ''
+  if (!Array.isArray(message)) return { text: '', images: [] }
   let out = ''
+  const images: QqImageRef[] = []
   for (const segment of message) {
     if (!isPlainObject(segment)) continue
     const type = typeof segment.type === 'string' ? segment.type : ''
@@ -97,9 +151,19 @@ export function segmentsToText(message: unknown): string {
       continue
     }
     if (type === 'at' || type === 'reply') continue
+    if (type === 'image') {
+      pushImage(images, imageRefOf(data))
+      out += '[图片]'
+      continue
+    }
     out += SEGMENT_PLACEHOLDER[type] ?? ''
   }
-  return out.replace(/\r\n/gu, '\n').trim()
+  return { text: out.replace(/\r\n/gu, '\n').trim(), images }
+}
+
+/** 兼容旧调用方：只要纯文本 */
+export function segmentsToText(message: unknown): string {
+  return parseMessageContent(message).text
 }
 
 /**
@@ -117,7 +181,8 @@ export function parsePrivateMessageEvent(raw: unknown): QqInbound | null {
   // 自用场景就是拿自己号当机器人，从手机 QQ 给自己发消息。
   // 防回声交给服务端的「自己发出的 message_id 环」：机器人回的消息若被实现方以 message 事件回放，
   // 这里按 message_id 丢掉（OneBot 11 正常用 message_sent，本就不解析）。
-  const text = segmentsToText(raw['message'])
+  const parsed = parseMessageContent(raw['message'])
+  const text = parsed.text
   if (text === '') return null
   const sender = isPlainObject(raw['sender']) ? raw['sender'] : {}
   const nickname = typeof sender['nickname'] === 'string' ? (sender['nickname'] as string).slice(0, 40) : ''
@@ -127,7 +192,8 @@ export function parsePrivateMessageEvent(raw: unknown): QqInbound | null {
     nickname,
     text,
     messageId: positiveInt(raw['message_id']) ?? 0,
-    at: Number.isFinite(seconds) ? Math.round(seconds * 1000) : Date.now()
+    at: Number.isFinite(seconds) ? Math.round(seconds * 1000) : Date.now(),
+    ...(parsed.images.length > 0 ? { images: parsed.images } : {})
   }
 }
 
@@ -292,24 +358,41 @@ export class QqOb11Server {
     this.onMessage?.(inbound)
   }
 
-  /** 私聊发一条纯文本（OneBot `send_private_msg`） */
-  async sendPrivate(userId: number, text: string): Promise<void> {
+  /** OneBot action 调用：发一条带 echo 的请求并等回执（所有 API 共用） */
+  private async callAction(action: string, params: Record<string, unknown>): Promise<Ob11Response> {
     const socket = this.activeSocket()
     if (!socket) throw new Error('没有已连接的 OneBot 客户端')
     const echo = `gotcha-${++this.seq}`
-    socket.send(
-      JSON.stringify({
-        action: 'send_private_msg',
-        params: { user_id: userId, message: [{ type: 'text', data: { text } }] },
-        echo
-      })
-    )
-    const response = await new Promise<Ob11Response>((resolve, reject) => {
+    socket.send(JSON.stringify({ action, params, echo }))
+    return new Promise<Ob11Response>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(echo)
         reject(new Error('OneBot 回执超时'))
       }, this.timeoutMs)
       this.pending.set(echo, { resolve, reject, timer })
+    })
+  }
+
+  /** 把图片文件交给 NapCat 换 base64 / url（M1 只读图，不落盘） */
+  async getImage(file: string): Promise<{ base64?: string; url?: string }> {
+    const response = await this.callAction('get_image', { file })
+    if (typeof response.retcode === 'number' && response.retcode !== 0) {
+      throw new Error(`OneBot get_image 失败（${response.retcode}）${response.wording ?? ''}`)
+    }
+    const data = isPlainObject(response.data) ? response.data : {}
+    const base64 = typeof data['base64'] === 'string' ? data['base64'] : ''
+    const url = typeof data['url'] === 'string' ? data['url'] : ''
+    return {
+      ...(base64 !== '' ? { base64 } : {}),
+      ...(url !== '' ? { url } : {})
+    }
+  }
+
+  /** 私聊发一条纯文本（OneBot `send_private_msg`） */
+  async sendPrivate(userId: number, text: string): Promise<void> {
+    const response = await this.callAction('send_private_msg', {
+      user_id: userId,
+      message: [{ type: 'text', data: { text } }]
     })
     if (typeof response.retcode === 'number' && response.retcode !== 0) {
       throw new Error(`OneBot 发送失败（${response.retcode}）${response.wording ?? ''}`)

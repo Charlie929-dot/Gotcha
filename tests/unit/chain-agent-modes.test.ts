@@ -35,12 +35,13 @@ afterEach(() => {
   db.close()
 })
 
-function payloadOf(groups?: { screen: boolean; diary: boolean }) {
-  void groups
+function payloadOf(groups: { screen: boolean; diary: boolean }) {
   const outbound = createLocalAskOutbound()
   const { payload } = outbound.buildLoop({
     question: '在吗',
     systemTime: SYSTEM_TIME,
+    systemTimeMs: NOW,
+    tools: groups,
     freshness: { latestEvidenceTs: null, captureRunning: false },
     turns: [],
     opening: {
@@ -51,51 +52,67 @@ function payloadOf(groups?: { screen: boolean; diary: boolean }) {
   return payload
 }
 
-function systemText(groups: { screen: boolean; diary: boolean }, final = false): string {
-  const [system] = buildChainAskLoopMessages(
+function messagesOf(groups: { screen: boolean; diary: boolean }, final = false) {
+  return buildChainAskLoopMessages(
     payloadOf(groups),
     { final },
     undefined,
     '你叫「贴心大肥鱼」。',
     groups
   )
-  return system?.content ?? ''
 }
 
-describe('system 按模式分段', () => {
-  it('两组都开：数据边界 / 最近段 / 两边工具句都在', () => {
+function systemText(groups: { screen: boolean; diary: boolean }): string {
+  return messagesOf(groups)[0]?.content ?? ''
+}
+
+describe('system 按模式分段（D64：动态事实改放 <now>）', () => {
+  it('两组都开：工具清单两边都在；时间 / 数据边界在 <now> 里', () => {
     const text = systemText({ screen: true, diary: true })
-    expect(text).toContain('数据边界：')
-    expect(text).toContain('能翻这台电脑的窗口记录，也能翻这个人写的日记')
-    expect(text).toContain('此刻：现在是 2026-10-30')
-    expect(text).toContain('你想到的（只是联想')
+    expect(text).toContain('<tools>')
+    expect(text).toContain('search_info')
+    expect(text).toContain('recall_diary')
+    expect(text).not.toContain('数据边界：')
+    const now = payloadOf({ screen: true, diary: true }).now
+    expect(now).toContain('数据边界：')
+    expect(now).toContain('此刻：现在是 2026-10-30')
+    expect(now).toContain('你想到的（只是联想')
   })
 
-  it('只有日记（聊天）：不写数据边界 / 屏幕工具，写日记工具句', () => {
+  it('只有日记（聊天）：不写屏幕工具；<now> 不写数据边界 / 最近段', () => {
     const text = systemText({ screen: false, diary: true })
-    expect(text).not.toContain('数据边界：')
-    expect(text).not.toContain('最近一段证据：')
-    expect(text).toContain('能翻这个人写的日记')
-    expect(text).not.toContain('能翻这台电脑的窗口记录')
+    expect(text).not.toContain('search_info')
+    expect(text).toContain('recall_diary')
+    const now = payloadOf({ screen: false, diary: true }).now
+    expect(now).not.toContain('数据边界：')
+    expect(now).not.toContain('最近一段证据：')
     // 聊天仍给「此刻 / 想到的」（这是人味的来源，不是屏幕记忆）
-    expect(text).toContain('此刻：')
-    expect(text).toContain('你想到的（只是联想')
+    expect(now).toContain('此刻：')
+    expect(now).toContain('你想到的（只是联想')
   })
 
-  it('两组都关（提问）：没有工具句、没有数据边界、也没有「收尾轮」提示', () => {
-    const text = systemText({ screen: false, diary: false }, true)
+  it('两组都关（提问）：没有工具清单；<now> 只有时间', () => {
+    const text = systemText({ screen: false, diary: false })
+    expect(text).not.toContain('<tools>')
     expect(text).not.toContain('手边有些工具')
-    expect(text).not.toContain('数据边界：')
-    expect(text).not.toContain('最近一段证据：')
-    expect(text).not.toContain('【收尾】')
-    expect(text).toContain('当前时间：')
+    const messages = messagesOf({ screen: false, diary: false }, true)
+    expect(messages.some((message) => message.content.includes('<final>'))).toBe(false)
+    const now = payloadOf({ screen: false, diary: false }).now
+    expect(now).toContain('当前时间：')
+    expect(now).not.toContain('数据边界：')
     // 底线仍在不编造
     expect(text).toContain('不编造')
   })
 
-  it('有工具的收尾轮才写「轮数用尽」', () => {
-    expect(systemText({ screen: true, diary: true }, true)).toContain('【收尾】')
-    expect(systemText({ screen: false, diary: true }, true)).toContain('【收尾】')
+  it('有工具的收尾轮：不再追加消息（没有 tool call 本身就是收尾）', () => {
+    for (const groups of [
+      { screen: true, diary: true },
+      { screen: false, diary: true }
+    ]) {
+      const messages = messagesOf(groups, true)
+      expect(messages).toEqual(messagesOf(groups, false))
+      expect(messages.some((message) => message.content.includes('<final>'))).toBe(false)
+    }
   })
 })
 

@@ -14,6 +14,8 @@
 
 import type { ChainAskResult } from '../../chain/agent/types'
 import type { QqInbound, QqLog, QqTransportStatus } from './ob11'
+import { QQ_INBOUND_IMAGE_MAX } from './ob11'
+import { downloadImageAsDataUrl, imageDataUrlFromBase64 } from './media'
 
 /** 传输层的最小契约（真实实现是 `QqOb11Server`；测试里换成假实现） */
 export interface QqTransport {
@@ -26,6 +28,8 @@ export interface QqTransport {
   }): Promise<{ port: number }>
   stop(): Promise<void>
   sendPrivate(userId: number, text: string): Promise<void>
+  /** NapCat `get_image`：拿 base64（优先）或 url（兜底） */
+  getImage(file: string): Promise<{ base64?: string; url?: string }>
   status(): QqTransportStatus
 }
 
@@ -46,6 +50,8 @@ export interface QqAskInput {
   /** 每个 QQ 用户一个会话（`qq:<userId>`），上下文按它取 */
   conversationId: string
   signal: AbortSignal
+  /** 本条消息里的图片（data URL；最多 4 张；取不到就空） */
+  images?: readonly string[]
 }
 
 export interface QqChannelDeps {
@@ -264,6 +270,42 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
 
   const log = deps.log
 
+  /**
+   * 图片引用 → data URL。优先 `get_image` 的 base64（不下载），没有才走 url；
+   * 单张失败跳过（文本里的 `[图片]` 还在），只记数量不记文件 id / url。
+   */
+  const resolveImages = async (refs: QqInbound['images']): Promise<string[]> => {
+    if (!refs || refs.length === 0) return []
+    const wanted = refs.slice(0, QQ_INBOUND_IMAGE_MAX)
+    // 并行取图：每张各自超时，别让 4 张串行把问答预算吃光
+    const resolved = await Promise.all(
+      wanted.map(async (ref) => {
+        try {
+          let base64 = ''
+          let url = ref.url ?? ''
+          if (ref.file !== undefined) {
+            const got = await transport.getImage(ref.file)
+            base64 = got.base64 ?? ''
+            if (got.url !== undefined) url = got.url
+          }
+          if (base64 !== '') {
+            const dataUrl = imageDataUrlFromBase64(base64)
+            if (dataUrl !== null) return dataUrl
+          }
+          if (url !== '') return await downloadImageAsDataUrl(url)
+          return null
+        } catch {
+          return null
+        }
+      })
+    )
+    const out = resolved.filter((item): item is string => item !== null)
+    if (out.length < wanted.length) {
+      log('warn', 'qq image skipped', { requested: wanted.length, resolved: out.length })
+    }
+    return out
+  }
+
   const allow = (userId: number): boolean => {
     // 白名单为空 = 谁都别问（fail-closed）；设置层也会挡，这里是最后一道
     if (!config || config.allowUsers.length === 0) return false
@@ -296,9 +338,17 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
   const answer = async (inbound: QqInbound): Promise<void> => {
     const conversationId = `qq-${inbound.userId}`
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), askTimeoutMs)
+    let timer: ReturnType<typeof setTimeout> | null = null
     try {
-      const result = await deps.ask({ text: inbound.text, conversationId, signal: controller.signal })
+      // 先取图（各自超时），再开始算问答超时：下载慢不该把模型请求挤掉
+      const images = await resolveImages(inbound.images)
+      timer = setTimeout(() => controller.abort(), askTimeoutMs)
+      const result = await deps.ask({
+        text: inbound.text,
+        conversationId,
+        signal: controller.signal,
+        ...(images.length > 0 ? { images } : {})
+      })
       const text = formatAskResult(result)
       const parts = splitForQq(text, config?.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
       for (const part of parts) {
@@ -321,7 +371,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
         aborted ? '这条查得太久了，先停在这。' : '这次没问出来，待会儿再试。'
       )
     } finally {
-      clearTimeout(timer)
+      if (timer !== null) clearTimeout(timer)
       pending = Math.max(0, pending - 1)
     }
   }

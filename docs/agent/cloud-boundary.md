@@ -48,6 +48,7 @@ interface AskOutbound {
 4. **本机策略不改变协议**：`createLocalAskOutbound()` 与云端策略输出的字段、截断、品牌完全一致，只跳过规则判定。
 5. **安全规则不能成为核心验收的前置**：核心单测 / 性能探针可注入本机策略；安全行为由 `tests/unit/ask-outbound.test.ts` 与既有脱敏用例单独守。
 6. **旧导出只做兼容**：`redact.ts` 里的 `buildChainAskPayload()` / `buildChainAskLoopPayload()` 仍保留给旧管线、`deepseek.ts`、`fake-llm.ts` 与既有测试；新代码不要再 import 它们。
+7. **会话回放只信云端视图（D64）**：`AskConversationPort` 存的 `CloudAskConversationTurn` 是**已经过策略、当时原样发出去**的消息；回放时逐字节透传，**不得从原始文本重建、不得二次脱敏**（二次处理会改前缀，也会把 `[已脱敏]` 再加工）。附件 / 图片同样是消息的一部分：必须原样保留与回放，只有压缩整轮丢弃时才随轮删除；不得单独删图。会话存储只能在组合根（`main/ask-conversation.ts`）按 conversationId 存取，不能成为绕开策略的新入口。
 
 ## 4. 现状与迁移
 

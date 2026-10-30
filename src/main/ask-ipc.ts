@@ -137,10 +137,11 @@ export interface AskIpcDeps {
   getWindow: () => BrowserWindow | null
   ask: (question: string, context: AskQueryContext) => Promise<ChainAskResult>
   /**
-   * 本地命令（memory-life M1）：`/help`、`/backup`…
+   * 本地命令（memory-life M1/M2/M3）：`/help`、`/backup`、`/log`、`/compact`…
    * 返回非 null = 命中命令（回执直接给界面，不调模型、不进历史）；null = 不是命令，照常提问。
+   * `context.conversationId` 给 `/compact` 用（压哪个会话）。
    */
-  command?: (text: string) => Promise<ChainAskResult | null>
+  command?: (text: string, context?: { conversationId?: string }) => Promise<ChainAskResult | null>
   segment: (segmentId: number) => SegmentEvidence | null
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
@@ -323,11 +324,17 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         if (typeof rawQuestion !== 'string') return failure('问题不合法')
         const asked = rawQuestion.trim()
         if (asked === '') return failure('问题是空的')
+        // 会话 id：老调用方（纯字符串）没有就现造一个，保证每次提问都有归属。
+        // 命令（尤其 `/compact`）也要用它，所以放在命令之前解析。
+        const conversationId =
+          typeof payload.conversationId === 'string' && CONVERSATION_ID_RE.test(payload.conversationId)
+            ? payload.conversationId
+            : `c${Date.now().toString(36)}`
         // 本地命令先过（方案 §6）：命中就在本地执行、回一条文本，不调模型、不写会话 / 历史。
         // 放在问题长度校验之前：命令的参数长度不该受「提问 500 字」限制。
         if (deps.command) {
           try {
-            const handled = await deps.command(asked)
+            const handled = await deps.command(asked, { conversationId })
             if (handled !== null) return handled
           } catch (error) {
             deps.log('warn', 'ask command failed', { error: String(error) })
@@ -337,11 +344,6 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         if (asked.length > ASK_QUESTION_MAX_CHARS) {
           return failure(`问题太长（上限 ${ASK_QUESTION_MAX_CHARS} 字）`)
         }
-        // 会话 id：老调用方（纯字符串）没有就现造一个，保证每次提问都有归属
-        const conversationId =
-          typeof payload.conversationId === 'string' && CONVERSATION_ID_RE.test(payload.conversationId)
-            ? payload.conversationId
-            : `c${Date.now().toString(36)}`
 
         // 选区问答：截图路径只做形状校验，真正的「在不在 ask-shots 里」由主进程 deps 校验
         const rawImage = payload.imagePath

@@ -202,6 +202,8 @@
 | `status.branch` 在 detached 时是 `'HEAD'`，不是 null | 2026-10-30 做 M2 节点命令：`/use <提交>` 后判「是否停在历史提交」，用 `status.branch === null` 永远不成立——`readStatus` 里 `symbolic-ref` 失败会回退 `rev-parse --abbrev-ref HEAD`，detached 时它返回字符串 `HEAD` | 判 detached 一律用 `repo.head()`（`symbolic-ref --short -q HEAD`，失败即 detached、`branch` 为 null）；`status.branch` 只适合显示，不适合做状态判断 |
 | 切节点后不重载会话 = 换了个盘、还在聊旧记忆 | 2026-10-30 M2：`git checkout` 会把 `conversations/` 整份换成目标节点的文件，但注册表里 `for(id)` 的 store 有内存缓存，不 `reload()` 的话下一问仍是旧节点的上下文（模型「记得」切走前的话） | 切 / 分叉成功后调 `askConversations.reload()`（只清 Map、不删文件）；`reload()` 与 `clear()` 别混用，后者连盘上文件一起删 |
 | 真 git 单测在并行下会超 vitest 默认 5s | 2026-10-30 M2：`main-memory-repo.test.ts` 单个用例（init + 提交 + checkout）串起来接近 20s，全量并行（152 worker）时默认 5s 会随机红 | 这类 describe 写 `{ timeout: 30_000 }`；产品里的仓超时仍是 20s / 推送 60s，两套数不要混 |
+| 会话不再自动裁剪，长聊天会一路涨到额度 | 2026-10-30 M3（D69）：去掉了 80k 自动丢轮（生命口径要求上下文真的变大）；不 `/compact` 就会一直涨，到 500K 冻结 | `<now>` 生命行会提前显示「还剩 X%」；看到掉得厉害就 `/compact`。旧轮原文在 git 历史里，`/use <sha>` 可回看 |
+| `/compact` 只压当前会话，不是整个节点 | 2026-10-30 M3：M1 拍板会话按 `conversationId` 一文件（1=A），所以 `/compact` 压的是桌面窗口**当前这个会话**，不是节点下所有会话 | 命令需要 conversationId（`ask-ipc` 提前解析并传给 command）；QQ 侧 M5 接命令时也要传；别按「整个节点一份 turns.jsonl」去理解 |
 
 ## 规则
 

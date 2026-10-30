@@ -409,9 +409,19 @@ export interface ChainAskLoopPayload {
   readonly recent?: AskRecentSegment
   /** 开场注入（新对话第一问才出现；见 `RedactableAskOpening`） */
   readonly opening?: CloudAskOpening
+  /** 当前节点的生命（M3；每轮现算） */
+  readonly life?: AskLifeState
   /** 用户随本轮问题上传的附件（图片 / 文本文件；没有就不出现） */
   readonly attachments?: CloudAskAttachments
   readonly [chainAskLoopBrand]: true
+}
+
+/** 当前节点的生命（M3）：每轮由组合根现算，只进 `<now>`，不进 system */
+export interface AskLifeState {
+  /** 最近一次请求的上下文占用（prompt + completion） */
+  readonly used: number
+  /** 一条命的额度 */
+  readonly limit: number
 }
 
 export interface ChainAskLoopBuildInput {
@@ -433,6 +443,8 @@ export interface ChainAskLoopBuildInput {
   recent?: AskRecentSegment
   /** 开场注入（新对话第一问；送云前逐段过策略） */
   opening?: RedactableAskOpening
+  /** 当前节点的生命（M3；每轮现算，`<now>` 里的一行事实，不过策略——数字不是隐私） */
+  life?: AskLifeState
   /** 用户随本轮问题上传的附件（用户主动提供，不过脱敏墙） */
   attachments?: RedactableAskAttachments
 }
@@ -449,6 +461,22 @@ export interface ChainAskLoopBuildResult {
   blockedSegmentIds: number[]
 }
 
+/** `/compact` 摘要的送云载荷（M3）：一段已过策略的会话原文 */
+export interface AskSummaryPayload {
+  readonly text: string
+}
+
+export interface AskSummaryBuildResult {
+  payload: AskSummaryPayload
+  /** 过策略后的字符数 */
+  chars: number
+  /** 整段被策略挡下（不该出云） */
+  blocked: boolean
+}
+
+/** 一次摘要最多送多少旧对话（字符）；超出由调用方先截断 */
+export const ASK_SUMMARY_MAX_CHARS = 60_000
+
 /** 出云载荷组装端口：核心只依赖这个接口，不依赖任何具体安全实现 */
 export interface AskOutbound {
   buildAsk(
@@ -457,6 +485,8 @@ export interface AskOutbound {
     options?: AskBuildOptions
   ): ChainAskBuildResult
   buildLoop(input: ChainAskLoopBuildInput): ChainAskLoopBuildResult
+  /** `/compact` 的摘要载荷：只过策略 + 截断，不拼问记忆的消息 */
+  buildSummary(text: string): AskSummaryBuildResult
 }
 
 /* ------------------------------------------------------------------ */
@@ -730,6 +760,13 @@ function clockTime(ts: number): string {
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
 }
 
+/** token 数 → `310K` / `820`（生命行给量级就够，不报个位） */
+function formatTokenAmount(value: number): string {
+  const tokens = Math.max(0, Math.round(value))
+  if (tokens < 1000) return String(tokens)
+  return `${Math.round(tokens / 1000)}K`
+}
+
 /**
  * 本轮 `<now>` 正文。只拼已经过策略的字段（opening / recent），本地时间不是隐私；
  * 没有屏幕工具就不写数据边界 / 最近段（与 D62 的模式口径一致）。
@@ -745,6 +782,14 @@ function renderNowText(
   ]
   if (opening?.facts !== undefined && opening.facts !== '') {
     lines.push(`此刻：${opening.facts}`)
+  }
+  // 生命（M3）：当前节点还剩多少上下文额度。让它自己知道「快想不动了」，
+  // 而不是等 /compact 或冻结时才发现；数字来自最近一次请求的 usage。
+  if (input.life !== undefined) {
+    const limit = Math.max(1, input.life.limit)
+    const remaining = Math.max(0, Math.min(limit, limit - input.life.used))
+    const percent = Math.round((remaining / limit) * 100)
+    lines.push(`生命：还剩 ${percent}%（${formatTokenAmount(remaining)} token）`)
   }
   if (opening?.remembered !== undefined && opening.remembered.length > 0) {
     lines.push('你想到的（只是联想，不一定对；想核对就用 recall_diary / read_diary）：')
@@ -987,6 +1032,7 @@ export function buildAskLoopPayload(
       ...(input.digest !== undefined && input.digest !== '' ? { digest: input.digest } : {}),
       ...(recent ? { recent } : {}),
       ...(opening ? { opening } : {}),
+      ...(input.life !== undefined ? { life: input.life } : {}),
       ...(attachments ? { attachments } : {})
     } as unknown as ChainAskLoopPayload,
     questionBlocked: asked.blocked,
@@ -1002,11 +1048,23 @@ export const passThroughAskPolicy: AskTextPolicy = {
   redact: (text) => ({ text, redacted: false, blocked: false })
 }
 
+/** `/compact` 摘要载荷：整段先过策略再截断；被挡就空文本（调用方不出云） */
+function buildAskSummaryPayload(text: string, policy: AskTextPolicy): AskSummaryBuildResult {
+  const redacted = policy.redact(text ?? '')
+  const trimmed = redacted.text.slice(0, ASK_SUMMARY_MAX_CHARS)
+  return {
+    payload: { text: redacted.blocked ? '' : trimmed },
+    chars: redacted.blocked ? 0 : trimmed.length,
+    blocked: redacted.blocked
+  }
+}
+
 /** 用指定策略组装载荷（云端 / 本机共用同一套协议实现） */
 export function createAskOutbound(policy: AskTextPolicy): AskOutbound {
   return {
     buildAsk: (question, evidence, options) => buildAskPayload(question, evidence, policy, options),
-    buildLoop: (input) => buildAskLoopPayload(input, policy)
+    buildLoop: (input) => buildAskLoopPayload(input, policy),
+    buildSummary: (text) => buildAskSummaryPayload(text, policy)
   }
 }
 

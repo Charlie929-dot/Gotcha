@@ -1,11 +1,11 @@
 /**
- * 问记忆 · 会话只追加（D64）
+ * 问记忆 · 会话只追加（D64 / M3 D69）
  *
  * 守四件事：
  * 1. 同一会话第二问的消息序列 = 第一问 + 追加，前面逐字节不变（前缀缓存的前提）；
  * 2. 工具轮（assistant tool_calls / tool 结果 / reasoning）也进会话，下一问原样重放；
  * 3. system 不随时间 / 数据边界变化（动态事实在 <now> 里）；
- * 4. 超预算时只裁最旧的轮次，压成 digest，最新几轮保留全文。
+ * 4. **不再自动裁剪**（M3 / D69）：超预算也照常追加；旧轮只在 `/compact` 时压成摘要。
  */
 
 import Database from 'better-sqlite3'
@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { askChain } from '../../src/chain/agent/ask'
 import {
   appendAskConversationTurn,
+  compactAskConversation,
   emptyAskConversation,
   type CloudAskConversationTurn
 } from '../../src/chain/agent/conversation'
@@ -201,24 +202,20 @@ describe('图片：只有压缩才删', () => {
     expect(second.some((message) => message.images?.includes(TINY))).toBe(true)
   })
 
-  it('压缩时整轮丢弃（图片随轮走）；保留轮的图片一张都不删', () => {
-    let conversation = appendAskConversationTurn(emptyAskConversation(), turnWithImage(0), {
-      maxChars: 50,
-      keepTurns: 1
-    })
-    conversation = appendAskConversationTurn(conversation, turnWithImage(1), {
-      maxChars: 50,
-      keepTurns: 1
-    })
-    expect(conversation.turns).toHaveLength(1)
-    expect(conversation.digest).toContain('问 0')
+  it('压缩（/compact）：整轮丢弃旧轮；保留轮的图片一张都不删', () => {
+    let conversation = appendAskConversationTurn(emptyAskConversation(), turnWithImage(0))
+    conversation = appendAskConversationTurn(conversation, turnWithImage(1))
+    const compacted = compactAskConversation(conversation, '之前聊过：问 0 → 答 0', 1)
+    expect(compacted.dropped).toBe(1)
+    expect(compacted.conversation.turns).toHaveLength(1)
+    expect(compacted.conversation.digest).toContain('问 0')
     // 保留轮（第 1 轮）的图必须还在：删图会改前缀、缓存失效
-    expect(conversation.turns[0]?.attachments?.images).toEqual([TINY])
-    expect(conversation.turns[0]?.answer).toContain('答 1')
+    expect(compacted.conversation.turns[0]?.attachments?.images).toEqual([TINY])
+    expect(compacted.conversation.turns[0]?.answer).toContain('答 1')
   })
 })
 
-describe('只追加：裁剪与摘要', () => {
+describe('只追加：不自动裁剪（M3 / D69）', () => {
   const turn = (index: number): CloudAskConversationTurn => ({
     question: `问 ${index} ${'q'.repeat(40)}`,
     now: '当前时间：x',
@@ -226,7 +223,7 @@ describe('只追加：裁剪与摘要', () => {
     answer: `答 ${index} ${'a'.repeat(80)}`
   })
 
-  it('超预算只裁最旧的，最近几轮保留全文；被裁的压进 digest', () => {
+  it('超预算也不自动丢轮，digest 不动（旧轮留给 /compact）', () => {
     let conversation = emptyAskConversation()
     for (let index = 0; index < 6; index += 1) {
       conversation = appendAskConversationTurn(conversation, turn(index), {
@@ -234,13 +231,29 @@ describe('只追加：裁剪与摘要', () => {
         keepTurns: 2
       })
     }
-    expect(conversation.turns).toHaveLength(2)
-    expect(conversation.turns.map((item) => item.answer)).toEqual([
+    expect(conversation.turns).toHaveLength(6)
+    expect(conversation.turns.map((item) => item.answer)).toEqual(
+      Array.from({ length: 6 }, (_, index) => expect.stringContaining(`答 ${index}`))
+    )
+    expect(conversation.digest).toBe('')
+  })
+
+  it('/compact 只留最近 N 轮，摘要进 digest；轮数不够时不压', () => {
+    let conversation = emptyAskConversation()
+    for (let index = 0; index < 6; index += 1) {
+      conversation = appendAskConversationTurn(conversation, turn(index))
+    }
+    const short = compactAskConversation(conversation, '摘要', 6)
+    expect(short.dropped).toBe(0)
+    expect(short.conversation).toBe(conversation)
+
+    const compacted = compactAskConversation(conversation, '之前聊过 0–3 轮', 2)
+    expect(compacted.dropped).toBe(4)
+    expect(compacted.conversation.turns.map((item) => item.answer)).toEqual([
       expect.stringContaining('答 4'),
       expect.stringContaining('答 5')
     ])
-    expect(conversation.digest).toContain('问 0')
-    expect(conversation.digest).toContain('答 0')
+    expect(compacted.conversation.digest).toContain('之前聊过 0–3 轮')
   })
 
   it('digest 挂在第一条 user 消息里（system 永不改；没有连续 user）', () => {

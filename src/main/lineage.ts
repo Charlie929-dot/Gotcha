@@ -40,6 +40,11 @@ export interface LineageBranch {
   parent: string | null
   created_at: number
   status: BranchStatus
+  /**
+   * 这个节点的上下文占用（最近一次请求的 prompt+completion，M3）。
+   * 按**节点**记而不是按代：同一代的不同分支各有各的上下文（方案 §4 / §5.1）。
+   */
+  life_tokens_used: number
 }
 
 export interface Lineage {
@@ -102,7 +107,9 @@ function parseBranch(value: unknown): LineageBranch | null {
     generation,
     parent: value.parent === null ? null : readString(value.parent),
     created_at: createdAt,
-    status
+    status,
+    // M2 之前写的家谱没有这个字段：缺省 0（旧节点从下一次请求开始计）
+    life_tokens_used: readNumber(value.life_tokens_used) ?? 0
   }
 }
 
@@ -154,7 +161,8 @@ export function emptyLineage(now: number): Lineage {
         generation: 'gen-1',
         parent: null,
         created_at: now,
-        status: 'alive'
+        status: 'alive',
+        life_tokens_used: 0
       }
     ]
   }
@@ -294,7 +302,8 @@ export function withBranchAdded(lineage: Lineage, input: AddBranchInput): Lineag
         generation: input.generation,
         parent: input.parent,
         created_at: input.at,
-        status: 'alive'
+        status: 'alive',
+        life_tokens_used: 0
       }
     ]
   }
@@ -317,4 +326,58 @@ export function withBranchRemoved(lineage: Lineage, branch: string): Lineage | n
   if (lineage.generations.some((item) => item.branch === branch)) return null
   if (lineage.branches.some((item) => item.parent === branch)) return null
   return { ...lineage, branches: lineage.branches.filter((item) => item.branch !== branch) }
+}
+
+/* ------------------------------------------------------------------ */
+/* 生命（M3）：按节点记账 / 读剩余                                      */
+/* ------------------------------------------------------------------ */
+
+export interface LineageLife {
+  branch: string
+  /** 最近一次请求的上下文占用（prompt+completion） */
+  used: number
+  /** 一条命的额度（`life_tokens`） */
+  limit: number
+  /** 还能用多少（下限 0） */
+  remaining: number
+  /** 剩余百分比（0–100，取整） */
+  percent: number
+}
+
+/** 读某节点的生命；节点不存在返回 null（调用方按「还没记账」处理） */
+export function lifeOf(lineage: Lineage, branch: string): LineageLife | null {
+  const node = findBranch(lineage, branch)
+  if (node === null) return null
+  const used = Math.max(0, Math.round(node.life_tokens_used))
+  const limit = lineage.life_tokens
+  const remaining = Math.max(0, limit - used)
+  return {
+    branch,
+    used,
+    limit,
+    remaining,
+    percent: limit > 0 ? Math.round((remaining / limit) * 100) : 0
+  }
+}
+
+/**
+ * 每轮 ask 结束记一次：这个节点的 `life_tokens_used` = 最近一次请求的上下文占用。
+ * 不是累计消耗（方案 §5.1）；记账失败只返回 false，不影响这一轮回答。
+ */
+export async function recordLineageUsage(
+  filePath: string,
+  branch: string,
+  tokens: number
+): Promise<boolean> {
+  const read = await readLineage(filePath)
+  if (read.status !== 'ok') return false
+  if (findBranch(read.lineage, branch) === null) return false
+  const used = Math.max(0, Math.round(Number.isFinite(tokens) ? tokens : 0))
+  const next: Lineage = {
+    ...read.lineage,
+    branches: read.lineage.branches.map((item) =>
+      item.branch === branch ? { ...item, life_tokens_used: used } : item
+    )
+  }
+  return writeLineage(filePath, next)
 }

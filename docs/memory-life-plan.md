@@ -1,6 +1,6 @@
 # 记忆生命与分支（memory-life）· 方案 v1
 
-> 状态：**M1–M2 已实现**（2026-10-30，D67：仓 / 家谱 / 会话与图片落盘 / 每日提交 / `/help` `/backup`；D68：节点命令 `/log` `/new` `/use` `/del` + 历史提交自动分叉），M3–M6 未开工。拍板人原话：「把记忆做成 github 仓库」「生命尽头写一封信传给女儿」「在分支上随意控制记忆版本」。
+> 状态：**M1–M3 已实现**（2026-10-30，D67：仓 / 家谱 / 会话与图片落盘 / 每日提交 / `/help` `/backup`；D68：节点命令 `/log` `/new` `/use` `/del` + 历史提交自动分叉；D69：生命记账 / `<now>` 生命行 / `/compact` / 冻结 / 去掉自动裁剪），M4–M6 未开工。拍板人原话：「把记忆做成 github 仓库」「生命尽头写一封信传给女儿」「在分支上随意控制记忆版本」。
 > 事实源：`src/chain/agent/*`（会话 / 载荷 / 工具循环）、`src/main/index.ts`（组合根）、`src/main/qq/*`（QQ 通道 / NapCat）、`src/memory/*`（个人记忆索引）、`src/main/ask-history.ts`（桌面问答历史）。
 > 取代 / 搁置：`docs/agent/llm-call.md` 第 4 步（perceive / 快照）**搁置**；D64 的「自动裁剪 + digest」被本方案的手动 `/compact` 取代；P2（工具目录搬家）、P4（NapCat 拆分）不做。
 

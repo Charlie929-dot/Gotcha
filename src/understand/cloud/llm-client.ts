@@ -7,6 +7,7 @@
  */
 
 import type {
+  AskSummaryPayload,
   ChainAskLoopPayload,
   ChainAskPayload,
   ChainExtractPayload,
@@ -53,6 +54,12 @@ export interface LlmUsage {
 
 export interface LlmJsonResult {
   json: unknown
+  usage: LlmUsage
+}
+
+/** `/compact` 摘要的响应（M3）：一段纯文本 + 本次用量 */
+export interface LlmSummaryResult {
+  summary: string
   usage: LlmUsage
 }
 
@@ -149,6 +156,14 @@ export interface LlmClient {
     payload: ChainAskLoopPayload,
     options?: LlmCompleteOptions
   ): Promise<LlmAskLoopResult>
+  /**
+   * `/compact` 摘要（M3）：一段对话原文 → 一段纯文本摘要。
+   * **可选**：没这个能力的客户端由调用方报 `failed`，不静默降级。
+   */
+  completeSummary?(
+    payload: AskSummaryPayload,
+    options?: LlmCompleteOptions
+  ): Promise<LlmSummaryResult>
 }
 
 /** 可重试性由子类 / 连接层决定，业务层只按类型判断 */

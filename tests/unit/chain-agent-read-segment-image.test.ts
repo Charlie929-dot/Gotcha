@@ -127,7 +127,8 @@ describe('载荷：截图只挂 turn.images，正文脱敏时不附图', () => {
         throw new Error('not used')
       },
       buildLoop: (input) =>
-        buildAskLoopPayload(input, { redact: (text) => ({ text, redacted: false, blocked: false }) })
+        buildAskLoopPayload(input, { redact: (text) => ({ text, redacted: false, blocked: false }) }),
+      buildSummary: (text) => ({ payload: { text }, chars: text.length, blocked: false })
     }
     const built = outbound.buildLoop(
       loopInput({
@@ -164,7 +165,8 @@ describe('载荷：截图只挂 turn.images，正文脱敏时不附图', () => {
             redacted: text.includes('secret'),
             blocked: false
           })
-        })
+        }),
+      buildSummary: (text) => ({ payload: { text }, chars: text.length, blocked: false })
     }
     const built = outbound.buildLoop(
       loopInput({

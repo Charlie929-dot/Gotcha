@@ -44,16 +44,48 @@ export interface CommandDeps {
   lineageFile: string
   /** 切节点后清掉会话内存缓存：下次提问从盘上（目标节点）重读 */
   reloadConversations?: () => void
+  /**
+   * `/compact`（M3）：压当前会话的旧轮。由组合根注入（要调模型 + 写会话 + 提交），
+   * 没注入就回「还没接上」。
+   */
+  compact?: (conversationId: string | undefined) => Promise<CompactOutcome>
   now?: () => number
   /** 名字 → slug；测试可注入固定实现（默认 pinyin-pro） */
   slugify?: (name: string) => string | null
 }
 
+/** `/compact` 的结果（M3）：成功只报数字，失败报原因，不把底层异常原文漏到界面 */
+export type CompactOutcome =
+  | {
+      ok: true
+      /** 压掉几轮 */
+      dropped: number
+      /** 保留几轮原文 */
+      kept: number
+      /** 摘要字符数 */
+      summaryChars: number
+      beforeChars: number
+      afterChars: number
+    }
+  | {
+      ok: false
+      reason:
+        | 'no-session'
+        | 'too-short'
+        | 'consent'
+        | 'budget'
+        | 'blocked'
+        | 'no-client'
+        | 'failed'
+        | 'unavailable'
+      detail?: string
+    }
+
 /** 方案里定义过的命令（含未实现的）：用于区分「拼错」与「还没做」 */
 export const KNOWN_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact'] as const
 
 /** 当前已经接上的命令 */
-export const READY_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel'] as const
+export const READY_COMMANDS = ['help', 'log', 'new', 'use', 'del', 'backup', 'cancel', 'compact'] as const
 
 /** 命名 / 删除确认的等待时限（方案 §6.2：60 秒超时，可 /cancel） */
 export const COMMAND_WAIT_TIMEOUT_MS = 60_000
@@ -204,7 +236,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
   }
   const active = read.status === 'ok' ? read.lineage.active : 'default'
   return [
-    '问记忆 · 记忆仓（M2 节点）',
+    '问记忆 · 记忆仓（M3 节点 + 生命）',
     '',
     '可用命令：',
     '  /help            看这一页',
@@ -212,6 +244,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /new <名字>      从当前节点开新分支（中文转拼音）',
     '  /use <名字|编号|提交>  切节点；切历史提交 = 只读查看',
     '  /del <名字>      删节点（要回 confirm）',
+    '  /compact         压旧段、保留最近几轮（过一次模型）',
     '  /backup          立即提交记忆；配了远端就推送',
     '  /cancel          取消等待中的命名 / 删除',
     '',
@@ -384,14 +417,21 @@ async function deleteNode(deps: CommandDeps, branch: string): Promise<string> {
 
 type Pending = { kind: 'name' } | { kind: 'delete'; branch: string } | null
 
+/** 命令上下文：`/compact` 要知道压哪个会话（桌面窗口的 conversationId） */
+export interface CommandContext {
+  conversationId?: string
+}
+
 /**
  * 返回处理函数：不是命令 → null（调用方继续走模型）；
- * 是命令 → 一条 `command` 回执（永不出网，除了 /backup 的 git push）。
+ * 是命令 → 一条 `command` 回执（永不出网，除了 /backup 的 git push 与 /compact 的摘要）。
  *
  * 等待状态（命名 / 删除确认）也在这里：等待中的**非命令文本**会被当名字或 confirm，
  * 其它输入视为放弃等待、照常走模型。
  */
-export function createCommandHandler(deps: CommandDeps): (text: string) => Promise<ChainAskResult | null> {
+export function createCommandHandler(
+  deps: CommandDeps
+): (text: string, context?: CommandContext) => Promise<ChainAskResult | null> {
   const now = deps.now ?? Date.now
   const slugify = deps.slugify ?? slugifyNodeName
   let pending: Pending = null
@@ -409,7 +449,39 @@ export function createCommandHandler(deps: CommandDeps): (text: string) => Promi
     return commandResult(await createNode(deps, slug, at))
   }
 
-  return async (text) => {
+  const handleCompact = async (context: CommandContext | undefined): Promise<ChainAskResult> => {
+    if (deps.compact === undefined) return commandResult('/compact 还没接上。')
+    const outcome = await deps.compact(context?.conversationId)
+    if (outcome.ok) {
+      return commandResult(
+        [
+          '===compact===',
+          `压掉 ${outcome.dropped} 轮（保留最近 ${outcome.kept} 轮原文），摘要 ${outcome.summaryChars} 字。`,
+          `会话从 ${outcome.beforeChars} 字降到 ${outcome.afterChars} 字；下一问按新上下文重算生命。`
+        ].join('\n')
+      )
+    }
+    switch (outcome.reason) {
+      case 'no-session':
+        return commandResult('/compact 得在桌面窗口里用（这里不知道压哪个会话）。')
+      case 'too-short':
+        return commandResult(outcome.detail ?? '轮数还不够，没什么可压的。')
+      case 'consent':
+        return commandResult('还没确认出云，先不压缩（摘要要过一次模型）。')
+      case 'budget':
+        return commandResult('今天的模型额度用完了，压不了。')
+      case 'blocked':
+        return commandResult('这段会话里有敏感内容，不能送去摘要。')
+      case 'no-client':
+        return commandResult('没有可用的模型客户端（缺 key / 配置不对）。')
+      case 'unavailable':
+        return commandResult('记忆仓不可用，没有压缩。')
+      default:
+        return commandResult('摘要失败（网络 / 模型），细节看日志。')
+    }
+  }
+
+  return async (text, context) => {
     const at = now()
     expire(at)
     const trimmed = text.trim()
@@ -445,6 +517,8 @@ export function createCommandHandler(deps: CommandDeps): (text: string) => Promi
         pending = null
         return commandResult('已取消。')
       }
+      case 'compact':
+        return handleCompact(context)
       case 'new': {
         const name = parsed.args.join(' ').trim()
         if (name === '') {
@@ -477,7 +551,7 @@ export function createCommandHandler(deps: CommandDeps): (text: string) => Promi
         )
       }
       default:
-        return commandResult(`/${parsed.name} 还没接上（M2 有 /help /log /new /use /del /backup）。`)
+        return commandResult(`/${parsed.name} 还没接上。`)
     }
   }
 }

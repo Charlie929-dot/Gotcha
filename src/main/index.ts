@@ -129,10 +129,17 @@ import {
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
 import { createAskConversationRegistry } from './ask-conversation'
-import { createCommandHandler, memoryDayKey } from './commands'
-import { ensureLineage, lineageSnapshot, readLineage } from './lineage'
+import { createCommandHandler, memoryDayKey, type CompactOutcome } from './commands'
+import { lifeOf, ensureLineage, lineageSnapshot, readLineage, recordLineageUsage } from './lineage'
 import { createMemoryRepo } from './memory-repo'
 import { forkDetachedIfNeeded } from './node-fork'
+import {
+  appendAskConversationTurn,
+  askConversationChars,
+  ASK_CONVERSATION_KEEP_TURNS,
+  compactAskConversation,
+  type CloudAskConversation
+} from '../chain/agent/conversation'
 import {
   appendAskHistory,
   ASK_HISTORY_FILE,
@@ -2029,6 +2036,105 @@ if (primaryInstance) {
       })().catch((error) => captureLog('warn', 'memory day commit failed', { error: String(error) }))
     }
     /**
+     * 生命（M3）：`life_tokens_used` 按节点记，每轮 ask 前现读。
+     * 读不到就不显示（不阻塞）；数字只进 `<now>` 的一行事实，不是证据。
+     */
+    const lifeStateNow = async (): Promise<{ used: number; limit: number } | undefined> => {
+      try {
+        const read = await readLineage(lineageFile)
+        if (read.status !== 'ok') return undefined
+        const life = lifeOf(read.lineage, read.lineage.active)
+        return life === null ? undefined : { used: life.used, limit: life.limit }
+      } catch {
+        return undefined
+      }
+    }
+    /** 生命用完了就拒绝提问（M3）：返回提示文本；没到额度返回 null */
+    const lifeEndedText = async (): Promise<string | null> => {
+      try {
+        const read = await readLineage(lineageFile)
+        if (read.status !== 'ok') return null
+        const life = lifeOf(read.lineage, read.lineage.active)
+        if (life === null || life.used < life.limit) return null
+        return `这一代的生命已经结束（${life.used} / ${life.limit} token）。/use 可以回看，或 /compact 续命。`
+      } catch {
+        return null
+      }
+    }
+    /**
+     * `/compact`（M3）：压当前会话的旧轮。**唯一会调模型的命令**——
+     * 过出云门（D24）/ 日额度（D22）/ 脱敏墙；失败不写会话，回执只报原因。
+     */
+    const compactConversation = async (
+      conversationId: string | undefined
+    ): Promise<CompactOutcome> => {
+      if (conversationId === undefined) return { ok: false, reason: 'no-session' }
+      const db = connections.queryDb()
+      if (!db) return { ok: false, reason: 'unavailable' }
+      if (getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) !== '1') {
+        return { ok: false, reason: 'consent' }
+      }
+      const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
+      if (budget > 0) {
+        const usage = readUsage(db, Date.now())
+        if (usage.promptTokens + usage.completionTokens >= budget) {
+          return { ok: false, reason: 'budget' }
+        }
+      }
+      const resolved = resolveClient()
+      const client = resolved.ok ? resolved.client : undefined
+      if (client?.completeSummary === undefined) return { ok: false, reason: 'no-client' }
+
+      const store = askConversations.for(conversationId)
+      const current = store.load()
+      if (current.turns.length <= ASK_CONVERSATION_KEEP_TURNS) {
+        return {
+          ok: false,
+          reason: 'too-short',
+          detail: `只有 ${current.turns.length} 轮，还不够压（至少 ${ASK_CONVERSATION_KEEP_TURNS + 1} 轮）。`
+        }
+      }
+      const older = current.turns.slice(0, -ASK_CONVERSATION_KEEP_TURNS)
+      const text = older.map((turn) => `问：${turn.question}\n答：${turn.answer}`).join('\n\n')
+      const built = askOutbound.buildSummary(text)
+      if (built.blocked || built.payload.text === '') return { ok: false, reason: 'blocked' }
+
+      let summary: string
+      let summaryUsage: { promptTokens: number; completionTokens: number }
+      try {
+        const result = await client.completeSummary(built.payload, { maxTokens: 2_000 })
+        summary = result.summary
+        summaryUsage = result.usage
+      } catch (error) {
+        captureLog('warn', 'memory compact summary failed', { error: String(error) })
+        return { ok: false, reason: 'failed' }
+      }
+
+      const compacted = compactAskConversation(current, summary, ASK_CONVERSATION_KEEP_TURNS)
+      if (compacted.dropped === 0) return { ok: false, reason: 'too-short' }
+      store.save(compacted.conversation)
+      // 摘要也是一次出云（用户主动）：记日账；不进这个节点的生命（它不是「上下文占用」）
+      try {
+        const writable = connections.ensureWritable().db
+        recordUsage(writable, Date.now(), {
+          calls: 1,
+          promptTokens: summaryUsage.promptTokens,
+          completionTokens: summaryUsage.completionTokens
+        })
+      } catch (error) {
+        captureLog('warn', 'memory compact usage record failed', { error: String(error) })
+      }
+      await memoryRepo.commit(`memory: compact ${memoryDayKey(Date.now())}`)
+      return {
+        ok: true,
+        dropped: compacted.dropped,
+        kept: compacted.conversation.turns.length,
+        summaryChars: summary.length,
+        beforeChars: askConversationChars(current),
+        afterChars: askConversationChars(compacted.conversation)
+      }
+    }
+    /**
      * 开场注入（D61，2026-10-30 收敛）：
      * - 「此刻」= 本地确定规则（时间 / 今天说过几句 / 上次多久前 / 日记记到哪天），**每轮都重算**
      *   （时间会走，旧数字会变成假话），不调模型；
@@ -2115,7 +2221,8 @@ if (primaryInstance) {
     const askOptionsFor = (
       db: ChainDb,
       context: AskQueryContext,
-      opening?: RedactableAskOpening
+      opening?: RedactableAskOpening,
+      life?: { used: number; limit: number }
     ): ChainAskOptions => {
       const mode = context.mode ?? DEFAULT_ASK_MODE
       const groups = askToolGroupsOf(mode)
@@ -2169,6 +2276,8 @@ if (primaryInstance) {
         tools: groups,
         // 新对话第一问：给 ta 一点「此刻」和「想到的」（D61）；续问/老对话不带
         ...(opening !== undefined ? { opening } : {}),
+        // 生命（M3）：每轮现算，进 `<now>` 的一行事实
+        ...(life !== undefined ? { life } : {}),
         // 多轮对话：同一会话之前的几轮（主进程只从自己落盘的历史里筛，渲染层伪造不了）
         history: context.history,
         // 会话（D64）：只追加的消息历史（工具轮也在里面），下一问原样重放
@@ -2203,6 +2312,16 @@ if (primaryInstance) {
           } catch (error) {
             captureLog('warn', 'ask usage record failed', { error: String(error) })
           }
+          // 生命（M3）：同一份 usage 记到当前节点（家谱 active）；失败只记日志
+          void (async () => {
+            const read = await readLineage(lineageFile)
+            if (read.status !== 'ok') return
+            await recordLineageUsage(
+              lineageFile,
+              read.lineage.active,
+              usage.promptTokens + usage.completionTokens
+            )
+          })().catch((error) => captureLog('warn', 'memory life record failed', { error: String(error) }))
         },
         log: (level, message, data) => captureLog(level, message, data)
       }
@@ -2262,6 +2381,16 @@ if (primaryInstance) {
           reloadConversations: () => askConversations.reload(),
           log: (level, message, data) => captureLog(level, message, data)
         })
+        // 生命用尽（M3）：同一代鱼，QQ 与桌面一样冻结
+        const ended = await lifeEndedText()
+        if (ended !== null) {
+          return {
+            kind: 'error',
+            reason: 'life-ended',
+            message: ended,
+            stats: { hits: 0, evidence: 0, cited: 0, questionChars: text.length }
+          }
+        }
         syncMemoryIfDue()
         const db = connections.queryDb()
         if (!db) {
@@ -2276,10 +2405,12 @@ if (primaryInstance) {
           signal,
           mode: DEFAULT_ASK_MODE
         }
+        const life = await lifeStateNow()
         const options = askOptionsFor(
           db,
           context,
-          await askOpeningFor(db, text, context, qqTalkTimes.get(conversationId) ?? [])
+          await askOpeningFor(db, text, context, qqTalkTimes.get(conversationId) ?? []),
+          life
         )
         // QQ 发来的图片：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
         const result = await askChain(
@@ -2375,6 +2506,16 @@ if (primaryInstance) {
           reloadConversations: () => askConversations.reload(),
           log: (level, message, data) => captureLog(level, message, data)
         })
+        // 生命用尽（M3）：这一代冻结，只读回看或 /compact 续命——不调模型、不记账
+        const ended = await lifeEndedText()
+        if (ended !== null) {
+          return {
+            kind: 'error',
+            reason: 'life-ended',
+            message: ended,
+            stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
+          }
+        }
         // 先把日记目录的增量同步进来（节流；失败只记日志，不挡住提问）。
         // **必须在取 queryDb 之前**：同步要开写连接，会把只读连接关掉，
         // 先取再同步会拿到一个已经关闭的句柄。
@@ -2388,18 +2529,21 @@ if (primaryInstance) {
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
           }
         }
-        return askChain(askOptionsFor(db, context, await askOpeningFor(db, question, context)), question)
+        const life = await lifeStateNow()
+        return askChain(askOptionsFor(db, context, await askOpeningFor(db, question, context), life), question)
           .then((result) => {
             // 记忆落仓不阻塞回答：一天一个提交（M1），失败了只是这次没进仓
             commitMemoryDay()
             return result
           })
       },
-      // 本地命令（M1/M2）：/help /log /new /use /del /backup；命中就本地执行，不调模型、不进问答历史
+      // 本地命令（M1/M2/M3）：/help /log /new /use /del /backup /compact
+      // 命中就本地执行、不调模型（/compact 例外：压摘要过一次模型）、不进问答历史
       command: createCommandHandler({
         repo: memoryRepo,
         lineageFile,
-        reloadConversations: () => askConversations.reload()
+        reloadConversations: () => askConversations.reload(),
+        compact: compactConversation
       }),
       // 「还要继续查吗」→ 恢复暂停的循环（问题用检查点里的原话，续查通道不再传）
       resume: async (resumeId, decision, context) => {

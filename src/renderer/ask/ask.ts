@@ -372,6 +372,7 @@ const ERROR_TEXT: Record<ChainAskErrorReason, string> = {
   'question-blocked': '这句话里有敏感内容（密码类），没有发出去。',
   unparseable: '模型这次答得不成形（结构不对），换个问法再试。',
   failed: '这次没查明白。',
+  'life-ended': '这一代的生命已经结束。/use 可以回看，或 /compact 续命。',
   aborted: '已停止。'
 }
 

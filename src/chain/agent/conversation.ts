@@ -10,10 +10,10 @@
  * - 不能再过一次脱敏墙（否则 `[已脱敏]` 会被二次处理，前缀就变了）；
  * - 它们只能由 `buildAskLoopPayload()` 产出，主进程只负责按会话存取。
  *
- * 裁剪是确定性的（不调模型）：超过**文字**预算时，从最旧的一轮开始丢，
- * 把「问 / 答」压成一行摘要放进 `digest`；最近 `KEEP_TURNS` 轮永远保留全文。
- * 图片不计入预算，也不会单独删：只有整轮被压缩掉时，图才随轮一起走。
- * 不做 LLM 摘要（多一次出云、多一份账单，先让结构跑通）。
+ * 2026-10-30 M3（D69）改口径：**不再自动裁剪**。生命 = 当前上下文 / 额度，
+ * 自动丢旧轮会让生命永远涨不到额度、冻结与传承都不会发生；旧轮只在用户主动
+ * `/compact` 时压成一份摘要（`compactAskConversation`），平时原样重放。
+ * 图片不单独删：只有整轮被压掉时，图才随轮一起走。
  */
 
 import type { CloudAskAttachments, CloudAskLoopTurn } from './payload'
@@ -102,35 +102,58 @@ function appendDigest(digest: string, line: string): string {
 }
 
 export interface AppendAskConversationOptions {
+  /** 已不再生效（M3 起不自动裁剪）；保留字段只为兼容老调用方 */
   maxChars?: number
+  /** 已不再生效；`/compact` 的保留轮数见 `compactAskConversation` */
   keepTurns?: number
 }
 
 /**
- * 追加一轮并按预算裁剪：只丢最旧的，最近 `keepTurns` 轮即使超预算也保留。
- * 纯函数——主进程 / 测试同一套口径，不依赖时间与模型。
+ * 追加一轮。**只追加，不裁剪**。
  *
- * 压缩是**唯一**允许替换历史的时机（2026-10-30 拍板）：只整轮丢弃（图片随轮一起走），
- * 保留轮里的图片一张都不删——删图同样会让前缀字节变化、缓存失效。
- * 预算只算文字：图片不计入，否则一张图就会立刻触发压缩、把缓存打掉。
+ * 2026-10-30 M3（D69）改口径：以前到 80k 文字就自动丢最旧的轮次（D64），
+ * 但生命 = 当前上下文 / 额度——自动裁剪会让生命永远停在 80k 字符附近，
+ * 冻结与 M4 传承都不会发生。所以旧轮只在用户主动 `/compact` 时压成摘要
+ * （`compactAskConversation`），平时原样重放；删图 / 删轮的时机仍然只有压缩。
  */
 export function appendAskConversationTurn(
   previous: CloudAskConversation,
   turn: CloudAskConversationTurn,
-  options: AppendAskConversationOptions = {}
+  _options: AppendAskConversationOptions = {}
 ): CloudAskConversation {
-  const maxChars = Math.max(1, options.maxChars ?? ASK_CONVERSATION_MAX_CHARS)
-  const keepTurns = Math.max(1, options.keepTurns ?? ASK_CONVERSATION_KEEP_TURNS)
-  const turns = [...previous.turns, turn]
-  let digest = previous.digest
-  let total = askConversationChars(previous) + askConversationTurnChars(turn)
+  return { digest: previous.digest, turns: [...previous.turns, turn] }
+}
 
-  while (total > maxChars && turns.length > keepTurns) {
-    const dropped = turns.shift()
-    if (dropped === undefined) break
-    total -= askConversationTurnChars(dropped)
-    digest = appendDigest(digest, digestLineOf(dropped))
+/**
+ * `/compact`：把「最近 keepTurns 轮」以外的旧轮压成一份摘要（LLM 产出，用户主动），
+ * 拼进 digest；保留的轮次原文不动（含图片）。
+ *
+ * 旧摘要 + 新摘要都留在 digest 里，超 `ASK_CONVERSATION_DIGEST_MAX_CHARS` 时
+ * 从**开头**截断（保留最近一次摘要的尾部）；旧轮原文仍在 git 历史里，可 `/use` 回看。
+ */
+export interface CompactAskConversationResult {
+  conversation: CloudAskConversation
+  /** 这次压掉几轮（0 = 没什么可压） */
+  dropped: number
+}
+
+export function compactAskConversation(
+  conversation: CloudAskConversation,
+  summary: string,
+  keepTurns = ASK_CONVERSATION_KEEP_TURNS
+): CompactAskConversationResult {
+  const keep = Math.max(1, Math.floor(keepTurns))
+  if (conversation.turns.length <= keep) {
+    return { conversation, dropped: 0 }
   }
-
-  return { digest, turns }
+  const dropped = conversation.turns.length - keep
+  const parts = [conversation.digest.trim(), summary.trim()].filter((part) => part !== '')
+  let digest = parts.join('\n')
+  if (digest.length > ASK_CONVERSATION_DIGEST_MAX_CHARS) {
+    digest = digest.slice(digest.length - ASK_CONVERSATION_DIGEST_MAX_CHARS)
+  }
+  return {
+    conversation: { digest, turns: conversation.turns.slice(-keep) },
+    dropped
+  }
 }

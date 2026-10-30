@@ -417,7 +417,11 @@ import { createCloudAskOutbound } from './ask-outbound'
 export {
   ASK_LOOP_READ_MAX_CHARS,
   ASK_LOOP_READ_MIN_CHARS,
+  ASK_SUMMARY_MAX_CHARS,
+  type AskLifeState,
   type AskLoopFreshness,
+  type AskSummaryBuildResult,
+  type AskSummaryPayload,
   type ChainAskBuildResult,
   type ChainAskLoopBuildResult,
   type ChainAskLoopPayload,

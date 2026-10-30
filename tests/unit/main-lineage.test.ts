@@ -12,10 +12,12 @@ import {
   emptyLineage,
   ensureLineage,
   generationOf,
+  lifeOf,
   lineageSnapshot,
   LINEAGE_LIFE_TOKENS,
   parseLineage,
   readLineage,
+  recordLineageUsage,
   withActive,
   withBranchAdded,
   withBranchRemoved,
@@ -61,7 +63,7 @@ describe('家谱', () => {
       active: 'spring',
       branches: [
         ...first.branches,
-        { branch: 'spring', generation: 'gen-1', parent: 'default', created_at: 2000, status: 'alive' as const }
+        { branch: 'spring', generation: 'gen-1', parent: 'default', created_at: 2000, status: 'alive' as const, life_tokens_used: 0 }
       ]
     }
     expect(await writeLineage(file, second)).toBe(true)
@@ -190,5 +192,70 @@ describe('家谱 · 节点（分支）操作', () => {
     const base = emptyLineage(1000)
     expect(generationOf(base, 'default')?.id).toBe('gen-1')
     expect(generationOf(base, 'nope')).toBeNull()
+  })
+})
+
+describe('生命记账（M3）', () => {
+  it('recordUsage 按节点记；lifeOf 算剩余与百分比', async () => {
+    const file = tempFile()
+    await ensureLineage(file, { now: 1 })
+    const base = emptyLineage(1)
+    const spring = withBranchAdded(base, {
+      branch: 'spring',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2
+    })
+    expect(spring).not.toBeNull()
+    if (spring === null) return
+    await writeLineage(file, spring)
+
+    expect(await recordLineageUsage(file, 'spring', 150_000)).toBe(true)
+    const read = await readLineage(file)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(lifeOf(read.lineage, 'spring')).toMatchObject({
+      used: 150_000,
+      limit: LINEAGE_LIFE_TOKENS,
+      remaining: 350_000,
+      percent: 70
+    })
+    // 兄弟节点各记各的
+    expect(lifeOf(read.lineage, 'default')).toMatchObject({ used: 0, percent: 100 })
+    // 不存在的节点不记
+    expect(await recordLineageUsage(file, 'nope', 1)).toBe(false)
+    // 用完时剩余 0、百分比 0（不出现负数）
+    expect(await recordLineageUsage(file, 'spring', 600_000)).toBe(true)
+    const done = await readLineage(file)
+    if (done.status !== 'ok') return
+    expect(lifeOf(done.lineage, 'spring')).toMatchObject({ remaining: 0, percent: 0 })
+  })
+
+  it('旧家谱没有 life_tokens_used 字段时按 0 读（向后兼容）', async () => {
+    const file = tempFile()
+    const raw = {
+      version: 1,
+      life_tokens: 500_000,
+      active: 'default',
+      generations: [
+        {
+          id: 'gen-1',
+          branch: 'default',
+          nickname: 'default',
+          mother: null,
+          born_at: 1,
+          died_at: null,
+          life_tokens_used: 0,
+          letter: null
+        }
+      ],
+      branches: [{ branch: 'default', generation: 'gen-1', parent: null, created_at: 1, status: 'alive' }]
+    }
+    writeFileSync(file, JSON.stringify(raw), 'utf8')
+    const read = await readLineage(file)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(read.lineage.branches[0]?.life_tokens_used).toBe(0)
+    expect(lifeOf(read.lineage, 'default')?.percent).toBe(100)
   })
 })

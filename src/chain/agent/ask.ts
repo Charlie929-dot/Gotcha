@@ -25,7 +25,13 @@ import {
 } from '../query'
 import { getSegmentDetail, type ChainDb } from '../store'
 import type { LlmClient, LlmUsage } from '../../understand/cloud/llm-client'
-import type { AskOutbound, AskRecentSegment, RedactableAskOpening, RedactableChainAskEvidence } from './payload'
+import type {
+  AskLifeState,
+  AskOutbound,
+  AskRecentSegment,
+  RedactableAskOpening,
+  RedactableChainAskEvidence
+} from './payload'
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
 import type { AskConversationPort } from './conversation'
@@ -113,6 +119,8 @@ export interface ChainAskOptions {
    * 新对话第一问出现；续查时片段从检查点沿用。没传 = 这个客户端不看这些。
    */
   opening?: RedactableAskOpening
+  /** 当前节点的生命（M3）：每轮现算，进 `<now>` 的一行事实 */
+  life?: AskLifeState
   /** 同一会话之前的几轮（续问）；不传 = 新对话 */
   history?: readonly ChainAskTurnContext[]
   /**
@@ -298,6 +306,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
               : pending?.opening
           return opening !== undefined ? { opening } : {}
         })(),
+        ...(options.life !== undefined ? { life: options.life } : {}),
         ...(options.searchBatch ? { searchBatch: options.searchBatch } : {}),
         ...(options.history ? { history: options.history } : {}),
         ...(options.recent ? { recent: options.recent } : {}),

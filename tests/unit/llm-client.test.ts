@@ -616,3 +616,30 @@ describe('DeepSeek 客户端 · 问记忆最终答复按文本', () => {
     expect(result?.json).toBe(content)
   })
 })
+
+describe('DeepSeek 客户端 · /compact 摘要（M3）', () => {
+  it('纯文本请求：不带 response_format / tools，返回 summary 与 usage', async () => {
+    const fetchImpl = vi.fn(async () => okResponse('之前聊过：用户在改记忆仓。'))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const result = await client.completeSummary?.({ text: '问：a\n答：b' })
+    expect(result?.summary).toContain('记忆仓')
+    expect(result?.usage).toEqual({ promptTokens: 10, completionTokens: 4 })
+
+    const [, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as Record<string, unknown> & {
+      messages: Array<{ role: string; content: string }>
+    }
+    expect(body).not.toHaveProperty('response_format')
+    expect(body).not.toHaveProperty('tools')
+    expect(body.messages).toHaveLength(2)
+    expect(body.messages[0]?.role).toBe('system')
+    expect(body.messages[0]?.content).toContain('记忆压缩器')
+    expect(body.messages[1]).toEqual({ role: 'user', content: '问：a\n答：b' })
+  })
+
+  it('空摘要报 parse 错误（不把空文本当成摘要）', async () => {
+    const fetchImpl = vi.fn(async () => okResponse('   '))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await expect(client.completeSummary?.({ text: 'x' })).rejects.toBeInstanceOf(LlmParseError)
+  })
+})

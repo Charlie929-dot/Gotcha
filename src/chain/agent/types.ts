@@ -222,6 +222,8 @@ export type ChainAskErrorReason =
   | 'unparseable'
   /** 客户端抛错（网络 / 截断 / 超时） */
   | 'failed'
+  /** 这一代的生命用完了（M3）：只读 / 回看 / `/compact` 续命 */
+  | 'life-ended'
   /** 用户点了停止（在途请求被取消，不是失败） */
   | 'aborted'
 

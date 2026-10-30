@@ -1,5 +1,5 @@
 /**
- * 本地命令（memory-life M1/M2）：解析 / /help / /log / /new / /use / /del / /backup / 未知。
+ * 本地命令（memory-life M1/M2/M3）：解析 / /help / /log / /new / /use / /del / /compact / /backup / 未知。
  * 用假仓，不碰真 git（真仓行为在 main-memory-repo.test.ts）。
  */
 
@@ -14,7 +14,8 @@ import {
   createCommandHandler,
   memoryDayKey,
   parseCommand,
-  slugifyNodeName
+  slugifyNodeName,
+  type CompactOutcome
 } from '../../src/main/commands'
 import {
   ensureLineage,
@@ -426,5 +427,41 @@ describe('命令执行', () => {
     const lineageFile = tempLineageFile()
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     expect(await run('昨天下午我在改什么')).toBeNull()
+  })
+
+  it('/compact：成功回执带数字，且把 conversationId 传下去', async () => {
+    const lineageFile = tempLineageFile()
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    expect(textOf(await run('/compact', { conversationId: 'c1' }))).toContain('/compact 还没接上')
+
+    let received: string | undefined
+    const compacted = createCommandHandler({
+      repo: fakeRepo(),
+      lineageFile,
+      compact: async (id) => {
+        received = id
+        return { ok: true, dropped: 3, kept: 6, summaryChars: 380, beforeChars: 42_000, afterChars: 8_000 }
+      }
+    })
+    const text = textOf(await compacted('/compact', { conversationId: 'c1' }))
+    expect(received).toBe('c1')
+    expect(text).toContain('===compact===')
+    expect(text).toContain('压掉 3 轮（保留最近 6 轮原文），摘要 380 字')
+    expect(text).toContain('从 42000 字降到 8000 字')
+  })
+
+  it('/compact：各种失败原因分开回，不漏底层异常', async () => {
+    const lineageFile = tempLineageFile()
+    const make = (outcome: CompactOutcome) =>
+      createCommandHandler({ repo: fakeRepo(), lineageFile, compact: async () => outcome })
+    expect(textOf(await make({ ok: false, reason: 'no-session' })('/compact'))).toContain('桌面窗口里用')
+    expect(
+      textOf(await make({ ok: false, reason: 'too-short', detail: '只有 2 轮，还不够压' })('/compact'))
+    ).toContain('只有 2 轮')
+    expect(textOf(await make({ ok: false, reason: 'consent' })('/compact'))).toContain('还没确认出云')
+    expect(textOf(await make({ ok: false, reason: 'budget' })('/compact'))).toContain('额度用完')
+    expect(textOf(await make({ ok: false, reason: 'blocked' })('/compact'))).toContain('敏感内容')
+    expect(textOf(await make({ ok: false, reason: 'no-client' })('/compact'))).toContain('模型客户端')
+    expect(textOf(await make({ ok: false, reason: 'failed' })('/compact'))).toContain('摘要失败')
   })
 })

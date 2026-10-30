@@ -29,6 +29,7 @@
  * - 「answer 说没找到但 citations 非空」强转 no-evidence（根因 7）。
  */
 import type {
+  AskLifeState,
   AskLoopFreshness,
   AskOutbound,
   AskRecentSegment,
@@ -134,6 +135,8 @@ export interface AskLoopContext {
    * 由组合根给出；载荷层统一过策略后再送云。
    */
   opening?: RedactableAskOpening
+  /** 当前节点的生命（M3）：每轮现算，拼进 `<now>`；不传 = 不显示 */
+  life?: AskLifeState
   /** 同一会话之前的几轮（续问）；没有就是新对话 */
   history?: readonly ChainAskTurnContext[]
   /** 提问前最后一段证据（指代线索；不是证据） */
@@ -322,6 +325,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       : {}),
     ...(ctx.history ? { history: ctx.history } : {}),
     ...(ctx.recent ? { recent: ctx.recent } : {}),
+    ...(ctx.life ? { life: ctx.life } : {}),
     ...(ctx.attachments ? { attachments: ctx.attachments } : {})
   })
   if (probe.questionBlocked) {
@@ -439,6 +443,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       ...(ctx.history ? { history: ctx.history } : {}),
       ...(ctx.recent ? { recent: ctx.recent } : {}),
       ...(ctx.opening ? { opening: ctx.opening } : {}),
+      ...(ctx.life ? { life: ctx.life } : {}),
       ...(ctx.attachments ? { attachments: ctx.attachments } : {})
     })
     // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；

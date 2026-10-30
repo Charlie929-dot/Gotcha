@@ -36,13 +36,16 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     writeFile: async () => true,
     readFile: async () => null,
     deleteFile: async () => true,
+    clearConversations: async () => true,
     head: async () => ({ branch: null, detached: true, sha: 'abc1234' }),
     switchBranch: async () => ({ ok: true }),
     switchCreate: async () => ({ ok: true }),
+    switchCreateOrphan: async () => ({ ok: true }),
     checkoutCommit: async () => ({ ok: true }),
     deleteBranch: async () => ({ ok: true }),
     listBranches: async () => [{ branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 }],
     branchLog: async () => [],
+    graphLog: async () => [],
     revParse: async () => null
   }
   return { ...base, ...overrides } as MemoryRepo

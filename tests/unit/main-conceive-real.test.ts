@@ -63,7 +63,7 @@ afterEach(() => {
 })
 
 describe('conceiveDaughter · 真实 git 仓', () => {
-  it('母亲提交 → ask 主干出生提交 → 女儿 orphan（信 + 快照）→ 家谱换代', { timeout: TIMEOUT }, async () => {
+  it('母亲提交 → life 出生提交 → 女儿从出生提交分叉（信 + 出生记录 + 快照）→ 家谱换代', { timeout: TIMEOUT }, async () => {
     const result = await conceiveDaughter(
       { repo, lineageFile },
       { nickname: '小雨', letter: '给女儿的话', motherBranch: 'default' }
@@ -74,17 +74,20 @@ describe('conceiveDaughter · 真实 git 仓', () => {
     const branches = (await repo.listBranches()).map((entry) => entry.branch)
     expect(branches).toEqual(expect.arrayContaining([TRUNK_BRANCH, 'xiao-yu', 'default']))
 
-    // 主干上有出生提交；女儿只有自己的出生提交（orphan，不继承母亲的提交）
+    // 主干上有出生提交；女儿从出生提交分叉（图上是真分支），首个提交是 born
     const trunkLog = await repo.branchLog(TRUNK_BRANCH)
     expect(trunkLog[0]?.subject).toContain('memory: birth xiao-yu')
+    expect(trunkLog.map((item) => item.subject)).toContain('memory: birth default')
     const daughterLog = await repo.branchLog('xiao-yu')
-    expect(daughterLog).toHaveLength(1)
     expect(daughterLog[0]?.subject).toContain('memory: born xiao-yu')
+    expect(daughterLog.length).toBeGreaterThan(1)
+    expect(daughterLog.map((item) => item.subject)).toContain('memory: birth xiao-yu')
 
-    // 当前在女儿分支：信与家谱快照都在她的空树里
+    // 当前在女儿分支：信、出生记录与家谱快照都在她的树里
     const head = await repo.head()
     expect(head).toMatchObject({ branch: 'xiao-yu', detached: false })
     expect(await repo.readFile('letters/xiao-yu.md')).toContain('给女儿的话')
+    expect(await repo.readFile('birth.json')).toContain('xiao-yu')
     const snapshot = JSON.parse((await repo.readFile('lineage.snapshot.json')) ?? '{}')
     expect(snapshot.active).toBe('xiao-yu')
 
@@ -115,7 +118,7 @@ describe('conceiveDaughter · 真实 git 仓', () => {
     if (read.status === 'ok') expect(read.lineage.active).toBe('default')
   })
 
-  it('旧仓只有 life 主干：出生提交写在 life 上，不新建 ask', { timeout: TIMEOUT }, async () => {
+  it('已有 life 主干：出生提交写在 life 上', { timeout: TIMEOUT }, async () => {
     expect((await repo.switchCreateOrphan('life')).ok).toBe(true)
     await repo.writeFile('lineage.snapshot.json', '{}\n')
     await repo.commit('memory: legacy life')

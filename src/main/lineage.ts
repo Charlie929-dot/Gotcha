@@ -27,15 +27,13 @@ export const LINEAGE_LIFE_TOKENS = 500_000
 export type BranchStatus = 'alive' | 'dead' | 'frozen'
 
 /**
- * 出生主干的分支名（D73：原 `life` 改名 `ask`）。
- * 旧仓里已经有 `life` 的继续认作主干、不迁移数据；新建的仓用 `ask`。
+ * 出生主干的分支名（D74：回到 `life`；D73 那次改名 `ask` 作废——`ask` 现在是纯模型分支）。
  */
-export const TRUNK_BRANCH = 'ask'
-export const LEGACY_TRUNK_BRANCH = 'life'
+export const TRUNK_BRANCH = 'life'
 
-/** 主干名（新 / 旧）不能当节点名 / 女儿名 */
+/** 主干名不能当节点名 / 女儿名 */
 export function isTrunkName(name: string): boolean {
-  return name === TRUNK_BRANCH || name === LEGACY_TRUNK_BRANCH
+  return name === TRUNK_BRANCH
 }
 
 /**

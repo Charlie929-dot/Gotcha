@@ -15,7 +15,6 @@ import type { ConceiveDaughterResult } from '../chain/agent/tools'
 import {
   findBranch,
   isTrunkName,
-  LEGACY_TRUNK_BRANCH,
   lifeOf,
   lineageSnapshot,
   readLineage,
@@ -43,14 +42,6 @@ export interface ConceiveInput {
   motherBranch: string
 }
 
-/** 出生主干用哪个名字：有 `ask` 用 `ask`，只有旧 `life` 就继续用 `life` */
-async function trunkNameOf(repo: MemoryRepo): Promise<string> {
-  const branches = await repo.listBranches()
-  if (branches.some((entry) => entry.branch === TRUNK_BRANCH)) return TRUNK_BRANCH
-  if (branches.some((entry) => entry.branch === LEGACY_TRUNK_BRANCH)) return LEGACY_TRUNK_BRANCH
-  return TRUNK_BRANCH
-}
-
 /** 家谱里没有主干节点就补一条（旧 M4 家谱只记了女儿，没记主干） */
 function withTrunkNode(lineage: Lineage, trunk: string, at: number): Lineage {
   if (findBranch(lineage, trunk) !== null) return lineage
@@ -64,8 +55,13 @@ function withTrunkNode(lineage: Lineage, trunk: string, at: number): Lineage {
   return added ?? lineage
 }
 
+/** 女儿分支里的出生记录（`birth.json`）：让首个提交一定有内容，也方便她知道自己从哪来 */
+function birthRecord(slug: string, mother: string, at: number): string {
+  return `${JSON.stringify({ nickname: slug, mother, born_at: at }, null, 2)}\n`
+}
+
 /**
- * 传承：母亲写信（可选）→ 主干出生提交 → 女儿 orphan 分支 → 家谱新代。
+ * 传承：母亲写信（可选）→ 主干出生提交 → 女儿从出生提交分叉 → 家谱新代。
  * 返回 `ok:false` 时仓与家谱都没变（失败前会退回母亲节点）。
  */
 export async function conceiveDaughter(
@@ -119,7 +115,7 @@ export async function conceiveDaughter(
     return { ok: false, message: '先保存当前节点失败，没有传承（记忆不会丢）。' }
   }
 
-  const trunk = await trunkNameOf(deps.repo)
+  const trunk = TRUNK_BRANCH
   const base = withTrunkNode(lineage, trunk, at)
   const next = withGenerationAdded(base, {
     branch: slug,
@@ -131,7 +127,7 @@ export async function conceiveDaughter(
   if (next === null) return { ok: false, message: '家谱加不进新的一代。' }
   const snapshot = lineageSnapshot(next)
 
-  // 1) 主干：先落出生提交（没有就从空树建）
+  // 1) 主干：先补「第一代出生」标记（新建主干时），再落这一代的出生提交
   const hasTrunk = branches.some((entry) => entry.branch === trunk)
   const trunkBranch = hasTrunk
     ? await deps.repo.switchBranch(trunk)
@@ -139,16 +135,22 @@ export async function conceiveDaughter(
   if (!trunkBranch.ok) {
     return { ok: false, message: `切到 ${trunk} 主干失败，没有传承（记忆不会丢）。` }
   }
+  if (!hasTrunk) {
+    await deps.repo.writeFile('lineage.snapshot.json', lineageSnapshot(base))
+    await deps.repo.commit(`memory: birth ${base.generations[0]?.branch ?? 'default'}`)
+  }
   await deps.repo.writeFile('lineage.snapshot.json', snapshot)
   await deps.repo.commit(`memory: birth ${slug}`)
 
-  // 2) 女儿：orphan 分支（空树），写母亲的信 + 家谱快照，首个提交
-  const daughter = await deps.repo.switchCreateOrphan(slug)
+  // 2) 女儿：从**出生提交**分叉（图上是真分支），首个提交写母亲的信 + 出生记录 + 家谱快照。
+  //    出生提交在主干的树上只有脚手架与快照、没有对话，所以她天然读不到母亲的记忆。
+  const daughter = await deps.repo.switchCreate(slug)
   if (!daughter.ok) {
     await deps.repo.switchBranch(input.motherBranch)
     return { ok: false, message: '开女儿分支失败，没有传承（记忆不会丢）。' }
   }
   if (letterPath !== null) await deps.repo.writeFile(letterPath, `${letter}\n`)
+  await deps.repo.writeFile('birth.json', birthRecord(slug, input.motherBranch, at))
   await deps.repo.writeFile('lineage.snapshot.json', snapshot)
   const born = await deps.repo.commit(`memory: born ${slug}`)
   if (!born.committed) {

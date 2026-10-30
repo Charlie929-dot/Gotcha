@@ -53,6 +53,7 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     writeFile: async () => true,
     readFile: async () => null,
     deleteFile: async () => true,
+    clearConversations: async () => true,
     head: async () => ({ branch: 'default', detached: false, sha: 'abc1234' }),
     switchBranch: async (name) => ({ ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }),
     switchCreate: async (name) => ({ ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }),
@@ -61,6 +62,7 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     deleteBranch: async () => ({ ok: true }),
     listBranches: async () => [{ branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 }],
     branchLog: async () => [],
+    graphLog: async () => ['* abc1234 2026-10-30 出生 default'],
     revParse: async () => null
   }
   return { ...base, ...overrides }
@@ -155,7 +157,7 @@ describe('命令执行', () => {
     expect(textOf(await run('/help'))).toContain('记忆仓：不可用 · 没找到 git')
   })
 
-  it('/mode chat 切到 persona 分支；/mode ask 开一条 assistant 空分支（纯模型、无工具）', async () => {
+  it('/mode chat 切到 persona 分支；/mode ask 从 life 主干开 ask 分支（纯模型、无工具）', async () => {
     const lineageFile = tempLineageFile()
     await ensureLineage(lineageFile, { now: 1 })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
@@ -169,39 +171,54 @@ describe('命令执行', () => {
     expect(asked?.kind).toBe('command')
     if (asked?.kind !== 'command') return
     expect(asked.text).toContain('纯模型')
-    expect(asked.mode).toEqual({ kind: 'ask', branch: 'assistant', tools: [] })
-    // 家谱真的写进去了：assistant 节点 + ask 主干（D73：原 life 改名）
+    expect(asked.mode).toEqual({ kind: 'ask', branch: 'ask', tools: [] })
+    // 家谱：life 主干（D74 回到 life）+ ask 纯模型分支，ask 挂在 life 下
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
-    expect(read.lineage.active).toBe('assistant')
+    expect(read.lineage.active).toBe('ask')
     expect(read.lineage.branches.map((node) => node.branch)).toEqual(
-      expect.arrayContaining(['ask', 'assistant'])
+      expect.arrayContaining(['life', 'ask'])
     )
-    expect(read.lineage.branches.find((node) => node.branch === 'assistant')?.parent).toBe('ask')
-    expect(read.lineage.last).toEqual({ ask: 'assistant', chat: 'default' })
+    expect(read.lineage.branches.find((node) => node.branch === 'life')?.kind).toBe('life')
+    expect(read.lineage.branches.find((node) => node.branch === 'ask')?.parent).toBe('life')
+    expect(read.lineage.last).toEqual({ ask: 'ask', chat: 'default' })
   })
 
-  it('/mode ask 认旧仓的 life 主干：不迁移数据，assistant 仍挂在 life 下', async () => {
+  it('纯模型分支的 /new：从 ask 分叉 + 清空会话', async () => {
     const lineageFile = tempLineageFile()
     await ensureLineage(lineageFile, { now: 1 })
+    const cleared: string[] = []
+    const created: string[] = []
+    let current = 'default'
     const run = createCommandHandler({
       repo: fakeRepo({
-        listBranches: async () => [
-          { branch: 'default', sha: 'abc1234', subject: 'memory: init', at: 1 },
-          { branch: 'life', sha: 'def5678', subject: 'memory: birth', at: 2 }
-        ]
+        head: async () => ({ branch: current, detached: false, sha: 'abc1234' }),
+        switchBranch: async (name) => {
+          current = name
+          return { ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }
+        },
+        clearConversations: async () => {
+          cleared.push('yes')
+          return true
+        },
+        switchCreate: async (name) => {
+          current = name
+          created.push(name)
+          return { ok: true, head: { branch: name, detached: false, sha: 'abc1234' } }
+        }
       }),
       lineageFile
     })
-    const asked = await run('/mode ask')
-    expect(asked?.kind).toBe('command')
+    expect(textOf(await run('/mode ask'))).toContain('纯模型')
+    expect(textOf(await run('/new 第二会话'))).toContain('上下文清空')
+    expect(created).toContain('di-er-hui-hua')
+    expect(cleared).toHaveLength(1)
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
-    expect(read.lineage.branches.find((node) => node.branch === 'life')?.kind).toBe('life')
-    expect(read.lineage.branches.find((node) => node.branch === 'assistant')?.parent).toBe('life')
-    expect(read.lineage.branches.some((node) => node.branch === 'ask')).toBe(false)
+    expect(read.lineage.active).toBe('di-er-hui-hua')
+    expect(read.lineage.branches.find((node) => node.branch === 'di-er-hui-hua')?.parent).toBe('ask')
   })
 
   it('/mode 不带参数报当前模式；未知名字不切换', async () => {
@@ -249,22 +266,28 @@ describe('命令执行', () => {
     expect(textOf(await run('/tool wat'))).toContain('不认识 /tool wat')
   })
 
-  it('/log 列出节点、标出当前与分叉来源', async () => {
+  it('/log 画 git 图（时间向下 / 分叉向右）并给节点编号', async () => {
     const lineageFile = tempLineageFile()
     await seededLineage(lineageFile)
     const run = createCommandHandler({
       repo: fakeRepo({
         head: async () => ({ branch: 'spring', detached: false, sha: 'def5678' }),
         status: async () => ({ ok: true, root: 'C:/tmp/memory-repo', branch: 'spring', head: 'def5678', dirty: false }),
-        ...twoBranches()
+        ...twoBranches(),
+        graphLog: async () => [
+          '* def5678 2026-10-30 保存（切换前）（HEAD -> spring）',
+          '* abc1234 2026-10-30 出生 default (default)'
+        ]
       }),
       lineageFile
     })
     const text = textOf(await run('/log'))
-    expect(text).toContain('[1] default')
-    expect(text).toContain('[2] spring（从 default 分叉）  ← 当前')
-    expect(text).toContain('def5678  memory: save before new')
-    expect(text).toContain('/use <编号|名字>')
+    expect(text).toContain('时间向下、分叉向右')
+    expect(text).toContain('* def5678 2026-10-30 保存（切换前）')
+    expect(text).toContain('出生 default')
+    expect(text).toContain('[1] default · 7 个工具')
+    expect(text).toContain('[2] spring · 7 个工具  ← 当前')
+    expect(text).toContain('用法：/use <编号|名字> 切节点')
   })
 
   it('/log 在 detached 时提示「第一句话会分叉」', async () => {

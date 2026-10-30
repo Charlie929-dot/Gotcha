@@ -42,11 +42,10 @@ import {
   findBranch,
   generationOf,
   isTrunkName,
-  LEGACY_TRUNK_BRANCH,
+  TRUNK_BRANCH,
   lineageSnapshot,
   readLineage,
   toolsOfBranch,
-  TRUNK_BRANCH,
   withActive,
   withBranchAdded,
   withBranchRemoved,
@@ -299,7 +298,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '可用命令：',
     '  /help            看这一页',
     '  /log             看记忆节点（编号给 /use 用）',
-    '  /new <名字>      从当前节点开新分支（assistant 分支 = 开空会话）',
+    '  /new <名字>      从当前节点开新分支（ask 分支 = 从它分叉并清空会话）',
     '  /use <名字|编号|提交>  切节点；切历史提交 = 只读查看',
     '  /del <名字>      删节点（要回 confirm）',
     '  /mode ask|chat   切模式（ask = 纯模型，chat = 带 persona；切分支）',
@@ -313,6 +312,27 @@ async function helpText(deps: CommandDeps): Promise<string> {
   ].join('\n')
 }
 
+/** 提交主题 → 人话（只换 `memory:` 前缀；不认识的原样留着） */
+function labelCommitSubject(line: string): string {
+  const rules: [RegExp, string][] = [
+    [/memory: birth (\S+)/gu, '出生 $1'],
+    [/memory: born (\S+)/gu, '$1 出生（分支首个提交）'],
+    [/memory: ask (\S+)/gu, '提问会话 $1'],
+    [/memory: ask\b/gu, '提问会话（挂载）'],
+    [/memory: save before \w+/gu, '保存（切换前）'],
+    [/memory: compact (\S+)/gu, '压缩 $1'],
+    [/memory: 清空问答历史前/gu, '清空历史前'],
+    [/memory: (\d{4}-\d{2}-\d{2}) .*/gu, '记忆 $1']
+  ]
+  let out = line
+  for (const [pattern, text] of rules) out = out.replace(pattern, text)
+  return out
+}
+
+/**
+ * `/log`（D74）：`git log --graph --all` 原样画——**时间向下、分叉向右**，
+ * 别自己拼 ASCII 树（分支一多就错位）。下面再给一份带编号的节点表（`/use` 用）。
+ */
 async function logText(deps: CommandDeps): Promise<string> {
   const status = await deps.repo.status()
   if (!status.ok) return `记忆仓不可用：${repoReasonText(status.reason)}`
@@ -322,26 +342,38 @@ async function logText(deps: CommandDeps): Promise<string> {
   const read = await readLineage(deps.lineageFile)
   const lineage = read.status === 'ok' ? read.lineage : null
   const ordered = orderBranches(lineage, branches)
+  const active = lineage?.active ?? head.branch ?? 'default'
+  const activeKind = lineage === null ? null : branchKindOf(lineage, active)
+  const modeText =
+    activeKind === null ? '' : ` · ${activeKind === 'assistant' ? '纯模型' : '聊天'}`
 
-  const lines = ['问记忆 · 记忆节点', '']
+  const lines = [
+    `问记忆 · 记忆节点（当前 ${active}${modeText}）`,
+    '时间向下、分叉向右（最近 40 个提交；完整看 git log --graph --all）',
+    ''
+  ]
+  const graph = await deps.repo.graphLog(40)
+  if (graph.length === 0) lines.push('（还没有提交）')
+  else for (const line of graph) lines.push(labelCommitSubject(line))
+
+  lines.push('', '节点（/use 用编号 / 名字 / 提交）：')
   ordered.forEach((branch, index) => {
-    const info = branches.find((entry) => entry.branch === branch)
-    if (info === undefined) return
     const node = lineage === null ? null : findBranch(lineage, branch)
-    const parentText = node?.parent ? `（从 ${node.parent} 分叉）` : ''
-    const kindText = node === null ? '' : node.kind === 'assistant' ? '  [纯模型]' : node.kind === 'life' ? '  [主干]' : ''
+    const kindText =
+      node === null
+        ? ''
+        : node.kind === 'assistant'
+          ? ' · 纯模型'
+          : node.kind === 'life'
+            ? ' · 主干'
+            : ''
+    const tools = lineage === null ? null : toolsOfBranch(lineage, branch).length
+    const toolsText = tools === null ? '' : ` · ${tools} 个工具`
     const current = head.branch === branch ? '  ← 当前' : ''
-    lines.push(`[${index + 1}] ${branch}${kindText}${parentText}${current}`)
-    const toolCount = lineage === null ? null : toolsOfBranch(lineage, branch).length
-    lines.push(
-      toolCount === null
-        ? `    ${info.sha}  ${info.subject}`
-        : `    ${info.sha}  ${info.subject}  · 工具 ${toolCount} 个`
-    )
+    lines.push(`[${index + 1}] ${branch}${kindText}${toolsText}${current}`)
   })
   if (head.detached && head.sha !== null) {
-    lines.push('')
-    lines.push(`HEAD 停在历史提交 ${head.sha}（只读查看；发第一句话会从这里分叉）`)
+    lines.push('', `HEAD 停在历史提交 ${head.sha}（只读查看；发第一句话会从这里分叉）`)
   }
   lines.push('', '用法：/use <编号|名字> 切节点；/use <短 sha> 看历史提交。')
   return lines.join('\n')
@@ -381,7 +413,7 @@ async function adoptTrunkBranch(
 
 /**
  * 确保出生主干存在（出生提交写在这里）；返回更新后的家谱与主干名。
- * D73：新仓用 `ask`；旧仓只有 `life` 就继续用 `life`（不迁移数据）。
+ * D74：主干固定叫 `life`（D73 那次改名 `ask` 作废——`ask` 现在是纯模型分支）。
  */
 async function ensureTrunkBranch(
   deps: CommandDeps,
@@ -389,12 +421,7 @@ async function ensureTrunkBranch(
   at: number
 ): Promise<{ lineage: Lineage; trunk: string; error?: string }> {
   const branches = await deps.repo.listBranches()
-  const has = (name: string): boolean => branches.some((entry) => entry.branch === name)
-  const trunk = has(TRUNK_BRANCH)
-    ? TRUNK_BRANCH
-    : has(LEGACY_TRUNK_BRANCH)
-      ? LEGACY_TRUNK_BRANCH
-      : TRUNK_BRANCH
+  const trunk = TRUNK_BRANCH
 
   const adopted = await adoptTrunkBranch(deps, lineage, at, trunk)
   if (adopted === null) return { lineage, trunk, error: '主干加不进家谱（细节看日志）。' }
@@ -415,33 +442,29 @@ async function ensureTrunkBranch(
   })
   if (added === null) return { lineage, trunk, error: '主干加不进家谱（细节看日志）。' }
   await writeLineageQuietly(deps, added)
-  await deps.repo.commit(`memory: ${trunk}`)
+  // D74：主干的第一个提交记「第一代出生」，让往下/向右的图从 gen-1 开始
+  await deps.repo.commit(`memory: birth ${added.generations[0]?.branch ?? 'default'}`)
   return { lineage: added, trunk }
 }
 
-/** 家谱里的主干节点名（新 `ask` / 旧 `life`），没有返回 null */
-function trunkNodeOf(lineage: Lineage): string | null {
-  const ask = findBranch(lineage, TRUNK_BRANCH)
-  if (ask !== null) return ask.branch
-  const life = findBranch(lineage, LEGACY_TRUNK_BRANCH)
-  return life !== null ? life.branch : null
-}
-
-/** assistant 分支的候选名：`assistant` / `assistant-2` / … */
-function nextAssistantName(lineage: Lineage, taken: readonly MemoryBranchInfo[]): string {
+/** 纯模型会话分支的候选名：`ask` / `ask-2` / …（D74：原 assistant） */
+function nextAskName(lineage: Lineage, taken: readonly MemoryBranchInfo[]): string {
   const used = new Set<string>([
     ...lineage.branches.map((item) => item.branch),
     ...taken.map((item) => item.branch)
   ])
-  if (!used.has('assistant')) return 'assistant'
+  if (!used.has('ask')) return 'ask'
   for (let index = 2; index < 1_000; index += 1) {
-    const name = `assistant-${index}`
+    const name = `ask-${index}`
     if (!used.has(name)) return name
   }
-  return `assistant-${Date.now().toString(36)}`
+  return `ask-${Date.now().toString(36)}`
 }
 
-/** 开一条 assistant 空分支（orphan 空树：只有会话，没有别的记忆） */
+/**
+ * 开纯模型挂载分支 `ask`（D74）：从**出生主干**分叉（主干里只有家谱快照、没有对话，
+ * 所以 ask 天然是空上下文）；图上是真分支（life → ask）。
+ */
 async function createAssistantBranch(
   deps: CommandDeps,
   lineage: Lineage,
@@ -452,25 +475,27 @@ async function createAssistantBranch(
   const ensured = await ensureTrunkBranch(deps, lineage, at)
   if (ensured.error !== undefined) return { error: ensured.error }
   const base = ensured.lineage
+  const trunk = ensured.trunk
 
   const saved = await saveBefore(deps, 'new')
   if (saved !== null) return { error: saved }
-  const name = nextAssistantName(base, await deps.repo.listBranches())
-  const created = await deps.repo.switchCreateOrphan(name)
+  const onTrunk = await deps.repo.switchBranch(trunk)
+  if (!onTrunk.ok) return { error: failureReasonText(onTrunk, `切到 ${trunk} 主干`) }
+  const name = nextAskName(base, await deps.repo.listBranches())
+  const created = await deps.repo.switchCreate(name)
   if (!created.ok) return { error: failureReasonText(created, `开出 ${name}`) }
 
   const added = withBranchAdded(base, {
     branch: name,
     generation: base.generations[0]?.id ?? 'gen-1',
-    parent: trunkNodeOf(base),
+    parent: trunk,
     at,
     kind: 'assistant'
   })
-  if (added === null) return { error: 'assistant 分支加不进家谱（细节看日志）。' }
+  if (added === null) return { error: '纯模型分支加不进家谱（细节看日志）。' }
   const next = withLastMode(withActive(added, name) ?? added, 'ask', name)
   await writeLineageQuietly(deps, next)
-  // orphan 分支还没有提交：先落一个出生提交，否则 `/log` 看不到它（unborn branch）
-  await deps.repo.commit(`memory: assistant ${name}`)
+  await deps.repo.commit(`memory: ask ${name}`)
   deps.reloadConversations?.()
   return { lineage: next, branch: name }
 }
@@ -498,17 +523,23 @@ async function createNode(
   const read = await ensureLineage(deps.lineageFile, { now: at })
   const lineage = read.lineage
   const currentKind = branchKindOf(lineage, current) ?? 'persona'
-  // assistant 分支的 `/new` = 开一条完全空的分支（只有会话，没有上下文）；persona 仍从当前节点分叉
+  // 纯模型分支的 `/new` = 从当前 ask 分叉（图上是真分支）+ 清空会话（上下文空白）；
+  // persona 分支仍从当前节点分叉，带着它的记忆（D74）
   if (currentKind === 'assistant') {
     const saved = await saveBefore(deps, 'new')
     if (saved !== null) return { text: saved }
-    const created = await deps.repo.switchCreateOrphan(slug)
+    const created = await deps.repo.switchCreate(slug)
     if (!created.ok) return { text: failureReasonText(created, `开出空会话 ${slug}`) }
+    const cleared = await deps.repo.clearConversations()
+    if (!cleared) {
+      await deps.repo.switchBranch(current)
+      return { text: '清空新会话的上下文失败，没有切换（细节看日志）。' }
+    }
     const tools = toolsOfBranch(lineage, current)
     const added = withBranchAdded(lineage, {
       branch: slug,
       generation: generationOf(lineage, current)?.id ?? lineage.generations[0]?.id ?? 'gen-1',
-      parent: trunkNodeOf(lineage),
+      parent: current,
       at,
       kind: 'assistant',
       tools
@@ -516,12 +547,12 @@ async function createNode(
     if (added === null) return { text: '分支加不进家谱（细节看日志）。' }
     const next = withLastMode(withActive(added, slug) ?? added, 'ask', slug)
     await writeLineageQuietly(deps, next)
-    await deps.repo.commit(`memory: assistant ${slug}`)
+    await deps.repo.commit(`memory: ask ${slug}`)
     deps.reloadConversations?.()
     return {
       text: [
         `===this is ${slug}===`,
-        `新会话 ${slug} 已开出（空分支：只有之后的对话，没有之前的记忆）。`,
+        `新会话 ${slug} 已开出（从 ${current} 分叉，上下文清空：只有之后的对话）。`,
         '发一句话就开始记；/use 可以回以前的会话。'
       ].join('\n'),
       mode: modeStateOf(next, slug)
@@ -728,13 +759,13 @@ async function switchMode(deps: CommandDeps, kind: AskModeKind, at: number): Pro
     if (kind === 'ask') {
       const created = await createAssistantBranch(deps, lineage, at)
       if (created.error !== undefined || created.branch === undefined || created.lineage === undefined) {
-        return commandResult(created.error ?? '开 assistant 分支失败（细节看日志）。')
+        return commandResult(created.error ?? '开纯模型分支失败（细节看日志）。')
       }
       const mode = modeStateOf(created.lineage, created.branch)
       return commandResult(
         [
           `===this is ${created.branch}===`,
-          `模式：${modeSummary(mode)}（新开的 assistant 分支；只有之后的对话，没有之前的记忆）`,
+          `模式：${modeSummary(mode)}（新开的纯模型分支；只有之后的对话，没有之前的记忆）`,
           '可以直接问了；/mode chat 切回带 persona 的那条线。'
         ].join('\n'),
         mode
@@ -1037,7 +1068,7 @@ export function createCommandHandler(
           pending = { kind: 'name' }
           pendingAt = at
           return commandResult(
-            '给新节点起个名字（中文会转成拼音，例如「春天」→ chun-tian），60 秒内发给我。\n（assistant 分支上 /new = 开一条只有会话的空分支）'
+            '给新节点起个名字（中文会转成拼音，例如「春天」→ chun-tian），60 秒内发给我。\n（ask 分支上 /new = 从它分叉并清空会话）'
           )
         }
         return handleNodeName(name, at)

@@ -383,6 +383,9 @@ export class NapcatManager {
   private configApplied = false
   private lastConfigAttempt = 0
   private installing = false
+  /** 本次 start 的时刻：WebUI 一直不通就按超时收口，别让界面永远停在「启动中」 */
+  private startedAt = 0
+  private lastPollErrorAt = 0
 
   constructor(private readonly deps: NapcatDeps) {
     this.now = deps.now ?? Date.now
@@ -447,6 +450,7 @@ export class NapcatManager {
       this.ownedProcess = false
       this.attachedToExisting = true
       this.qrMinMtime = 0
+      this.startedAt = this.now()
       this.phase = 'waiting-login'
       this.error = null
       this.beginPoll()
@@ -458,6 +462,8 @@ export class NapcatManager {
     this.progress = null
     this.stopping = false
     this.configApplied = false
+    this.startedAt = this.now()
+    this.lastPollErrorAt = 0
     // 复用旧安装时 cache/qrcode.png 里可能还躺着上一次的码：只认本次启动之后写的
     this.qrMinMtime = this.now() - 5_000
     this.qrMtime = 0
@@ -652,9 +658,19 @@ export class NapcatManager {
         return
       }
       if (this.shellDir === null) return
+      if (this.phase === 'starting') this.phase = 'waiting-login'
+
+      // 二维码先读：WebUI 挂了也不耽误扫码
+      await this.readQr()
+
+      // 60s 还没摸到 WebUI：QQ/NapCat 基本是没起来，给原因并停止干等
+      if (this.webuiCredential === null && this.now() - this.startedAt > 60_000) {
+        this.stopPoll()
+        this.fail('NapCat 没起来：没读到 WebUI（QQ 可能没启动 / 被安全软件拦了），点「启动」重试')
+        return
+      }
 
       await this.ensureWebui()
-      if (this.phase === 'starting') this.phase = 'waiting-login'
 
       if (this.webuiCredential !== null) {
         const status = await this.webuiPost('/api/QQLogin/CheckLoginStatus')
@@ -689,7 +705,11 @@ export class NapcatManager {
       await this.readQr()
       if (this.phase !== 'error') this.phase = 'waiting-login'
     } catch (error) {
-      this.log('warn', 'napcat poll failed', { error: String(error) })
+      // WebUI 没起来时每个轮询都会抛：30s 记一次就够，别刷日志
+      if (this.now() - this.lastPollErrorAt > 30_000) {
+        this.lastPollErrorAt = this.now()
+        this.log('warn', 'napcat poll failed', { error: String(error) })
+      }
     } finally {
       this.polling = false
     }

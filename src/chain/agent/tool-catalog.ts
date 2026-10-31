@@ -10,7 +10,7 @@
  *
  * 这里只放**名字与说明**，wire 格式（参数 schema）在 `understand/cloud/deepseek.ts`；
  * 两边各有一份清单，靠单测卡住「目录里有的，deepseek 必须也认识」。
- * `conceive_daughter` 是生命周期工具（生命 ≤15% 自动出现），不进目录、不给 /tool 管。
+ * `give_birth` 是生命周期工具（生命 ≤15% 自动出现），不进目录、不给 /tool 管。
  */
 
 export interface AskToolSet {
@@ -21,7 +21,7 @@ export interface AskToolSet {
 }
 
 /**
- * 集合 = 老 D62 的两个工具组（屏幕记忆 / 日记）。
+ * 集合 = 老 D62 的两个工具组（屏幕记忆 / 日记）+ D81 的信。
  * 顺序就是 `/tool set` 的编号，也是 `/tool ele` 的分组顺序。
  */
 export const ASK_TOOL_SCREEN_NAMES = [
@@ -31,14 +31,17 @@ export const ASK_TOOL_SCREEN_NAMES = [
   'ask_history'
 ] as const
 export const ASK_TOOL_DIARY_NAMES = ['recall_diary', 'read_diary', 'memory_profile'] as const
+export const ASK_TOOL_LETTER_NAMES = ['write_letter', 'list_letter', 'read_letter'] as const
 
 export type AskToolName =
   | (typeof ASK_TOOL_SCREEN_NAMES)[number]
   | (typeof ASK_TOOL_DIARY_NAMES)[number]
+  | (typeof ASK_TOOL_LETTER_NAMES)[number]
 
 export const ASK_TOOL_SETS: readonly AskToolSet[] = [
   { id: 'screen', label: '屏幕记忆', tools: [...ASK_TOOL_SCREEN_NAMES] },
-  { id: 'diary', label: '日记', tools: [...ASK_TOOL_DIARY_NAMES] }
+  { id: 'diary', label: '日记', tools: [...ASK_TOOL_DIARY_NAMES] },
+  { id: 'letter', label: '信', tools: [...ASK_TOOL_LETTER_NAMES] }
 ]
 
 /** 全部工具元素（顺序：先屏幕后日记，与 `ASK_TOOL_SETS` 一致） */
@@ -54,7 +57,10 @@ export const ASK_TOOL_LABELS: Readonly<Record<AskToolName, string>> = {
   ask_history: '查最近的问答记录',
   recall_diary: '按关键词 / 日期 / 标签检索日记',
   read_diary: '打开某一天的日记全文',
-  memory_profile: '看「关于我」的统计画像'
+  memory_profile: '看「关于我」的统计画像',
+  write_letter: '写一封信（写给谁 / 写什么 / 写到哪）',
+  list_letter: '看有哪些信（草稿 / 待寄 / 未读）',
+  read_letter: '读一封信（不传 id = 最新未读）'
 }
 
 export function isAskToolName(value: string): value is AskToolName {
@@ -74,6 +80,11 @@ export function hasScreenTools(tools: readonly string[]): boolean {
 /** 这组工具里有没有日记（决定要不要接日记后端、开场「想到的」） */
 export function hasDiaryTools(tools: readonly string[]): boolean {
   return tools.some((name) => (ASK_TOOL_DIARY_NAMES as readonly string[]).includes(name))
+}
+
+/** 这组工具里有没有信（决定 `<now>` 要不要报未读数、要不要接 letters 后端） */
+export function hasLetterTools(tools: readonly string[]): boolean {
+  return tools.some((name) => (ASK_TOOL_LETTER_NAMES as readonly string[]).includes(name))
 }
 
 /**

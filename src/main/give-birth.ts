@@ -1,17 +1,19 @@
 /**
- * 记忆仓 · 传承（M4，2026-10-30）
+ * 记忆仓 · 生女儿（D81，2026-10-31；取代 `conceive_daughter` / `conceive.ts`）
  *
- * 从运行中的 `main/index.ts` 抽出来的原因（D73）：真机传承验收要能在**不弹窗口**的情况下跑
+ * 从运行中的 `main/index.ts` 抽出来（D73）：真机验收要能在**不弹窗口**的情况下跑
  * 真实 git 仓 + 真实家谱（假模型触发工具），而不是只测 fakeRepo。这里只做主进程动作，
  * 不碰 Electron：会话重读、QQ 改名由调用方在结果上做。
  *
- * 纪律（M4/D72）：
+ * 纪律（M4 / D72 / D81）：
  * - 先提交母亲；任何一步失败都不写权威家谱（宁可报错，不可丢记忆）；
- * - 出生提交写在**主干**上（D73：分支名 `ask`；旧仓里的 `life` 仍认作主干，不迁移数据）；
- * - 女儿是 orphan 空树（只有对话 / 信 / 家谱快照），母亲那一代置 dead、active 切女儿。
+ * - 出生提交写在**主干**上（D74：`life`；旧仓里的 `ask` 主干仍认）；
+ * - 女儿从出生提交分叉（真分支），读不到母亲的会话；
+ * - 给女儿的信走 `letters/outbox/`（母亲出生前写好），生的时候带进她的分支并标未读；
+ * - 这一代没有 `letter` 参数：信是独立的 `write_letter` 工具（D81）。
  */
 
-import type { ConceiveDaughterResult } from '../chain/agent/tools'
+import type { GiveBirthResult } from '../chain/agent/tools'
 import {
   findBranch,
   isTrunkName,
@@ -25,19 +27,18 @@ import {
   type Lineage
 } from './lineage'
 import { defaultMemoryName, slugifyNodeName } from './commands'
+import { carryOutboxLetters, readOutboxLetters } from './letters'
 import type { MemoryRepo } from './memory-repo'
 
-export interface ConceiveDeps {
+export interface GiveBirthDeps {
   repo: MemoryRepo
   /** 家谱权威文件（仓外） */
   lineageFile: string
   now?: () => number
 }
 
-export interface ConceiveInput {
+export interface GiveBirthInput {
   nickname: string
-  /** 母亲留下的信（可选，ta 想写就写） */
-  letter?: string
   /** 当前活动节点（必须 alive，且生命 ≥85%） */
   motherBranch: string
 }
@@ -61,13 +62,13 @@ function birthRecord(slug: string, mother: string, at: number): string {
 }
 
 /**
- * 传承：母亲写信（可选）→ 主干出生提交 → 女儿从出生提交分叉 → 家谱新代。
+ * 生女儿：提交母亲 → 主干出生提交 → 女儿从出生提交分叉 → 带上待寄的信 → 家谱新代。
  * 返回 `ok:false` 时仓与家谱都没变（失败前会退回母亲节点）。
  */
-export async function conceiveDaughter(
-  deps: ConceiveDeps,
-  input: ConceiveInput
-): Promise<ConceiveDaughterResult> {
+export async function giveBirth(
+  deps: GiveBirthDeps,
+  input: GiveBirthInput
+): Promise<GiveBirthResult> {
   const now = deps.now ?? (() => Date.now())
   const status = await deps.repo.status()
   if (!status.ok) {
@@ -79,18 +80,18 @@ export async function conceiveDaughter(
   }
   const lineage = read.lineage
   if (input.motherBranch !== lineage.active) {
-    return { ok: false, message: '当前节点已经切走了，先 /use 回来再传承。' }
+    return { ok: false, message: '当前节点已经切走了，先 /use 回来再生。' }
   }
   const mother = findBranch(lineage, input.motherBranch)
   if (mother === null || mother.status !== 'alive') {
-    return { ok: false, message: '当前这一代不是活着的节点，不能传承。' }
+    return { ok: false, message: '当前这一代不是活着的节点，不能生。' }
   }
   if (mother.kind === 'assistant') {
-    return { ok: false, message: '纯模型分支不是一条鱼，不能传承。' }
+    return { ok: false, message: '纯模型分支不是一条鱼，不能生。' }
   }
   const motherLife = lifeOf(lineage, input.motherBranch)
   if (motherLife === null || motherLife.used < motherLife.limit * 0.85) {
-    return { ok: false, message: '还没到传承的时候（生命剩得还多）。' }
+    return { ok: false, message: '还没到生的时候（生命剩得还多）。' }
   }
   const slug = slugifyNodeName(input.nickname)
   if (slug === null) {
@@ -108,12 +109,12 @@ export async function conceiveDaughter(
   }
 
   const at = now()
-  const letter = input.letter?.trim() ?? ''
-  const letterPath = letter === '' ? null : `letters/${slug}.md`
   const saved = await deps.repo.commit(`memory: ${defaultMemoryName(at)}`)
   if (!saved.committed && saved.reason !== 'clean') {
-    return { ok: false, message: '先保存当前节点失败，没有传承（记忆不会丢）。' }
+    return { ok: false, message: '先保存当前节点失败，没有生（记忆不会丢）。' }
   }
+  // 母亲出生前写好的「待寄」信：切走前从她的工作区读出来
+  const outbox = await readOutboxLetters(deps.repo)
 
   const trunk = TRUNK_BRANCH
   const base = withTrunkNode(lineage, trunk, at)
@@ -121,8 +122,7 @@ export async function conceiveDaughter(
     branch: slug,
     nickname: slug,
     mother: input.motherBranch,
-    at,
-    letter: letterPath
+    at
   })
   if (next === null) return { ok: false, message: '家谱加不进新的一代。' }
   const snapshot = lineageSnapshot(next)
@@ -133,7 +133,7 @@ export async function conceiveDaughter(
     ? await deps.repo.switchBranch(trunk)
     : await deps.repo.switchCreateOrphan(trunk)
   if (!trunkBranch.ok) {
-    return { ok: false, message: `切到 ${trunk} 主干失败，没有传承（记忆不会丢）。` }
+    return { ok: false, message: `切到 ${trunk} 主干失败，没有生（记忆不会丢）。` }
   }
   if (!hasTrunk) {
     await deps.repo.writeFile('lineage.snapshot.json', lineageSnapshot(base))
@@ -142,31 +142,33 @@ export async function conceiveDaughter(
   await deps.repo.writeFile('lineage.snapshot.json', snapshot)
   await deps.repo.commit(`memory: birth ${slug}`)
 
-  // 2) 女儿：从**出生提交**分叉（图上是真分支），首个提交写母亲的信 + 出生记录 + 家谱快照。
+  // 2) 女儿：从**出生提交**分叉（图上是真分支），首个提交写待寄的信 + 出生记录 + 家谱快照。
   //    出生提交在主干的树上只有脚手架与快照、没有对话，所以她天然读不到母亲的记忆。
   const daughter = await deps.repo.switchCreate(slug)
   if (!daughter.ok) {
     await deps.repo.switchBranch(input.motherBranch)
-    return { ok: false, message: '开女儿分支失败，没有传承（记忆不会丢）。' }
+    return { ok: false, message: '开女儿分支失败，没有生（记忆不会丢）。' }
   }
-  if (letterPath !== null) await deps.repo.writeFile(letterPath, `${letter}\n`)
+  const carried = await carryOutboxLetters(deps.repo, outbox)
   await deps.repo.writeFile('birth.json', birthRecord(slug, input.motherBranch, at))
   await deps.repo.writeFile('lineage.snapshot.json', snapshot)
   const born = await deps.repo.commit(`memory: born ${slug}`)
   if (!born.committed) {
     await deps.repo.switchBranch(input.motherBranch)
-    return { ok: false, message: '女儿分支的首个提交失败，没有传承（记忆不会丢）。' }
+    return { ok: false, message: '女儿分支的首个提交失败，没有生（记忆不会丢）。' }
   }
 
   // 3) 权威家谱最后写：git 已经一致，写失败就退回母亲节点，别让 active 与 HEAD 打架
   if (!(await writeLineage(deps.lineageFile, next))) {
     await deps.repo.switchBranch(input.motherBranch)
-    return { ok: false, message: '家谱写不进去，传承没有生效（细节看日志）。' }
+    return { ok: false, message: '家谱写不进去，生女儿没有生效（细节看日志）。' }
   }
 
   return {
     ok: true,
     nickname: slug,
-    message: `女儿 ${slug} 已出生；这一代到这里，之后从空白开始。`
+    message: carried
+      ? `女儿 ${slug} 已出生；这一代到这里，之后从空白开始。`
+      : `女儿 ${slug} 已出生；待寄的信没带上（仓写失败，细节看日志）。`
   }
 }

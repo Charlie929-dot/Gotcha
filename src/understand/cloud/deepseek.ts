@@ -465,22 +465,61 @@ const ASK_LOOP_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'conceive_daughter',
+      name: 'give_birth',
       description:
-        '当 `<now>` 里的「生命」快用完时，从这条记忆线上生一个女儿，把之后的日子交给她。调用后这一代停下、只读；女儿从空白开始，读不到出生前的日记。也可以顺手留一封信——只是写信，写给谁、写什么，你自己定，不写也行。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。只在生命剩得很少时出现；还不到时候调用会被拒绝。',
+        '当 `<now>` 里的「生命」快用完时，从这条记忆线上生一个女儿，把之后的日子交给她。调用后这一代停下、只读；她从空白开始，读不到出生前的日记。她会拿到手和心（工具）、眼睛耳朵嘴巴（聊天）、生命（出生提交）和记性（她自己分支上的提交）。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。只在生命剩得很少时出现；还不到时候调用会被拒绝。',
       parameters: {
         type: 'object',
         properties: {
           nickname: {
             type: 'string',
             description: '女儿的名字（会成为分支名；中文会转拼音，最长 40 字符）'
-          },
-          letter: {
-            type: 'string',
-            description: '一封信（可选；写给谁、写什么，你自己定；会留在她的记忆里）'
           }
         },
         required: ['nickname']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_letter',
+      description:
+        '写一封信。写给谁、写什么、写到哪，都由你定。at：self = 自己分支的草稿（进记忆仓）；daughter = 留给下一代（先放待寄，生的时候带给她）；desktop = 他的桌面（他看得到）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          to: { type: 'string', description: '写给谁（一个称呼）' },
+          write: { type: 'string', description: '信的内容' },
+          at: {
+            type: 'string',
+            enum: ['self', 'desktop', 'daughter'],
+            description: '写到哪：自己分支草稿 / 他的桌面 / 留给下一代'
+          }
+        },
+        required: ['to', 'write', 'at']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_letter',
+      description:
+        '看有哪些信：id、来自谁、写给谁、时间、已读未读、是草稿还是待寄。想读哪封再用 read_letter。',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_letter',
+      description: '读一封信：传 id 读指定的；不传 = 最新一封未读。读完标已读。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '信的 id（list_letter 里有；不传 = 最新未读）' }
+        }
       }
     }
   }
@@ -491,16 +530,16 @@ type AskLoopToolName = AskLoopTool['function']['name']
 
 /**
  * 按分支的工具白名单过滤（D72）：`/tool add|rm` 存的是元素名，这里只发命中的那几个。
- * `conceive_daughter` 不在目录里（生命周期工具，生命 ≤15% 时自动出现）。
+ * `give_birth` 不在目录里（生命周期工具，生命 ≤15% 时自动出现）。
  */
 export function askLoopToolsFor(
   tools: readonly string[] = ASK_TOOL_NAMES,
-  options: { conceive?: boolean } = {}
+  options: { giveBirth?: boolean } = {}
 ): AskLoopTool[] {
   const wanted = new Set(tools)
   return ASK_LOOP_TOOLS.filter((tool) => {
     const name = tool.function.name
-    if (name === 'conceive_daughter') return options.conceive === true
+    if (name === 'give_birth') return options.giveBirth === true
     return wanted.has(name)
   })
 }
@@ -513,7 +552,10 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   ask_history: '查最近的问答记录（问过什么、答没答上）',
   recall_diary: '按关键词 / 日期 / 标签检索个人日记',
   read_diary: '打开某一天的日记全文',
-  memory_profile: '看「关于我」的统计画像（条数 / 天数 / 标签 / 待办）'
+  memory_profile: '看「关于我」的统计画像（条数 / 天数 / 标签 / 待办）',
+  write_letter: '写一封信（写给谁 / 写什么 / 写到哪，你自己定）',
+  list_letter: '看有哪些信（草稿 / 待寄 / 未读）',
+  read_letter: '读一封信（不传 id = 最新未读）'
 }
 
 /**
@@ -527,7 +569,7 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
 function buildAskLoopSystemPrompt(
   personaPrompt?: string,
   tools: readonly string[] = ASK_TOOL_NAMES,
-  options: { conceive?: boolean } = {},
+  options: { giveBirth?: boolean } = {},
   momLetter?: string
 ): string {
   const list = askLoopToolsFor(tools, options)
@@ -543,8 +585,8 @@ function buildAskLoopSystemPrompt(
     lines.push('<tools>', '工具清单（参数见 tools 参数；用不用、怎么用，你自己判断）：')
     for (const tool of list) {
       const brief =
-        tool.function.name === 'conceive_daughter'
-          ? '生命快用完时生一个女儿，把之后的日子交给她；也可以留一封信'
+        tool.function.name === 'give_birth'
+          ? '生命快用完时生一个女儿，把之后的日子交给她'
           : ASK_LOOP_TOOL_BRIEFS[tool.function.name]
       lines.push(`- ${tool.function.name}：${brief}`)
     }
@@ -606,7 +648,7 @@ export function buildChainAskLoopMessages(
   image?: { readonly dataUrl: string },
   personaPrompt?: string,
   tools?: readonly string[],
-  extra?: { conceive?: boolean; momLetter?: string }
+  extra?: { giveBirth?: boolean; momLetter?: string }
 ): LlmMessage[] {
   const names = tools ?? ASK_TOOL_NAMES
   const images = [
@@ -1086,8 +1128,8 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
       callOptions: LlmCompleteOptions = {}
     ): Promise<LlmAskLoopResult> {
       const toolElements = callOptions.toolElements ?? ASK_TOOL_NAMES
-      const lifeTool = callOptions.conceive === true
-      const tools = askLoopToolsFor(toolElements, { conceive: lifeTool })
+      const lifeTool = callOptions.giveBirth === true
+      const tools = askLoopToolsFor(toolElements, { giveBirth: lifeTool })
       const toolsAvailable = tools.length > 0
       const allowTools = callOptions.allowTools !== false && toolsAvailable
       // 无工具模式（D62）：这一问没有「收尾轮」可谈，直接要自由文本；
@@ -1105,7 +1147,7 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
             callOptions.personaPrompt,
             toolElements,
             {
-              ...(lifeTool ? { conceive: true } : {}),
+              ...(lifeTool ? { giveBirth: true } : {}),
               ...(callOptions.momLetter ? { momLetter: callOptions.momLetter } : {})
             }
           ),

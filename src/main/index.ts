@@ -22,9 +22,9 @@ import {
   type MemorySettingsSaveResult
 } from './memory-settings'
 import { buildMemoryListView, deleteMemoryView, parseMemoryListQuery, restoreMemoryView } from './memory-admin'
-import type { ConceiveDaughterResult, DiaryToolDeps } from '../chain/agent/tools'
+import type { GiveBirthResult, DiaryToolDeps, LetterAt } from '../chain/agent/tools'
 import { askModeKindOfBranch, asksMemoryContext, type AskModeState } from '../chain/agent/mode'
-import { defaultToolsForBranchKind, hasDiaryTools, hasScreenTools } from '../chain/agent/tool-catalog'
+import { defaultToolsForBranchKind, hasDiaryTools, hasLetterTools, hasScreenTools } from '../chain/agent/tool-catalog'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
@@ -131,7 +131,8 @@ import {
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
 import { createAskConversationRegistry } from './ask-conversation'
 import { createCommandHandler, currentModeState, memoryDayKey, type CompactOutcome } from './commands'
-import { conceiveDaughter as conceiveOnRepo } from './conceive'
+import { giveBirth as giveBirthOnRepo } from './give-birth'
+import { createLetterStore } from './letters'
 import { defaultMomLetterFor } from './default-mom-letter'
 import {
   birthDayOf,
@@ -2017,6 +2018,15 @@ if (primaryInstance) {
     })
     const lineageFile = join(app.getPath('userData'), 'memory-lineage.json')
     /**
+     * 信（D81）：写在当前分支的 `letters/`；`<now>` 只报未读数，
+     * 正文走 read_letter。桌面落点是 `<桌面>/记忆球的信/`。
+     */
+    const letterStore = createLetterStore({
+      repo: memoryRepo,
+      desktopDir: app.getPath('desktop'),
+      now: () => Date.now()
+    })
+    /**
      * 会话存储（D64，只追加）：桌面窗口 / QQ 用户各自一个 conversationId。
      * 接了记忆仓就从当前节点的 `conversations/` 恢复（重启不断片），下一问只追加；
      * system 前缀不变，缓存才命中。
@@ -2069,6 +2079,8 @@ if (primaryInstance) {
       kind: BranchKind
       /** 第一代（家谱里没有母亲）：只有这一代拿默认的妈妈的信（D79 / D80） */
       firstGeneration: boolean
+      /** 当前分支的昵称（写信时的「来自」） */
+      nickname: string
       /** 这一代的出生日（本地 `yyyy-mm-dd`）；代分支才有 */
       bornDay?: string
       /** 母亲留下的信（仓内相对路径）；第一代没有 */
@@ -2099,6 +2111,8 @@ if (primaryInstance) {
     interface AskStateNow {
       mode: AskModeState
       life?: AskLifeContext
+      /** 未读信数（D81）：>0 才进 `<now>` */
+      unreadLetters?: number
     }
     const askStateNow = async (): Promise<AskStateNow | undefined> => {
       try {
@@ -2119,6 +2133,7 @@ if (primaryInstance) {
         // 只有「女儿代」（有母亲）才有出生日边界；第一代看全部日记
         const bornDay =
           generation !== null && generation.mother !== null ? birthDayOf(lineage, branch) : null
+        const unreadLetters = hasLetterTools(mode.tools) ? await letterStore.unreadCount() : 0
         return {
           mode,
           life: {
@@ -2127,9 +2142,11 @@ if (primaryInstance) {
             limit: life.limit,
             kind,
             firstGeneration: generation !== null && generation.mother === null,
+            nickname: generation?.nickname ?? branch,
             ...(bornDay !== null ? { bornDay } : {}),
             ...(generation?.letter ? { letterPath: generation.letter } : {})
-          }
+          },
+          ...(unreadLetters > 0 ? { unreadLetters } : {})
         }
       } catch {
         return undefined
@@ -2333,19 +2350,21 @@ if (primaryInstance) {
       mode: AskModeState,
       opening?: RedactableAskOpening,
       life?: AskLifeContext,
-      momLetter?: string
+      momLetter?: string,
+      unreadLetters?: number
     ): ChainAskOptions => {
       const chat = mode.kind === 'chat'
       const tools = mode.tools
       // 人设：只有 chat（persona 分支）注入（卡启用 → 卡全文；卡没启用 → 名字 / 口吻 / 红线）。
       // 纯模型（ask）不带人设，免得它把「问个技术问题」也演成角色。
-      const personaPrompt = chat
-        ? buildPersonaPrompt(readPersona(db, { userDataDir: app.getPath('userData') }))
-        : undefined
+      const persona = chat ? readPersona(db, { userDataDir: app.getPath('userData') }) : null
+      const personaPrompt = persona !== null ? buildPersonaPrompt(persona) : undefined
+      /** 信的「来自」：优先人设名（贴心大肥鱼），读不到再用分支昵称 */
+      const letterFrom = (persona?.name ?? '').trim() || life?.nickname || ''
       // 指代线索：提问前最后一段（不是证据；引用仍要经 search_info / read_segment）
       const recent = hasScreenTools(tools) ? latestSegmentHint(db) : undefined
-      // 传承（M4）：只有 persona 分支、生命 ≤15% 且带工具时才给这个入口；纯模型保持单轮
-      const conceiveEnabled =
+      // 生女儿（D81）：只有 persona 分支、生命 ≤15% 且带工具时才给这个入口；纯模型保持单轮
+      const birthEnabled =
         life !== undefined &&
         chat &&
         tools.length > 0 &&
@@ -2390,22 +2409,28 @@ if (primaryInstance) {
         // 个人记忆（第二本账）：日记条目 + 「关于我」统计；人设是本地配置，只拼在 system 最前面。
         // M4：女儿代带 sinceDay（出生前的日记读不到）。
         ...(hasDiaryTools(tools) ? { diary: diaryToolsFor(db, { sinceDay: life?.bornDay }) } : {}),
+        // 信（D81）：写 / 列 / 读；只有挂了这个工具的分支才接后端
+        ...(hasLetterTools(tools) && life !== undefined
+          ? {
+              letters: {
+                write: (input: { to: string; write: string; at: LetterAt }) =>
+                  letterStore.write({ ...input, from: letterFrom }),
+                list: () => letterStore.list(),
+                read: (id?: string) => letterStore.read(id)
+              }
+            }
+          : {}),
         ...(personaPrompt !== undefined ? { personaPrompt } : {}),
         // 这次给哪些工具（D72：当前分支的 /tool 白名单）：链层据此决定单轮 / 工具循环
         tools,
-        // 传承（M4）：生命 ≤15% 才把 conceive_daughter 放进来（工具描述在 deepseek.ts）
-        ...(conceiveEnabled && life !== undefined
-          ? {
-              conceive: (nickname: string, letter?: string) =>
-                conceiveDaughter({
-                  nickname,
-                  ...(letter !== undefined ? { letter } : {}),
-                  motherBranch: life.branch
-                })
-            }
+        // 生女儿（D81）：生命 ≤15% 才把 give_birth 放进来（工具描述在 deepseek.ts）
+        ...(birthEnabled && life !== undefined
+          ? { giveBirth: (nickname: string) => giveBirth({ nickname, motherBranch: life.branch }) }
           : {}),
-        // 母亲的信（M4）：女儿代的 system 里多一段 <mom_letter>
+        // 母亲的信（M4 / D80）：第一代 / 旧数据的 system 里多一段 <mom_letter>
         ...(momLetter !== undefined && momLetter !== '' ? { momLetter } : {}),
+        // 未读信数（D81）：只进 `<now>` 的一行
+        ...(unreadLetters !== undefined ? { unreadLetters } : {}),
         // 新对话第一问：给 ta 一点「此刻」和「想到的」（D61）；续问/老对话不带
         ...(opening !== undefined ? { opening } : {}),
         // 生命（M3）：每轮现算，进 `<now>` 的一行事实
@@ -2473,21 +2498,19 @@ if (primaryInstance) {
      */
     const qqTalkTimes = new Map<string, number[]>()
     /**
-     * 传承（M4 / D73）：真正的动作抽到 `conceive.ts`（真实 git 仓可独立验收，不弹窗口）；
+     * 生女儿（D81 / D73）：真正的动作抽到 `give-birth.ts`（真实 git 仓可独立验收，不弹窗口）；
      * 这里只做组合根的事：女儿出生后重读会话、清 QQ 内存上下文、在线改 QQ 名。
      *
      * 只有生命 ≤15% 时工具才会出现，这里再校验一次（模型可能伪造调用 / 旧检查点恢复）。
      */
-    const conceiveDaughter = async (input: {
+    const giveBirth = async (input: {
       nickname: string
-      letter?: string
       motherBranch: string
-    }): Promise<ConceiveDaughterResult> => {
-      const result = await conceiveOnRepo(
+    }): Promise<GiveBirthResult> => {
+      const result = await giveBirthOnRepo(
         { repo: memoryRepo, lineageFile },
         {
           nickname: input.nickname,
-          ...(input.letter !== undefined ? { letter: input.letter } : {}),
           motherBranch: input.motherBranch
         }
       )
@@ -2584,7 +2607,8 @@ if (primaryInstance) {
           mode,
           await askOpeningFor(db, text, context, mode, qqTalkTimes.get(historyKey) ?? [], life?.bornDay),
           life,
-          momLetter
+          momLetter,
+          state?.unreadLetters
         )
         // QQ 发来的图片：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
         const result = await askChain(
@@ -2715,7 +2739,8 @@ if (primaryInstance) {
             mode,
             await askOpeningFor(db, question, context, mode, undefined, life?.bornDay),
             life,
-            momLetter
+            momLetter,
+            state?.unreadLetters
           ),
           question
         )
@@ -2757,7 +2782,8 @@ if (primaryInstance) {
               mode,
               await askOpeningFor(db, '', context, mode, undefined, life?.bornDay),
               life,
-              momLetter
+              momLetter,
+              state?.unreadLetters
             ),
             resume: { id: resumeId, decision }
           },

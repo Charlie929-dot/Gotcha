@@ -146,11 +146,11 @@ describe('工具过滤', () => {
     expect(names([])).toEqual([])
   })
 
-  it('传承工具只在 conceive=true 时出现（生命 ≤15% 才由组合根打开）', () => {
-    expect(names(ALL)).not.toContain('conceive_daughter')
-    expect(names(DIARY)).not.toContain('conceive_daughter')
-    const withLife = askLoopToolsFor(ALL, { conceive: true }).map((tool) => tool.function.name)
-    expect(withLife).toContain('conceive_daughter')
+  it('生女儿工具只在 giveBirth=true 时出现（生命 ≤15% 才由组合根打开）', () => {
+    expect(names(ALL)).not.toContain('give_birth')
+    expect(names(DIARY)).not.toContain('give_birth')
+    const withLife = askLoopToolsFor(ALL, { giveBirth: true }).map((tool) => tool.function.name)
+    expect(withLife).toContain('give_birth')
   })
 })
 

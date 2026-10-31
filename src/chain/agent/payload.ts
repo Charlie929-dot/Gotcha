@@ -356,15 +356,46 @@ export type RedactableAskLoopToolResult =
       observations: readonly RedactableDiaryObservation[]
     }
   /**
-   * 传承（M4）：this generation 已经把记忆线交给女儿。
+   * 生女儿（D81）：这一代已经把记忆线交给女儿。
    * `born=true` 时工具结果会告诉模型「这一问之后从空白开始」；`nickname` 是女儿的分支名。
    */
   | {
-      kind: 'conceive_daughter'
+      kind: 'give_birth'
       freshness: AskLoopFreshness
       born: boolean
       nickname: string
       message: string
+    }
+  /** 写信（D81）：落到自己分支 / 桌面 / 待寄给女儿 */
+  | {
+      kind: 'write_letter'
+      freshness: AskLoopFreshness
+      id: string
+      at: 'self' | 'desktop' | 'daughter'
+      message: string
+    }
+  /** 看有哪些信（D81）：只给元信息，不展开正文 */
+  | {
+      kind: 'list_letter'
+      freshness: AskLoopFreshness
+      letters: readonly {
+        id: string
+        from: string
+        to: string
+        at: number
+        where: 'letters' | 'outbox'
+        unread: boolean
+      }[]
+    }
+  /** 读一封信（D81）：正文也随工具结果回给模型 */
+  | {
+      kind: 'read_letter'
+      freshness: AskLoopFreshness
+      id: string
+      from: string
+      to: string
+      at: number
+      text: string
     }
 
 /** 循环里的一次往返：模型发起的调用 + 执行器给出的摘要 */
@@ -457,6 +488,8 @@ export interface ChainAskLoopBuildInput {
   opening?: RedactableAskOpening
   /** 当前节点的生命（M3；每轮现算，`<now>` 里的一行事实，不过策略——数字不是隐私） */
   life?: AskLifeState
+  /** 当前节点的未读信数（D81；`<now>` 只报数量，正文走 read_letter） */
+  letters?: { readonly unread: number }
   /** 用户随本轮问题上传的附件（用户主动提供，不过脱敏墙） */
   attachments?: RedactableAskAttachments
 }
@@ -803,6 +836,10 @@ function renderNowText(
     const percent = Math.round((remaining / limit) * 100)
     lines.push(`生命：还剩 ${percent}%（${formatTokenAmount(remaining)} token）`)
   }
+  // 信（D81）：只报未读数，不把正文放进 system；让 ta 自己用 list_letter / read_letter 看
+  if (input.letters !== undefined && input.letters.unread > 0) {
+    lines.push(`信件：${input.letters.unread} 封未读`)
+  }
   if (opening?.remembered !== undefined && opening.remembered.length > 0) {
     lines.push('你想到的（只是联想，不一定对；想核对就用 recall_diary / read_diary）：')
     for (const item of opening.remembered) lines.push(`- [${item.day}] ${item.snippet}`)
@@ -1011,15 +1048,69 @@ export function buildAskLoopPayload(
         view = { kind: 'memory_profile', freshness: result.freshness, stats: result.stats, observations }
         break
       }
-      case 'conceive_daughter': {
+      case 'give_birth': {
         const nickname = policy.redact(normalizeText(result.nickname))
         const message = policy.redact(normalizeText(result.message))
         view = {
-          kind: 'conceive_daughter',
+          kind: 'give_birth',
           freshness: result.freshness,
           born: result.born === true,
           nickname: nickname.blocked ? '' : nickname.text.slice(0, 60),
-          message: message.blocked ? '传承完成' : message.text.slice(0, 240)
+          message: message.blocked ? '生女儿完成' : message.text.slice(0, 240)
+        }
+        break
+      }
+      case 'write_letter': {
+        const message = policy.redact(normalizeText(result.message))
+        view = {
+          kind: 'write_letter',
+          freshness: result.freshness,
+          id: result.id.slice(0, 80),
+          at: result.at,
+          message: message.blocked ? '信写好了' : message.text.slice(0, 240)
+        }
+        break
+      }
+      case 'list_letter': {
+        const letters: Array<{
+          id: string
+          from: string
+          to: string
+          at: number
+          where: 'letters' | 'outbox'
+          unread: boolean
+        }> = []
+        for (const letter of result.letters) {
+          const from = policy.redact(normalizeText(letter.from))
+          const to = policy.redact(normalizeText(letter.to))
+          letters.push({
+            id: letter.id.slice(0, 80),
+            from: from.blocked ? '' : from.text.slice(0, 60),
+            to: to.blocked ? '' : to.text.slice(0, 60),
+            at: letter.at,
+            where: letter.where,
+            unread: letter.unread === true
+          })
+        }
+        view = { kind: 'list_letter', freshness: result.freshness, letters }
+        break
+      }
+      case 'read_letter': {
+        const text = guardText(policy, result.text, Number.MAX_SAFE_INTEGER)
+        if (text.blocked) {
+          view = { kind: 'error', message: '这封信包含敏感内容，不能展开' }
+          break
+        }
+        const from = policy.redact(normalizeText(result.from))
+        const to = policy.redact(normalizeText(result.to))
+        view = {
+          kind: 'read_letter',
+          freshness: result.freshness,
+          id: result.id.slice(0, 80),
+          from: from.blocked ? '' : from.text.slice(0, 60),
+          to: to.blocked ? '' : to.text.slice(0, 60),
+          at: result.at,
+          text: text.text
         }
         break
       }

@@ -86,7 +86,7 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
     await run('/mode ask')
     const tree = textOf(await run('/log'))
     expect(tree).toBe(
-      ['[0] life · 主干', '[0-0] ask · 纯模型 · 0 个工具  ← 当前', '[0-1] default · 7 个工具'].join('\n')
+      ['[0] life · 主干', '[0-0] ask · 纯模型 · 0 个工具  ← 当前', '[0-1] default · 10 个工具'].join('\n')
     )
     const history = textOf(await run('/log 0-0'))
     expect(history.split('\n')[0]).toBe('[0] ask  ← 当前')

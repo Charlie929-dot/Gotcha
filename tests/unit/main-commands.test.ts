@@ -311,12 +311,12 @@ describe('命令执行', () => {
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     expect(textOf(await run('/tool set'))).toContain('[1] screen · 屏幕记忆（4 个）')
     expect(textOf(await run('/tool ele 1'))).toContain('[1] search_info')
-    expect(textOf(await run('/tool'))).toContain('7 个工具')
+    expect(textOf(await run('/tool'))).toContain('10 个工具')
 
     // 默认分支（persona）全开 → 先 rm 掉整组日记
-    expect(textOf(await run('/tool rm diary'))).toContain('工具（4 个）')
-    expect(textOf(await run('/tool add diary:recall_diary,memory_profile'))).toContain('工具（6 个）')
-    expect(textOf(await run('/tool rm screen:get_freshness'))).toContain('工具（5 个）')
+    expect(textOf(await run('/tool rm diary'))).toContain('工具（7 个）')
+    expect(textOf(await run('/tool add diary:recall_diary,memory_profile'))).toContain('工具（9 个）')
+    expect(textOf(await run('/tool rm screen:get_freshness'))).toContain('工具（8 个）')
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
@@ -325,7 +325,10 @@ describe('命令执行', () => {
       'read_segment',
       'ask_history',
       'recall_diary',
-      'memory_profile'
+      'memory_profile',
+      'write_letter',
+      'list_letter',
+      'read_letter'
     ])
     // 不认识的名字 / 集合如实报错
     expect(textOf(await run('/tool add nope'))).toContain('没有集合')
@@ -348,9 +351,9 @@ describe('命令执行', () => {
       [
         '[0] life · 主干',
         '[0-0] ask · 纯模型 · 0 个工具',
-        '[0-1] default · 7 个工具',
-        '[0-1-0] spring · 7 个工具  ← 当前',
-        '[0-2] gen2 · 7 个工具'
+        '[0-1] default · 10 个工具',
+        '[0-1-0] spring · 10 个工具  ← 当前',
+        '[0-2] gen2 · 10 个工具'
       ].join('\n')
     )
   })
@@ -722,7 +725,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/log'))).toContain('[0] default · 7 个工具  ← 正在看')
+    expect(textOf(await run('/log'))).toContain('[0] default · 10 个工具  ← 正在看')
   })
 
   it('/use 不存在的目标如实报错', async () => {

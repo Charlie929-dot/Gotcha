@@ -1224,7 +1224,7 @@ function toolSetText(): string {
     '工具集合（/tool ele <集合> 看元素）：',
     ...ASK_TOOL_SETS.map((set, index) => toolSetLine(index + 1, set)),
     '',
-    'conceive_daughter 不在里面：生命 ≤15% 时自动出现。'
+    'give_birth 不在里面：生命 ≤15% 时自动出现。'
   ].join('\n')
 }
 

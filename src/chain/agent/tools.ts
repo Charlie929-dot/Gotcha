@@ -102,12 +102,44 @@ export interface DiaryToolDeps {  recall(query: {
   profile(): DiaryProfileView
 }
 
-/** 传承（M4）：主进程注入的出生动作结果；失败只给可读原因 */
-export interface ConceiveDaughterResult {
+/** 生女儿（D81）：主进程注入的出生动作结果；失败只给可读原因 */
+export interface GiveBirthResult {
   ok: boolean
   /** 实际落下的分支名（slug） */
   nickname?: string
   message: string
+}
+
+/** 写信落到哪：自己分支草稿 / 他的桌面 / 女儿分支（出生前先待寄） */
+export type LetterAt = 'self' | 'desktop' | 'daughter'
+
+export interface LetterSummary {
+  id: string
+  from: string
+  to: string
+  /** 毫秒时间戳 */
+  at: number
+  /** 仓里的位置：`letters/` 草稿 / `letters/outbox/` 待寄 */
+  where: 'letters' | 'outbox'
+  unread: boolean
+}
+
+export interface LetterView extends LetterSummary {
+  text: string
+}
+
+export interface WriteLetterResult {
+  ok: boolean
+  id?: string
+  at?: LetterAt
+  message: string
+}
+
+/** 主进程注入的信件实现（仓内 / 桌面）；不传 = 这个分支没有写信能力 */
+export interface LetterToolDeps {
+  write(input: { to: string; write: string; at: LetterAt }): Promise<WriteLetterResult>
+  list(): Promise<readonly LetterSummary[]>
+  read(id: string | undefined): Promise<LetterView | null>
 }
 
 /** 日记引用的白名单元数据（模型最终给的 itemId 必须落在这里面） */
@@ -156,10 +188,14 @@ export interface AskToolDeps {
    */
   diary?: DiaryToolDeps
   /**
-   * 传承（M4）：只有生命快到终点（≤15%）且记忆仓可用时才注入；
-   * 不传 = 模型调 `conceive_daughter` 会如实回「现在还不能传承」。
+   * 生女儿（D81）：只有生命快到终点（≤15%）且记忆仓可用时才注入；
+   * 不传 = 模型调 `give_birth` 会如实回「现在还不能传承」。
    */
-  conceive?: (nickname: string, letter?: string) => Promise<ConceiveDaughterResult>
+  giveBirth?: (nickname: string) => Promise<GiveBirthResult>
+  /**
+   * 信（D81）：写 / 列 / 读。不传 = 这个分支没挂写信工具，模型调了只会收到可读原因。
+   */
+  letters?: LetterToolDeps
 }
 
 export interface AskToolOutcome {
@@ -795,23 +831,22 @@ export function createAskToolExecutor(deps: AskToolDeps): {
         if (call.name === 'memory_profile') {
           return executeMemoryProfile(deps)
         }
-        if (call.name === 'conceive_daughter') {
+        if (call.name === 'give_birth') {
           const nickname = optionalText(call.arguments['nickname'], 40)
           if (nickname === undefined) {
-            return { result: { kind: 'error', message: 'conceive_daughter 需要 nickname' }, segments: [] }
+            return { result: { kind: 'error', message: 'give_birth 需要 nickname' }, segments: [] }
           }
-          if (deps.conceive === undefined) {
+          if (deps.giveBirth === undefined) {
             return {
               result: { kind: 'error', message: '现在还不能传承（生命还没到终点，或记忆仓不可用）' },
               segments: []
             }
           }
-          const letter = optionalText(call.arguments['letter'], 4_000)
-          const outcome = await deps.conceive(nickname, letter)
+          const outcome = await deps.giveBirth(nickname)
           return outcome.ok
             ? {
                 result: {
-                  kind: 'conceive_daughter',
+                  kind: 'give_birth',
                   freshness: currentFreshness(deps),
                   born: true,
                   nickname: outcome.nickname ?? nickname,
@@ -820,6 +855,74 @@ export function createAskToolExecutor(deps: AskToolDeps): {
                 segments: []
               }
             : { result: { kind: 'error', message: outcome.message }, segments: [] }
+        }
+        if (call.name === 'write_letter') {
+          const to = optionalText(call.arguments['to'], 60)
+          const write = optionalText(call.arguments['write'], 8_000)
+          const rawAt = call.arguments['at']
+          const at: LetterAt | undefined =
+            rawAt === 'self' || rawAt === 'desktop' || rawAt === 'daughter' ? rawAt : undefined
+          if (to === undefined || write === undefined || at === undefined) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'write_letter 参数不合法（需要 to / write / at: self|desktop|daughter）'
+              },
+              segments: []
+            }
+          }
+          if (deps.letters === undefined) {
+            return {
+              result: { kind: 'error', message: '现在不能写信（记忆仓不可用，或这个分支没挂写信工具）' },
+              segments: []
+            }
+          }
+          const outcome = await deps.letters.write({ to, write, at })
+          return outcome.ok
+            ? {
+                result: {
+                  kind: 'write_letter',
+                  freshness: currentFreshness(deps),
+                  id: outcome.id ?? '',
+                  at,
+                  message: outcome.message
+                },
+                segments: []
+              }
+            : { result: { kind: 'error', message: outcome.message }, segments: [] }
+        }
+        if (call.name === 'list_letter') {
+          if (deps.letters === undefined) {
+            return {
+              result: { kind: 'error', message: '现在看不了信（记忆仓不可用，或这个分支没挂写信工具）' },
+              segments: []
+            }
+          }
+          const letters = await deps.letters.list()
+          return {
+            result: { kind: 'list_letter', freshness: currentFreshness(deps), letters },
+            segments: []
+          }
+        }
+        if (call.name === 'read_letter') {
+          if (deps.letters === undefined) {
+            return {
+              result: { kind: 'error', message: '现在看不了信（记忆仓不可用，或这个分支没挂写信工具）' },
+              segments: []
+            }
+          }
+          const id = optionalText(call.arguments['id'], 80)
+          const letter = await deps.letters.read(id)
+          if (letter === null) {
+            return {
+              result: { kind: 'error', message: '没有这封信（用 list_letter 看有哪些）' },
+              segments: []
+            }
+          }
+          return {
+            result: { kind: 'read_letter', freshness: currentFreshness(deps), ...letter },
+            segments: []
+          }
         }
         return { result: { kind: 'error', message: `未知工具：${call.name}` }, segments: [] }
       } catch {

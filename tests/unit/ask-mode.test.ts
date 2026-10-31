@@ -20,12 +20,14 @@ import {
 import {
   ASK_TOOL_DIARY_NAMES,
   ASK_TOOL_LABELS,
+  ASK_TOOL_LETTER_NAMES,
   ASK_TOOL_NAMES,
   ASK_TOOL_SCREEN_NAMES,
   ASK_TOOL_SETS,
   askToolSetOf,
   defaultToolsForBranchKind,
   hasDiaryTools,
+  hasLetterTools,
   hasScreenTools,
   isAskToolName,
   normalizeAskTools
@@ -70,9 +72,9 @@ describe('分支 kind ↔ 模式', () => {
 })
 
 describe('工具目录', () => {
-  it('两个集合：屏幕记忆 4 个 / 日记 3 个，编号顺序固定', () => {
-    expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual(['screen', 'diary'])
-    expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual(['屏幕记忆', '日记'])
+  it('三个集合：屏幕记忆 4 个 / 日记 3 个 / 信 3 个，编号顺序固定', () => {
+    expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual(['screen', 'diary', 'letter'])
+    expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual(['屏幕记忆', '日记', '信'])
     expect(ASK_TOOL_SCREEN_NAMES).toEqual([
       'search_info',
       'get_freshness',
@@ -80,7 +82,8 @@ describe('工具目录', () => {
       'ask_history'
     ])
     expect(ASK_TOOL_DIARY_NAMES).toEqual(['recall_diary', 'read_diary', 'memory_profile'])
-    expect(ASK_TOOL_NAMES).toHaveLength(7)
+    expect(ASK_TOOL_LETTER_NAMES).toEqual(['write_letter', 'list_letter', 'read_letter'])
+    expect(ASK_TOOL_NAMES).toHaveLength(10)
   })
 
   it('每个元素都有说明，且只属于一个集合', () => {
@@ -88,7 +91,7 @@ describe('工具目录', () => {
       expect(ASK_TOOL_LABELS[name]).toBeTruthy()
       expect(askToolSetOf(name)?.tools).toContain(name)
     }
-    expect(askToolSetOf('conceive_daughter')).toBeNull()
+    expect(askToolSetOf('give_birth')).toBeNull()
   })
 
   it('规范化：丢掉不认识的、去重、按目录顺序', () => {
@@ -98,14 +101,16 @@ describe('工具目录', () => {
     ])
     expect(normalizeAskTools([])).toEqual([])
     expect(isAskToolName('read_diary')).toBe(true)
-    expect(isAskToolName('conceive_daughter')).toBe(false)
+    expect(isAskToolName('give_birth')).toBe(false)
   })
 
-  it('屏幕 / 日记判定按元素算，不按整个集合', () => {
+  it('屏幕 / 日记 / 信判定按元素算，不按整个集合', () => {
     expect(hasScreenTools(['get_freshness'])).toBe(true)
     expect(hasScreenTools(['read_diary'])).toBe(false)
     expect(hasDiaryTools(['memory_profile'])).toBe(true)
     expect(hasDiaryTools(['search_info'])).toBe(false)
+    expect(hasLetterTools(['read_letter'])).toBe(true)
+    expect(hasLetterTools(['search_info'])).toBe(false)
   })
 
   it('默认值：persona / life 全开，assistant 全关', () => {

@@ -105,8 +105,13 @@ export interface DiaryToolDeps {  recall(query: {
 /** 生女儿（D81）：主进程注入的出生动作结果；失败只给可读原因 */
 export interface GiveBirthResult {
   ok: boolean
-  /** 实际落下的分支名（slug） */
+  /**
+   * 这一代真正起的名字（模型给的原话，用于回执 / 家谱显示，D82）。
+   * 取不到时等于 `branch`。
+   */
   nickname?: string
+  /** 实际落下的分支名（slug；git 只认它） */
+  branch?: string
   message: string
 }
 

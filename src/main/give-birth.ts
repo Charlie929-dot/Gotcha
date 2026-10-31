@@ -23,6 +23,7 @@ import {
   TRUNK_BRANCH,
   withBranchAdded,
   withGenerationAdded,
+  withGenerationRealName,
   writeLineage,
   type Lineage
 } from './lineage'
@@ -41,6 +42,11 @@ export interface GiveBirthInput {
   nickname: string
   /** 当前活动节点（必须 alive，且生命 ≥85%） */
   motherBranch: string
+  /**
+   * 母亲这一代真正叫什么（D82）：老家谱里第一代只有分支名 `default`，
+   * 交接时用人设名补上，回执 / 家谱树才不显示 `default`。不给就不改名。
+   */
+  motherName?: string
 }
 
 /** 家谱里没有主干节点就补一条（旧 M4 家谱只记了女儿，没记主干） */
@@ -57,8 +63,12 @@ function withTrunkNode(lineage: Lineage, trunk: string, at: number): Lineage {
 }
 
 /** 女儿分支里的出生记录（`birth.json`）：让首个提交一定有内容，也方便她知道自己从哪来 */
-function birthRecord(slug: string, mother: string, at: number): string {
-  return `${JSON.stringify({ nickname: slug, mother, born_at: at }, null, 2)}\n`
+function birthRecord(slug: string, mother: string, at: number, name?: string): string {
+  return `${JSON.stringify(
+    { nickname: slug, ...(name !== undefined && name !== slug ? { name } : {}), mother, born_at: at },
+    null,
+    2
+  )}\n`
 }
 
 /**
@@ -97,6 +107,8 @@ export async function giveBirth(
   if (slug === null) {
     return { ok: false, message: '这个名字转不出可用的分支名（用英文 / 数字 / 短一些的中文）。' }
   }
+  // D82：家谱里存「真名」——模型给的原话（可以是中文），只清空白、限长，不做拼音
+  const realName = input.nickname.replace(/\s+/gu, ' ').trim().slice(0, 24) || slug
   if (isTrunkName(slug)) {
     return { ok: false, message: `${slug} 是出生主干，不能当女儿的名字。` }
   }
@@ -120,12 +132,15 @@ export async function giveBirth(
   const base = withTrunkNode(lineage, trunk, at)
   const next = withGenerationAdded(base, {
     branch: slug,
-    nickname: slug,
+    // D82：家谱存「真名」（模型给的原话），分支名仍是 slug
+    nickname: realName,
     mother: input.motherBranch,
     at
   })
   if (next === null) return { ok: false, message: '家谱加不进新的一代。' }
-  const snapshot = lineageSnapshot(next)
+  // D82：母亲这代没起过名（老数据 nickname = 分支名）就顺手补上人设名
+  const named = withGenerationRealName(next, input.motherBranch, input.motherName ?? '')
+  const snapshot = lineageSnapshot(named)
 
   // 1) 主干：先补「第一代出生」标记（新建主干时），再落这一代的出生提交
   const hasTrunk = branches.some((entry) => entry.branch === trunk)
@@ -150,7 +165,7 @@ export async function giveBirth(
     return { ok: false, message: '开女儿分支失败，没有生（记忆不会丢）。' }
   }
   const carried = await carryOutboxLetters(deps.repo, outbox)
-  await deps.repo.writeFile('birth.json', birthRecord(slug, input.motherBranch, at))
+  await deps.repo.writeFile('birth.json', birthRecord(slug, input.motherBranch, at, realName))
   await deps.repo.writeFile('lineage.snapshot.json', snapshot)
   const born = await deps.repo.commit(`memory: born ${slug}`)
   if (!born.committed) {
@@ -159,16 +174,17 @@ export async function giveBirth(
   }
 
   // 3) 权威家谱最后写：git 已经一致，写失败就退回母亲节点，别让 active 与 HEAD 打架
-  if (!(await writeLineage(deps.lineageFile, next))) {
+  if (!(await writeLineage(deps.lineageFile, named))) {
     await deps.repo.switchBranch(input.motherBranch)
     return { ok: false, message: '家谱写不进去，生女儿没有生效（细节看日志）。' }
   }
 
   return {
     ok: true,
-    nickname: slug,
+    nickname: realName,
+    branch: slug,
     message: carried
-      ? `女儿 ${slug} 已出生；这一代到这里，之后从空白开始。`
-      : `女儿 ${slug} 已出生；待寄的信没带上（仓写失败，细节看日志）。`
+      ? `女儿 ${realName}（分支 ${slug}）已出生；这一代到这里，之后从空白开始。`
+      : `女儿 ${realName}（分支 ${slug}）已出生；待寄的信没带上（仓写失败，细节看日志）。`
   }
 }

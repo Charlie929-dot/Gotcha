@@ -76,6 +76,11 @@ export interface AskHistoryEntry {
    */
   conceived?: boolean
   /**
+   * 交接回执（D82）：母亲生命耗尽、下一代接手时的那一行字。
+   * 只用于展示；老记录没有这个字段。
+   */
+  receipt?: string
+  /**
    * 过程（D55 ③）：每轮思考 + 工具调用摘要。
    * 老记录没有这个字段；只用于展示，不写回请求。
    */
@@ -229,6 +234,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
   }
   if (data.branch !== undefined && (typeof data.branch !== 'string' || data.branch === '')) return null
   if (data.conceived !== undefined && typeof data.conceived !== 'boolean') return null
+  if (data.receipt !== undefined && typeof data.receipt !== 'string') return null
   if (data.trace !== undefined && !isTrace(data.trace)) return null
   if (data.kind === 'clarify') {
     if (!isClarify(data.clarify)) return null
@@ -253,6 +259,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
     ...(typeof data.message === 'string' ? { message: data.message } : {}),
     ...(typeof data.note === 'string' ? { note: data.note } : {}),
     ...(typeof data.conceived === 'boolean' ? { conceived: data.conceived } : {}),
+    ...(typeof data.receipt === 'string' ? { receipt: data.receipt } : {}),
     ...(isTrace(data.trace) ? { trace: data.trace } : {}),
     stats: data.stats
   }
@@ -388,7 +395,9 @@ export function toHistoryEntry(
     // 过程（D55 ③）：所有出口都带（暂停轮不落历史，最终结果会带完整 steps）
     ...(result.trace ? { trace: result.trace } : {}),
     // 传承那一问（M4）：只显示，不进下一代上下文
-    ...(result.conceived ? { conceived: true } : {})
+    ...(result.conceived ? { conceived: true } : {}),
+    // 交接回执（D82）：跟这一问一起落盘，重开窗口还在
+    ...(result.receipt !== undefined && result.receipt !== '' ? { receipt: result.receipt } : {})
   }
   if (result.kind === 'answer') {
     return {

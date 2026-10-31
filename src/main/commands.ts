@@ -59,6 +59,7 @@ import {
   type LineageBranch,
   type LineageRead
 } from './lineage'
+import { displayNameOf, handoverReceiptOf } from './handover'
 import type {
   GitRunResult,
   MemoryBranchInfo,
@@ -467,7 +468,8 @@ function labelCommitSubject(line: string): string {
 }
 
 /**
- * 家谱树的一行：`[0-1] default · 7 个工具  ← 当前`（`life` 不显示工具数，D75 的样例口径）。
+ * 家谱树的一行：`[0-1] 鱼苗 (yumiao) · 7 个工具  ← 当前`。
+ * 名字（D82）：有真名就 `真名 (分支)`，没起过名只写分支；`life` 不显示工具数（D75 的样例口径）。
  * 停在历史提交时，家谱 `active` 那个节点标 `← 正在看`（表明这一问会从它分叉）。
  */
 function genealogyLine(
@@ -477,6 +479,11 @@ function genealogyLine(
   viewedBranch: string | null
 ): string {
   const info = lineage === null ? null : findBranch(lineage, node.branch)
+  const generation = lineage === null ? null : generationOf(lineage, node.branch)
+  // 真名挂在这一代的**主分支**上；同代的其他节点（ask / spring）仍只显示分支名
+  const realName =
+    generation !== null && generation.branch === node.branch ? displayNameOf(generation) : ''
+  const label = realName !== '' && realName !== node.branch ? `${realName} (${node.branch})` : node.branch
   let suffix = ''
   if (info !== null && lineage !== null) {
     if (info.kind === 'life') suffix = ' · 主干'
@@ -491,7 +498,7 @@ function genealogyLine(
       : viewedBranch === node.branch
         ? '  ← 正在看'
         : ''
-  return `[${node.id}] ${node.branch}${suffix}${marker}`
+  return `[${node.id}] ${label}${suffix}${marker}`
 }
 
 /** 短 sha 比较：`%h` 与 `rev-parse --short` 的位数可能不同，按前缀认同一个提交 */
@@ -981,8 +988,12 @@ async function finishMemoryAction(
   if (!switched.ok) return { text: failureReasonText(switched, `切到 ${action.branch}`) }
   const synced = await syncActive(deps, lineage, action.branch, action.mode?.kind)
   deps.reloadConversations?.()
+  // 切到的是一代已经交接过的母亲（D82）：顺手把那一行交接回执补给她看
+  const receipt = synced !== undefined ? handoverReceiptOf(synced, action.branch) : null
   return {
-    text: `===this is ${action.branch}===\n已切到节点 ${action.branch}。这一问开始用它的记忆。`,
+    text: `===this is ${action.branch}===\n已切到节点 ${action.branch}。这一问开始用它的记忆。${
+      receipt !== null ? `\n\n${receipt}` : ''
+    }`,
     ...(synced !== undefined ? { mode: modeStateOf(synced, action.branch) } : action.mode !== undefined ? { mode: action.mode } : {})
   }
 }
@@ -1021,8 +1032,16 @@ async function useNode(
     const mode = lineage !== null ? modeStateOf(lineage, branchName) : undefined
     if (head.branch === branchName) {
       const synced = await syncActive(deps, lineage, branchName, mode?.kind)
+      const receipt =
+        synced !== undefined
+          ? handoverReceiptOf(synced, branchName)
+          : lineage !== null
+            ? handoverReceiptOf(lineage, branchName)
+            : null
       return {
-        text: `===this is ${branchName}===\n已经在 ${branchName}。`,
+        text: `===this is ${branchName}===\n已经在 ${branchName}。${
+          receipt !== null ? `\n\n${receipt}` : ''
+        }`,
         ...(synced !== undefined ? { mode: modeStateOf(synced, branchName) } : mode !== undefined ? { mode } : {})
       }
     }

@@ -475,7 +475,10 @@ export function withBranchRemoved(lineage: Lineage, branch: string): Lineage | n
 export interface AddGenerationInput {
   /** 女儿的分支名（昵称 slug） */
   branch: string
-  /** 女儿的名字（显示用；与分支名同口径） */
+  /**
+   * 女儿的名字（显示用，D82）：模型给的原话（可以是中文），不是分支名。
+   * 老数据里它等于分支名 —— 读的地方一律「真名优先、没起过名回退分支」。
+   */
   nickname: string
   /** 母亲节点（分支名）；必须存在且 alive */
   mother: string
@@ -539,8 +542,28 @@ export function withGenerationAdded(lineage: Lineage, input: AddGenerationInput)
   }
 }
 
-/** 某节点的出生日（本地 `yyyy-mm-dd`）；不是代分支 / 时间坏掉返回 null */
-export function birthDayOf(lineage: Lineage, branch: string): string | null {
+/**
+ * 给一代补「真名」（D82）：老家谱里 `nickname` 等于这一代的主分支名（等于从没起过名），
+ * 交接时用当下的人设名补上，回执 / 家谱树 / `<now>` 就都有名字可显示。
+ * 名字记在**代**上（`generation`），所以同代的其它分支（`test-2` 之类）交接也能补。
+ * 已经有真名 / 名字为空 / 节点不存在都不动，返回原家谱。
+ */
+export function withGenerationRealName(lineage: Lineage, branch: string, name: string): Lineage {
+  const trimmed = name.trim()
+  if (trimmed === '') return lineage
+  const generation = generationOf(lineage, branch)
+  if (generation === null) return lineage
+  if (generation.nickname.trim() !== generation.branch) return lineage
+  if (trimmed === generation.branch) return lineage
+  return {
+    ...lineage,
+    generations: lineage.generations.map((item) =>
+      item.id === generation.id ? { ...item, nickname: trimmed } : item
+    )
+  }
+}
+
+/** 某节点的出生日（本地 `yyyy-mm-dd`）；不是代分支 / 时间坏掉返回 null */export function birthDayOf(lineage: Lineage, branch: string): string | null {
   const generation = generationOf(lineage, branch)
   if (generation === null) return null
   const date = new Date(generation.born_at)

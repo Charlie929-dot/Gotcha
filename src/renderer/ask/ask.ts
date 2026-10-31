@@ -792,6 +792,14 @@ function assistantCard(
 }
 
 function renderTurn(entry: AskHistoryEntry): void {
+  renderTurnBody(entry)
+  // 交接回执（D82）：跟在出生那一问后面单独一条，与命令回执同款
+  if (entry.receipt !== undefined && entry.receipt !== '') {
+    threadEl.append(receiptBubble('回执', entry.receipt, entry.at))
+  }
+}
+
+function renderTurnBody(entry: AskHistoryEntry): void {
   appendUserBubble(entry.question, entry.imagePath, entry.attachments)
 
   if (entry.kind === 'answer') {
@@ -998,20 +1006,29 @@ function renderContinueCard(result: ContinueAskResult): void {
  * 本地命令回执（`/help`、`/backup`）：不落历史，所以不能走 `renderThread()`
  * （会把刚画出来的回执一起重建掉）——只把等待卡换成一张普通回答卡。
  */
-function renderCommandResult(result: Extract<ChainAskResult, { kind: 'command' }>): void {
-  const pending = threadEl.querySelector('.card.pending')?.closest('.msg') ?? null
+/**
+ * 回执气泡：命令结果（`/git`、`/use`…）与「交接回执」（D82）共用，区别只在标题。
+ * 回执不落问答历史里的「轮」，所以这里不画引用 / 过程，只画一行字。
+ */
+function receiptBubble(label: string, text: string, at: number = Date.now()): HTMLElement {
   const wrap = element('div', 'msg assistant')
   const card = element('div', 'card answer')
   const head = element('div', 'card-head')
-  const label = element('span', 'card-label')
-  label.textContent = '命令'
+  const tag = element('span', 'card-label')
+  tag.textContent = label
   const meta = element('span', 'muted')
-  meta.textContent = formatClock(Date.now())
-  head.append(label, meta)
+  meta.textContent = formatClock(at)
+  head.append(tag, meta)
   const body = element('p', 'answer-text')
-  body.textContent = result.text
+  body.textContent = text
   card.append(head, body)
   wrap.append(card)
+  return wrap
+}
+
+function renderCommandResult(result: Extract<ChainAskResult, { kind: 'command' }>): void {
+  const pending = threadEl.querySelector('.card.pending')?.closest('.msg') ?? null
+  const wrap = receiptBubble('命令', result.text)
   if (pending) pending.replaceWith(wrap)
   else threadEl.append(wrap)
   threadEl.scrollTop = threadEl.scrollHeight

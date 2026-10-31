@@ -82,7 +82,7 @@ describe('giveBirth · 真实 git 仓', () => {
       { repo, lineageFile },
       { nickname: '小雨', motherBranch: 'default' }
     )
-    expect(result).toMatchObject({ ok: true, nickname: 'xiao-yu' })
+    expect(result).toMatchObject({ ok: true, nickname: '小雨', branch: 'xiao-yu' })
 
     // 分支：主干 + 女儿 + 原来的 default 都还在
     const branches = (await repo.listBranches()).map((entry) => entry.branch)
@@ -118,6 +118,9 @@ describe('giveBirth · 真实 git 仓', () => {
     const daughter = generationOf(lineage, 'xiao-yu')
     expect(daughter?.mother).toBe('gen-1')
     expect(daughter?.letter).toBeNull()
+    // D82：家谱存的是真名（模型给的原话），分支名仍是 slug
+    expect(daughter?.nickname).toBe('小雨')
+    expect(daughter?.branch).toBe('xiao-yu')
     expect(findBranch(lineage, 'default')?.status).toBe('dead')
     expect(findBranch(lineage, TRUNK_BRANCH)?.kind).toBe('life')
     expect(lineage.last).toEqual({ chat: 'xiao-yu' })
@@ -146,7 +149,7 @@ describe('giveBirth · 真实 git 仓', () => {
       { repo, lineageFile },
       { nickname: 'mimi', motherBranch: 'default' }
     )
-    expect(result).toMatchObject({ ok: true, nickname: 'mimi' })
+    expect(result).toMatchObject({ ok: true, nickname: 'mimi', branch: 'mimi' })
     const branches = (await repo.listBranches()).map((entry) => entry.branch)
     expect(branches).toEqual(expect.arrayContaining(['life', 'mimi']))
     expect(branches).not.toContain('ask')

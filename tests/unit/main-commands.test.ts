@@ -22,6 +22,8 @@ import {
   readLineage,
   toolsOfBranch,
   withBranchAdded,
+  withGenerationAdded,
+  withGenerationRealName,
   writeLineage,
   type Lineage
 } from '../../src/main/lineage'
@@ -543,8 +545,63 @@ describe('命令执行', () => {
     expect(read.lineage.active).toBe('spring')
   })
 
-  it('/use 编号：认家谱树的编号（0 / 0-1 / 0-1-0）', async () => {
+  it('/use 回到已交接的母亲：补一条交接回执（D82：家谱真名）', async () => {
     const lineageFile = tempLineageFile()
+    const base = await ensureLineage(lineageFile, { now: 1 })
+    const born = withGenerationAdded(base.lineage, {
+      branch: 'yumiao',
+      nickname: '鱼苗',
+      mother: 'default',
+      at: 2
+    })
+    if (born === null) throw new Error('seed failed')
+    await writeLineage(lineageFile, withGenerationRealName(born, 'default', '贴心大肥鱼'))
+    let current = 'yumiao'
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        listBranches: async () => [
+          { branch: 'default', sha: 'a1', subject: 'memory: 2026-10-31', at: 1 },
+          { branch: 'yumiao', sha: 'a2', subject: 'memory: born yumiao', at: 2 }
+        ],
+        head: async () => ({ branch: current, detached: false, sha: 'a2' }),
+        switchBranch: async (name) => {
+          current = name
+          return { ok: true, head: { branch: name, detached: false, sha: 'a1' } }
+        }
+      }),
+      lineageFile
+    })
+    const text = textOf(await run('/use default'))
+    expect(text).toContain('===this is default===')
+    expect(text).toContain('=== <贴心大肥鱼> 生命耗尽  ta的女儿 <鱼苗> 将接续ta的使命===')
+  })
+
+  it('/log 家谱树显示真名（D82）：有真名就「真名 (分支)」', async () => {
+    const lineageFile = tempLineageFile()
+    const base = await ensureLineage(lineageFile, { now: 1 })
+    const born = withGenerationAdded(base.lineage, {
+      branch: 'yumiao',
+      nickname: '鱼苗',
+      mother: 'default',
+      at: 2
+    })
+    if (born === null) throw new Error('seed failed')
+    await writeLineage(lineageFile, born)
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        listBranches: async () => [
+          { branch: 'default', sha: 'a1', subject: 'memory: 2026-10-31', at: 1 },
+          { branch: 'yumiao', sha: 'a2', subject: 'memory: born yumiao', at: 2 }
+        ],
+        head: async () => ({ branch: 'yumiao', detached: false, sha: 'a2' })
+      }),
+      lineageFile
+    })
+    const text = textOf(await run('/log'))
+    expect(text).toContain('鱼苗 (yumiao)')
+  })
+
+  it('/use 编号：认家谱树的编号（0 / 0-1 / 0-1-0）', async () => {    const lineageFile = tempLineageFile()
     await seededTree(lineageFile)
     let current = 'life'
     const run = createCommandHandler({

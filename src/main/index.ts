@@ -132,6 +132,7 @@ import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask
 import { createAskConversationRegistry } from './ask-conversation'
 import { createCommandHandler, currentModeState, memoryDayKey, type CompactOutcome } from './commands'
 import { giveBirth as giveBirthOnRepo } from './give-birth'
+import { handoverReceiptText } from './handover'
 import { createLetterStore } from './letters'
 import { defaultMomLetterFor } from './default-mom-letter'
 import {
@@ -2351,7 +2352,9 @@ if (primaryInstance) {
       opening?: RedactableAskOpening,
       life?: AskLifeContext,
       momLetter?: string,
-      unreadLetters?: number
+      unreadLetters?: number,
+      /** 传承成功后拿到交接回执（D82）：由组合根挂到这一问的结果上 */
+      onBirth?: (receipt: string) => void
     ): ChainAskOptions => {
       const chat = mode.kind === 'chat'
       const tools = mode.tools
@@ -2359,8 +2362,9 @@ if (primaryInstance) {
       // 纯模型（ask）不带人设，免得它把「问个技术问题」也演成角色。
       const persona = chat ? readPersona(db, { userDataDir: app.getPath('userData') }) : null
       const personaPrompt = persona !== null ? buildPersonaPrompt(persona) : undefined
+      const personaName = (persona?.name ?? '').trim()
       /** 信的「来自」：优先人设名（贴心大肥鱼），读不到再用分支昵称 */
-      const letterFrom = (persona?.name ?? '').trim() || life?.nickname || ''
+      const letterFrom = personaName || life?.nickname || ''
       // 指代线索：提问前最后一段（不是证据；引用仍要经 search_info / read_segment）
       const recent = hasScreenTools(tools) ? latestSegmentHint(db) : undefined
       // 生女儿（D81）：只有 persona 分支、生命 ≤15% 且带工具时才给这个入口；纯模型保持单轮
@@ -2425,7 +2429,27 @@ if (primaryInstance) {
         tools,
         // 生女儿（D81）：生命 ≤15% 才把 give_birth 放进来（工具描述在 deepseek.ts）
         ...(birthEnabled && life !== undefined
-          ? { giveBirth: (nickname: string) => giveBirth({ nickname, motherBranch: life.branch }) }
+          ? {
+              giveBirth: async (nickname: string) => {
+                // D82：母亲这代没起过名就补人设名（回执 / 家谱树都用它）
+                const result = await giveBirth({
+                  nickname,
+                  motherBranch: life.branch,
+                  ...(personaName !== '' ? { motherName: personaName } : {})
+                })
+                const daughter = result.nickname ?? result.branch
+                if (result.ok && onBirth !== undefined && daughter !== undefined && daughter !== '') {
+                  // 母亲名：人设名 > 这代真名 > 分支名；女儿名用刚出生的那个
+                  onBirth(
+                    handoverReceiptText({
+                      mother: personaName || life.nickname || life.branch,
+                      daughter
+                    })
+                  )
+                }
+                return result
+              }
+            }
           : {}),
         // 母亲的信（M4 / D80）：第一代 / 旧数据的 system 里多一段 <mom_letter>
         ...(momLetter !== undefined && momLetter !== '' ? { momLetter } : {}),
@@ -2506,12 +2530,15 @@ if (primaryInstance) {
     const giveBirth = async (input: {
       nickname: string
       motherBranch: string
+      /** 母亲这代真正叫什么（D82）：老家谱第一代只有 `default`，交接时补成人设名 */
+      motherName?: string
     }): Promise<GiveBirthResult> => {
       const result = await giveBirthOnRepo(
         { repo: memoryRepo, lineageFile },
         {
           nickname: input.nickname,
-          motherBranch: input.motherBranch
+          motherBranch: input.motherBranch,
+          ...(input.motherName !== undefined ? { motherName: input.motherName } : {})
         }
       )
       if (!result.ok) return result
@@ -2601,6 +2628,11 @@ if (primaryInstance) {
           signal
         }
         const momLetter = await momLetterFor(life)
+        // 交接回执（D82）：QQ 那一路只挂在结果上，回话格式仍由通道自己取 answer
+        const birth: { receipt?: string } = {}
+        const onBirth = (receipt: string): void => {
+          birth.receipt = receipt
+        }
         const options = askOptionsFor(
           db,
           context,
@@ -2608,7 +2640,8 @@ if (primaryInstance) {
           await askOpeningFor(db, text, context, mode, qqTalkTimes.get(historyKey) ?? [], life?.bornDay),
           life,
           momLetter,
-          state?.unreadLetters
+          state?.unreadLetters,
+          onBirth
         )
         // QQ 发来的图片：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
         const result = await askChain(
@@ -2620,7 +2653,7 @@ if (primaryInstance) {
         // 传承那一问不记进 QQ 的短上下文 / 说话时刻（女儿从空白开始；M4）
         if (result.conceived !== true) rememberQqTurn(historyKey, text, result)
         commitMemoryDay()
-        return result
+        return birth.receipt !== undefined ? { ...result, receipt: birth.receipt } : result
       }
     })
     /**
@@ -2732,6 +2765,11 @@ if (primaryInstance) {
         const mode = state?.mode ?? fallbackMode
         const life = state?.life
         const momLetter = await momLetterFor(life)
+        // 交接回执（D82）：这一问里真的出生了才填；文字由 askOptionsFor 按真名拼好
+        const birth: { receipt?: string } = {}
+        const onBirth = (receipt: string): void => {
+          birth.receipt = receipt
+        }
         return askChain(
           askOptionsFor(
             db,
@@ -2740,14 +2778,15 @@ if (primaryInstance) {
             await askOpeningFor(db, question, context, mode, undefined, life?.bornDay),
             life,
             momLetter,
-            state?.unreadLetters
+            state?.unreadLetters,
+            onBirth
           ),
           question
         )
           .then((result) => {
             // 记忆落仓不阻塞回答：一天一个提交（M1），失败了只是这次没进仓
             commitMemoryDay()
-            return result
+            return birth.receipt !== undefined ? { ...result, receipt: birth.receipt } : result
           })
       },
       // 本地命令（M1/M2/M3/M5）：/help /log /new /use /del /backup /compact /mode /tool

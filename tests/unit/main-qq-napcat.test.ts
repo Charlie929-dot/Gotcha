@@ -21,11 +21,13 @@ import {
   findNapcatDir,
   isNapcatDir,
   mergeOneBotConfig,
+  NAPCAT_QR_MAX_AGE_MS,
   NAPCAT_REQUIRED_FILES,
   napcatTokenHash,
   NapcatManager,
   parseWebuiConfig,
   qrcodeDataUrl,
+  qrExpired,
   type NapcatDeps
 } from '../../src/main/qq/napcat'
 
@@ -205,6 +207,14 @@ describe('二维码', () => {
   it('不是 PNG 就返回 null', () => {
     expect(qrcodeDataUrl(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]))).toBeNull()
     expect(qrcodeDataUrl(new Uint8Array([0x89, 0x50]))).toBeNull()
+  })
+
+  it('过期判定：票约 2 分钟，超过就该换一张（没有码也算过期）', () => {
+    const now = 1_000_000
+    expect(qrExpired(null, now)).toBe(true)
+    expect(qrExpired(now - 5_000, now)).toBe(false)
+    expect(qrExpired(now - NAPCAT_QR_MAX_AGE_MS + 1, now)).toBe(false)
+    expect(qrExpired(now - NAPCAT_QR_MAX_AGE_MS - 1, now)).toBe(true)
   })
 })
 

@@ -219,6 +219,7 @@
 | `/use <sha>` 是「看历史」不是「切分支」：分叉会挂到旧节点下 | 2026-10-31 D76：`/use <sha>` 只 checkout、不写 active；下一句由 `forkDetachedIfNeeded` 按 active 分叉，于是从 test 的历史提交聊出来的东西挂到了 `assistant-2`，test 的历史页里永远看不到 | `/log <节点>` 记住这一页，`/use <sha>` 把 active 记成它（D76）；detached 时**只写权威家谱**、不写仓内快照（否则工作区脏、切不回去）；快照在分叉 / 每日提交时补 |
 | 分页从「最旧」数起时，不能只取最新 N 条再 reverse | 2026-10-31 D77：`branchLog` 返回最新在前；想从最旧翻页，只取最新 `offset+20` 条再 reverse，拿到的是「最新那段」的最旧，不是真最旧（少算被截掉的提交） | 先用 `commitCount`（`rev-list --count`）拿总数，再取 `total - start` 条（覆盖到起点），reverse 后取前 20 条；页首 `start` 按 20 对齐到最后一页 |
 | `/git` 翻页必须翻缓存，不能重跑命令 | 2026-10-31 D78：分页时若重新执行 git，`git log` 每次结果可能不同（新提交）、`push` 之类的写命令会重复执行 | 第一次跑完整命令、把 `{command, lines, code}` 存进 handler 状态；`/git n|l` 只切页；`maxOutput` 在 runner 层截断（200k），命令层只做行级裁剪 |
+| NapCat 不会自己换登录二维码 | 2026-10-31 真机：抽屉里的码扫出来永远「已过期」；`cache/qrcode.png` 还停在早上 10:45（票只有 ~2 分钟），`CheckLoginStatus.loginPhase` 一直是 `waiting_qrcode`——NapCat 只在启动 / 收到刷新请求时写这张 PNG | 轮询里判 `qrExpired(qrAt, now)`（`NAPCAT_QR_MAX_AGE_MS = 110s`）：过期就先清掉旧图，再 POST `/api/QQLogin/RefreshQRcode`（要 WebUI 凭据、15s 节流），NapCat 会重写 `cache/qrcode.png`，随后按普通路径读回来；`readQr()` 也拒绝比 110s 还旧的图（接管老进程别照收旧码）。实测 `RefreshQRcode` 返回 `{ qrcodeurl }`、文件 mtime 立刻更新 |
 
 ## 规则
 

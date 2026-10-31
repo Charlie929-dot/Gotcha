@@ -205,6 +205,30 @@ describe('一次问答', () => {
     ])
   })
 
+  it('交接回执先单独发一条，再发回答（D85）', async () => {
+    const transport = new FakeTransport()
+    const receipt = '🎗️提示\n✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
+    const channel = createQqChannel(transport, {
+      ask: async () => ({ ...answer('女儿出生了。'), receipt }),
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('生一个吧'))
+    const texts = transport.sent.map((item) => item.text)
+    expect(texts[0]).toContain('🎗️提示')
+    expect(texts[0]).toContain('生命耗尽')
+    expect(texts[0]).not.toContain('女儿出生了。')
+    expect(texts.slice(1).join('\n')).toContain('女儿出生了。')
+  })
+
+  it('formatAskResult：有回执时回执在最前、自成一段（splitForQq 才能分两条）', () => {
+    const text = formatAskResult({ ...answer('正文'), receipt: '🎗️提示\n回执行' })
+    expect(text.startsWith('🎗️提示')).toBe(true)
+    expect(text).toContain('\n\n正文')
+    expect(formatAskResult(answer('正文'))).not.toContain('🎗️提示')
+  })
+
   it('长答按上限分条，每条不超过上限', async () => {
     const transport = new FakeTransport()
     const channel = createQqChannel(transport, {

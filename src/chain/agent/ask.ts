@@ -35,7 +35,7 @@ import type {
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
 import type { AskConversationPort } from './conversation'
-import type { AskHistorySummary, ConceiveDaughterResult, DiaryToolDeps } from './tools'
+import type { AskHistorySummary, DiaryToolDeps, GiveBirthResult, LetterToolDeps } from './tools'
 import {
   EVIDENCE_TEXT_CHARS,
   type ChainAskRelatedSegment,
@@ -95,10 +95,14 @@ export interface ChainAskOptions {
   /** 日记记忆（第二本账）：不传 = 没接入，三个记忆工具会如实报错 */
   diary?: DiaryToolDeps
   /**
-   * 传承（M4）：生命 ≤15% 且模式带工具时才由组合根注入；
-   * 不传 = 模型调 `conceive_daughter` 会回「现在还不能传承」。
+   * 生女儿（D81）：生命 ≤15% 且模式带工具时才由组合根注入；
+   * 不传 = 模型调 `give_birth` 会回「现在还不能传承」。
    */
-  conceive?: (nickname: string, letter?: string) => Promise<ConceiveDaughterResult>
+  giveBirth?: (nickname: string) => Promise<GiveBirthResult>
+  /** 信（D81）：写 / 列 / 读；不传 = 这个分支没挂写信工具 */
+  letters?: LetterToolDeps
+  /** 未读信数（D81）：只进 `<now>` 的一行 */
+  unreadLetters?: number
   /** 母亲留下的信（`<mom_letter>`，M4）：只有女儿代才有 */
   momLetter?: string
   /**
@@ -117,10 +121,10 @@ export interface ChainAskOptions {
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 默认回忆助手口吻） */
   personaPrompt?: string
   /**
-   * 这次问答给哪些工具组（D62 模式）。不传 = 两组都开（老行为）。
-   * 两组都关时循环只发一次请求、不带 tools（提问 / 纯聊天），不再有收尾轮。
+   * 这次问答给哪些工具（元素名，D72）：来自当前分支的 `/tool` 配置。
+   * 不传 / 空表 = 纯模型：循环只发一次请求、不带 tools（提问 / 纯聊天）。
    */
-  tools?: { screen: boolean; diary: boolean }
+  tools?: readonly string[]
   /**
    * 开场注入：「此刻」事实每轮刷新（由调用方现算），「想到的」日记片段只在
    * 新对话第一问出现；续查时片段从检查点沿用。没传 = 这个客户端不看这些。
@@ -297,7 +301,9 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         captureRunning: options.captureRunning ?? (() => false),
         ...(options.readAskHistory ? { readAskHistory: options.readAskHistory } : {}),
         ...(options.diary ? { diary: options.diary } : {}),
-        ...(options.conceive ? { conceive: options.conceive } : {}),
+        ...(options.giveBirth ? { giveBirth: options.giveBirth } : {}),
+        ...(options.letters ? { letters: options.letters } : {}),
+        ...(options.unreadLetters !== undefined ? { unreadLetters: options.unreadLetters } : {}),
         ...(options.momLetter ? { momLetter: options.momLetter } : {}),
         ...(options.readShot ? { readShot: options.readShot } : {}),
         ...(options.personaPrompt ? { personaPrompt: options.personaPrompt } : {}),

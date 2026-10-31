@@ -52,6 +52,7 @@ import {
 } from '../../understand/cloud/llm-client'
 import type { ChainAskClientResolution, ChainAskLog } from './ask'
 import { readChainFreshness } from './freshness'
+import { ASK_TOOL_NAMES } from './tool-catalog'
 import { isNoEvidenceAnswer, memorySnippet, parseChainReply, parseChainReplyText, type CitationMeta } from './parse'
 import {
   type ChainAskCitation,
@@ -67,8 +68,9 @@ import {
 import {
   createAskToolExecutor,
   type AskHistorySummary,
-  type ConceiveDaughterResult,
+  type GiveBirthResult,
   type DiaryToolDeps,
+  type LetterToolDeps,
   type MemoryCitationMeta
 } from './tools'
 import type { ChainDb } from '../store'
@@ -127,10 +129,14 @@ export interface AskLoopContext {
   /** 日记记忆（第二本账）；不传 = 没有接入，三个记忆工具会如实报错 */
   diary?: DiaryToolDeps
   /**
-   * 传承（M4）：只有在生命 ≤15% 且模式带工具时由组合根注入；
-   * 不传 = 模型调 `conceive_daughter` 会回「现在还不能传承」。
+   * 生女儿（D81）：只有在生命 ≤15% 且模式带工具时由组合根注入；
+   * 不传 = 模型调 `give_birth` 会回「现在还不能传承」。
    */
-  conceive?: (nickname: string, letter?: string) => Promise<ConceiveDaughterResult>
+  giveBirth?: (nickname: string) => Promise<GiveBirthResult>
+  /** 信（D81）：写 / 列 / 读；不传 = 这个分支没挂写信工具 */
+  letters?: LetterToolDeps
+  /** 未读信数（D81）：只进 `<now>` 的一行，正文走 read_letter */
+  unreadLetters?: number
   /** 母亲留下的信（`<mom_letter>`，M4）：只有女儿代才有；不传 = 不写这一段 */
   momLetter?: string
   /**
@@ -141,10 +147,10 @@ export interface AskLoopContext {
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 用默认的回忆助手口吻） */
   personaPrompt?: string
   /**
-   * 这次给哪些工具组（D62 模式）。不传 = 两组都开。
-   * 两组都关 = 单轮请求：不跑工具预算、不带 tools、不产生收尾轮。
+   * 这次给哪些工具（元素名，D72；来自当前分支的 `/tool` 配置）。
+   * 不传 = 空表 = 纯模型：单轮请求，不跑工具预算、不带 tools、不产生收尾轮。
    */
-  tools?: { screen: boolean; diary: boolean }
+  tools?: readonly string[]
   /**
    * 开场注入：「此刻」事实（每轮现算）+ 第一问的「想到的」日记片段。
    * 由组合根给出；载荷层统一过策略后再送云。
@@ -269,6 +275,14 @@ function summarizeToolOutcome(
       return `打开 ${result.day} 的日记`
     case 'memory_profile':
       return '看了「关于我」的统计'
+    case 'give_birth':
+      return '把之后的日子交给了下一代'
+    case 'write_letter':
+      return `写了一封信（${result.at}）`
+    case 'list_letter':
+      return `看了 ${result.letters.length} 封信`
+    case 'read_letter':
+      return `读了信 ${result.id}`
     default:
       return `失败：${result.message}`
   }
@@ -311,7 +325,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.readAskHistory ? { readAskHistory: ctx.readAskHistory } : {}),
     ...(ctx.searchBatch ? { searchBatch: ctx.searchBatch } : {}),
     ...(ctx.diary ? { diary: ctx.diary } : {}),
-    ...(ctx.conceive ? { conceive: ctx.conceive } : {}),
+    ...(ctx.giveBirth ? { giveBirth: ctx.giveBirth } : {}),
+    ...(ctx.letters ? { letters: ctx.letters } : {}),
     ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId)
@@ -324,9 +339,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   }
   const systemTime = formatSystemTime(now)
   const systemTimeMs = now
-  /** 工具组（D62）：两组都关 = 单轮请求，不跑预算、不等待续查 */
-  const toolGroups = ctx.tools ?? { screen: true, diary: true }
-  const toolsAvailable = toolGroups.screen || toolGroups.diary
+  /** 工具白名单（D72）：缺省 = 全开（老调用方 / 测试行为不变）；空数组 = 纯模型 */
+  const tools = ctx.tools ?? ASK_TOOL_NAMES
+  const toolsAvailable = tools.length > 0
   /** 会话里之前的轮次（只追加的基底）；没有存储时为空 */
   const priorConversation = ctx.conversation?.load() ?? emptyAskConversation()
 
@@ -335,7 +350,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     question,
     systemTime,
     systemTimeMs,
-    tools: toolGroups,
+    tools,
     freshness,
     turns: [],
     ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
@@ -454,7 +469,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       question,
       systemTime,
       systemTimeMs,
-      tools: toolGroups,
+      tools,
       freshness,
       turns,
       ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
@@ -467,6 +482,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       ...(ctx.recent ? { recent: ctx.recent } : {}),
       ...(ctx.opening ? { opening: ctx.opening } : {}),
       ...(ctx.life ? { life: ctx.life } : {}),
+      ...(ctx.unreadLetters !== undefined ? { letters: { unread: ctx.unreadLetters } } : {}),
       ...(ctx.attachments ? { attachments: ctx.attachments } : {})
     })
     // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；
@@ -491,10 +507,10 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         ...(ctx.image ? { image: ctx.image } : {}),
         ...(ctx.personaPrompt ? { personaPrompt: ctx.personaPrompt } : {}),
-        // 工具组必须每轮都传：两组都关时客户端要据此摘掉「数据边界 / 工具」段
-        toolGroups,
-        // 传承（M4）：生命 ≤15% 才把 conceive_daughter 放进 tools + 工具清单
-        ...(ctx.conceive ? { conceive: true } : {}),
+        // 工具白名单必须每轮都传：空表时客户端据此摘掉「数据边界 / 工具」段
+        toolElements: tools,
+        // 生女儿（D81）：生命 ≤15% 才把 give_birth 放进 tools + 工具清单
+        ...(ctx.giveBirth ? { giveBirth: true } : {}),
         // 母亲的信：只有女儿代才有；放进 system 的 <mom_letter>
         ...(ctx.momLetter ? { momLetter: ctx.momLetter } : {})
       })
@@ -559,7 +575,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         if (call.name === 'ask_history') usedAskHistory = true
         const toolStartedAt = Date.now()
         const outcome = await executor.execute({ name: call.name, arguments: call.arguments })
-        if (outcome.result.kind === 'conceive_daughter') conceived = true
+        if (outcome.result.kind === 'give_birth') conceived = true
         const toolMs = Date.now() - toolStartedAt
         turns.push({
           toolCall: { name: call.name, arguments: call.arguments },

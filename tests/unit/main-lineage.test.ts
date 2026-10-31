@@ -19,6 +19,7 @@ import {
   parseLineage,
   readLineage,
   recordLineageUsage,
+  usageAfterCompact,
   withActive,
   withBranchAdded,
   withBranchRemoved,
@@ -65,7 +66,7 @@ describe('家谱', () => {
       active: 'spring',
       branches: [
         ...first.branches,
-        { branch: 'spring', generation: 'gen-1', parent: 'default', created_at: 2000, status: 'alive' as const, life_tokens_used: 0 }
+        { branch: 'spring', generation: 'gen-1', parent: 'default', created_at: 2000, status: 'alive' as const, life_tokens_used: 0, kind: 'persona' as const }
       ]
     }
     expect(await writeLineage(file, second)).toBe(true)
@@ -300,6 +301,45 @@ describe('生命记账（M3）', () => {
     const done = await readLineage(file)
     if (done.status !== 'ok') return
     expect(lifeOf(done.lineage, 'spring')).toMatchObject({ remaining: 0, percent: 0 })
+  })
+
+  it('纯模型分支也记账（D86），dead 仍拒绝', async () => {
+    const file = tempFile()
+    await ensureLineage(file, { now: 1 })
+    const withAsk = withBranchAdded(emptyLineage(1), {
+      branch: 'ask',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2,
+      kind: 'assistant'
+    })
+    expect(withAsk).not.toBeNull()
+    if (withAsk === null) return
+    await writeLineage(file, withAsk)
+    expect(await recordLineageUsage(file, 'ask', 42_000)).toBe(true)
+    const read = await readLineage(file)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(lifeOf(read.lineage, 'ask')).toMatchObject({ used: 42_000, percent: 92 })
+    const dead = {
+      ...read.lineage,
+      branches: read.lineage.branches.map((item) =>
+        item.branch === 'ask' ? { ...item, status: 'dead' as const } : item
+      )
+    }
+    await writeLineage(file, dead)
+    expect(await recordLineageUsage(file, 'ask', 1)).toBe(false)
+  })
+
+  it('usageAfterCompact：旧上下文 − 被压掉的旧轮 + 摘要本身', () => {
+    // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身
+    expect(usageAfterCompact(10_000, 4_000, 300)).toBe(6_300)
+    // 摘要比旧轮还大时如实变大（不硬压成 0）
+    expect(usageAfterCompact(1_000, 500, 800)).toBe(1_300)
+    // 减过头就落到 0，不出现负数
+    expect(usageAfterCompact(500, 900, 100)).toBe(0)
+    // 坏数据按 0 算，不把 NaN 写进家谱
+    expect(usageAfterCompact(Number.NaN, Number.NaN, Number.NaN)).toBe(0)
   })
 
   it('旧家谱没有 life_tokens_used 字段时按 0 读（向后兼容）', async () => {

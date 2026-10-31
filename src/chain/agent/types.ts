@@ -5,7 +5,7 @@
  * 这一层只做「问题 → 检索证据 → 出云 → 一段回答 + 引用段」，不含 UI。
  */
 
-import type { AskModeConfig } from './mode'
+import type { AskModeState } from './mode'
 
 /** 一条引用：段身份 + 服务端补的事实（前端不用再查库）+ 模型给的一句「那是什么」 */
 export interface ChainAskCitation {
@@ -185,10 +185,10 @@ export type ChainAskResult = (
       text: string
       stats: ChainAskStats
       /**
-       * 命令要求切换模式（`/mode`）：界面收到后写 localStorage + 刷新模式条，
-       * 下一条消息生效（D62）。不带 = 这条命令不改模式。
+       * 这条命令把模式切到了哪里（`/mode`、`/use`）：界面收到后刷新模式条（D72）。
+       * 不带 = 这条命令不改模式。
        */
-      mode?: AskModeConfig
+      mode?: AskModeState
       trace?: ChainAskTrace
     }
   | {
@@ -204,6 +204,12 @@ export type ChainAskResult = (
    * 下一问从空白开始。界面 / 记录层据此只把它当一条「展示用」结果。
    */
   conceived?: true
+  /**
+   * 交接回执（D82 / D83）：这一问里母亲生命耗尽、下一代接手时给界面的一行字
+   * （`🎗️提示` + `✨<母亲> 生命耗尽  ta的女儿 ✨<女儿> 将接续ta的使命`）。
+   * 界面当一条回执显示，随问答历史落盘，重开窗口还在。
+   */
+  receipt?: string
 }
 
 /** 续问时带上的上一轮对话（问题 + 最终答复 / 澄清问题），让「那上午呢」这类指代有处可落 */

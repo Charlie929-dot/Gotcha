@@ -207,6 +207,18 @@
 | `git checkout --orphan` 不等于空树 | 2026-10-30 M4：`--orphan` 只换 HEAD，旧文件还留在索引 / 工作区；直接提交会把母亲的 `conversations/` 带进女儿分支 | `switchCreateOrphan` 里执行 `git rm -rf --ignore-unmatch .` 清空，再写回 `.gitattributes` / `.gitignore` / 三个目录脚手架；单测见 `main-memory-repo.test.ts` 的 orphan 用例 |
 | 传承后母亲最后一问的 usage 会记到女儿头上 | 2026-10-30 M4：`onUsage` 以前在回调时现读 `lineage.active`，而传承会把 active 切到女儿；母亲那一问的用量就记成了女儿的生命 | 在 `askOptionsFor` 里捕获**这一问开始时**的 `life.branch` 传给 `onUsage`；`recordLineageUsage` 再拒绝 `status !== 'alive'` 的节点（恢复中的边角也挡住） |
 | 第一代不能套「出生日之后」的日记过滤 | 2026-10-30 M4：`lineage` 第一代 `born_at` 是建谱时间（今天），若给所有代都设 `sinceDay`，第一代会看不到今天的日记 | 只有 `generation.mother !== null`（女儿代）才算出生日边界；第一代 `bornDay` 不传，照常读全部日记 |
+| 切模式不会自动换会话：问答历史要按分支筛 | 2026-10-31 D72：会话文件在仓里、`checkout` 天然按分支隔离；但 `ask-history.jsonl` 是仓外单文件，只按 `conversationId` 取会把 chat 的问答带进 ask（反过来也一样） | `AskHistoryEntry` 加了 `branch` 字段：`record` 写入时的活动分支、`conversationHistory` / `ask_history` 工具按当前分支过滤；渲染层会话列表也按分支过滤 |
+| assistant 分支不能有生命 | 2026-10-31 D72：assistant 是「助手会话」不是一条鱼；若照常记账，`/mode ask` 聊到 500K 会突然冻结、被要求传承 | `askStateNow` 对 assistant 不返回 life（无 `<now>` 生命行）、`lifeEndedText` 直接放行、`recordLineageUsage` 拒绝 assistant；`conceive_daughter` 只在 persona 分支且工具非空时出现 |
+| `switch` 前要先提交：/mode 也会 checkout | 2026-10-31 D72：`/mode ask|chat` 本质是切分支，和 `/use` 同一条纪律——工作区脏就切不了 | 复用 `saveBefore()`（提交失败就不切）；新建 assistant 分支前也先提交当前节点，orphan 落一个出生提交（否则 unborn branch 不会出现在 `/log`） |
+| 工具白名单空表 ≠ 「不传」 | 2026-10-31 D72：链层 / 云端的 `tools` 不传 = 全开（老调用方与测试行为不变）；assistant 分支要显式传 `[]` 才是纯模型 | 组合根按分支 `toolsOfBranch()` 取值（assistant 默认 `[]`），链层默认值 `ASK_TOOL_NAMES`；`/tool rm` 可以合法清空，别把 `[]` 当 falsy 丢掉 |
+| 主干改名后「找主干」不能只认一个名字 | 2026-10-31 D74：主干**固定叫 `life`**（D73 曾改名 `ask`，已撤回——`ask` 现在是纯模型分支，两者会撞名） | 统一用 `lineage.ts` 的 `TRUNK_BRANCH` / `isTrunkName`；`/new` 也拒绝用主干名；纯模型会话名从 `ask` 起、重名自动 `ask-2` |
+| 从父分支分叉会继承 `conversations/` | 2026-10-31 D74：`/new` on ask 用 `switchCreate`（图上是真分支），但会把 ask 的会话文件一起带过去，同一个会话 id 会接上旧上下文 | 分叉后 `clearConversations()`（只留 `.gitkeep`）再提交；女儿不用清，因为出生提交在 life 上、树里本来没有对话 |
+| 快照相同 = 没有 diff：分叉后首个提交会「无变化」 | 2026-10-31 D74：女儿从出生提交分叉，`lineage.snapshot.json` 内容与父提交相同；若没写信，`commit` 会返回 clean、传承失败 | 女儿首个提交固定写 `birth.json`（昵称 / 母亲 / 出生时刻）；空会话分支靠「家谱新增节点 → 快照变化」产生 diff |
+| `/use` 起名等待没有后台定时器 | 2026-10-31 D75：`/use`（脏工作区）/ `/backup`（不带 `-d`）先回执起名，切换 / 提交推迟到回执；超时不会自己发生——进程只在收到消息时看 `pendingAt` | 超时在**下一条输入**到达时补做（`takeExpired` → 默认时间戳名），别另起定时器去 commit/switch（会和用户正在做的事打架）；`/cancel` 是唯一放弃等待的出口 |
+| `memory: <日>` 与 `memory: <日> <时>` 不能混用 | 2026-10-31 D75：`commitDay` 按「最后一次提交主题 === `memory: <日>`」判断今天已提交；切换保存 / 手动备份若也用 `memory: <日>`，每日提交会误判为已做，`labelCommitSubject` 也分不出两者 | 切换保存 / `/backup` 一律 `memory: <日> <时>`（`defaultMemoryName()`，到分钟）；每日固定提交保持 `memory: <日>`（23:59 口径不带时间） |
+| `/use <sha>` 是「看历史」不是「切分支」：分叉会挂到旧节点下 | 2026-10-31 D76：`/use <sha>` 只 checkout、不写 active；下一句由 `forkDetachedIfNeeded` 按 active 分叉，于是从 test 的历史提交聊出来的东西挂到了 `assistant-2`，test 的历史页里永远看不到 | `/log <节点>` 记住这一页，`/use <sha>` 把 active 记成它（D76）；detached 时**只写权威家谱**、不写仓内快照（否则工作区脏、切不回去）；快照在分叉 / 每日提交时补 |
+| 分页从「最旧」数起时，不能只取最新 N 条再 reverse | 2026-10-31 D77：`branchLog` 返回最新在前；想从最旧翻页，只取最新 `offset+20` 条再 reverse，拿到的是「最新那段」的最旧，不是真最旧（少算被截掉的提交） | 先用 `commitCount`（`rev-list --count`）拿总数，再取 `total - start` 条（覆盖到起点），reverse 后取前 20 条；页首 `start` 按 20 对齐到最后一页 |
+| `/git` 翻页必须翻缓存，不能重跑命令 | 2026-10-31 D78：分页时若重新执行 git，`git log` 每次结果可能不同（新提交）、`push` 之类的写命令会重复执行 | 第一次跑完整命令、把 `{command, lines, code}` 存进 handler 状态；`/git n|l` 只切页；`maxOutput` 在 runner 层截断（200k），命令层只做行级裁剪 |
 
 ## 规则
 

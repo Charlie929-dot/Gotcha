@@ -131,6 +131,14 @@ function citationLines(result: ChainAskResult): string[] {
 
 /** 一次结果 → 回复正文（不含分条；分条在 `splitForQq`） */
 export function formatAskResult(result: ChainAskResult): string {
+  const body = formatAskBody(result)
+  // 交接回执（D82 / D85）：出生那一问把回执放在最前面、自己成一段——
+  // `splitForQq` 按空行分段，手机上就是先一条「🎗️提示 …」，再是回答本身。
+  const receipt = result.receipt?.trim() ?? ''
+  return receipt === '' ? body : `${receipt}\n\n${body}`
+}
+
+function formatAskBody(result: ChainAskResult): string {
   switch (result.kind) {
     case 'answer':
     case 'insufficient': {

@@ -21,12 +21,9 @@ import {
 } from '../../chain/agent/types'
 import type { SegmentEvidence } from '../../chain/agent/evidence'
 import {
-  ASK_MODE_PRESETS,
-  DEFAULT_ASK_MODE,
-  askModePresetOf,
-  normalizeAskMode,
-  type AskModeConfig,
-  type AskModePreset
+  ASK_MODE_LABELS,
+  type AskModeKind,
+  type AskModeState
 } from '../../chain/agent/mode'
 import type { AskHistoryEntry } from '../../main/ask-history'
 import type { MemorySettingsView } from '../../main/memory-settings'
@@ -89,13 +86,8 @@ const memoryListMsg = must<HTMLElement>('memory-list-msg')
 const memoryItemsEl = must<HTMLUListElement>('memory-items')
 const memoryMoreButton = must<HTMLButtonElement>('memory-more')
 const memoryUndoButton = must<HTMLButtonElement>('memory-undo')
-/* ---- 模式条（D62：问记忆 / 聊天 / 提问 + 组合开关） ---- */
+/* ---- 模式条（D72：ask / chat 两档；工具用 /tool 管） ---- */
 const modeButtons = [...document.querySelectorAll<HTMLButtonElement>('.mode-btn')]
-const modeExtraToggle = must<HTMLButtonElement>('mode-extra-toggle')
-const modeExtra = must<HTMLElement>('mode-extra')
-const modeScreenInput = must<HTMLInputElement>('mode-screen')
-const modeDiaryInput = must<HTMLInputElement>('mode-diary')
-const modeCardInput = must<HTMLInputElement>('mode-card')
 const modeNote = must<HTMLElement>('mode-note')
 /* ---- 设置抽屉 · 人格卡（D62） ---- */
 const personaCardSelect = must<HTMLSelectElement>('set-persona-card')
@@ -134,61 +126,62 @@ let filter = ''
 let busy = false
 
 /* ------------------------------------------------------------------ */
-/* 模式（D62）：问记忆 / 聊天 / 提问 + 组合开关                          */
+/* 模式（D72：分支即模式）：ask / chat 两个按钮，主进程按分支现算          */
 /* ------------------------------------------------------------------ */
 
-const MODE_STORAGE_KEY = 'gotcha.ask.mode'
-const PRESET_LABEL: Record<AskModePreset, string> = {
-  memory: '问记忆',
-  chat: '聊天',
-  plain: '提问'
-}
-
-function loadAskMode(): AskModeConfig {
-  try {
-    const raw = localStorage.getItem(MODE_STORAGE_KEY)
-    if (raw === null) return { ...DEFAULT_ASK_MODE }
-    return normalizeAskMode(JSON.parse(raw))
-  } catch {
-    return { ...DEFAULT_ASK_MODE }
-  }
-}
-
-let askMode: AskModeConfig = loadAskMode()
+/** 当前模式（由主进程给；界面只显示，不决定） */
+let askMode: AskModeState | null = null
 /** 当前启用的人格卡文件名（设置抽屉读到后回填；只用于提示「选了卡但没启用」） */
 let activePersonaCard = ''
 
-/** 模式条 / 开关 / 提示一起刷新（切模式、读设置后都走这里） */
+/** 模式条 / 提示一起刷新（启动、每条结果、读设置后都走这里） */
 function applyModeUI(): void {
-  const preset = askModePresetOf(askMode)
+  const kind = askMode?.kind ?? null
   for (const button of modeButtons) {
-    button.classList.toggle('active', button.dataset.mode === preset)
+    button.classList.toggle('active', button.dataset.mode === kind)
   }
-  modeScreenInput.checked = askMode.screen
-  modeDiaryInput.checked = askMode.diary
-  modeCardInput.checked = askMode.card
+  if (askMode === null) {
+    modeNote.textContent = '模式：读不到（记忆仓不可用）'
+    return
+  }
   const parts = [
-    askMode.screen ? '屏幕记忆开' : '屏幕记忆关',
-    askMode.diary ? '日记开' : '日记关'
+    `分支 ${askMode.branch}`,
+    askMode.tools.length === 0 ? '无工具' : `${askMode.tools.length} 个工具`
   ]
-  if (askMode.card) {
-    parts.push(activePersonaCard !== '' ? `人格卡：${activePersonaCard}` : '人格卡（还没选卡）')
-  } else {
-    parts.push('人格卡关')
+  if (askMode.kind === 'chat') {
+    parts.push(activePersonaCard !== '' ? `人格卡：${activePersonaCard}` : '默认人设')
   }
-  modeNote.textContent = `${preset === null ? '组合' : PRESET_LABEL[preset]} · ${parts.join(' · ')}`
+  modeNote.textContent = `${ASK_MODE_LABELS[askMode.kind]} · ${parts.join(' · ')}`
 }
 
-function setAskMode(next: AskModeConfig): void {
-  askMode = normalizeAskMode(next)
-  try {
-    localStorage.setItem(MODE_STORAGE_KEY, JSON.stringify(askMode))
-  } catch {
-    // 存不了只影响下次打开窗口的默认值，不影响这次提问
-  }
+/** 主进程切了分支（/mode、/use、/new、传承）：刷新模式条 */
+function setAskMode(next: AskModeState | null): void {
+  if (next !== null) askMode = next
   applyModeUI()
-  // 下一条消息才生效：已经发出去的那几轮上下文不重写（Q2 选 A）
-  setStatus('idle', `模式：${modeNote.textContent ?? ''}（下一条生效）`)
+}
+
+async function refreshMode(): Promise<void> {
+  if (!api) return
+  try {
+    const next = await api.mode()
+    if (next !== null) {
+      setAskMode(next)
+      // 分支过滤影响会话列表：模式一到就按当前分支重画（启动时历史可能先到）
+      if (entries.length > 0) renderHistoryList()
+    }
+  } catch {
+    // 读不到就保持现状；不把窗口带崩
+  }
+}
+
+/** 点模式按钮 = 发一条 `/mode ask|chat`（命令不调模型，回执照常显示） */
+async function requestMode(kind: AskModeKind): Promise<void> {
+  if (busy) return
+  if (askMode?.kind === kind) {
+    setStatus('idle', `已经是${ASK_MODE_LABELS[kind]}模式`)
+    return
+  }
+  await ask(`/mode ${kind}`)
 }
 
 /* ------------------------------------------------------------------ */
@@ -458,6 +451,8 @@ function conversationKey(entry: AskHistoryEntry): string {
 function listConversations(): ConversationView[] {
   const grouped = new Map<string, AskHistoryEntry[]>()
   for (const entry of entries) {
+    // D72：历史按分支隔离，界面也只看当前分支（切 /mode 后不把另一档的问答混在同一条线里）
+    if ((entry.branch ?? 'default') !== (askMode?.branch ?? 'default')) continue
     const key = conversationKey(entry)
     const list = grouped.get(key)
     if (list) list.push(entry)
@@ -797,6 +792,14 @@ function assistantCard(
 }
 
 function renderTurn(entry: AskHistoryEntry): void {
+  renderTurnBody(entry)
+  // 交接回执（D82）：跟在出生那一问后面单独一条，与命令回执同款
+  if (entry.receipt !== undefined && entry.receipt !== '') {
+    threadEl.append(receiptBubble('回执', entry.receipt, entry.at))
+  }
+}
+
+function renderTurnBody(entry: AskHistoryEntry): void {
   appendUserBubble(entry.question, entry.imagePath, entry.attachments)
 
   if (entry.kind === 'answer') {
@@ -1003,20 +1006,29 @@ function renderContinueCard(result: ContinueAskResult): void {
  * 本地命令回执（`/help`、`/backup`）：不落历史，所以不能走 `renderThread()`
  * （会把刚画出来的回执一起重建掉）——只把等待卡换成一张普通回答卡。
  */
-function renderCommandResult(result: Extract<ChainAskResult, { kind: 'command' }>): void {
-  const pending = threadEl.querySelector('.card.pending')?.closest('.msg') ?? null
+/**
+ * 回执气泡：命令结果（`/git`、`/use`…）与「交接回执」（D82）共用，区别只在标题。
+ * 回执不落问答历史里的「轮」，所以这里不画引用 / 过程，只画一行字。
+ */
+function receiptBubble(label: string, text: string, at: number = Date.now()): HTMLElement {
   const wrap = element('div', 'msg assistant')
   const card = element('div', 'card answer')
   const head = element('div', 'card-head')
-  const label = element('span', 'card-label')
-  label.textContent = '命令'
+  const tag = element('span', 'card-label')
+  tag.textContent = label
   const meta = element('span', 'muted')
-  meta.textContent = formatClock(Date.now())
-  head.append(label, meta)
+  meta.textContent = formatClock(at)
+  head.append(tag, meta)
   const body = element('p', 'answer-text')
-  body.textContent = result.text
+  body.textContent = text
   card.append(head, body)
   wrap.append(card)
+  return wrap
+}
+
+function renderCommandResult(result: Extract<ChainAskResult, { kind: 'command' }>): void {
+  const pending = threadEl.querySelector('.card.pending')?.closest('.msg') ?? null
+  const wrap = receiptBubble('命令', result.text)
   if (pending) pending.replaceWith(wrap)
   else threadEl.append(wrap)
   threadEl.scrollTop = threadEl.scrollHeight
@@ -1147,7 +1159,9 @@ async function ask(
     return
   }
   if (activeConversationId === null) activeConversationId = newConversationId()
-  if (currentThreadEntries.length === 0) threadEl.replaceChildren()
+  // 空会话里只摘掉空态提示：命令回执不落历史（主进程直接返回、不过 settle），
+  // 这里整片 replaceChildren 会让连续几条命令只剩最后一条。
+  if (currentThreadEntries.length === 0) threadEl.querySelector('.thread-empty')?.remove()
 
   setupBusy()
   appendPending(question, imagePath, attachments)
@@ -1171,8 +1185,7 @@ async function ask(
       question,
       conversationId,
       imagePath,
-      apiAttachments.length > 0 ? apiAttachments : undefined,
-      askMode
+      apiAttachments.length > 0 ? apiAttachments : undefined
     )
     if (result.kind === 'continue-ask') {
       // 这一问还没落历史：保留刚画的问题气泡，只把等待卡换成「还要继续吗」
@@ -1182,15 +1195,25 @@ async function ask(
       return
     }
     if (result.kind === 'command') {
+      // `/mode` / `/use` / `/new`：先刷新模式条；切了分支就把线程换成新分支的（D72）
+      const switched = result.mode !== undefined && result.mode.branch !== askMode?.branch
+      if (result.mode) setAskMode(result.mode)
+      else await refreshMode()
+      if (switched) {
+        activeConversationId = null
+        currentThreadEntries = []
+        await refreshHistory()
+        renderThread()
+      }
       // 命令回执不落历史，不能走 refreshHistory / renderThread（否则刚画的回执会被重建掉）
       renderCommandResult(result)
-      // `/mode`：主进程算好目标模式，界面落地（localStorage + 模式条），下一条生效
-      if (result.mode) setAskMode(result.mode)
-      else setStatus('idle', '命令已执行')
+      setStatus('idle', '命令已执行')
       return
     }
     const status = statusOf(result)
     setStatus(status.kind, status.text)
+    // 传承会切分支（D72）：回答完刷新一下模式条与分支信息
+    void refreshMode()
     await refreshHistory()
     activeConversationId = conversationId
     renderThread()
@@ -1323,34 +1346,19 @@ must<HTMLButtonElement>('evidence-close').addEventListener('click', () => {
 })
 
 /* ------------------------------------------------------------------ */
-/* 模式条（D62）：预设按钮 + 组合开关                                   */
+/* 模式条（D72）：ask / chat 两个按钮，点了发 `/mode`（切分支）           */
 /* ------------------------------------------------------------------ */
 
 for (const button of modeButtons) {
   button.addEventListener('click', () => {
-    const preset = button.dataset.mode as AskModePreset | undefined
-    if (preset === undefined || !(preset in ASK_MODE_PRESETS)) return
-    setAskMode({ ...ASK_MODE_PRESETS[preset] })
-  })
-}
-
-modeExtraToggle.addEventListener('click', () => {
-  const open = modeExtra.hidden
-  modeExtra.hidden = !open
-  modeExtraToggle.setAttribute('aria-expanded', String(open))
-})
-
-for (const input of [modeScreenInput, modeDiaryInput, modeCardInput]) {
-  input.addEventListener('change', () => {
-    setAskMode({
-      screen: modeScreenInput.checked,
-      diary: modeDiaryInput.checked,
-      card: modeCardInput.checked
-    })
+    const kind = button.dataset.mode
+    if (kind !== 'ask' && kind !== 'chat') return
+    void requestMode(kind)
   })
 }
 
 applyModeUI()
+void refreshMode()
 
 /* ------------------------------------------------------------------ */
 /* 设置抽屉（D53：供应商 / 密钥 / 出网确认 / 用量）                     */

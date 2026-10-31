@@ -22,7 +22,7 @@
  */
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision, ChainAskTurnContext } from '../chain/agent/types'
-import { normalizeAskMode, type AskModeConfig } from '../chain/agent/mode'
+import type { AskModeState } from '../chain/agent/mode'
 import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskHistoryEntry } from './ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
@@ -63,13 +63,11 @@ export interface AskQueryAttachment extends AskAttachmentInput {
   path?: string
 }
 
-/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区截图 / 上传附件 / 模式） */
+/** 一次提问的上下文：会话 id + 该会话之前的几轮 + 取消信号（+ 选区截图 / 上传附件） */
 export interface AskQueryContext {
   conversationId: string
   history: readonly ChainAskTurnContext[]
   signal: AbortSignal
-  /** 这次用的模式（D62）：决定给哪些工具、注不注入人格卡；缺省由主进程按「问记忆」处理 */
-  mode?: AskModeConfig
   /** 选区问答：随这条对话留存的截图（主进程校验后给绝对路径） */
   imagePath?: string
   /** 用户上传的附件（图片 / 文本文件；主进程在提问前落盘图片并回填 path） */
@@ -137,14 +135,16 @@ export interface AskIpcDeps {
   getWindow: () => BrowserWindow | null
   ask: (question: string, context: AskQueryContext) => Promise<ChainAskResult>
   /**
-   * 本地命令（memory-life M1/M2/M3 / D70）：`/help`、`/backup`、`/log`、`/compact`、`/mode`…
-   * 返回非 null = 命中命令（回执直接给界面，不调模型、不进历史）；null = 不是命令，照常提问。
-   * `context.conversationId` 给 `/compact` 用（压哪个会话）；`context.mode` 给 `/mode` 报当前。
+   * 本地命令（memory-life M1/M2/M3 / D70 / D72）：`/help`、`/log`、`/backup`、`/compact`、
+   * `/mode`、`/tool`… 返回非 null = 命中命令（回执直接给界面，不调模型、不进历史）；
+   * null = 不是命令，照常提问。`context.conversationId` 给 `/compact` 用（压哪个会话）。
    */
   command?: (
     text: string,
-    context?: { conversationId?: string; mode?: AskModeConfig }
+    context?: { conversationId?: string }
   ) => Promise<ChainAskResult | null>
+  /** 当前模式（D72 分支即模式）：界面启动 / 每条结果后刷新模式条 */
+  mode?: () => Promise<AskModeState | null>
   segment: (segmentId: number) => SegmentEvidence | null
   consent: () => AskConsentView
   setConsent: (consented: boolean) => AskConsentView
@@ -155,7 +155,7 @@ export interface AskIpcDeps {
     conversationId: string,
     imagePath?: string,
     attachments?: { kind: 'image' | 'file'; name?: string; path?: string; chars?: number }[]
-  ) => void
+  ) => void | Promise<void>
   /** 截图路径 → data URL（渲染层读不了文件）；路径非法 / 读不到返回 null */
   image?: (path: string) => string | null
   /**
@@ -168,8 +168,10 @@ export interface AskIpcDeps {
     decision: ChainAskResumeDecision,
     context: AskQueryContext
   ) => Promise<ChainAskResult>
-  /** 同一会话之前的几轮（主进程按 conversationId 从历史里筛；缺省按空对话处理） */
-  conversationHistory?: (conversationId: string) => readonly ChainAskTurnContext[]
+  /** 同一会话之前的几轮（主进程按 conversationId + 当前分支筛；缺省按空对话处理） */
+  conversationHistory?: (
+    conversationId: string
+  ) => readonly ChainAskTurnContext[] | Promise<readonly ChainAskTurnContext[]>
   /** 全部历史（最新在前） */
   history: () => AskHistoryEntry[]
   /** 清空历史（接记忆仓时会先提交一次再删会话文件，允许返回 Promise） */
@@ -268,7 +270,6 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     {
       question: string
       conversationId: string
-      mode: AskModeConfig
       imagePath?: string
       attachments?: AskQueryAttachment[]
     }
@@ -278,14 +279,13 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
    * 一次问答收口：暂停（continue-ask）暂时不落历史——用户还没决定、答案还没出来；
    * 其余结果照常落一条。历史写失败不能让提问失败，记一条 warn 就行。
    */
-  const settle = (
+  const settle = async (
     question: string,
     conversationId: string,
     result: ChainAskResult,
-    mode: AskModeConfig,
     imagePath?: string,
     attachments?: readonly AskQueryAttachment[]
-  ): ChainAskResult => {
+  ): Promise<ChainAskResult> => {
     const recorded = historyAttachments(attachments)
     if (result.kind === 'continue-ask') {
       if (result.resumeId) {
@@ -297,7 +297,6 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         pendingResume.set(result.resumeId, {
           question,
           conversationId,
-          mode,
           ...(imagePath ? { imagePath } : {}),
           ...(recorded.length > 0 ? { attachments: [...attachments!] } : {})
         })
@@ -307,9 +306,9 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     try {
       // 不带图 / 附件时保持老调用形状
       if (imagePath || recorded.length > 0) {
-        deps.record(question, result, conversationId, imagePath, recorded)
+        await deps.record(question, result, conversationId, imagePath, recorded)
       } else {
-        deps.record(question, result, conversationId)
+        await deps.record(question, result, conversationId)
       }
     } catch (error) {
       deps.log('warn', 'ask history record failed', { error: String(error) })
@@ -333,15 +332,12 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           typeof payload.conversationId === 'string' && CONVERSATION_ID_RE.test(payload.conversationId)
             ? payload.conversationId
             : `c${Date.now().toString(36)}`
-        // 模式（D62）：不是对象就拒（不静默猜），对象里缺的字段按关处理。
-        // 放在命令之前：`/mode` 要知道「当前」是哪个模式，命令回执也可能带新模式。
-        if (payload.mode !== undefined && !isPlainObject(payload.mode)) return failure('模式不合法')
-        const mode = normalizeAskMode(payload.mode)
+        // 模式（D72）：模式 = 当前分支的 kind，主进程按家谱现算，渲染层不再传。
         // 本地命令先过（方案 §6）：命中就在本地执行、回一条文本，不调模型、不写会话 / 历史。
         // 放在问题长度校验之前：命令的参数长度不该受「提问 500 字」限制。
         if (deps.command) {
           try {
-            const handled = await deps.command(asked, { conversationId, mode })
+            const handled = await deps.command(asked, { conversationId })
             if (handled !== null) return handled
           } catch (error) {
             deps.log('warn', 'ask command failed', { error: String(error) })
@@ -361,26 +357,28 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         const attachments = parseAttachments(payload.attachments)
         if (attachments === null) return failure('附件不合法（只收图片和文本文件，条数 / 大小有上限）')
 
+        // 在途状态先挂上：读历史（现在要读家谱、异步）也算这一次提问已经开始，
+        // 期间不允许开写连接（删除 / 撤销 / 清空）。
+        active?.abort()
+        const controller = new AbortController()
+        active = controller
+
         let history: readonly ChainAskTurnContext[] = []
         try {
-          history = deps.conversationHistory?.(conversationId) ?? []
+          history = (await deps.conversationHistory?.(conversationId)) ?? []
         } catch (error) {
           deps.log('warn', 'ask history context failed', { error: String(error) })
         }
 
-        active?.abort()
-        const controller = new AbortController()
-        active = controller
         try {
           const result = await deps.ask(asked, {
             conversationId,
             history,
             signal: controller.signal,
-            mode,
             ...(imagePath ? { imagePath } : {}),
             ...(attachments.length > 0 ? { attachments } : {})
           })
-          return settle(asked, conversationId, result, mode, imagePath, attachments)
+          return await settle(asked, conversationId, result, imagePath, attachments)
         } catch (error) {
           deps.log('error', 'ask:query failed', { error: String(error) })
           return failure('问记忆出错，看日志')
@@ -405,32 +403,31 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         if (!pending) return failure('这次追问已经过期（窗口重开或等太久），重新问一遍就好')
         pendingResume.delete(resumeId)
 
+        active?.abort()
+        const controller = new AbortController()
+        active = controller
+
         let history: readonly ChainAskTurnContext[] = []
         try {
-          history = deps.conversationHistory?.(pending.conversationId) ?? []
+          history = (await deps.conversationHistory?.(pending.conversationId)) ?? []
         } catch (error) {
           deps.log('warn', 'ask history context failed', { error: String(error) })
         }
 
-        active?.abort()
-        const controller = new AbortController()
-        active = controller
         try {
           const result = await deps.resume(resumeId, decision, {
             conversationId: pending.conversationId,
             history,
             signal: controller.signal,
-            mode: pending.mode,
             ...(pending.imagePath ? { imagePath: pending.imagePath } : {}),
             ...(pending.attachments && pending.attachments.length > 0
               ? { attachments: pending.attachments }
               : {})
           })
-          return settle(
+          return await settle(
             pending.question,
             pending.conversationId,
             result,
-            pending.mode,
             pending.imagePath,
             pending.attachments
           )
@@ -464,6 +461,19 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
       }
     ],
     ['ask:consent:get', (event) => (ensureSender(event) ? deps.consent() : null)],
+    [
+      'ask:mode:get',
+      async (event) => {
+        if (!ensureSender(event)) return null
+        if (!deps.mode) return null
+        try {
+          return await deps.mode()
+        } catch (error) {
+          deps.log('warn', 'ask mode read failed', { error: String(error) })
+          return null
+        }
+      }
+    ],
     [
       'ask:image',
       (event, path) => {

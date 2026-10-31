@@ -14,7 +14,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, resolve, sep } from 'node:path'
 
@@ -35,6 +35,8 @@ export interface GitRunResult {
 
 export interface GitRunOptions {
   timeoutMs?: number
+  /** 输出上限（字符）；超出只保留前 N 个，防止 `git log -p` 把内存吃满（`/git` 用） */
+  maxOutput?: number
 }
 
 /** 可注入的 git 执行器：测试用来模拟「没装 git」或固定回执 */
@@ -126,6 +128,11 @@ export interface MemoryRepo {
   readFile(relativePath: string): Promise<string | null>
   /** 删仓内文件（不存在也算成功） */
   deleteFile(relativePath: string): Promise<boolean>
+  /**
+   * 清掉 `conversations/` 里的会话与图片资产（保留 `.gitkeep`）：
+   * D74 的「新会话从空白开始」= 先分叉再清空，调用方随后提交。
+   */
+  clearConversations(): Promise<boolean>
 
   /* ---- M2 节点（分支）操作 ---- */
 
@@ -148,6 +155,18 @@ export interface MemoryRepo {
   listBranches(): Promise<MemoryBranchInfo[]>
   /** 某个分支最近几条提交（默认 5 条） */
   branchLog(name: string, limit?: number): Promise<MemoryBranchCommit[]>
+  /**
+   * 两个 ref 的最近公共祖先（完整 sha；`/log <节点>` 拿它当分叉点，D77）。
+   * 没有共同祖先 / 读不出来返回 null。
+   */
+  mergeBase(a: string, b: string): Promise<string | null>
+  /** 某个 ref 的提交数（`/log <节点>` 分页用）；读不出来返回 0 */
+  commitCount(ref: string): Promise<number>
+  /**
+   * 在记忆仓里跑原生命令（`/git`，D78）：argv 直传、**不经过 shell**、不弹凭据；
+   * 输出截到 200k 字符，避免 `git log -p` 之类把内存吃满。
+   */
+  git(args: readonly string[]): Promise<GitRunResult>
   /** 短 sha → 验证并解析；不存在返回 null */
   revParse(ref: string): Promise<string | null>
 }
@@ -208,11 +227,14 @@ function spawnGit(cwd: string): GitRunner {
 
       child.stdout?.setEncoding('utf8')
       child.stderr?.setEncoding('utf8')
+      const cap = options.maxOutput ?? 0
       child.stdout?.on('data', (chunk: string) => {
         stdout += chunk
+        if (cap > 0 && stdout.length > cap) stdout = stdout.slice(0, cap)
       })
       child.stderr?.on('data', (chunk: string) => {
         stderr += chunk
+        if (cap > 0 && stderr.length > cap) stderr = stderr.slice(0, cap)
       })
       child.on('error', (error: NodeJS.ErrnoException) => {
         finish({
@@ -425,12 +447,58 @@ export function createMemoryRepo(options: {
     return out
   }
 
+  const mergeBaseInner = async (a: string, b: string): Promise<string | null> => {
+    const status = await ensure()
+    if (!status.ok) return null
+    const result = await run(['merge-base', a, b])
+    if (!result.ok) return null
+    const sha = result.stdout.trim()
+    return sha === '' ? null : sha
+  }
+
+  const commitCountInner = async (ref: string): Promise<number> => {
+    const status = await ensure()
+    if (!status.ok) return 0
+    const result = await run(['rev-list', '--count', ref])
+    if (!result.ok) return 0
+    const count = Number(result.stdout.trim())
+    return Number.isFinite(count) && count > 0 ? count : 0
+  }
+
+  const gitInner = async (args: readonly string[]): Promise<GitRunResult> => {
+    const status = await ensure()
+    if (!status.ok) {
+      return { ok: false, code: null, stdout: '', stderr: '', error: status.reason }
+    }
+    return run([...args], { maxOutput: 200_000 })
+  }
+
   const revParseInner = async (ref: string): Promise<string | null> => {
     const status = await ensure()
     if (!status.ok) return null
     const result = await run(['rev-parse', '--short', '--verify', `${ref}^{commit}`])
     if (!result.ok || result.stdout.trim() === '') return null
     return result.stdout.trim()
+  }
+
+  /**
+   * 清 `conversations/`（只留 `.gitkeep`）：新会话分支先分叉再清空，
+   * 图上是真分支、上下文是空的。删除只发生在工作区，提交由调用方做。
+   */
+  const clearConversationsInner = async (): Promise<boolean> => {
+    const dir = resolve(root, 'conversations')
+    try {
+      const entries = await readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.name === '.gitkeep') continue
+        await rm(resolve(dir, entry.name), { recursive: true, force: true })
+      }
+      return true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
+      log?.('warn', 'memory conversations clear failed', { error: String(error) })
+      return false
+    }
   }
 
   const ensureIdentity = async (): Promise<void> => {
@@ -630,6 +698,10 @@ export function createMemoryRepo(options: {
     deleteBranch: (name) => exclusive(() => deleteBranchInner(name)),
     listBranches: () => exclusive(listBranchesInner),
     branchLog: (name, limit = 5) => exclusive(() => branchLogInner(name, limit)),
+    mergeBase: (a, b) => exclusive(() => mergeBaseInner(a, b)),
+    commitCount: (ref) => exclusive(() => commitCountInner(ref)),
+    git: (args) => exclusive(() => gitInner(args)),
+    clearConversations: () => exclusive(clearConversationsInner),
     revParse: (ref) => exclusive(() => revParseInner(ref))
   }
 }

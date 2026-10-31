@@ -39,6 +39,11 @@ export interface AskHistoryEntry {
   id: string
   /** 所属会话（同一会话的多轮追问共用；老记录没有这个字段 = 单条会话） */
   conversationId?: string
+  /**
+   * 提问时所在的分支（D72 分支即模式）：上下文 / ask_history 只认同一个分支，
+   * 切 `/mode ask` 后不会把 chat 的记录带过去。老记录没有这个字段 = default。
+   */
+  branch?: string
   /** 提问时刻（毫秒） */
   at: number
   question: string
@@ -70,6 +75,11 @@ export interface AskHistoryEntry {
    * 老记录没有这个字段 = 普通问答。
    */
   conceived?: boolean
+  /**
+   * 交接回执（D82）：母亲生命耗尽、下一代接手时的那一行字。
+   * 只用于展示；老记录没有这个字段。
+   */
+  receipt?: string
   /**
    * 过程（D55 ③）：每轮思考 + 工具调用摘要。
    * 老记录没有这个字段；只用于展示，不写回请求。
@@ -222,7 +232,9 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
   if (data.conversationId !== undefined && (typeof data.conversationId !== 'string' || data.conversationId === '')) {
     return null
   }
+  if (data.branch !== undefined && (typeof data.branch !== 'string' || data.branch === '')) return null
   if (data.conceived !== undefined && typeof data.conceived !== 'boolean') return null
+  if (data.receipt !== undefined && typeof data.receipt !== 'string') return null
   if (data.trace !== undefined && !isTrace(data.trace)) return null
   if (data.kind === 'clarify') {
     if (!isClarify(data.clarify)) return null
@@ -235,6 +247,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
     question: data.question,
     kind: data.kind as AskHistoryEntry['kind'],
     ...(typeof data.conversationId === 'string' ? { conversationId: data.conversationId } : {}),
+    ...(typeof data.branch === 'string' ? { branch: data.branch } : {}),
     ...(typeof data.imagePath === 'string' ? { imagePath: data.imagePath } : {}),
     ...(Array.isArray(data.attachments) ? { attachments: data.attachments as AskHistoryAttachment[] } : {}),
     ...(typeof data.answer === 'string' ? { answer: data.answer } : {}),
@@ -246,6 +259,7 @@ export function parseAskHistoryEntry(value: unknown): AskHistoryEntry | null {  
     ...(typeof data.message === 'string' ? { message: data.message } : {}),
     ...(typeof data.note === 'string' ? { note: data.note } : {}),
     ...(typeof data.conceived === 'boolean' ? { conceived: data.conceived } : {}),
+    ...(typeof data.receipt === 'string' ? { receipt: data.receipt } : {}),
     ...(isTrace(data.trace) ? { trace: data.trace } : {}),
     stats: data.stats
   }
@@ -366,7 +380,8 @@ export function toHistoryEntry(
   at: number,
   conversationId?: string,
   imagePath?: string,
-  attachments?: readonly AskHistoryAttachment[]
+  attachments?: readonly AskHistoryAttachment[],
+  branch?: string
 ): AskHistoryEntry {
   const base = {
     id: `${at.toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
@@ -374,12 +389,15 @@ export function toHistoryEntry(
     question,
     stats: result.stats,
     ...(conversationId ? { conversationId } : {}),
+    ...(branch ? { branch } : {}),
     ...(imagePath ? { imagePath } : {}),
     ...(attachments && attachments.length > 0 ? { attachments: [...attachments] } : {}),
     // 过程（D55 ③）：所有出口都带（暂停轮不落历史，最终结果会带完整 steps）
     ...(result.trace ? { trace: result.trace } : {}),
     // 传承那一问（M4）：只显示，不进下一代上下文
-    ...(result.conceived ? { conceived: true } : {})
+    ...(result.conceived ? { conceived: true } : {}),
+    // 交接回执（D82）：跟这一问一起落盘，重开窗口还在
+    ...(result.receipt !== undefined && result.receipt !== '' ? { receipt: result.receipt } : {})
   }
   if (result.kind === 'answer') {
     return {

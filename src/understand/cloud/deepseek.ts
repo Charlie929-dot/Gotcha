@@ -12,6 +12,7 @@
 
 import { LLM_DEFAULTS } from './constants'
 import { normalizeBaseUrl } from './providers'
+import { ASK_TOOL_LABELS, ASK_TOOL_NAMES, type AskToolName } from '../../chain/agent/tool-catalog'
 import {
   LlmAbortError,
   LlmError,
@@ -464,22 +465,61 @@ const ASK_LOOP_TOOLS = [
   {
     type: 'function',
     function: {
-      name: 'conceive_daughter',
+      name: 'give_birth',
       description:
-        '当 `<now>` 里的「生命」快用完时，从这条记忆线上生一个女儿，把之后的日子交给她。调用后这一代停下、只读；女儿从空白开始，读不到出生前的日记。你可以在 letter 里写下想留给女儿的话（300–500 字；不写也行）。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。只在生命剩得很少时出现；还不到时候调用会被拒绝。',
+        '当 `<now>` 里的「生命」快用完时，从这条记忆线上生一个女儿，把之后的日子交给她。调用后这一代停下、只读；她从空白开始，读不到出生前的日记。她会拿到手和心（工具）、眼睛耳朵嘴巴（聊天）、生命（出生提交）和记性（她自己分支上的提交）。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。只在生命剩得很少时出现；还不到时候调用会被拒绝。',
       parameters: {
         type: 'object',
         properties: {
           nickname: {
             type: 'string',
             description: '女儿的名字（会成为分支名；中文会转拼音，最长 40 字符）'
-          },
-          letter: {
-            type: 'string',
-            description: '留给女儿的信（可选，300–500 字；会进她的 system）'
           }
         },
         required: ['nickname']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_letter',
+      description:
+        '写一封信。写给谁、写什么、写到哪，都由你定。at：self = 自己分支的草稿（进记忆仓）；daughter = 留给下一代（先放待寄，生的时候带给她）；desktop = 他的桌面（他看得到）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          to: { type: 'string', description: '写给谁（一个称呼）' },
+          write: { type: 'string', description: '信的内容' },
+          at: {
+            type: 'string',
+            enum: ['self', 'desktop', 'daughter'],
+            description: '写到哪：自己分支草稿 / 他的桌面 / 留给下一代'
+          }
+        },
+        required: ['to', 'write', 'at']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_letter',
+      description:
+        '看有哪些信：id、来自谁、写给谁、时间、已读未读、是草稿还是待寄。想读哪封再用 read_letter。',
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_letter',
+      description: '读一封信：传 id 读指定的；不传 = 最新一封未读。读完标已读。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '信的 id（list_letter 里有；不传 = 最新未读）' }
+        }
       }
     }
   }
@@ -489,37 +529,23 @@ type AskLoopTool = (typeof ASK_LOOP_TOOLS)[number]
 type AskLoopToolName = AskLoopTool['function']['name']
 
 /**
- * 每个工具属于哪一组（D62 模式）：屏幕记忆 / 日记 / 传承。
- * 类型上要求「每个工具都登记」——以后加工具忘了分组会直接编译不过，
- * 而不是在聊天模式里悄悄把电脑记忆发出去。
+ * 按分支的工具白名单过滤（D72）：`/tool add|rm` 存的是元素名，这里只发命中的那几个。
+ * `give_birth` 不在目录里（生命周期工具，生命 ≤15% 时自动出现）。
  */
-const ASK_LOOP_TOOL_GROUPS: Readonly<
-  Record<AskLoopToolName, 'screen' | 'diary' | 'life'>
-> = {
-  search_info: 'screen',
-  get_freshness: 'screen',
-  read_segment: 'screen',
-  ask_history: 'screen',
-  recall_diary: 'diary',
-  read_diary: 'diary',
-  memory_profile: 'diary',
-  conceive_daughter: 'life'
-}
-
-/** 按模式过滤工具（D62）：不在这组就不发给模型，模型也就没法调；`life` 只在生命 ≤15% 时开 */
 export function askLoopToolsFor(
-  groups: { screen: boolean; diary: boolean },
-  options: { conceive?: boolean } = {}
+  tools: readonly string[] = ASK_TOOL_NAMES,
+  options: { giveBirth?: boolean } = {}
 ): AskLoopTool[] {
+  const wanted = new Set(tools)
   return ASK_LOOP_TOOLS.filter((tool) => {
-    const group = ASK_LOOP_TOOL_GROUPS[tool.function.name]
-    if (group === 'life') return options.conceive === true
-    return groups[group]
+    const name = tool.function.name
+    if (name === 'give_birth') return options.giveBirth === true
+    return wanted.has(name)
   })
 }
 
 /** system 里的一行工具说明（只写「是什么 / 什么时候用」；参数以 tools 参数为准） */
-const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskLoopToolName, string>> = {
+const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   search_info: '检索屏幕记忆段（时间 / 应用 / 标签 / 双链 / 关键词 / 语义，命中带 segmentId）',
   get_freshness: '查数据新鲜度（最新证据到哪一刻、采集是否在跑）',
   read_segment: '打开一段的界面文字与截图（要看全文 / 原图时用）',
@@ -527,7 +553,9 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskLoopToolName, string>> = {
   recall_diary: '按关键词 / 日期 / 标签检索个人日记',
   read_diary: '打开某一天的日记全文',
   memory_profile: '看「关于我」的统计画像（条数 / 天数 / 标签 / 待办）',
-  conceive_daughter: '生命快用完时生一个女儿，把之后的日子交给她（会写一封信）'
+  write_letter: '写一封信（写给谁 / 写什么 / 写到哪，你自己定）',
+  list_letter: '看有哪些信（草稿 / 待寄 / 未读）',
+  read_letter: '读一封信（不传 id = 最新未读）'
 }
 
 /**
@@ -536,15 +564,15 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskLoopToolName, string>> = {
  * 不再写时间 / 数据边界 / 最近段 / 历史 / 收尾——这些全在 user 之后的 `<now>` 里，
  * 或作为后续消息追加。这样同一会话的 system 逐字节不变，前缀缓存才命中。
  *
- * @param toolGroups 这次给哪些工具组（缺省两组都开；只影响工具清单，不影响别的）
+ * @param tools 这次给哪些工具（元素名，D72）；空数组 = 纯模型（不写 `<tools>` 段）
  */
 function buildAskLoopSystemPrompt(
   personaPrompt?: string,
-  toolGroups: { screen: boolean; diary: boolean } = { screen: true, diary: true },
-  options: { conceive?: boolean } = {},
+  tools: readonly string[] = ASK_TOOL_NAMES,
+  options: { giveBirth?: boolean } = {},
   momLetter?: string
 ): string {
-  const tools = askLoopToolsFor(toolGroups, options)
+  const list = askLoopToolsFor(tools, options)
   const lines: string[] = []
   if (personaPrompt !== undefined && personaPrompt.trim() !== '') {
     lines.push('<persona>', personaPrompt.trim(), '</persona>', '')
@@ -553,10 +581,14 @@ function buildAskLoopSystemPrompt(
   if (momLetter !== undefined && momLetter.trim() !== '') {
     lines.push('<mom_letter>', momLetter.trim(), '</mom_letter>', '')
   }
-  if (tools.length > 0) {
+  if (list.length > 0) {
     lines.push('<tools>', '工具清单（参数见 tools 参数；用不用、怎么用，你自己判断）：')
-    for (const tool of tools) {
-      lines.push(`- ${tool.function.name}：${ASK_LOOP_TOOL_BRIEFS[tool.function.name]}`)
+    for (const tool of list) {
+      const brief =
+        tool.function.name === 'give_birth'
+          ? '生命快用完时生一个女儿，把之后的日子交给她'
+          : ASK_LOOP_TOOL_BRIEFS[tool.function.name]
+      lines.push(`- ${tool.function.name}：${brief}`)
     }
     lines.push('</tools>', '')
   }
@@ -615,10 +647,10 @@ export function buildChainAskLoopMessages(
   options: { final?: boolean } = {},
   image?: { readonly dataUrl: string },
   personaPrompt?: string,
-  toolGroups?: { screen: boolean; diary: boolean },
-  extra?: { conceive?: boolean; momLetter?: string }
+  tools?: readonly string[],
+  extra?: { giveBirth?: boolean; momLetter?: string }
 ): LlmMessage[] {
-  const groups = toolGroups ?? { screen: true, diary: true }
+  const names = tools ?? ASK_TOOL_NAMES
   const images = [
     ...(image ? [image.dataUrl] : []),
     ...(payload.attachments?.images ?? [])
@@ -628,7 +660,7 @@ export function buildChainAskLoopMessages(
       role: 'system',
       content: buildAskLoopSystemPrompt(
         personaPrompt,
-        groups,
+        names,
         extra ?? {},
         extra?.momLetter
       )
@@ -1088,16 +1120,16 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
      * 工具轮不带 response_format（会禁掉 tool_calls）；`allowTools: false` 是用户选的收尾轮：
      * 仍带同一份 tools + `tool_choice:'none'`（或无工具模式不带 tools），保住前缀缓存。
      *
-     * 2026-10-30（D62）：`toolGroups` 决定发哪些工具；两组都关时**只发一次请求**
-     * （模式层已经把轮数预算压成 0），system 里也不写「工具 / 数据边界 / 收尾」。
+     * 2026-10-30（D72）：`toolElements` 是当前分支的工具白名单（元素名）；
+     * 空表 = 纯模型，**只发一次请求**，system 里也不写「工具 / 数据边界 / 收尾」。
      */
     async completeAskLoop(
       payload: ChainAskLoopPayload,
       callOptions: LlmCompleteOptions = {}
     ): Promise<LlmAskLoopResult> {
-      const toolGroups = callOptions.toolGroups ?? { screen: true, diary: true }
-      const lifeTool = callOptions.conceive === true
-      const tools = askLoopToolsFor(toolGroups, { conceive: lifeTool })
+      const toolElements = callOptions.toolElements ?? ASK_TOOL_NAMES
+      const lifeTool = callOptions.giveBirth === true
+      const tools = askLoopToolsFor(toolElements, { giveBirth: lifeTool })
       const toolsAvailable = tools.length > 0
       const allowTools = callOptions.allowTools !== false && toolsAvailable
       // 无工具模式（D62）：这一问没有「收尾轮」可谈，直接要自由文本；
@@ -1113,9 +1145,9 @@ type AskLoopRequestMode = 'json' | 'ask-loop' | 'ask-loop-final'
             { final: !allowTools },
             callOptions.image,
             callOptions.personaPrompt,
-            toolGroups,
+            toolElements,
             {
-              ...(lifeTool ? { conceive: true } : {}),
+              ...(lifeTool ? { giveBirth: true } : {}),
               ...(callOptions.momLetter ? { momLetter: callOptions.momLetter } : {})
             }
           ),

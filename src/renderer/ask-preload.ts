@@ -15,6 +15,7 @@ import type { AskHistoryEntry } from '../main/ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
 import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
 import type { MemoryDeleteView, MemoryListView, MemoryRestoreView } from '../main/memory-admin'
+import type { MemoryRepoSettingsView } from '../main/memory-repo-settings'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from '../main/qq/qq-settings'
 import type { NapcatView } from '../main/qq/napcat'
@@ -81,6 +82,14 @@ export interface AskApi {
   }): Promise<MemoryListView>
   memoryDelete(id: number): Promise<MemoryDeleteView>
   memoryRestore(uid: string): Promise<MemoryRestoreView>
+  /* ---- 记忆仓（D90）：远端绑定 / 推送状态 / 定时 ---- */
+  memoryRepo(): Promise<MemoryRepoSettingsView | { error: string }>
+  saveMemoryRepo(patch: unknown): Promise<{
+    ok: boolean
+    error?: string
+    view?: MemoryRepoSettingsView
+  }>
+  pushMemoryRepo(): Promise<{ ok: boolean; error?: string; view?: MemoryRepoSettingsView }>
   /* ---- QQ 通道（D63）：NapCat 反向 WS 拨入本机；默认关闭 ---- */
   qqSettings(): Promise<QqSettingsView | { error: string }>
   saveQqSettings(patch: unknown): Promise<QqSettingsSaveResult>
@@ -139,6 +148,20 @@ const api: AskApi = {
   memoryDelete: (id) => ipcRenderer.invoke('ask:memory:delete', { id }) as Promise<MemoryDeleteView>,
   memoryRestore: (uid) =>
     ipcRenderer.invoke('ask:memory:restore', { uid }) as Promise<MemoryRestoreView>,
+  memoryRepo: () =>
+    ipcRenderer.invoke('ask:memoryrepo:get') as Promise<MemoryRepoSettingsView | { error: string }>,
+  saveMemoryRepo: (patch) =>
+    ipcRenderer.invoke('ask:memoryrepo:save', patch) as Promise<{
+      ok: boolean
+      error?: string
+      view?: MemoryRepoSettingsView
+    }>,
+  pushMemoryRepo: () =>
+    ipcRenderer.invoke('ask:memoryrepo:push') as Promise<{
+      ok: boolean
+      error?: string
+      view?: MemoryRepoSettingsView
+    }>,
   qqSettings: () => ipcRenderer.invoke('ask:qq:get') as Promise<QqSettingsView | { error: string }>,
   saveQqSettings: (patch) =>
     ipcRenderer.invoke('ask:qq:save', patch) as Promise<QqSettingsSaveResult>,

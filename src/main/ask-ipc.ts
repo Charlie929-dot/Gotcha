@@ -27,6 +27,7 @@ import type { SegmentEvidence } from '../chain/agent/evidence'
 import type { AskHistoryEntry } from './ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from './graph-settings'
 import type { MemorySettingsSaveResult, MemorySettingsView } from './memory-settings'
+import type { MemoryRepoSettingsView } from './memory-repo-settings'
 import type {
   MemoryDeleteView,
   MemoryListView,
@@ -223,6 +224,19 @@ export interface AskIpcDeps {
   qqNapcatStop?: () => Promise<void>
   qqNapcatInstall?: () => Promise<{ ok: boolean; error?: string }>
   qqNapcatChooseDir?: () => Promise<{ ok: boolean; error?: string; view?: NapcatView }>
+  /**
+   * 记忆仓（D90）：远端绑定 / 推送状态 / 定时。
+   * 地址写进仓的 git 配置（不落设置表）；间隔进设置表。
+   */
+  memoryRepo?: () => Promise<MemoryRepoSettingsView | { error: string }>
+  saveMemoryRepo?: (
+    patch: unknown
+  ) => Promise<{ ok: boolean; error?: string; view?: MemoryRepoSettingsView }>
+  pushMemoryRepo?: () => Promise<{
+    ok: boolean
+    error?: string
+    view?: MemoryRepoSettingsView
+  }>
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -841,6 +855,45 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask:history:clear failed', { error: String(error) })
           return false
+        }
+      }
+    ],
+    [
+      'ask:memoryrepo:get',
+      async (event) => {
+        if (!ensureSender(event)) return { error: 'forbidden' }
+        if (!deps.memoryRepo) return { error: 'unsupported' }
+        try {
+          return await deps.memoryRepo()
+        } catch (error) {
+          deps.log('error', 'ask memory repo read failed', { error: String(error) })
+          return { error: 'memory-repo-read-failed' }
+        }
+      }
+    ],
+    [
+      'ask:memoryrepo:save',
+      async (event, patch) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.saveMemoryRepo) return { ok: false, error: '当前版本不支持保存记忆仓设置' }
+        try {
+          return await deps.saveMemoryRepo(patch)
+        } catch (error) {
+          deps.log('error', 'ask memory repo save failed', { error: String(error) })
+          return { ok: false, error: '保存失败' }
+        }
+      }
+    ],
+    [
+      'ask:memoryrepo:push',
+      async (event) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.pushMemoryRepo) return { ok: false, error: '当前版本不支持手动推送' }
+        try {
+          return await deps.pushMemoryRepo()
+        } catch (error) {
+          deps.log('error', 'ask memory repo push failed', { error: String(error) })
+          return { ok: false, error: '推送失败，细节看日志' }
         }
       }
     ]

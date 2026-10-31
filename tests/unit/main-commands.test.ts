@@ -52,6 +52,16 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     commit: async () => ({ committed: false, reason: 'clean' }),
     commitDay: async () => ({ committed: false, reason: 'clean' }),
     push: async () => ({ ok: false, reason: 'no-remote' }),
+    remoteUrl: async () => null,
+    setRemote: async (url) => ({ ok: true, url }),
+    pushState: async () => ({
+      ok: true,
+      remote: null,
+      branch: 'default',
+      dirty: false,
+      ahead: null,
+      lastPush: null
+    }),
     lastCommit: async () => ({ hash: 'abc1234', subject: 'memory: 2026-10-30' }),
     writeFile: async () => true,
     readFile: async () => null,

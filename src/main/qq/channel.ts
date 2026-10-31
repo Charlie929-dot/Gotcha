@@ -49,7 +49,7 @@ export interface QqChannelConfig {
 
 export interface QqAskInput {
   text: string
-  /** 每个 QQ 用户一个会话（`qq:<userId>`），上下文按它取 */
+  /** 每个 QQ 用户一个会话（`qq-<userId>`），上下文按它取 */
   conversationId: string
   signal: AbortSignal
   /** 本条消息里的图片（data URL；最多 4 张；取不到就空） */
@@ -58,6 +58,11 @@ export interface QqAskInput {
 
 export interface QqChannelDeps {
   ask: (input: QqAskInput) => Promise<ChainAskResult>
+  /**
+   * 本地命令（M5）：与桌面共用同一个 `createCommandHandler` 实例。
+   * 命中就返结果（不调模型、不计生命、不占限流），返 null 照常提问。
+   */
+  command?: (text: string, context: { conversationId: string }) => Promise<ChainAskResult | null>
   log: QqLog
   now?: () => number
   /** 每用户每分钟最多几条（默认 6） */
@@ -161,6 +166,9 @@ function formatAskBody(result: ChainAskResult): string {
         '',
         '回一句话补上就行。'
       ].join('\n')
+    case 'command':
+      // 本地命令（M5）：命令回执自己就是正文（桌面窗口原样显示，QQ 只剥 Markdown）
+      return stripMarkdown(result.text)
     case 'continue-ask':
       // M1 不通续查（续查要在桌面点选）：把问题与候选原样带回去，并说明入口
       return [
@@ -347,6 +355,41 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     }
   }
 
+  /** 一段回复 → 按上限分条发出去（段间留一口气，测试传 partGapMs: 0） */
+  const sendParts = async (userId: number, text: string): Promise<number> => {
+    const parts = splitForQq(text, config?.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
+    for (const part of parts) {
+      await transport.sendPrivate(userId, part)
+      // 连发太快时 QQ 侧偶发乱序 / 折叠（默认 200ms）
+      if (parts.length > 1 && partGapMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, partGapMs))
+      }
+    }
+    return parts.length
+  }
+
+  /**
+   * 本地命令（M5）：与桌面共用同一个 `createCommandHandler` 实例（同一份「等名字 / 等 confirm」状态）。
+   * 命中的命令不调模型、不计生命、不占每分钟额度，也不进问答队列（方案 §6.2）。
+   * 返回 true = 这条消息已经被命令吃掉，不再走提问。
+   */
+  const command = deps.command
+  const tryCommand = async (inbound: QqInbound): Promise<boolean> => {
+    if (command === undefined) return false
+    let handled: ChainAskResult | null
+    try {
+      handled = await command(inbound.text, { conversationId: `qq-${inbound.userId}` })
+    } catch (error) {
+      log('warn', 'qq command failed', { userId: inbound.userId, error: String(error) })
+      await warnOnce(inbound.userId, '命令没跑成，细节看日志。')
+      return true
+    }
+    if (handled === null) return false
+    const parts = await sendParts(inbound.userId, formatAskResult(handled))
+    log('info', 'qq command handled', { userId: inbound.userId, parts })
+    return true
+  }
+
   const answer = async (inbound: QqInbound): Promise<void> => {
     const conversationId = `qq-${inbound.userId}`
     const controller = new AbortController()
@@ -361,19 +404,11 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
         signal: controller.signal,
         ...(images.length > 0 ? { images } : {})
       })
-      const text = formatAskResult(result)
-      const parts = splitForQq(text, config?.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
-      for (const part of parts) {
-        await transport.sendPrivate(inbound.userId, part)
-        // 段与段之间留一口气：连发太快时 QQ 侧偶发乱序 / 折叠（默认 200ms，测试传 0）
-        if (parts.length > 1 && partGapMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, partGapMs))
-        }
-      }
+      const parts = await sendParts(inbound.userId, formatAskResult(result))
       log('info', 'qq answered', {
         userId: inbound.userId,
         kind: result.kind,
-        parts: parts.length
+        parts
       })
     } catch (error) {
       log('warn', 'qq answer failed', { userId: inbound.userId, error: String(error) })
@@ -394,6 +429,8 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       log('warn', 'qq message from non-allowlisted user dropped', { userId: inbound.userId })
       return
     }
+    // 命令放最前（与桌面 `ask:query` 一致）：参数可以比提问长，也不该吃限流 / 排队名额
+    if (await tryCommand(inbound)) return
     if (Array.from(inbound.text).length > QQ_QUESTION_MAX_CHARS) {
       await warnOnce(inbound.userId, `问题太长了（上限 ${QQ_QUESTION_MAX_CHARS} 字），只说关键那句吧。`)
       return

@@ -14,6 +14,7 @@ import {
   createCommandHandler,
   memoryDayKey,
   parseCommand,
+  serializeCommands,
   slugifyNodeName,
   type CompactOutcome
 } from '../../src/main/commands'
@@ -1108,5 +1109,40 @@ describe('命令执行', () => {
     expect(textOf(await make({ ok: false, reason: 'blocked' })('/compact'))).toContain('敏感内容')
     expect(textOf(await make({ ok: false, reason: 'no-client' })('/compact'))).toContain('模型客户端')
     expect(textOf(await make({ ok: false, reason: 'failed' })('/compact'))).toContain('摘要失败')
+  })
+})
+
+describe('命令串行锁（M5：桌面 + QQ 共用一份 handler）', () => {
+  function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  it('两路同时发命令：一条跑完再跑下一条', async () => {
+    const order: string[] = []
+    const run = serializeCommands(async (text) => {
+      order.push(`start:${text}`)
+      await delay(5)
+      order.push(`end:${text}`)
+      return commandResult(`done:${text}`)
+    })
+    const both = await Promise.all([run('/log'), run('/life')])
+    expect(order).toEqual(['start:/log', 'end:/log', 'start:/life', 'end:/life'])
+    expect(both.map((result) => (result?.kind === 'command' ? result.text : ''))).toEqual([
+      'done:/log',
+      'done:/life'
+    ])
+  })
+
+  it('前一条抛错不影响后一条', async () => {
+    const seen: string[] = []
+    const run = serializeCommands(async (text) => {
+      seen.push(text)
+      if (text === '/del') throw new Error('boom')
+      return commandResult('ok')
+    })
+    await expect(run('/del')).rejects.toThrow('boom')
+    const after = await run('/help')
+    expect(after?.kind).toBe('command')
+    expect(seen).toEqual(['/del', '/help'])
   })
 })

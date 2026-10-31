@@ -329,3 +329,141 @@ describe('图片（D63 追加）', () => {
     expect(transport.profiles).toEqual(['xiao-yu'])
   })
 })
+
+describe('本地命令（M5）', () => {
+  function receipt(text: string): ChainAskResult {
+    return { kind: 'command', text, stats: stats() }
+  }
+
+  it('命中命令：不调模型，按 qq-<号> 会话把回执发回去', async () => {
+    const transport = new FakeTransport()
+    let asked = 0
+    const seen: { text: string; conversationId: string }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        asked += 1
+        return answer('不该走到这里')
+      },
+      command: async (text, context) => {
+        seen.push({ text, conversationId: context.conversationId })
+        return text === '/help' ? receipt('🎗️提示\n能用的命令：/help /log /new') : null
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('/help'))
+
+    expect(asked).toBe(0)
+    expect(seen).toEqual([{ text: '/help', conversationId: 'qq-20002' }])
+    expect(transport.sent).toHaveLength(1)
+    expect(transport.sent[0]?.text).toContain('能用的命令')
+  })
+
+  it('命令不占每分钟限流：连发 3 条后普通问题照样能问', async () => {
+    const transport = new FakeTransport()
+    let asked = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        asked += 1
+        return answer('答')
+      },
+      command: async (text) => (text.startsWith('/') ? receipt(`跑了 ${text}`) : null),
+      log: () => {},
+      perMinute: 1,
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('/log'))
+    await channel.handleMessage(inbound('/life'))
+    await channel.handleMessage(inbound('/git log --oneline'))
+
+    expect(transport.sent.filter((item) => item.text.includes('跑了')).length).toBe(3)
+    // 限流窗口没被命令吃掉：第一条普通消息还能问
+    await channel.handleMessage(inbound('我下午在干嘛'))
+    expect(asked).toBe(1)
+    expect(transport.sent.some((item) => item.text.includes('太多了'))).toBe(false)
+  })
+
+  it('命令返回 null：照常提问（普通一句话不会被命令拦下）', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, {
+      ask: async () => answer('照常答'),
+      command: async () => null,
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('我昨天看了什么'))
+    expect(transport.sent[0]?.text).toContain('照常答')
+  })
+
+  it('命令抛错：回一句「没跑成」，不调模型', async () => {
+    const transport = new FakeTransport()
+    let asked = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        asked += 1
+        return answer('不该走到这里')
+      },
+      command: async () => {
+        throw new Error('git boom')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('/backup'))
+
+    expect(asked).toBe(0)
+    expect(transport.sent[0]?.text).toContain('没跑成')
+  })
+
+  it('命令不进问答队列：长问答还在跑时，命令照样先回', async () => {
+    const transport = new FakeTransport()
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        await gate
+        return answer('慢慢答完')
+      },
+      command: async (text) => (text === '/life' ? receipt('❤️剩余生命✨99%') : null),
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    const asking = channel.handleMessage(inbound('慢问题'))
+    await channel.handleMessage(inbound('/life'))
+
+    expect(transport.sent.some((item) => item.text.includes('剩余生命'))).toBe(true)
+    expect(transport.sent.some((item) => item.text.includes('慢慢答完'))).toBe(false)
+    release()
+    await asking
+    expect(transport.sent.some((item) => item.text.includes('慢慢答完'))).toBe(true)
+  })
+
+  it('非白名单发命令也不执行、不回话', async () => {
+    const transport = new FakeTransport()
+    let commands = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => answer('x'),
+      command: async () => {
+        commands += 1
+        return receipt('不该跑到这里')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('/help', 99999))
+    expect(commands).toBe(0)
+    expect(transport.sent).toHaveLength(0)
+  })
+
+  it('命令回执走 formatAskResult：剥 Markdown，保留换行', () => {
+    expect(formatAskResult(receipt('**粗体** 与 `代码`\n\n第二段'))).toBe('粗体 与 代码\n\n第二段')
+  })
+})

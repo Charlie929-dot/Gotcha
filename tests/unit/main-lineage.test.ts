@@ -19,6 +19,7 @@ import {
   parseLineage,
   readLineage,
   recordLineageUsage,
+  usageAfterCompact,
   withActive,
   withBranchAdded,
   withBranchRemoved,
@@ -300,6 +301,17 @@ describe('生命记账（M3）', () => {
     const done = await readLineage(file)
     if (done.status !== 'ok') return
     expect(lifeOf(done.lineage, 'spring')).toMatchObject({ remaining: 0, percent: 0 })
+  })
+
+  it('usageAfterCompact：旧上下文 − 被压掉的旧轮 + 摘要本身', () => {
+    // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身
+    expect(usageAfterCompact(10_000, 4_000, 300)).toBe(6_300)
+    // 摘要比旧轮还大时如实变大（不硬压成 0）
+    expect(usageAfterCompact(1_000, 500, 800)).toBe(1_300)
+    // 减过头就落到 0，不出现负数
+    expect(usageAfterCompact(500, 900, 100)).toBe(0)
+    // 坏数据按 0 算，不把 NaN 写进家谱
+    expect(usageAfterCompact(Number.NaN, Number.NaN, Number.NaN)).toBe(0)
   })
 
   it('旧家谱没有 life_tokens_used 字段时按 0 读（向后兼容）', async () => {

@@ -605,6 +605,23 @@ export function lifeOf(lineage: Lineage, branch: string): LineageLife | null {
 }
 
 /**
+ * `/compact` 之后的用量（D69 §5.2 续命）：新上下文 ≈ 旧上下文 − 被压掉的旧轮 + 摘要本身。
+ * 摘要请求的 `prompt_tokens` 就是被压掉那几轮的 token（外加一点点摘要系统提示词），
+ * `completion_tokens` 是摘要本身的 token——两者都来自这次压缩调用，不用再引分词器。
+ * 少算的那点系统提示词宁可当成余量：偏小只会多给一口气，偏大才会把人锁死。
+ */
+export function usageAfterCompact(
+  used: number,
+  summaryPromptTokens: number,
+  summaryCompletionTokens: number
+): number {
+  const base = Number.isFinite(used) ? Math.max(0, Math.round(used)) : 0
+  const dropped = Number.isFinite(summaryPromptTokens) ? Math.max(0, Math.round(summaryPromptTokens)) : 0
+  const summary = Number.isFinite(summaryCompletionTokens) ? Math.max(0, Math.round(summaryCompletionTokens)) : 0
+  return Math.max(0, base - dropped + summary)
+}
+
+/**
  * 每轮 ask 结束记一次：这个节点的 `life_tokens_used` = 最近一次请求的上下文占用。
  * 不是累计消耗（方案 §5.1）；记账失败只返回 false，不影响这一轮回答。
  */

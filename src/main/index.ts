@@ -146,7 +146,8 @@ import {
   lineageSnapshot,
   readLineage,
   recordLineageUsage,
-  toolsOfBranch
+  toolsOfBranch,
+  usageAfterCompact
 } from './lineage'
 import { createMemoryRepo } from './memory-repo'
 import { forkDetachedIfNeeded } from './node-fork'
@@ -2246,6 +2247,23 @@ if (primaryInstance) {
         captureLog('warn', 'memory compact usage record failed', { error: String(error) })
       }
       await memoryRepo.commit(`memory: compact ${memoryDayKey(Date.now())}`)
+      // 续命（D69 §5.2）：压完把这一节点的用量改成「压缩后的近似值」——否则下一问仍然
+      // 被「生命已结束」拦住，永远走不到「按新上下文重算」那一步（2026-10-31 真机复验抓到的死锁）。
+      // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身，两个数都在 summaryUsage 里；
+      // dead / 纯模型节点由 recordLineageUsage 自己拒绝，不会复活已经交接出去的那一代。
+      try {
+        const read = await readLineage(lineageFile)
+        const life = read.status === 'ok' ? lifeOf(read.lineage, read.lineage.active) : null
+        if (read.status === 'ok' && life !== null) {
+          await recordLineageUsage(
+            lineageFile,
+            read.lineage.active,
+            usageAfterCompact(life.used, summaryUsage.promptTokens, summaryUsage.completionTokens)
+          )
+        }
+      } catch (error) {
+        captureLog('warn', 'memory compact life update failed', { error: String(error) })
+      }
       return {
         ok: true,
         dropped: compacted.dropped,

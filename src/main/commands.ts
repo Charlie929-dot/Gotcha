@@ -931,6 +931,7 @@ function parseUseArgs(args: readonly string[]): { target: string; defaultName: b
 /** 回执起名的提示：`0`（或空）= 默认时间戳名 */
 function namePromptText(kind: 'use' | 'backup', at: number): string {
   return [
+    RECEIPT_HEAD,
     kind === 'use' ? '切换前先把当前记忆存一份。' : '先把当前记忆存一份。',
     `给它起个名字？回 0 用默认：记忆 ${defaultMemoryName(at)}`,
     '（60 秒内回；/cancel 放弃这次切换 / 备份）'
@@ -1413,9 +1414,9 @@ export function createCommandHandler(
     if (outcome.ok) {
       return commandResult(
         [
-          '===compact===',
+          RECEIPT_HEAD,
           `压掉 ${outcome.dropped} 轮（保留最近 ${outcome.kept} 轮原文），摘要 ${outcome.summaryChars} 字。`,
-          `会话从 ${outcome.beforeChars} 字降到 ${outcome.afterChars} 字；下一问按新上下文重算生命。`
+          `会话从 ${outcome.beforeChars} 字降到 ${outcome.afterChars} 字；生命按压完的上下文重算，下一问可以接着聊。`
         ].join('\n')
       )
     }

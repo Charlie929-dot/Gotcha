@@ -42,6 +42,7 @@ import type {
 } from './payload'
 import { ASK_LOOP_READ_MAX_CHARS, ASK_LOOP_READ_MIN_CHARS } from './payload'
 import { readChainFreshness } from './freshness'
+import { normalizeArchiveId, type RecalledAttachment } from './archive'
 
 /** 引用白名单与 citation meta 的来源：search_info 返回过的段（at 是毫秒时间戳） */
 export interface SearchHitMeta {
@@ -201,6 +202,11 @@ export interface AskToolDeps {
    * 信（D81）：写 / 列 / 读。不传 = 这个分支没挂写信工具，模型调了只会收到可读原因。
    */
   letters?: LetterToolDeps
+  /**
+   * 回想归档（D88）：历史轮次里的图片 / 文本附件换成占位符后，按 id 取回原图或正文。
+   * 只认本会话出现过的 id；不传 = 这个会话没有归档，工具会如实回「没有这个归档」。
+   */
+  recall?: (id: string) => RecalledAttachment | null
 }
 
 export interface AskToolOutcome {
@@ -567,7 +573,11 @@ function executeReadSegment(deps: AskToolDeps, args: Record<string, unknown>): A
   }
   if (!deps.canReadSegment || !deps.canReadSegment(rawId)) {
     return {
-      result: { kind: 'error', message: '只能展开 search_info 返回过的段（先检索，再按 segmentId 展开）' },
+      result: {
+        kind: 'error',
+        message:
+          '只能展开 search_info 返回过的段，而且只在本轮有效（换了一问，段号就过期了）：重新 search_info，再按新的 segmentId 展开'
+      },
       segments: []
     }
   }
@@ -819,6 +829,43 @@ export function createAskToolExecutor(deps: AskToolDeps): {
         }
         if (call.name === 'read_segment') {
           return executeReadSegment(deps, call.arguments)
+        }
+        if (call.name === 'recall') {
+          const id = normalizeArchiveId(
+            typeof call.arguments['id'] === 'string' ? call.arguments['id'] : ''
+          )
+          if (id === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'recall 需要归档 id（占位符里 # 后面那串，例如 #a1b2c3d4）'
+              },
+              segments: []
+            }
+          }
+          const got = deps.recall?.(id) ?? null
+          if (got === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: '没有这个归档：只认本会话里出现过的图片 / 文件'
+              },
+              segments: []
+            }
+          }
+          return {
+            result: {
+              kind: 'recall',
+              id,
+              media: got.media,
+              text: got.media === 'file' ? got.text ?? '' : '',
+              name: got.name ?? ''
+            },
+            segments: [],
+            ...(got.media === 'image' && got.images !== undefined && got.images.length > 0
+              ? { images: got.images }
+              : {})
+          }
         }
         if (call.name === 'recall_diary') {
           const args = parseRecallDiaryArgs(call.arguments)

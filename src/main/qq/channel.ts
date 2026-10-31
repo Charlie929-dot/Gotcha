@@ -14,8 +14,16 @@
 
 import type { ChainAskResult } from '../../chain/agent/types'
 import type { QqInbound, QqLog, QqTransportStatus } from './ob11'
-import { QQ_INBOUND_IMAGE_MAX } from './ob11'
-import { downloadImageAsDataUrl, imageDataUrlFromBase64 } from './media'
+import { QQ_INBOUND_FILE_MAX, QQ_INBOUND_IMAGE_MAX } from './ob11'
+import {
+  downloadFileBytes,
+  downloadImageAsDataUrl,
+  imageDataUrlFromBase64,
+  imageDataUrlFromBytes,
+  isImageFile,
+  isTextFile,
+  textFromBytes
+} from './media'
 
 /** 传输层的最小契约（真实实现是 `QqOb11Server`；测试里换成假实现） */
 export interface QqTransport {
@@ -30,6 +38,8 @@ export interface QqTransport {
   sendPrivate(userId: number, text: string): Promise<void>
   /** NapCat `get_image`：拿 base64（优先）或 url（兜底） */
   getImage(file: string): Promise<{ base64?: string; url?: string }>
+  /** 私聊文件的下载地址（D88）：可选，假实现不接就当拿不到 */
+  getFileUrl?(fileId: string): Promise<string | null>
   /** 改 QQ 昵称（M4 传承）：可选，老测试假实现不用接 */
   setProfile?(nickname: string): Promise<void>
   status(): QqTransportStatus
@@ -54,6 +64,8 @@ export interface QqAskInput {
   signal: AbortSignal
   /** 本条消息里的图片（data URL；最多 4 张；取不到就空） */
   images?: readonly string[]
+  /** 本条消息里的文本文件（D88：QQ 以「文件」发的 .md/.txt 等） */
+  files?: readonly { readonly name: string; readonly text: string }[]
 }
 
 export interface QqChannelDeps {
@@ -326,8 +338,54 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     return out
   }
 
-  const allow = (userId: number): boolean => {
-    // 白名单为空 = 谁都别问（fail-closed）；设置层也会挡，这里是最后一道
+  /**
+   * 文件引用 → 图片 / 文本附件（D88）。QQ 把同一张图当「文件」发时，`[文件]` 里其实
+   * 还藏着字节：扩展名是图片就当图（和图片段同一条路），是文本就当附件；
+   * 取不到就只留占位符，日志只记原因，不记文件名 / id。
+   */
+  const resolveFiles = async (
+    refs: QqInbound['files']
+  ): Promise<{ images: string[]; files: { name: string; text: string }[] }> => {
+    const out = { images: [] as string[], files: [] as { name: string; text: string }[] }
+    if (!refs || refs.length === 0) return out
+    for (const ref of refs.slice(0, QQ_INBOUND_FILE_MAX)) {
+      const name = ref.name ?? ''
+      const wantedImage = name === '' || isImageFile(name)
+      const wantedText = name !== '' && isTextFile(name)
+      if (!wantedImage && !wantedText) continue
+      try {
+        let url = ref.url ?? ''
+        if (url === '' && ref.fileId !== undefined && transport.getFileUrl !== undefined) {
+          url = (await transport.getFileUrl(ref.fileId)) ?? ''
+        }
+        if (url === '') {
+          log('warn', 'qq file skipped', { reason: 'no-url' })
+          continue
+        }
+        const bytes = await downloadFileBytes(url)
+        if (bytes === null) {
+          log('warn', 'qq file skipped', { reason: 'download-failed' })
+          continue
+        }
+        if (wantedImage) {
+          const dataUrl = imageDataUrlFromBytes(bytes)
+          if (dataUrl !== null) {
+            out.images.push(dataUrl)
+            continue
+          }
+        }
+        if (!wantedText) continue
+        const text = textFromBytes(bytes)
+        if (text !== null) out.files.push({ name: name === '' ? '文件' : name, text })
+        else log('warn', 'qq file skipped', { reason: 'not-text' })
+      } catch {
+        log('warn', 'qq file skipped', { reason: 'error' })
+      }
+    }
+    return out
+  }
+
+  const allow = (userId: number): boolean => {    // 白名单为空 = 谁都别问（fail-closed）；设置层也会挡，这里是最后一道
     if (!config || config.allowUsers.length === 0) return false
     return config.allowUsers.includes(String(userId))
   }
@@ -395,14 +453,17 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | null = null
     try {
-      // 先取图（各自超时），再开始算问答超时：下载慢不该把模型请求挤掉
+      // 先取图 / 文件（各自超时），再开始算问答超时：下载慢不该把模型请求挤掉
       const images = await resolveImages(inbound.images)
+      const filesAttached = await resolveFiles(inbound.files)
+      const allImages = [...images, ...filesAttached.images]
       timer = setTimeout(() => controller.abort(), askTimeoutMs)
       const result = await deps.ask({
         text: inbound.text,
         conversationId,
         signal: controller.signal,
-        ...(images.length > 0 ? { images } : {})
+        ...(allImages.length > 0 ? { images: allImages } : {}),
+        ...(filesAttached.files.length > 0 ? { files: filesAttached.files } : {})
       })
       const parts = await sendParts(inbound.userId, formatAskResult(result))
       log('info', 'qq answered', {

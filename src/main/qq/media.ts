@@ -66,8 +66,7 @@ export function imageDataUrlFromBase64(raw: string): string | null {
 }
 
 /** 下载兜底：只认 http/https，超时 / 超限 / 非图片都返回 null */
-export async function downloadImageAsDataUrl(
-  url: string,
+export async function downloadImageAsDataUrl(  url: string,
   options: { timeoutMs?: number; maxBytes?: number } = {}
 ): Promise<string | null> {
   let parsed: URL
@@ -94,6 +93,109 @@ export async function downloadImageAsDataUrl(
     const mime = imageMimeOf(buffer)
     if (mime === null) return null
     return `data:${mime};base64,${buffer.toString('base64')}`
+  } catch {
+    return null
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * 文件（D88，2026-10-31）：QQ 里以「文件」发来的图片 / 文本
+ *
+ * 实测：同一张图用「图片」发它就看得见，用「文件」发只留一个 `[文件]` 占位符。
+ * 这里补一条兜底——按扩展名认出图片就取字节当图、认出文本就取正文当附件，
+ * 都不是就只留占位符（模型会知道「这里有个东西，我没拿到内容」）。
+ * ------------------------------------------------------------------ */
+
+/** 单文件字节上限（与图片同口径） */
+export const QQ_FILE_MAX_BYTES = 4 * 1024 * 1024
+/** 文本文件最多取多少字（送云前附件协议还会再截断一次） */
+export const QQ_TEXT_MAX_CHARS = 30_000
+
+const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'] as const
+const TEXT_EXTS = [
+  '.md',
+  '.markdown',
+  '.txt',
+  '.json',
+  '.jsonl',
+  '.csv',
+  '.log',
+  '.yml',
+  '.yaml',
+  '.ts',
+  '.tsx',
+  '.js',
+  '.mjs',
+  '.py',
+  '.html',
+  '.css',
+  '.xml',
+  '.ini',
+  '.toml'
+] as const
+
+function extOf(name: string): string {
+  const base = name.trim().toLowerCase().split(/[\\/]/u).pop() ?? ''
+  const dot = base.lastIndexOf('.')
+  return dot > 0 ? base.slice(dot) : ''
+}
+
+/** 这个文件名像不像图片 */
+export function isImageFile(name: string): boolean {
+  return (IMAGE_EXTS as readonly string[]).includes(extOf(name))
+}
+
+/** 这个文件名像不像文本 */
+export function isTextFile(name: string): boolean {
+  return (TEXT_EXTS as readonly string[]).includes(extOf(name))
+}
+
+/** 字节 → 图片 data URL（按文件头认类型；不是图返回 null） */
+export function imageDataUrlFromBytes(buffer: Buffer): string | null {
+  if (buffer.length === 0 || buffer.length > QQ_IMAGE_MAX_BYTES) return null
+  const mime = imageMimeOf(buffer)
+  if (mime === null) return null
+  return `data:${mime};base64,${buffer.toString('base64')}`
+}
+
+/** 字节 → 文本（UTF-8；去 BOM；乱码太多就当不是文本；超上限截断并标注） */
+export function textFromBytes(buffer: Buffer, maxChars = QQ_TEXT_MAX_CHARS): string | null {
+  if (buffer.length === 0) return null
+  let text = buffer.toString('utf8')
+  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+  const sample = text.slice(0, 4_000)
+  const broken = (sample.match(/\uFFFD/gu) ?? []).length
+  if (broken / Math.max(1, sample.length) > 0.1) return null
+  return text.length > maxChars
+    ? `${text.slice(0, maxChars)}\n…（后面还有 ${text.length - maxChars} 字，已截断）`
+    : text
+}
+
+/** 下载任意文件字节：只认 http/https，超时 / 超限返回 null（SSRF 口径与图片一致） */
+export async function downloadFileBytes(
+  url: string,
+  options: { timeoutMs?: number; maxBytes?: number } = {}
+): Promise<Buffer | null> {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+  const timeoutMs = Math.max(1_000, options.timeoutMs ?? QQ_IMAGE_DOWNLOAD_TIMEOUT_MS)
+  const maxBytes = Math.max(1, options.maxBytes ?? QQ_FILE_MAX_BYTES)
+  try {
+    const response = await fetch(parsed, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+    if (!response.ok) return null
+    const length = Number(response.headers.get('content-length') ?? '')
+    if (Number.isFinite(length) && length > maxBytes) return null
+    const buffer = Buffer.from(await response.arrayBuffer())
+    if (buffer.length === 0 || buffer.length > maxBytes) return null
+    return buffer
   } catch {
     return null
   }

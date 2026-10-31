@@ -12,6 +12,7 @@ import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { askChain } from '../../src/chain/agent/ask'
+import { archiveIdOfImage } from '../../src/chain/agent/archive'
 import {
   appendAskConversationTurn,
   compactAskConversation,
@@ -142,14 +143,22 @@ describe('图片：只有压缩才删', () => {
     return payload
   }
 
-  it('用户附件图片原样进会话、下一问重放', () => {
+  it('用户附件图片：仓里留着，下一问的上下文里换成占位符（D88）', () => {
+    const id = archiveIdOfImage(TINY)
+    expect(id).not.toBeNull()
     const conversation = appendAskConversationTurn(emptyAskConversation(), turnWithImage(0))
+    // 存储层照旧保留原图（recall / /log 要用）
     expect(conversation.turns[0]?.attachments?.images).toEqual([TINY])
     const messages = buildChainAskLoopMessages(payloadWith(conversation.turns))
-    expect(messages[1]).toMatchObject({ role: 'user', images: [TINY] })
+    const first = messages[1]
+    expect(first).toMatchObject({ role: 'user' })
+    expect(first?.images).toBeUndefined()
+    expect(String(first?.content)).toContain(`#${id}`)
+    expect(String(first?.content)).toContain('recall')
   })
 
-  it('工具截图（read_segment）原样进会话、下一问重放', () => {
+  it('工具截图（read_segment）同样归档：不再原样重发，只留占位符（D88）', () => {
+    const id = archiveIdOfImage(TINY)
     const turn: CloudAskConversationTurn = {
       question: '看图',
       now: '',
@@ -168,8 +177,9 @@ describe('图片：只有压缩才删', () => {
     const conversation = appendAskConversationTurn(emptyAskConversation(), turn)
     expect(conversation.turns[0]?.turns[0]?.images).toEqual([TINY])
     const messages = buildChainAskLoopMessages(payloadWith(conversation.turns))
-    const imageMessage = messages.find((message) => message.images?.includes(TINY))
-    expect(imageMessage).toMatchObject({ role: 'user' })
+    expect(messages.some((message) => message.images?.includes(TINY))).toBe(false)
+    const placeholder = messages.find((message) => String(message.content).includes(`#${id}`))
+    expect(placeholder).toMatchObject({ role: 'user' })
   })
 
   it('没超预算：图片一张都不删', () => {
@@ -180,7 +190,7 @@ describe('图片：只有压缩才删', () => {
     expect(conversation.turns[0]?.attachments?.images).toEqual([TINY])
   })
 
-  it('askChain 的附件图片进会话，并在下一问重放（前缀不断）', async () => {
+  it('askChain 的附件图片进会话；下一问上下文里只留占位符（D88）', async () => {
     const store = createAskConversationStore()
     const client = new FakeLlmClient([{ json: '第一答' }, { json: '第二答' }])
     await askChain(
@@ -199,7 +209,59 @@ describe('图片：只有压缩才删', () => {
     await ask(store, client, '第二问')
     expect(client.askLoopRequests[0]?.attachments?.images).toEqual([TINY])
     const second = buildChainAskLoopMessages(client.askLoopRequests[1]!)
-    expect(second.some((message) => message.images?.includes(TINY))).toBe(true)
+    expect(second.some((message) => message.images?.includes(TINY))).toBe(false)
+    expect(second.some((message) => String(message.content).includes('已归档'))).toBe(true)
+  })
+
+  it('recall：按上一问占位符里的 id 取回原图；没见过的 id 如实拒绝（D88）', async () => {
+    const store = createAskConversationStore()
+    const id = archiveIdOfImage(TINY)
+    expect(id).not.toBeNull()
+    const client = new FakeLlmClient([{ json: '第一答' }])
+    await askChain(
+      {
+        db,
+        outbound: createLocalAskOutbound(),
+        resolveClient: () => ({ ok: true, client }),
+        now: () => NOW,
+        captureRunning: () => false,
+        canSend: () => true,
+        conversation: store,
+        attachments: { images: [TINY] }
+      },
+      '看图'
+    )
+
+    // 第二问：先换个不存在的 id，再按真 id 取回
+    client.push({ toolCalls: [{ name: 'recall', arguments: { id: 'deadbeef' } }] })
+    client.push({ toolCalls: [{ name: 'recall', arguments: { id } }] })
+    client.push({ json: '想起来了' })
+    const result = await ask(store, client, '刚才那张图什么颜色')
+    expect(result.kind).toBe('answer')
+
+    const recalled = client.askLoopRequests.at(-1)!
+    expect(recalled.turns[0]?.toolResult.kind).toBe('error')
+    expect(recalled.turns[1]?.toolResult.kind).toBe('recall')
+    // 图跟着工具轮挂回来（DeepSeek 只允许 user 消息带图）
+    expect(recalled.turns[1]?.images?.[0]).toBe(TINY)
+  })
+
+  it('带图的一问：onUsage 的 meta.images 记下张数（D88 生命不记账的依据）', async () => {
+    const seen: { images: number }[] = []
+    const client = new FakeLlmClient([{ json: '答' }])
+    const deps = {
+      db,
+      outbound: createLocalAskOutbound(),
+      resolveClient: () => ({ ok: true, client }),
+      now: () => NOW,
+      captureRunning: () => false,
+      canSend: () => true,
+      onUsage: (_usage: { promptTokens: number; completionTokens: number }, meta: { images: number }) =>
+        seen.push(meta)
+    }
+    await askChain({ ...deps, attachments: { images: [TINY] } }, '看图')
+    await askChain(deps, '只问字')
+    expect(seen).toEqual([{ images: 1 }, { images: 0 }])
   })
 
   it('压缩（/compact）：整轮丢弃旧轮；保留轮的图片一张都不删', () => {

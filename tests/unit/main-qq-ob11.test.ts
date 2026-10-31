@@ -94,6 +94,38 @@ describe('入站解析', () => {
     expect(parsed?.text).toBe('[图片][图片][图片][图片][图片][图片]')
     expect(parsed?.images?.map((ref) => ref.file)).toEqual(['a.png', 'b.png', 'c.png', 'd.png'])
   })
+
+  it('文件段：占位符带文件名，引用带 file_id 与 url；最多 4 个（D88）', () => {
+    const parsed = parsePrivateMessageEvent(
+      event({
+        message: [
+          { type: 'text', data: { text: '这是你哦 ' } },
+          { type: 'file', data: { file: 'avatar.jpg', file_id: 'fid-1', url: 'http://x/a.jpg' } },
+          { type: 'file', data: { file: 'note.md', file_id: 'fid-2' } },
+          { type: 'file', data: { file: 'a.txt' } },
+          { type: 'file', data: { file: 'b.txt' } },
+          { type: 'file', data: { file: 'c.txt' } }
+        ]
+      })
+    )
+    expect(parsed?.text).toBe('这是你哦 [文件：avatar.jpg][文件：note.md][文件：a.txt][文件：b.txt][文件：c.txt]')
+    expect(parsed?.files).toHaveLength(4)
+    expect(parsed?.files?.[0]).toEqual({
+      name: 'avatar.jpg',
+      file: 'avatar.jpg',
+      fileId: 'fid-1',
+      url: 'http://x/a.jpg'
+    })
+    expect(parsed?.files?.[1]).toEqual({ name: 'note.md', file: 'note.md', fileId: 'fid-2' })
+  })
+
+  it('CQ 字符串里的文件段也带名字', () => {
+    const parsed = parsePrivateMessageEvent(
+      event({ message: '看图[CQ:file,file=/tmp/x.jpg,file_id=fid-9]' })
+    )
+    expect(parsed?.text).toBe('看图[文件：x.jpg]')
+    expect(parsed?.files?.[0]?.fileId).toBe('fid-9')
+  })
 })
 
 describe('回复成形', () => {

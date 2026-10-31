@@ -67,23 +67,24 @@ describe('分支 kind ↔ 模式', () => {
     ).toBe('纯模型（分支 ✨assistant · 无工具）')
     expect(
       modeSummary({ kind: 'chat', branch: 'default', tools: [...ASK_TOOL_SCREEN_NAMES] })
-    ).toBe('聊天（分支 ✨default · 4 个工具）')
+    ).toBe('聊天（分支 ✨default · 5 个工具）')
   })
 })
 
 describe('工具目录', () => {
-  it('三个集合：屏幕记忆 4 个 / 日记 3 个 / 信 3 个，编号顺序固定', () => {
+  it('三个集合：屏幕记忆 5 个 / 日记 3 个 / 信 3 个，编号顺序固定', () => {
     expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual(['screen', 'diary', 'letter'])
     expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual(['屏幕记忆', '日记', '信'])
     expect(ASK_TOOL_SCREEN_NAMES).toEqual([
       'search_info',
       'get_freshness',
       'read_segment',
+      'recall',
       'ask_history'
     ])
     expect(ASK_TOOL_DIARY_NAMES).toEqual(['recall_diary', 'read_diary', 'memory_profile'])
     expect(ASK_TOOL_LETTER_NAMES).toEqual(['write_letter', 'list_letter', 'read_letter'])
-    expect(ASK_TOOL_NAMES).toHaveLength(10)
+    expect(ASK_TOOL_NAMES).toHaveLength(11)
   })
 
   it('每个元素都有说明，且只属于一个集合', () => {

@@ -107,7 +107,9 @@ describe('system 按工具分段（D64：动态事实改放 <now>）', () => {
     const messages = messagesOf(NONE, true)
     expect(messages.some((message) => message.content.includes('<final>'))).toBe(false)
     const now = payloadOf(NONE).now
-    expect(now).toContain('当前时间：')
+    // D88：时间行改成「现在是<时段> HH:mm（…）」+「距今天 24:00 还有 …」
+    expect(now).toMatch(/^现在是(凌晨|早上|上午|中午|下午|傍晚|晚上) \d{2}:\d{2}/u)
+    expect(now).toContain('距今天 24:00 还有')
     expect(now).not.toContain('数据边界：')
     // 底线仍在不编造
     expect(text).toContain('不编造')

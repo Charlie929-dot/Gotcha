@@ -2503,7 +2503,7 @@ if (primaryInstance) {
           const usage = readUsage(db, Date.now())
           return usage.promptTokens + usage.completionTokens >= budget
         },
-        onUsage: (usage) => {
+        onUsage: (usage, meta) => {
           try {
             // 显式提问是用户动作：允许打开写连接记账（D22 日账）
             const writable = connections.ensureWritable().db
@@ -2518,6 +2518,9 @@ if (primaryInstance) {
           // 生命（M3/M4）：记到**这一问开始时**的分支；传承会在 ask 中途把 active 切到女儿，
           // 不能在回调时现读 active，否则母亲最后一问的用量会记到女儿头上。
           // 纯模型分支也有生命（D86）：照常记账；recordLineageUsage 只拒绝 dead 节点。
+          // 带图的一问不记（D88）：图只活这一轮，下一轮在上下文里已经变成占位符——
+          // 记进去只会让「还剩 X%」掉 8%，下一轮又跳回来。下一次请求的真实 usage 会覆盖它。
+          if (meta.images > 0) return
           void recordLineageUsage(
             lineageFile,
             life?.branch ?? mode.branch,
@@ -2630,7 +2633,7 @@ if (primaryInstance) {
       log: (level, message, data) => captureLog(level, message, data),
       // 命令（M5）：与桌面同一个 handler；命中就不进模型，也不占限流 / 排队
       command,
-      ask: async ({ text, conversationId, signal, images }) => {
+      ask: async ({ text, conversationId, signal, images, files }) => {
         // 与桌面同一套前置：历史提交只读查看中先分叉（M2），再同步日记、取只读连接
         await forkDetachedIfNeeded({
           repo: memoryRepo,
@@ -2682,10 +2685,18 @@ if (primaryInstance) {
           state?.unreadLetters,
           onBirth
         )
-        // QQ 发来的图片：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
+        // QQ 发来的图片 / 文本文件（D88）：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
+        const hasImages = images !== undefined && images.length > 0
+        const hasFiles = files !== undefined && files.length > 0
         const result = await askChain(
-          images !== undefined && images.length > 0
-            ? { ...options, attachments: { images } }
+          hasImages || hasFiles
+            ? {
+                ...options,
+                attachments: {
+                  ...(hasImages ? { images } : {}),
+                  ...(hasFiles ? { files } : {})
+                }
+              }
             : options,
           text
         )

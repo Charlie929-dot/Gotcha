@@ -29,6 +29,11 @@ export interface QqInbound {
   at: number
   /** 这条消息里的图片引用（最多 4 张；拿不到图的会跳过） */
   images?: readonly QqImageRef[]
+  /**
+   * 这条消息里的文件引用（D88，最多 4 个）。QQ 有时把图片当「文件」发，
+   * 通道会按扩展名再判一次：是图就取字节当图，是文本就取正文。
+   */
+  files?: readonly QqFileRef[]
 }
 
 /** 图片段里的引用：`file` 可交给 OneBot `get_image`，`url` 是可直接下载的地址 */
@@ -37,8 +42,22 @@ export interface QqImageRef {
   url?: string
 }
 
+/** 文件段里的引用：`name` 给模型看，`file` / `fileId` / `url` 用来取字节 */
+export interface QqFileRef {
+  /** 文件名（能拿到就给；扩展名是后面判图片 / 文本的依据） */
+  name?: string
+  /** OneBot 的 file 字段（文件名或 id，形态看实现） */
+  file?: string
+  /** NapCat 的 file_id（取下载地址用） */
+  fileId?: string
+  /** 直链（有就直接下载） */
+  url?: string
+}
+
 /** 一条消息里的图片上限（与桌面附件一致） */
 export const QQ_INBOUND_IMAGE_MAX = 4
+/** 一条消息里的文件上限（D88） */
+export const QQ_INBOUND_FILE_MAX = 4
 
 export type QqLog = (
   level: 'info' | 'warn' | 'error',
@@ -110,15 +129,60 @@ function pushImage(images: QqImageRef[], ref: QqImageRef | null): void {
   images.push(ref)
 }
 
+/** 文件段的文件名：优先 file_name / name，其次 file 字段的 basename */
+function fileNameOf(data: Record<string, unknown>): string {
+  for (const key of ['file_name', 'name', 'file']) {
+    const value = data[key]
+    if (typeof value !== 'string') continue
+    const trimmed = value.trim()
+    if (trimmed === '') continue
+    const base = trimmed.split(/[\\/]/u).pop() ?? trimmed
+    if (base !== '') return base.slice(0, 120)
+  }
+  return ''
+}
+
+/** 文件段 → `QqFileRef`；文件名 / file / file_id / url 全空就当没有 */
+function fileRefOf(data: Record<string, unknown>): QqFileRef | null {
+  const name = fileNameOf(data)
+  const file = typeof data['file'] === 'string' ? data['file'].trim() : ''
+  const fileId = typeof data['file_id'] === 'string' ? data['file_id'].trim() : ''
+  const url = typeof data['url'] === 'string' ? data['url'].trim() : ''
+  if (name === '' && file === '' && fileId === '' && url === '') return null
+  return {
+    ...(name !== '' ? { name } : {}),
+    ...(file !== '' ? { file } : {}),
+    ...(fileId !== '' ? { fileId } : {}),
+    ...(url !== '' ? { url } : {})
+  }
+}
+
+function pushFile(files: QqFileRef[], ref: QqFileRef | null): void {
+  if (ref === null || files.length >= QQ_INBOUND_FILE_MAX) return
+  if (files.some((item) => item.file === ref.file && item.url === ref.url)) return
+  files.push(ref)
+}
+
+/** 文件段的占位符（D88）：带上文件名，让模型知道「这里有个 xxx，但我没拿到内容」 */
+function filePlaceholderText(ref: QqFileRef): string {
+  return ref.name !== undefined && ref.name !== '' ? `[文件：${ref.name}]` : '[文件]'
+}
+
 /** CQ 字符串 → 纯文本 + 图片引用（只留 text 段，其余按占位符；`at` / `reply` 直接丢） */
-function parseCqMessage(raw: string): { text: string; images: QqImageRef[] } {
+function parseCqMessage(raw: string): { text: string; images: QqImageRef[]; files: QqFileRef[] } {
   const images: QqImageRef[] = []
+  const files: QqFileRef[] = []
   const text = raw
     .replace(CQ_RE, (_match: string, type: string, params: string) => {
       if (type === 'at' || type === 'reply') return ''
       if (type === 'image') {
         pushImage(images, imageRefOf(cqParams(params)))
         return '[图片]'
+      }
+      if (type === 'file') {
+        const ref = fileRefOf(cqParams(params))
+        pushFile(files, ref)
+        return ref === null ? '[文件]' : filePlaceholderText(ref)
       }
       return SEGMENT_PLACEHOLDER[type] ?? ''
     })
@@ -127,21 +191,30 @@ function parseCqMessage(raw: string): { text: string; images: QqImageRef[] } {
     .replace(/&#93;/gu, ']')
     .replace(/&#44;/gu, ',')
     .replace(/&amp;/gu, '&')
-  return { text, images }
+  return { text, images, files }
 }
 
 /**
- * 报文里的 `message` → 纯文本 + 图片引用。
+ * 报文里的 `message` → 纯文本 + 图片 / 文件引用。
  * 段数组优先（NapCat 的默认形态）；字符串按 CQ 码解析；其它形态当空。
  */
-export function parseMessageContent(message: unknown): { text: string; images: QqImageRef[] } {
+export function parseMessageContent(message: unknown): {
+  text: string
+  images: QqImageRef[]
+  files: QqFileRef[]
+} {
   if (typeof message === 'string') {
     const parsed = parseCqMessage(message)
-    return { text: parsed.text.replace(/\r\n/gu, '\n').trim(), images: parsed.images }
+    return {
+      text: parsed.text.replace(/\r\n/gu, '\n').trim(),
+      images: parsed.images,
+      files: parsed.files
+    }
   }
-  if (!Array.isArray(message)) return { text: '', images: [] }
+  if (!Array.isArray(message)) return { text: '', images: [], files: [] }
   let out = ''
   const images: QqImageRef[] = []
+  const files: QqFileRef[] = []
   for (const segment of message) {
     if (!isPlainObject(segment)) continue
     const type = typeof segment.type === 'string' ? segment.type : ''
@@ -156,9 +229,15 @@ export function parseMessageContent(message: unknown): { text: string; images: Q
       out += '[图片]'
       continue
     }
+    if (type === 'file') {
+      const ref = fileRefOf(data)
+      pushFile(files, ref)
+      out += ref === null ? '[文件]' : filePlaceholderText(ref)
+      continue
+    }
     out += SEGMENT_PLACEHOLDER[type] ?? ''
   }
-  return { text: out.replace(/\r\n/gu, '\n').trim(), images }
+  return { text: out.replace(/\r\n/gu, '\n').trim(), images, files }
 }
 
 /** 兼容旧调用方：只要纯文本 */
@@ -193,7 +272,8 @@ export function parsePrivateMessageEvent(raw: unknown): QqInbound | null {
     text,
     messageId: positiveInt(raw['message_id']) ?? 0,
     at: Number.isFinite(seconds) ? Math.round(seconds * 1000) : Date.now(),
-    ...(parsed.images.length > 0 ? { images: parsed.images } : {})
+    ...(parsed.images.length > 0 ? { images: parsed.images } : {}),
+    ...(parsed.files.length > 0 ? { files: parsed.files } : {})
   }
 }
 
@@ -385,6 +465,22 @@ export class QqOb11Server {
     return {
       ...(base64 !== '' ? { base64 } : {}),
       ...(url !== '' ? { url } : {})
+    }
+  }
+
+  /**
+   * 私聊文件的下载地址（D88）：NapCat 的 `get_private_file_url`。
+   * 拿不到就返回 null——调用方会退回「占位符 + 明说没拿到」，不会假装读过。
+   */
+  async getFileUrl(fileId: string): Promise<string | null> {
+    try {
+      const response = await this.callAction('get_private_file_url', { file_id: fileId })
+      if (typeof response.retcode === 'number' && response.retcode !== 0) return null
+      const data = isPlainObject(response.data) ? response.data : {}
+      const url = typeof data['url'] === 'string' ? data['url'].trim() : ''
+      return url === '' ? null : url
+    } catch {
+      return null
     }
   }
 

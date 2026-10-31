@@ -303,6 +303,34 @@ describe('生命记账（M3）', () => {
     expect(lifeOf(done.lineage, 'spring')).toMatchObject({ remaining: 0, percent: 0 })
   })
 
+  it('纯模型分支也记账（D86），dead 仍拒绝', async () => {
+    const file = tempFile()
+    await ensureLineage(file, { now: 1 })
+    const withAsk = withBranchAdded(emptyLineage(1), {
+      branch: 'ask',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2,
+      kind: 'assistant'
+    })
+    expect(withAsk).not.toBeNull()
+    if (withAsk === null) return
+    await writeLineage(file, withAsk)
+    expect(await recordLineageUsage(file, 'ask', 42_000)).toBe(true)
+    const read = await readLineage(file)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    expect(lifeOf(read.lineage, 'ask')).toMatchObject({ used: 42_000, percent: 92 })
+    const dead = {
+      ...read.lineage,
+      branches: read.lineage.branches.map((item) =>
+        item.branch === 'ask' ? { ...item, status: 'dead' as const } : item
+      )
+    }
+    await writeLineage(file, dead)
+    expect(await recordLineageUsage(file, 'ask', 1)).toBe(false)
+  })
+
   it('usageAfterCompact：旧上下文 − 被压掉的旧轮 + 摘要本身', () => {
     // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身
     expect(usageAfterCompact(10_000, 4_000, 300)).toBe(6_300)

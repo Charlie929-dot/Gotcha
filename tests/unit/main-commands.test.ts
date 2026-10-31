@@ -1048,15 +1048,51 @@ describe('命令执行', () => {
       lineageFile,
       compact: async (id) => {
         received = id
-        return { ok: true, dropped: 3, kept: 6, summaryChars: 380, beforeChars: 42_000, afterChars: 8_000 }
+        return { ok: true, dropped: 3, kept: 6, summaryTokens: 270, beforeTokens: 6_600, afterTokens: 5_100 }
       }
     })
     const text = textOf(await compacted('/compact', { conversationId: 'c1' }))
     expect(received).toBe('c1')
     expect(text.startsWith('🎗️提示')).toBe(true)
     expect(text).not.toContain('===')
-    expect(text).toContain('压掉 3 轮（保留最近 6 轮原文），摘要 380 字')
-    expect(text).toContain('从 42000 字降到 8000 字')
+    expect(text).toContain('压掉 3 轮（保留最近 6 轮原文），摘要 270 token')
+    expect(text).toContain('上下文 6.6k → 5.1k token（估算）')
+    expect(text).not.toContain('字')
+  })
+
+  it('/life：按格式报剩余生命（token）', async () => {
+    const lineageFile = tempLineageFile()
+    const seeded = await ensureLineage(lineageFile, { now: 1 })
+    const active = seeded.lineage.active
+    await writeLineage(lineageFile, {
+      ...seeded.lineage,
+      life_tokens: 1_000_000,
+      branches: seeded.lineage.branches.map((item) =>
+        item.branch === active ? { ...item, life_tokens_used: 200_000 } : item
+      )
+    })
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    const text = textOf(await run('/life'))
+    expect(text).toBe('❤️剩余生命✨80%\n🔤上下文 已使用✨200k，剩余✨800k（1000k）')
+  })
+
+  it('/life：纯模型分支也有生命（同样 500K，只是不冻结）', async () => {
+    const lineageFile = tempLineageFile()
+    const seeded = await ensureLineage(lineageFile, { now: 1 })
+    const withAsk = withBranchAdded(seeded.lineage, {
+      branch: 'ask',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2,
+      kind: 'assistant'
+    })
+    expect(withAsk).not.toBeNull()
+    if (withAsk === null) return
+    await writeLineage(lineageFile, { ...withAsk, active: 'ask' })
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    const text = textOf(await run('/life'))
+    expect(text).toContain('❤️剩余生命✨100%')
+    expect(text).toContain('已使用✨0，剩余✨500k（500k）')
   })
 
   it('/compact：各种失败原因分开回，不漏底层异常', async () => {

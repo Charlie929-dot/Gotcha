@@ -46,6 +46,7 @@ import {
   isTrunkName,
   TRUNK_BRANCH,
   lineageSnapshot,
+  lifeOf,
   readLineage,
   toolsOfBranch,
   withActive,
@@ -99,10 +100,12 @@ export type CompactOutcome =
       dropped: number
       /** 保留几轮原文 */
       kept: number
-      /** 摘要字符数 */
-      summaryChars: number
-      beforeChars: number
-      afterChars: number
+      /** 摘要本身 token（响应里的 completion_tokens，原样） */
+      summaryTokens: number
+      /** 压缩前这一问的上下文 token（上一次请求的用量） */
+      beforeTokens: number
+      /** 压缩后估算的上下文 token（旧用量 − 被压掉的旧轮 + 摘要） */
+      afterTokens: number
     }
   | {
       ok: false
@@ -128,6 +131,7 @@ export const KNOWN_COMMANDS = [
   'backup',
   'cancel',
   'compact',
+  'life',
   'mode',
   'tool',
   'git'
@@ -143,6 +147,7 @@ export const READY_COMMANDS = [
   'backup',
   'cancel',
   'compact',
+  'life',
   'mode',
   'tool',
   'git'
@@ -179,6 +184,17 @@ export function slugifyNodeName(name: string): string | null {
     .slice(0, SLUG_MAX_CHARS)
     .replace(/-+$/u, '')
   return slug !== '' && SLUG_RE.test(slug) ? slug : null
+}
+
+/** token 数 → 人看的短写（≥10k 取整到 k；1k–10k 留一位小数；不足 1k 写原数） */
+function formatTokens(tokens: number): string {
+  const value = Math.max(0, Math.round(Number.isFinite(tokens) ? tokens : 0))
+  if (value < 1000) return String(value)
+  if (value < 10_000) {
+    const short = (value / 1000).toFixed(1)
+    return short.endsWith('.0') ? `${short.slice(0, -2)}k` : `${short}k`
+  }
+  return `${Math.round(value / 1000)}k`
 }
 
 /** 命令回执：形状与问答复保持一致，界面当一条普通答复显示 */
@@ -429,6 +445,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /mode ask|chat   切模式（ask = 纯模型，chat = 带 persona；切分支）',
     '  /tool            看当前分支的工具；set / ele / add / rm',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
+    '  /life            看剩余生命（token；纯模型分支也有，但不冻结）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
     '  /git <参数>      在记忆仓里跑原生命令（/git n|l 翻页）',
     '  /cancel          取消等待中的命名 / 删除',
@@ -1412,11 +1429,15 @@ export function createCommandHandler(
     if (deps.compact === undefined) return commandResult('/compact 还没接上。')
     const outcome = await deps.compact(context?.conversationId)
     if (outcome.ok) {
+      const contextLine =
+        outcome.beforeTokens > 0 && outcome.afterTokens > 0
+          ? `上下文 ${formatTokens(outcome.beforeTokens)} → ${formatTokens(outcome.afterTokens)} token（估算）`
+          : '上下文 token 数这轮没读到（细节看日志）'
       return commandResult(
         [
           RECEIPT_HEAD,
-          `压掉 ${outcome.dropped} 轮（保留最近 ${outcome.kept} 轮原文），摘要 ${outcome.summaryChars} 字。`,
-          `会话从 ${outcome.beforeChars} 字降到 ${outcome.afterChars} 字；生命按压完的上下文重算，下一问可以接着聊。`
+          `压掉 ${outcome.dropped} 轮（保留最近 ${outcome.kept} 轮原文），摘要 ${outcome.summaryTokens} token。`,
+          `${contextLine}；生命按压完的上下文重算，下一问可以接着聊。`
         ].join('\n')
       )
     }
@@ -1556,6 +1577,18 @@ export function createCommandHandler(
       }
       case 'compact':
         return handleCompact(context)
+      case 'life': {
+        const read = await readLineage(deps.lineageFile)
+        if (read.status !== 'ok') return commandResult('家谱还没建好，看不到生命（细节看日志）。')
+        const life = lifeOf(read.lineage, read.lineage.active)
+        if (life === null) return commandResult('这条分支还没记过生命。')
+        return commandResult(
+          [
+            `❤️剩余生命✨${life.percent}%`,
+            `🔤上下文 已使用✨${formatTokens(life.used)}，剩余✨${formatTokens(life.remaining)}（${formatTokens(life.limit)}）`
+          ].join('\n')
+        )
+      }
       case 'mode': {
         const name = parsed.args.join(' ').trim()
         if (name === '') {

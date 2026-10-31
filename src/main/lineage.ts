@@ -633,9 +633,9 @@ export async function recordLineageUsage(
   const read = await readLineage(filePath)
   if (read.status !== 'ok') return false
   const node = findBranch(read.lineage, branch)
-  // 只给活着的节点记账：传承后母亲已 dead，恢复中的最后一问不该把用量记到下一代头上；
-  // assistant 分支（D72）没有生命，也不记账。
-  if (node === null || node.status !== 'alive' || node.kind === 'assistant') return false
+  // 只给活着的节点记账：传承后母亲已 dead，恢复中的最后一问不该把用量记到下一代头上。
+  // 纯模型分支（D86）也有生命（同样 500K），只是不冻结、可以无限压缩，所以照样记账。
+  if (node === null || node.status !== 'alive') return false
   const used = Math.max(0, Math.round(Number.isFinite(tokens) ? tokens : 0))
   const next: Lineage = {
     ...read.lineage,

@@ -153,7 +153,6 @@ import { createMemoryRepo } from './memory-repo'
 import { forkDetachedIfNeeded } from './node-fork'
 import {
   appendAskConversationTurn,
-  askConversationChars,
   ASK_CONVERSATION_KEEP_TURNS,
   compactAskConversation,
   type CloudAskConversation
@@ -2107,8 +2106,8 @@ if (primaryInstance) {
      * 这一问的处境（D72）：当前分支 → 模式（kind + 工具白名单）+ 生命（M3/M4）。
      * 读不到就不显示（不阻塞）；数字只进 `<now>` 的一行事实，不是证据。
      *
-     * assistant 分支（纯模型）**没有生命**：不注入生命行、不计账、也不会被冻结——
-     * 它不是一条鱼，只是一段助手会话。
+     * assistant 分支（纯模型）也有生命（D86）：同样 500K、照样记账、`<now>` 里也有生命行；
+     * 但它不是一条鱼，所以**不冻结、不传承**——只是把上下文占用照实显示出来。
      */
     interface AskStateNow {
       mode: AskModeState
@@ -2128,7 +2127,6 @@ if (primaryInstance) {
           branch,
           tools: toolsOfBranch(lineage, branch)
         }
-        if (kind === 'assistant') return { mode }
         const life = lifeOf(lineage, branch)
         if (life === null) return { mode }
         const generation = generationOf(lineage, branch)
@@ -2169,7 +2167,7 @@ if (primaryInstance) {
         const read = await readLineage(lineageFile)
         if (read.status !== 'ok') return null
         const node = findBranch(read.lineage, read.lineage.active)
-        // assistant 分支没有生命（D72）：不参与冻结 / 传承
+        // 纯模型分支（D72 / D86）：有生命但**不冻结**——它可以一直 /compact，没有「生命耗尽」这一说
         if (node !== null && node.kind === 'assistant') return null
         if (node !== null && node.status !== 'alive') {
           return node.status === 'dead'
@@ -2250,16 +2248,16 @@ if (primaryInstance) {
       // 续命（D69 §5.2）：压完把这一节点的用量改成「压缩后的近似值」——否则下一问仍然
       // 被「生命已结束」拦住，永远走不到「按新上下文重算」那一步（2026-10-31 真机复验抓到的死锁）。
       // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身，两个数都在 summaryUsage 里；
-      // dead / 纯模型节点由 recordLineageUsage 自己拒绝，不会复活已经交接出去的那一代。
+      // dead 节点由 recordLineageUsage 拒绝，不会复活已经交接出去的那一代。
+      let beforeTokens = 0
+      let afterTokens = 0
       try {
         const read = await readLineage(lineageFile)
         const life = read.status === 'ok' ? lifeOf(read.lineage, read.lineage.active) : null
         if (read.status === 'ok' && life !== null) {
-          await recordLineageUsage(
-            lineageFile,
-            read.lineage.active,
-            usageAfterCompact(life.used, summaryUsage.promptTokens, summaryUsage.completionTokens)
-          )
+          beforeTokens = life.used
+          afterTokens = usageAfterCompact(life.used, summaryUsage.promptTokens, summaryUsage.completionTokens)
+          await recordLineageUsage(lineageFile, read.lineage.active, afterTokens)
         }
       } catch (error) {
         captureLog('warn', 'memory compact life update failed', { error: String(error) })
@@ -2268,9 +2266,9 @@ if (primaryInstance) {
         ok: true,
         dropped: compacted.dropped,
         kept: compacted.conversation.turns.length,
-        summaryChars: summary.length,
-        beforeChars: askConversationChars(current),
-        afterChars: askConversationChars(compacted.conversation)
+        summaryTokens: summaryUsage.completionTokens,
+        beforeTokens,
+        afterTokens
       }
     }
     /**
@@ -2513,7 +2511,7 @@ if (primaryInstance) {
           }
           // 生命（M3/M4）：记到**这一问开始时**的分支；传承会在 ask 中途把 active 切到女儿，
           // 不能在回调时现读 active，否则母亲最后一问的用量会记到女儿头上。
-          // assistant 分支没有生命（D72）：recordLineageUsage 会拒绝，这里不用再分叉。
+          // 纯模型分支也有生命（D86）：照常记账；recordLineageUsage 只拒绝 dead 节点。
           void recordLineageUsage(
             lineageFile,
             life?.branch ?? mode.branch,

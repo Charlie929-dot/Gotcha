@@ -43,6 +43,11 @@ export const NAPCAT_REQUIRED_FILES = [
 
 /** NapCat 登录二维码相对 Shell 目录的位置 */
 export const NAPCAT_QRCODE_REL = join('cache', 'qrcode.png')
+/**
+ * 二维码票的有效期（约 2 分钟，留一点余量）：比这还旧的图不算数。
+ * NapCat 只在启动 / 收到刷新请求时写 `cache/qrcode.png`，不会自己换——旧图扫出来就是「已过期」。
+ */
+export const NAPCAT_QR_MAX_AGE_MS = 110_000
 /** WebUI 默认端口（config/webui.json 里通常也是 6099） */
 export const NAPCAT_DEFAULT_WEBUI_PORT = 6099
 /** 下载包名（官方 Releases 里的 Windows Shell 包） */
@@ -126,6 +131,14 @@ export function parseWebuiConfig(raw: string): NapcatWebuiConfig | null {
   } catch {
     return null
   }
+}
+
+/**
+ * 二维码是不是已经旧到不能再显示（旧了就该让 NapCat 换一张）。
+ * `qrAt === null`（还没拿到码）也算「该刷新」。
+ */
+export function qrExpired(qrAt: number | null, now: number): boolean {
+  return qrAt === null || now - qrAt > NAPCAT_QR_MAX_AGE_MS
 }
 
 /** 图片字节 → `data:image/png;base64,…`（只认 PNG；NapCat 写的二维码就是 PNG） */
@@ -365,7 +378,7 @@ export class NapcatManager {
   private qrDataUrl: string | null = null
   private qrAt: number | null = null
   private qrMtime = 0
-  /** 只接受这个时刻之后写的二维码（新拉起的进程）；接管已有进程时为 0（照收） */
+  /** 只接受这个时刻之后写的二维码（新拉起的进程）；接管已有进程时为 0（按「新鲜度」判断） */
   private qrMinMtime = 0
   private progress: number | null = null
   private loggedIn = false
@@ -386,6 +399,8 @@ export class NapcatManager {
   /** 本次 start 的时刻：WebUI 一直不通就按超时收口，别让界面永远停在「启动中」 */
   private startedAt = 0
   private lastPollErrorAt = 0
+  /** 上一次找 NapCat 换二维码的时刻（别每个轮询都调） */
+  private lastQrRefreshAt = 0
 
   constructor(private readonly deps: NapcatDeps) {
     this.now = deps.now ?? Date.now
@@ -702,7 +717,13 @@ export class NapcatManager {
         this.loggedIn = false
       }
 
-      await this.readQr()
+      // 没登录：码过期（或还没有码）就让 NapCat 换一张——它自己不会换，旧码扫出来是「已过期」
+      if (qrExpired(this.qrAt, this.now())) {
+        this.qrDataUrl = null
+        this.qrAt = null
+        await this.refreshQr()
+        await this.readQr()
+      }
       if (this.phase !== 'error') this.phase = 'waiting-login'
     } catch (error) {
       // WebUI 没起来时每个轮询都会抛：30s 记一次就够，别刷日志
@@ -793,6 +814,8 @@ export class NapcatManager {
     }
     if (info.mtimeMs === this.qrMtime) return
     if (info.mtimeMs < this.qrMinMtime) return
+    // 旧图（票早过期了）不算数：等 refreshQr() 换一张，别把过期码一直挂在界面上
+    if (info.mtimeMs < this.now() - NAPCAT_QR_MAX_AGE_MS) return
     const bytes = await readFile(file).catch(() => null)
     if (bytes === null) return
     const dataUrl = qrcodeDataUrl(bytes)
@@ -801,6 +824,28 @@ export class NapcatManager {
     this.qrAt = this.now()
     this.qrMtime = info.mtimeMs
     this.log('info', 'napcat qrcode updated')
+  }
+
+  /**
+   * 二维码过期就让 NapCat 换一张（2026-10-31 真机：它只在启动时写 `cache/qrcode.png`，
+   * 旧码会一直挂在界面上，手机扫出来是「已过期」）。刷新后 NapCat 会把那张 PNG 重写，
+   * 再按普通路径读回来——不引入二维码编码器，也不新增依赖。
+   */
+  private async refreshQr(): Promise<void> {
+    if (this.webuiCredential === null) return
+    if (this.now() - this.lastQrRefreshAt < 15_000) return
+    this.lastQrRefreshAt = this.now()
+    try {
+      const data = asRecord(await this.webuiPost('/api/QQLogin/RefreshQRcode'))
+      const url = data?.['qrcodeurl']
+      if (typeof url !== 'string' || url === '') return
+      // 文件刚被重写：旧的 mtime 不能再拦住它
+      this.qrMtime = 0
+      await this.readQr()
+      if (this.qrDataUrl !== null) this.log('info', 'napcat qrcode refreshed')
+    } catch (error) {
+      this.log('warn', 'napcat qrcode refresh failed', { error: String(error) })
+    }
   }
 
   private async latestDownloadUrl(): Promise<string> {

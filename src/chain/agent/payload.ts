@@ -397,6 +397,18 @@ export type RedactableAskLoopToolResult =
       at: number
       text: string
     }
+  /**
+   * 回想归档（D88）：历史轮次里的图片 / 文本附件已经换成占位符，
+   * 按 id 取回原图（随工具轮挂图）或文件正文。只能取本会话出现过的 id。
+   */
+  | {
+      kind: 'recall'
+      id: string
+      /** image = 取回的是图；file = 取回的是文本正文 */
+      media: 'image' | 'file'
+      text: string
+      name: string
+    }
 
 /** 循环里的一次往返：模型发起的调用 + 执行器给出的摘要 */
 export interface RedactableAskLoopTurn {
@@ -812,6 +824,52 @@ function formatTokenAmount(value: number): string {
   return `${Math.round(tokens / 1000)}K`
 }
 
+const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const
+
+/** 时段词（说话时用）：0-4 凌晨 / 5-7 早上 / 8-10 上午 / 11-12 中午 / 13-16 下午 / 17-18 傍晚 / 其余晚上 */
+function periodOfHour(hour: number): string {
+  if (hour < 5) return '凌晨'
+  if (hour < 8) return '早上'
+  if (hour < 11) return '上午'
+  if (hour < 13) return '中午'
+  if (hour < 17) return '下午'
+  if (hour < 19) return '傍晚'
+  return '晚上'
+}
+
+/**
+ * 时间事实（D88）：`现在是晚上 20:11` + 日期 + 离 24:00 还有多久。
+ * 最后一项是本机算的——模型连着三次把「十二点」当成 22:00（差两小时），
+ * 与其让它心算，不如直接把差了多少告诉它。
+ */
+function clockFactsOf(ms: number): {
+  period: string
+  hhmm: string
+  day: string
+  untilMidnight: string
+} {
+  const date = new Date(ms)
+  const hour = date.getHours()
+  const minute = date.getMinutes()
+  const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${WEEKDAY_NAMES[date.getDay()]}`
+  const remainMinutes = Math.max(
+    0,
+    24 * 60 - (hour * 60 + minute) - (date.getSeconds() > 0 ? 1 : 0)
+  )
+  const hours = Math.floor(remainMinutes / 60)
+  const rest = remainMinutes % 60
+  const untilMidnight =
+    hours > 0
+      ? `${hours} 小时${rest > 0 ? ` ${rest} 分` : ''}`
+      : `${rest} 分`
+  return {
+    period: periodOfHour(hour),
+    hhmm: `${pad2(hour)}:${pad2(minute)}`,
+    day,
+    untilMidnight
+  }
+}
+
 /**
  * 本轮 `<now>` 正文。只拼已经过策略的字段（opening / recent），本地时间不是隐私；
  * 没有屏幕工具就不写数据边界 / 最近段（与 D62 的模式口径一致）。
@@ -822,9 +880,18 @@ function renderNowText(
   recent: AskRecentSegment | undefined
 ): string {
   const ms = input.systemTimeMs ?? parseSystemTimeMs(input.systemTime)
-  const lines: string[] = [
-    `当前时间：${input.systemTime}${ms === null ? '' : `（毫秒时间戳 ${ms}，相对时间先按它换算）`}`
-  ]
+  const lines: string[] = []
+  // 时间（D88）：模型自己把「十一点半 / 十二点」算成 21:30 / 22:00，连着错三次。
+  // 这里给它本机算好的三件事：现在是几点（带时段）、今天是哪天、离今天结束还有多久。
+  if (ms === null) {
+    lines.push(`当前时间：${input.systemTime}`)
+  } else {
+    const clock = clockFactsOf(ms)
+    lines.push(
+      `现在是${clock.period} ${clock.hhmm}（${clock.day}，毫秒时间戳 ${ms}，相对时间先按它换算）`,
+      `距今天 24:00 还有 ${clock.untilMidnight}。`
+    )
+  }
   if (opening?.facts !== undefined && opening.facts !== '') {
     lines.push(`此刻：${opening.facts}`)
   }
@@ -1093,6 +1160,26 @@ export function buildAskLoopPayload(
           })
         }
         view = { kind: 'list_letter', freshness: result.freshness, letters }
+        break
+      }
+      case 'recall': {
+        // 回想归档（D88）：图片原样挂回工具轮后面（和 read_segment 的截图同一条路）；
+        // 文本附件的正文是用户的文件内容，照常过策略。
+        if (result.media === 'image') images = guardTurnImages(turn.images)
+        const text =
+          result.media === 'file' ? guardText(policy, result.text, Number.MAX_SAFE_INTEGER) : null
+        if (text !== null && text.blocked) {
+          view = { kind: 'error', message: '这个文件包含敏感内容，不能展开' }
+          break
+        }
+        const name = result.name === '' ? null : policy.redact(normalizeText(result.name))
+        view = {
+          kind: 'recall',
+          id: result.id.slice(0, 80),
+          media: result.media,
+          ...(name !== null && !name.blocked ? { name: name.text.slice(0, 120) } : {}),
+          ...(text !== null ? { text: text.text } : {})
+        }
         break
       }
       case 'read_letter': {

@@ -130,7 +130,13 @@ import {
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
 import { createAskConversationRegistry } from './ask-conversation'
-import { createCommandHandler, currentModeState, memoryDayKey, type CompactOutcome } from './commands'
+import {
+  createCommandHandler,
+  currentModeState,
+  memoryDayKey,
+  serializeCommands,
+  type CompactOutcome
+} from './commands'
 import { giveBirth as giveBirthOnRepo } from './give-birth'
 import { handoverReceiptText } from './handover'
 import { createLetterStore } from './letters'
@@ -2497,7 +2503,7 @@ if (primaryInstance) {
           const usage = readUsage(db, Date.now())
           return usage.promptTokens + usage.completionTokens >= budget
         },
-        onUsage: (usage) => {
+        onUsage: (usage, meta) => {
           try {
             // 显式提问是用户动作：允许打开写连接记账（D22 日账）
             const writable = connections.ensureWritable().db
@@ -2512,6 +2518,9 @@ if (primaryInstance) {
           // 生命（M3/M4）：记到**这一问开始时**的分支；传承会在 ask 中途把 active 切到女儿，
           // 不能在回调时现读 active，否则母亲最后一问的用量会记到女儿头上。
           // 纯模型分支也有生命（D86）：照常记账；recordLineageUsage 只拒绝 dead 节点。
+          // 带图的一问不记（D88）：图只活这一轮，下一轮在上下文里已经变成占位符——
+          // 记进去只会让「还剩 X%」掉 8%，下一轮又跳回来。下一次请求的真实 usage 会覆盖它。
+          if (meta.images > 0) return
           void recordLineageUsage(
             lineageFile,
             life?.branch ?? mode.branch,
@@ -2523,10 +2532,25 @@ if (primaryInstance) {
     }
 
     /**
+     * 本地命令（M1/M2/M3/M5）：桌面与 QQ **共用同一个 handler**——两路发 `/use` 改的是同一条鱼，
+     * 「等名字 / 等 confirm」状态也只有一份。串行锁（M5）保证两路命令不互相踩。
+     * 命中就在本地执行、不调模型（`/compact` 例外：压摘要过一次模型）、不进问答历史。
+     */
+    const command = serializeCommands(
+      createCommandHandler({
+        repo: memoryRepo,
+        lineageFile,
+        reloadConversations: () => askConversations.reload(),
+        compact: compactConversation
+      })
+    )
+
+    /**
      * QQ 通道（D63）：参考 `dsh-onebot-qq` 的 OneBot 11 口径——NapCat 反向 WS 拨入本机 127.0.0.1，
      * 我们只做「私聊文字 → 问记忆 → 纯文本回话」。
      *
-     * 不复刻参考插件的插件形态（多账号 / 群聊 / 媒体 / t2i / 斜杠命令），M1 只借协议与 NapCat 对接方式：
+     * 不复刻参考插件的插件形态（多账号 / 群聊 / 媒体 / t2i），M1 只借协议与 NapCat 对接方式；
+     * 斜杠命令由 M5（D87）接上：与桌面共用同一套 `command`。
      * - 问答复用桌面同一条链路（`askChain` → 同一份出云策略、日额度、脱敏墙）与「问记忆」模式；
      * - 上下文按 QQ 用户各自留最近 6 轮（内存，重启即弃；不写桌面问答历史，免得两套记录互相污染）；
      * - 默认关闭，设置里开了才占端口；没白名单 / 没 token 一律不起（fail-closed）。
@@ -2607,7 +2631,9 @@ if (primaryInstance) {
     }
     qqChannel = createQqChannel(new QqOb11Server(), {
       log: (level, message, data) => captureLog(level, message, data),
-      ask: async ({ text, conversationId, signal, images }) => {
+      // 命令（M5）：与桌面同一个 handler；命中就不进模型，也不占限流 / 排队
+      command,
+      ask: async ({ text, conversationId, signal, images, files }) => {
         // 与桌面同一套前置：历史提交只读查看中先分叉（M2），再同步日记、取只读连接
         await forkDetachedIfNeeded({
           repo: memoryRepo,
@@ -2659,10 +2685,18 @@ if (primaryInstance) {
           state?.unreadLetters,
           onBirth
         )
-        // QQ 发来的图片：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
+        // QQ 发来的图片 / 文本文件（D88）：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
+        const hasImages = images !== undefined && images.length > 0
+        const hasFiles = files !== undefined && files.length > 0
         const result = await askChain(
-          images !== undefined && images.length > 0
-            ? { ...options, attachments: { images } }
+          hasImages || hasFiles
+            ? {
+                ...options,
+                attachments: {
+                  ...(hasImages ? { images } : {}),
+                  ...(hasFiles ? { files } : {})
+                }
+              }
             : options,
           text
         )
@@ -2806,13 +2840,8 @@ if (primaryInstance) {
           })
       },
       // 本地命令（M1/M2/M3/M5）：/help /log /new /use /del /backup /compact /mode /tool
-      // 命中就本地执行、不调模型（/compact 例外：压摘要过一次模型）、不进问答历史
-      command: createCommandHandler({
-        repo: memoryRepo,
-        lineageFile,
-        reloadConversations: () => askConversations.reload(),
-        compact: compactConversation
-      }),
+      // 桌面与 QQ 共用同一个 command（M5），所以 /use 在 QQ 里切了，桌面这条鱼也跟着切
+      command,
       // 模式（D72）：界面启动 / 每条结果后刷新模式条
       mode: () => currentModeState({ repo: memoryRepo, lineageFile }),
       // 「还要继续查吗」→ 恢复暂停的循环（问题用检查点里的原话，续查通道不再传）

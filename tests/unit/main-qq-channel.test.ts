@@ -5,7 +5,7 @@
  * 默认关 / 白名单 fail-closed / 每用户串行 / 限流 / 长答分条 / 错误如实回一句。
  */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChainAskResult } from '../../src/chain/agent/types'
 import {
@@ -52,6 +52,13 @@ class FakeTransport implements QqTransport {
     return got
   }
 
+  /** file_id → 下载地址（D88）；没塞就当 NapCat 不给 */
+  fileUrls = new Map<string, string>()
+
+  async getFileUrl(fileId: string): Promise<string | null> {
+    return this.fileUrls.get(fileId) ?? null
+  }
+
   async setProfile(nickname: string): Promise<void> {
     this.profiles.push(nickname)
   }
@@ -77,14 +84,20 @@ function config(overrides: Partial<QqChannelConfig> = {}): QqChannelConfig {
   }
 }
 
-function inbound(text: string, userId = 20002, images?: QqInbound['images']): QqInbound {
+function inbound(
+  text: string,
+  userId = 20002,
+  images?: QqInbound['images'],
+  files?: QqInbound['files']
+): QqInbound {
   return {
     userId,
     nickname: '测试',
     text,
     messageId: Math.floor(Math.random() * 1e9),
     at: Date.now(),
-    ...(images !== undefined ? { images } : {})
+    ...(images !== undefined ? { images } : {}),
+    ...(files !== undefined ? { files } : {})
   }
 }
 
@@ -316,8 +329,93 @@ describe('图片（D63 追加）', () => {
     expect(transport.sent[0]?.text).toContain('没看到图')
     expect(logs.some((entry) => entry.message === 'qq image skipped')).toBe(true)
   })
+})
 
-  it('传承改名：setProfile 转给 transport（M4）', async () => {
+describe('文件（D88：QQ 把图当「文件」发）', () => {
+  const pngBytes = Buffer.from(TINY_PNG, 'base64')
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function stubFetch(body: Uint8Array): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body as unknown as BodyInit, { status: 200, headers: { 'content-type': 'application/octet-stream' } }))
+    )
+  }
+
+  it('扩展名是图片 → 取字节当图（和图片段同一条路）', async () => {
+    const transport = new FakeTransport()
+    transport.fileUrls.set('fid-1', 'https://example.test/avatar.jpg')
+    stubFetch(pngBytes)
+    const asked: { images?: readonly string[]; files?: readonly { name: string; text: string }[] }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ images, files }) => {
+        asked.push({ ...(images !== undefined ? { images } : {}), ...(files !== undefined ? { files } : {}) })
+        return answer('看到了。')
+      },
+      log: () => undefined,
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(
+      inbound('这是你哦 [文件：avatar.jpg]', 20002, undefined, [{ name: 'avatar.jpg', fileId: 'fid-1' }])
+    )
+
+    expect(asked).toHaveLength(1)
+    expect(asked[0]?.images?.[0]).toMatch(/^data:image\/png;base64,/u)
+    expect(asked[0]?.files).toBeUndefined()
+  })
+
+  it('扩展名是文本 → 正文当附件', async () => {
+    const transport = new FakeTransport()
+    transport.fileUrls.set('fid-2', 'https://example.test/note.md')
+    stubFetch(new TextEncoder().encode('# 标题\n正文在这里'))
+    const asked: { files?: readonly { name: string; text: string }[] }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ files }) => {
+        asked.push({ ...(files !== undefined ? { files } : {}) })
+        return answer('读到了。')
+      },
+      log: () => undefined,
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(
+      inbound('读一下 [文件：note.md]', 20002, undefined, [{ name: 'note.md', fileId: 'fid-2' }])
+    )
+
+    expect(asked[0]?.files?.[0]?.name).toBe('note.md')
+    expect(asked[0]?.files?.[0]?.text).toContain('正文在这里')
+  })
+
+  it('拿不到下载地址 → 只按文字问，日志记 qq file skipped', async () => {
+    const transport = new FakeTransport()
+    const logs: string[] = []
+    const asked: { images?: readonly string[]; files?: readonly { name: string; text: string }[] }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ images, files }) => {
+        asked.push({ ...(images !== undefined ? { images } : {}), ...(files !== undefined ? { files } : {}) })
+        return answer('没拿到文件，只看到文件名。')
+      },
+      log: (_level, message) => logs.push(message),
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(
+      inbound('看看 [文件：x.jpg]', 20002, undefined, [{ name: 'x.jpg', fileId: 'fid-missing' }])
+    )
+
+    expect(asked[0]?.images).toBeUndefined()
+    expect(asked[0]?.files).toBeUndefined()
+    expect(logs).toContain('qq file skipped')
+    expect(transport.sent[0]?.text).toContain('没拿到文件')
+  })
+})
+
+describe('传承改名（M4）', () => {
+  it('setProfile 转给 transport', async () => {
     const transport = new FakeTransport()
     const channel = createQqChannel(transport, {
       ask: async () => answer('在。'),
@@ -327,5 +425,143 @@ describe('图片（D63 追加）', () => {
     await channel.start(config())
     await channel.setProfile?.('xiao-yu')
     expect(transport.profiles).toEqual(['xiao-yu'])
+  })
+})
+
+describe('本地命令（M5）', () => {
+  function receipt(text: string): ChainAskResult {
+    return { kind: 'command', text, stats: stats() }
+  }
+
+  it('命中命令：不调模型，按 qq-<号> 会话把回执发回去', async () => {
+    const transport = new FakeTransport()
+    let asked = 0
+    const seen: { text: string; conversationId: string }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        asked += 1
+        return answer('不该走到这里')
+      },
+      command: async (text, context) => {
+        seen.push({ text, conversationId: context.conversationId })
+        return text === '/help' ? receipt('🎗️提示\n能用的命令：/help /log /new') : null
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('/help'))
+
+    expect(asked).toBe(0)
+    expect(seen).toEqual([{ text: '/help', conversationId: 'qq-20002' }])
+    expect(transport.sent).toHaveLength(1)
+    expect(transport.sent[0]?.text).toContain('能用的命令')
+  })
+
+  it('命令不占每分钟限流：连发 3 条后普通问题照样能问', async () => {
+    const transport = new FakeTransport()
+    let asked = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        asked += 1
+        return answer('答')
+      },
+      command: async (text) => (text.startsWith('/') ? receipt(`跑了 ${text}`) : null),
+      log: () => {},
+      perMinute: 1,
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('/log'))
+    await channel.handleMessage(inbound('/life'))
+    await channel.handleMessage(inbound('/git log --oneline'))
+
+    expect(transport.sent.filter((item) => item.text.includes('跑了')).length).toBe(3)
+    // 限流窗口没被命令吃掉：第一条普通消息还能问
+    await channel.handleMessage(inbound('我下午在干嘛'))
+    expect(asked).toBe(1)
+    expect(transport.sent.some((item) => item.text.includes('太多了'))).toBe(false)
+  })
+
+  it('命令返回 null：照常提问（普通一句话不会被命令拦下）', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, {
+      ask: async () => answer('照常答'),
+      command: async () => null,
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('我昨天看了什么'))
+    expect(transport.sent[0]?.text).toContain('照常答')
+  })
+
+  it('命令抛错：回一句「没跑成」，不调模型', async () => {
+    const transport = new FakeTransport()
+    let asked = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        asked += 1
+        return answer('不该走到这里')
+      },
+      command: async () => {
+        throw new Error('git boom')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('/backup'))
+
+    expect(asked).toBe(0)
+    expect(transport.sent[0]?.text).toContain('没跑成')
+  })
+
+  it('命令不进问答队列：长问答还在跑时，命令照样先回', async () => {
+    const transport = new FakeTransport()
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        await gate
+        return answer('慢慢答完')
+      },
+      command: async (text) => (text === '/life' ? receipt('❤️剩余生命✨99%') : null),
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    const asking = channel.handleMessage(inbound('慢问题'))
+    await channel.handleMessage(inbound('/life'))
+
+    expect(transport.sent.some((item) => item.text.includes('剩余生命'))).toBe(true)
+    expect(transport.sent.some((item) => item.text.includes('慢慢答完'))).toBe(false)
+    release()
+    await asking
+    expect(transport.sent.some((item) => item.text.includes('慢慢答完'))).toBe(true)
+  })
+
+  it('非白名单发命令也不执行、不回话', async () => {
+    const transport = new FakeTransport()
+    let commands = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => answer('x'),
+      command: async () => {
+        commands += 1
+        return receipt('不该跑到这里')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('/help', 99999))
+    expect(commands).toBe(0)
+    expect(transport.sent).toHaveLength(0)
+  })
+
+  it('命令回执走 formatAskResult：剥 Markdown，保留换行', () => {
+    expect(formatAskResult(receipt('**粗体** 与 `代码`\n\n第二段'))).toBe('粗体 与 代码\n\n第二段')
   })
 })

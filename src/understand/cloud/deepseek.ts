@@ -13,6 +13,7 @@
 import { LLM_DEFAULTS } from './constants'
 import { normalizeBaseUrl } from './providers'
 import { ASK_TOOL_LABELS, ASK_TOOL_NAMES, type AskToolName } from '../../chain/agent/tool-catalog'
+import { archiveIdOfImage, imagePlaceholder } from '../../chain/agent/archive'
 import {
   LlmAbortError,
   LlmError,
@@ -375,7 +376,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'read_segment',
       description:
-        '打开一段：返回这段的界面文字（UIA 采集，可能很长，用 offset / query 往后翻）和最近一张截图（用户开了历史截图时才有，每段一张）。OCR 文本不可信，服务端不再返回 OCR 正文；要看屏幕原图就打开这一段。只能打开检索结果里出现过的 segmentId。文字里出现的网址就是用户要的链接，原样给，不要用标题拼。',
+        '打开一段：返回这段的界面文字（UIA 采集，可能很长，用 offset / query 往后翻）和最近一张截图（用户开了历史截图时才有，每段一张）。OCR 文本不可信，服务端不再返回 OCR 正文；要看屏幕原图就打开这一段。只能打开**本轮** search_info 返回过的 segmentId（换了一问就会过期，要重新 search_info）。文字里出现的网址就是用户要的链接，原样给，不要用标题拼。',
       parameters: {
         type: 'object',
         properties: {
@@ -388,6 +389,21 @@ const ASK_LOOP_TOOLS = [
           limit: { type: 'number', description: '本次取多少字符，默认 3000、最多 6000' }
         },
         required: ['segmentId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'recall',
+      description:
+        '回想一张早先的图片或一个早先的文件：对话里的图过一轮就归档成占位符（形如 `[图片 #a1b2c3d4 已归档]`），需要再看原图 / 读文件正文时按那个 id 取回。只认本会话里出现过的 id。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '占位符里 # 后面那串（例如 a1b2c3d4）' }
+        },
+        required: ['id']
       }
     }
   },
@@ -549,6 +565,7 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   search_info: '检索屏幕记忆段（时间 / 应用 / 标签 / 双链 / 关键词 / 语义，命中带 segmentId）',
   get_freshness: '查数据新鲜度（最新证据到哪一刻、采集是否在跑）',
   read_segment: '打开一段的界面文字与截图（要看全文 / 原图时用）',
+  recall: '回想归档的图片 / 文件（占位符里的 id；过一轮就不在上下文里了）',
   ask_history: '查最近的问答记录（问过什么、答没答上）',
   recall_diary: '按关键词 / 日期 / 标签检索个人日记',
   read_diary: '打开某一天的日记全文',
@@ -633,6 +650,19 @@ function userMessageContent(
 }
 
 /**
+ * 历史轮次的图 → 占位符行（D88）：图只在它出现的那一轮发送，之后换成一两行字；
+ * 模型想再看原图就 `recall`。
+ */
+function archivedImagesText(images: readonly string[]): string {
+  const lines: string[] = []
+  for (const url of images) {
+    const id = archiveIdOfImage(url)
+    lines.push(id === null ? '[图片 已归档，需要时用 recall]' : imagePlaceholder(id))
+  }
+  return lines.join('\n')
+}
+
+/**
  * 工具循环请求的消息序列（D64，只追加）：
  *
  *   system（固定；更早会话的压缩摘要挂在它尾部）
@@ -669,7 +699,10 @@ export function buildChainAskLoopMessages(
 
   const digest = payload.digest !== undefined ? digestBlock(payload.digest) : ''
   let callIndex = 0
-  const pushTurns = (turns: ChainAskLoopPayload['turns']): void => {
+  const pushTurns = (
+    turns: ChainAskLoopPayload['turns'],
+    archive = false
+  ): void => {
     for (const turn of turns) {
       const id = `call_${callIndex++}`
       messages.push({
@@ -685,27 +718,33 @@ export function buildChainAskLoopMessages(
         content: JSON.stringify(turn.toolResult)
       })
       // 2026-10-29：read_segment 的截图。DeepSeek 只允许 user 消息带图（tool 带图 400），
-      // 所以在工具结果后面补一条只含图的 user 消息；图本身就是这段证据，不再加说明文字。
+      // 所以在工具结果后面补一条只含图 / 占位符的 user 消息。
       if (turn.images && turn.images.length > 0) {
-        messages.push({ role: 'user', content: '', images: turn.images })
+        if (archive) {
+          // D88：历史轮次的图不再原样重发，换成带 id 的占位符（要看用 recall）
+          messages.push({ role: 'user', content: archivedImagesText(turn.images) })
+        } else {
+          messages.push({ role: 'user', content: '', images: turn.images })
+        }
       }
     }
   }
 
-  // 之前轮次：原样重放（这些消息当时就是按这个形态发出去的）
+  // 之前轮次：原样重放（这些消息当时就是按这个形态发出去的）。
+  // 图片例外（D88）：过一轮就换成占位符，省上下文；要原图用 recall 取回。
   let firstPrior = true
   for (const turn of payload.conversation ?? []) {
     const files = turn.attachments?.files
     const attachments = turn.attachments
+    const archived = attachments?.images ?? []
+    const base = userMessageContent(turn.question, files, turn.now, firstPrior ? digest : '')
     messages.push({
       role: 'user',
-      content: userMessageContent(turn.question, files, turn.now, firstPrior ? digest : ''),
-      ...(attachments !== undefined && attachments.images.length > 0
-        ? { images: attachments.images }
-        : {})
+      content:
+        archived.length > 0 ? [base, archivedImagesText(archived)].filter((part) => part !== '').join('\n') : base
     })
     firstPrior = false
-    pushTurns(turn.turns)
+    pushTurns(turn.turns, true)
     if (turn.answer.trim() !== '') messages.push({ role: 'assistant', content: turn.answer })
   }
 

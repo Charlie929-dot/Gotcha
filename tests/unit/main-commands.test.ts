@@ -14,6 +14,7 @@ import {
   createCommandHandler,
   memoryDayKey,
   parseCommand,
+  serializeCommands,
   slugifyNodeName,
   type CompactOutcome
 } from '../../src/main/commands'
@@ -311,20 +312,21 @@ describe('命令执行', () => {
     const lineageFile = tempLineageFile()
     await ensureLineage(lineageFile, { now: 1 })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
-    expect(textOf(await run('/tool set'))).toContain('[1] screen · 屏幕记忆（4 个）')
+    expect(textOf(await run('/tool set'))).toContain('[1] screen · 屏幕记忆（5 个）')
     expect(textOf(await run('/tool ele 1'))).toContain('[1] search_info')
-    expect(textOf(await run('/tool'))).toContain('10 个工具')
+    expect(textOf(await run('/tool'))).toContain('11 个工具')
 
     // 默认分支（persona）全开 → 先 rm 掉整组日记
-    expect(textOf(await run('/tool rm diary'))).toContain('工具（7 个）')
-    expect(textOf(await run('/tool add diary:recall_diary,memory_profile'))).toContain('工具（9 个）')
-    expect(textOf(await run('/tool rm screen:get_freshness'))).toContain('工具（8 个）')
+    expect(textOf(await run('/tool rm diary'))).toContain('工具（8 个）')
+    expect(textOf(await run('/tool add diary:recall_diary,memory_profile'))).toContain('工具（10 个）')
+    expect(textOf(await run('/tool rm screen:get_freshness'))).toContain('工具（9 个）')
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
     expect(toolsOfBranch(read.lineage, 'default')).toEqual([
       'search_info',
       'read_segment',
+      'recall',
       'ask_history',
       'recall_diary',
       'memory_profile',
@@ -353,9 +355,9 @@ describe('命令执行', () => {
       [
         '[0] life · 主干',
         '[0-0] ask · 纯模型 · 0 个工具',
-        '[0-1] default · 10 个工具',
-        '[0-1-0] spring · 10 个工具  ← 当前',
-        '[0-2] gen2 · 10 个工具'
+        '[0-1] default · 11 个工具',
+        '[0-1-0] spring · 11 个工具  ← 当前',
+        '[0-2] gen2 · 11 个工具'
       ].join('\n')
     )
   })
@@ -783,7 +785,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/log'))).toContain('[0] default · 10 个工具  ← 正在看')
+    expect(textOf(await run('/log'))).toContain('[0] default · 11 个工具  ← 正在看')
   })
 
   it('/use 不存在的目标如实报错', async () => {
@@ -1108,5 +1110,40 @@ describe('命令执行', () => {
     expect(textOf(await make({ ok: false, reason: 'blocked' })('/compact'))).toContain('敏感内容')
     expect(textOf(await make({ ok: false, reason: 'no-client' })('/compact'))).toContain('模型客户端')
     expect(textOf(await make({ ok: false, reason: 'failed' })('/compact'))).toContain('摘要失败')
+  })
+})
+
+describe('命令串行锁（M5：桌面 + QQ 共用一份 handler）', () => {
+  function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  it('两路同时发命令：一条跑完再跑下一条', async () => {
+    const order: string[] = []
+    const run = serializeCommands(async (text) => {
+      order.push(`start:${text}`)
+      await delay(5)
+      order.push(`end:${text}`)
+      return commandResult(`done:${text}`)
+    })
+    const both = await Promise.all([run('/log'), run('/life')])
+    expect(order).toEqual(['start:/log', 'end:/log', 'start:/life', 'end:/life'])
+    expect(both.map((result) => (result?.kind === 'command' ? result.text : ''))).toEqual([
+      'done:/log',
+      'done:/life'
+    ])
+  })
+
+  it('前一条抛错不影响后一条', async () => {
+    const seen: string[] = []
+    const run = serializeCommands(async (text) => {
+      seen.push(text)
+      if (text === '/del') throw new Error('boom')
+      return commandResult('ok')
+    })
+    await expect(run('/del')).rejects.toThrow('boom')
+    const after = await run('/help')
+    expect(after?.kind).toBe('command')
+    expect(seen).toEqual(['/del', '/help'])
   })
 })

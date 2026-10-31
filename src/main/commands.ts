@@ -1689,3 +1689,26 @@ async function backupText(deps: CommandDeps, at: number, name?: string): Promise
       return `${head}推送失败（网络 / 凭据），下次 /backup 再试。`
   }
 }
+
+export type CommandHandler = (
+  text: string,
+  context?: CommandContext
+) => Promise<ChainAskResult | null>
+
+/**
+ * 命令串行锁（M5）：桌面与 QQ 共用同一个 handler，两路命令不能同时跑——
+ * 否则 `/use`（切分支）和 `/backup`（提交）会互相踩。仓层 git 已经串行，
+ * 这里串行的是「命令本身」：前一条失败不影响后一条，各自返回自己的结果。
+ */
+export function serializeCommands(handler: CommandHandler): CommandHandler {
+  let tail: Promise<unknown> = Promise.resolve()
+  return (text, context) => {
+    const run = (): Promise<ChainAskResult | null> => handler(text, context)
+    const next = tail.then(run, run)
+    tail = next.then(
+      () => undefined,
+      () => undefined
+    )
+    return next
+  }
+}

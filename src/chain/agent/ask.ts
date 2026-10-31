@@ -33,7 +33,7 @@ import type {
   RedactableChainAskEvidence
 } from './payload'
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
-import { resolveLoopClient, runAskLoop, type AskLoopResumeState } from './loop'
+import { resolveLoopClient, runAskLoop, type AskLoopResumeState, type AskUsageMeta } from './loop'
 import type { AskConversationPort } from './conversation'
 import type { AskHistorySummary, DiaryToolDeps, GiveBirthResult, LetterToolDeps } from './tools'
 import {
@@ -75,8 +75,11 @@ export interface ChainAskOptions {
   canSend?: () => boolean
   /** 当日 token 预算用完了（D22）：返回 true 就整次不出云，理由报 `budget` */
   overBudget?: () => boolean
-  /** 记账：问一次记一次（循环路径整次结束发一次累计值） */
-  onUsage?: (usage: LlmUsage) => void
+  /**
+   * 记账：问一次记一次（循环路径整次结束发一次累计值）。
+   * `meta.images` = 这次请求实际送出去几张图（生命记账要用它扣掉「一次性」的部分，D88）。
+   */
+  onUsage?: (usage: LlmUsage, meta: AskUsageMeta) => void
   /** 检索条数上限（契约 §4 取 5~10，默认 8；单发路径用，循环的 limit 由模型自己给） */
   limit?: number
   /** 每段证据的正文字符上限（默认 500；单发路径用） */
@@ -439,7 +442,10 @@ async function askOnce(
     log('warn', 'chain ask: 模型调用失败', { error: String(error) })
     return { kind: 'error', reason: 'failed', message: String(error), stats }
   }
-  if (result.usage) options.onUsage?.(result.usage)
+  if (result.usage) {
+    // 单发路径不带工具轮，图只有选区截图那一张（D88 的生命记账要看这个数）
+    options.onUsage?.(result.usage, { images: options.imageDataUrl !== undefined ? 1 : 0 })
+  }
 
   // 4. 解析（引用白名单 = 真正送出去的证据）
   const meta = new Map<number, CitationMeta>(

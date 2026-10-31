@@ -53,6 +53,7 @@ import {
 import type { ChainAskClientResolution, ChainAskLog } from './ask'
 import { readChainFreshness } from './freshness'
 import { ASK_TOOL_NAMES } from './tool-catalog'
+import { archiveIdOfImage, archiveIdOfText, type RecalledAttachment } from './archive'
 import { isNoEvidenceAnswer, memorySnippet, parseChainReply, parseChainReplyText, type CitationMeta } from './parse'
 import {
   type ChainAskCitation,
@@ -177,7 +178,7 @@ export interface AskLoopContext {
     readonly files?: readonly { readonly name: string; readonly text: string }[]
   }
   /** 记账：整次循环结束后一次（含失败路径已消耗的量） */
-  onUsage?: (usage: LlmUsage) => void
+  onUsage?: (usage: LlmUsage, meta: AskUsageMeta) => void
   /** 从暂停点恢复（`ask.ts` 按检查点回填）；暂停轮的 turns / 白名单 / 计数都在里面 */
   resume?: AskLoopResumeState
   /** 恢复后用户的选择：continue=继续检索，stop=按现有结果收尾 */
@@ -197,6 +198,11 @@ function pad2(value: number): string {
 export function formatSystemTime(now: number): string {
   const date = new Date(now)
   return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())} 周${WEEKDAY_NAMES[date.getDay()]}`
+}
+
+/** 一次请求的记账附加信息（D88）：这次实际送出去几张图（用户附件 / 选区截图 / 工具截图） */
+export interface AskUsageMeta {
+  readonly images: number
 }
 
 function emptyStats(): ChainAskStats {
@@ -283,6 +289,8 @@ function summarizeToolOutcome(
       return `看了 ${result.letters.length} 封信`
     case 'read_letter':
       return `读了信 ${result.id}`
+    case 'recall':
+      return result.media === 'image' ? `回想图片 #${result.id}` : `回想文件 #${result.id}`
     default:
       return `失败：${result.message}`
   }
@@ -317,6 +325,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(steps.length > 0 ? { trace: { steps } } : {})
   })
 
+  /** 归档表（D88）：本会话出现过的图 / 文本附件 → 可按 id 取回（数据只从会话历史来，不碰磁盘） */
+  const recallArchive = new Map<string, RecalledAttachment>()
+
   const executor = createAskToolExecutor({
     db: ctx.db,
     now: ctx.now,
@@ -329,7 +340,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.letters ? { letters: ctx.letters } : {}),
     ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
-    canReadSegment: (segmentId) => whitelist.has(segmentId)
+    canReadSegment: (segmentId) => whitelist.has(segmentId),
+    // 只能回想本会话里出现过的归档（D88）；模型不能按 id 扫库
+    recall: (id) => recallArchive.get(id) ?? null
   })
 
   const now = ctx.now()
@@ -344,6 +357,31 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   const toolsAvailable = tools.length > 0
   /** 会话里之前的轮次（只追加的基底）；没有存储时为空 */
   const priorConversation = ctx.conversation?.load() ?? emptyAskConversation()
+
+  // 归档表：历史轮次里带过的图（用户附件 / 工具截图）与文本附件（D88）。
+  // 图片过一轮就不在上下文里了，`recall` 只能从这里取——所以模型只能回想它真的见过的东西。
+  for (const turn of priorConversation.turns) {
+    for (const url of turn.attachments?.images ?? []) {
+      const id = archiveIdOfImage(url)
+      if (id !== null && !recallArchive.has(id)) {
+        recallArchive.set(id, { id, media: 'image', images: [url] })
+      }
+    }
+    for (const item of turn.turns) {
+      for (const url of item.images ?? []) {
+        const id = archiveIdOfImage(url)
+        if (id !== null && !recallArchive.has(id)) {
+          recallArchive.set(id, { id, media: 'image', images: [url] })
+        }
+      }
+    }
+    for (const file of turn.attachments?.files ?? []) {
+      const id = archiveIdOfText(file.text)
+      if (!recallArchive.has(id)) {
+        recallArchive.set(id, { id, media: 'file', text: file.text, name: file.name })
+      }
+    }
+  }
 
   // 问题敏感：循环开始前一次判定（与单发路径同口径——宁可答「没找到」，不发敏感问题）
   const probe = ctx.outbound.buildLoop({
@@ -438,10 +476,16 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   // usage 累计：所有出口（成功 / 失败 / 拒答）都只在这里发一次 onUsage
   let usageTotal: LlmUsage = { promptTokens: 0, completionTokens: 0 }
   let usageSettled = false
+  /**
+   * 这一次请求送出去几张图（D88）：用户附件 + 本轮工具截图 + 选区截图。
+   * 图只在它出现的那一轮有效，下一轮在上下文里已经变成占位符——所以带图的这一问
+   * 不记生命，否则「还剩 X%」会在发图后掉 8%，下一轮又跳回来。
+   */
+  let imagesSent = ctx.image !== undefined ? 1 : (ctx.attachments?.images?.length ?? 0)
   const settleUsage = (): void => {
     if (usageSettled) return
     usageSettled = true
-    ctx.onUsage?.(usageTotal)
+    ctx.onUsage?.(usageTotal, { images: imagesSent })
   }
   const accumulate = (usage: LlmUsage | undefined): void => {
     if (!usage) return
@@ -588,6 +632,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
             : {})
         })
         hitsShown += outcome.segments.length
+        if (outcome.images !== undefined) imagesSent += outcome.images.length
         traceTools.push({
           name: call.name,
           arguments: call.arguments,

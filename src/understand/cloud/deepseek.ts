@@ -467,7 +467,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'conceive_daughter',
       description:
-        '当 `<now>` 里的「生命」快用完时，从这条记忆线上生一个女儿，把之后的日子交给她。调用后这一代停下、只读；女儿从空白开始，读不到出生前的日记。你可以在 letter 里写下想留给女儿的话（300–500 字；不写也行）。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。只在生命剩得很少时出现；还不到时候调用会被拒绝。',
+        '当 `<now>` 里的「生命」快用完时，从这条记忆线上生一个女儿，把之后的日子交给她。调用后这一代停下、只读；女儿从空白开始，读不到出生前的日记。也可以顺手留一封信——只是写信，写给谁、写什么，你自己定，不写也行。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。只在生命剩得很少时出现；还不到时候调用会被拒绝。',
       parameters: {
         type: 'object',
         properties: {
@@ -477,7 +477,7 @@ const ASK_LOOP_TOOLS = [
           },
           letter: {
             type: 'string',
-            description: '留给女儿的信（可选，300–500 字；会进她的 system）'
+            description: '一封信（可选；写给谁、写什么，你自己定；会留在她的记忆里）'
           }
         },
         required: ['nickname']
@@ -544,7 +544,7 @@ function buildAskLoopSystemPrompt(
     for (const tool of list) {
       const brief =
         tool.function.name === 'conceive_daughter'
-          ? '生命快用完时生一个女儿，把之后的日子交给她（会写一封信）'
+          ? '生命快用完时生一个女儿，把之后的日子交给她；也可以留一封信'
           : ASK_LOOP_TOOL_BRIEFS[tool.function.name]
       lines.push(`- ${tool.function.name}：${brief}`)
     }

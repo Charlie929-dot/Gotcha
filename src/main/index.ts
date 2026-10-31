@@ -132,9 +132,11 @@ import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask
 import { createAskConversationRegistry } from './ask-conversation'
 import { createCommandHandler, currentModeState, memoryDayKey, type CompactOutcome } from './commands'
 import { conceiveDaughter as conceiveOnRepo } from './conceive'
+import { defaultMomLetterFor } from './default-mom-letter'
 import {
   birthDayOf,
   branchKindOf,
+  type BranchKind,
   ensureLineage,
   findBranch,
   generationOf,
@@ -2063,6 +2065,10 @@ if (primaryInstance) {
       branch: string
       used: number
       limit: number
+      /** 分支种类（D79）：persona 才有默认的母亲信 */
+      kind: BranchKind
+      /** 第一代（家谱里没有母亲）：只有这一代拿默认的妈妈的信（D79 / D80） */
+      firstGeneration: boolean
       /** 这一代的出生日（本地 `yyyy-mm-dd`）；代分支才有 */
       bornDay?: string
       /** 母亲留下的信（仓内相对路径）；第一代没有 */
@@ -2119,6 +2125,8 @@ if (primaryInstance) {
             branch: life.branch,
             used: life.used,
             limit: life.limit,
+            kind,
+            firstGeneration: generation !== null && generation.mother === null,
             ...(bornDay !== null ? { bornDay } : {}),
             ...(generation?.letter ? { letterPath: generation.letter } : {})
           }
@@ -2126,6 +2134,15 @@ if (primaryInstance) {
       } catch {
         return undefined
       }
+    }
+    /**
+     * 母亲的信（M4 / D79 / D80）：真的写过信就用仓里那封；第一代（没有母亲）用默认的
+     * 妈妈写给她的信，后代没有信就没有。纯模型 / 出生主干不给。
+     */
+    const momLetterFor = async (life: AskLifeContext | undefined): Promise<string | undefined> => {
+      if (life === undefined) return undefined
+      if (life.letterPath !== undefined) return (await memoryRepo.readFile(life.letterPath)) ?? undefined
+      return defaultMomLetterFor(life.kind, life.firstGeneration)
     }
     /** 生命用完了 / 这一代已经传承过：拒绝提问（M3/M4）。返回提示文本；还能问返回 null */
     const lifeEndedText = async (): Promise<string | null> => {
@@ -2560,10 +2577,7 @@ if (primaryInstance) {
           history: qqHistories.get(historyKey) ?? [],
           signal
         }
-        const momLetter =
-          life?.letterPath !== undefined
-            ? (await memoryRepo.readFile(life.letterPath)) ?? undefined
-            : undefined
+        const momLetter = await momLetterFor(life)
         const options = askOptionsFor(
           db,
           context,
@@ -2693,10 +2707,7 @@ if (primaryInstance) {
         const state = await askStateNow()
         const mode = state?.mode ?? fallbackMode
         const life = state?.life
-        const momLetter =
-          life?.letterPath !== undefined
-            ? (await memoryRepo.readFile(life.letterPath)) ?? undefined
-            : undefined
+        const momLetter = await momLetterFor(life)
         return askChain(
           askOptionsFor(
             db,
@@ -2737,10 +2748,7 @@ if (primaryInstance) {
         const state = await askStateNow()
         const mode = state?.mode ?? fallbackMode
         const life = state?.life
-        const momLetter =
-          life?.letterPath !== undefined
-            ? (await memoryRepo.readFile(life.letterPath)) ?? undefined
-            : undefined
+        const momLetter = await momLetterFor(life)
         return askChain(
           {
             ...askOptionsFor(

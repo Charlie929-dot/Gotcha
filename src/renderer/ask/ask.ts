@@ -1142,7 +1142,9 @@ async function ask(
     return
   }
   if (activeConversationId === null) activeConversationId = newConversationId()
-  if (currentThreadEntries.length === 0) threadEl.replaceChildren()
+  // 空会话里只摘掉空态提示：命令回执不落历史（主进程直接返回、不过 settle），
+  // 这里整片 replaceChildren 会让连续几条命令只剩最后一条。
+  if (currentThreadEntries.length === 0) threadEl.querySelector('.thread-empty')?.remove()
 
   setupBusy()
   appendPending(question, imagePath, attachments)

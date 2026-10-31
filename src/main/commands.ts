@@ -59,7 +59,7 @@ import {
   type LineageBranch,
   type LineageRead
 } from './lineage'
-import { displayNameOf, handoverReceiptOf } from './handover'
+import { displayNameOf, handoverReceiptOf, RECEIPT_HEAD, receiptText } from './handover'
 import type {
   GitRunResult,
   MemoryBranchInfo,
@@ -861,8 +861,8 @@ async function createNode(
     deps.reloadConversations?.()
     return {
       text: [
-        `===this is ${slug}===`,
-        `新会话 ${slug} 已开出（从 ${current} 分叉，上下文清空：只有之后的对话）。`,
+        RECEIPT_HEAD,
+        `新会话 ✨${slug} 已开出（从 ✨${current} 分叉，上下文清空：只有之后的对话）。`,
         '发一句话就开始记；/use 可以回以前的会话。'
       ].join('\n'),
       mode: modeStateOf(next, slug)
@@ -889,8 +889,8 @@ async function createNode(
 
   return {
     text: [
-      `===this is ${slug}===`,
-      `新节点 ${slug} 已从 ${parent} 开出，当前在这里。`,
+      RECEIPT_HEAD,
+      `新节点 ✨${slug} 已从 ✨${parent} 开出，当前在这里。`,
       '发一句话就开始记到这条线上；/use 可以切回去。'
     ].join('\n'),
     ...(added !== null ? { mode: modeStateOf(added, slug) } : {})
@@ -967,17 +967,17 @@ async function finishMemoryAction(
     if (action.owner === undefined) {
       return {
         text: [
-          `===this is 历史提交 ${action.sha}===`,
-          `已停在 ${action.sha}——这里是只读的旧位置，家谱不变。`,
-          `发第一句话会从这里分叉成 ${action.from}-<序号>；只看不聊不会留下分支。`
+          RECEIPT_HEAD,
+          `已停在历史提交 ✨${action.sha}——这里是只读的旧位置，家谱不变。`,
+          `发第一句话会从这里分叉成 ✨${action.from}-<序号>；只看不聊不会留下分支。`
         ].join('\n')
       }
     }
     return {
       text: [
-        `===this is 历史提交 ${action.sha}===`,
-        `已停在 ${action.sha}——只读旧位置，家谱当前节点记作 ${action.owner}。`,
-        `发第一句话会从 ${action.owner} 分叉${action.forkName !== undefined ? `成 ${action.forkName}` : ''}；只看不聊不会留下分支。`
+        RECEIPT_HEAD,
+        `已停在历史提交 ✨${action.sha}——只读旧位置，家谱当前节点记作 ✨${action.owner}。`,
+        `发第一句话会从 ✨${action.owner} 分叉${action.forkName !== undefined ? `成 ✨${action.forkName}` : ''}；只看不聊不会留下分支。`
       ].join('\n')
     }
   }
@@ -988,12 +988,12 @@ async function finishMemoryAction(
   if (!switched.ok) return { text: failureReasonText(switched, `切到 ${action.branch}`) }
   const synced = await syncActive(deps, lineage, action.branch, action.mode?.kind)
   deps.reloadConversations?.()
-  // 切到的是一代已经交接过的母亲（D82）：顺手把那一行交接回执补给她看
+  // 切到的是一代已经交接过的母亲（D82）：顺手把那一行交接回执补给她看（同一个抬头下）
   const receipt = synced !== undefined ? handoverReceiptOf(synced, action.branch) : null
   return {
-    text: `===this is ${action.branch}===\n已切到节点 ${action.branch}。这一问开始用它的记忆。${
-      receipt !== null ? `\n\n${receipt}` : ''
-    }`,
+    text: receiptText(
+      `已切到节点 ✨${action.branch}。这一问开始用它的记忆。${receipt !== null ? `\n\n${receipt}` : ''}`
+    ),
     ...(synced !== undefined ? { mode: modeStateOf(synced, action.branch) } : action.mode !== undefined ? { mode: action.mode } : {})
   }
 }
@@ -1039,9 +1039,9 @@ async function useNode(
             ? handoverReceiptOf(lineage, branchName)
             : null
       return {
-        text: `===this is ${branchName}===\n已经在 ${branchName}。${
-          receipt !== null ? `\n\n${receipt}` : ''
-        }`,
+        text: receiptText(
+          `已经在 ✨${branchName}。${receipt !== null ? `\n\n${receipt}` : ''}`
+        ),
         ...(synced !== undefined ? { mode: modeStateOf(synced, branchName) } : mode !== undefined ? { mode } : {})
       }
     }
@@ -1200,7 +1200,7 @@ async function switchMode(deps: CommandDeps, kind: AskModeKind, at: number): Pro
       const mode = modeStateOf(created.lineage, created.branch)
       return commandResult(
         [
-          `===this is ${created.branch}===`,
+          RECEIPT_HEAD,
           `模式：${modeSummary(mode)}（新开的纯模型分支；只有之后的对话，没有之前的记忆）`,
           '可以直接问了；/mode chat 切回带 persona 的那条线。'
         ].join('\n'),
@@ -1213,7 +1213,7 @@ async function switchMode(deps: CommandDeps, kind: AskModeKind, at: number): Pro
   const mode = modeStateOf(lineage, target)
   if (target === lineage.active) {
     await syncActive(deps, lineage, target, kind)
-    return commandResult(`===this is ${target}===\n已经在 ${modeSummary(mode)}。`, mode)
+    return commandResult(receiptText(`已经在 ${modeSummary(mode)}。`), mode)
   }
   const saved = await saveBefore(deps, at)
   if (saved !== null) return commandResult(saved)
@@ -1223,7 +1223,7 @@ async function switchMode(deps: CommandDeps, kind: AskModeKind, at: number): Pro
   deps.reloadConversations?.()
   return commandResult(
     [
-      `===this is ${target}===`,
+      RECEIPT_HEAD,
       `模式：${modeSummary(next !== undefined ? modeStateOf(next, target) : mode)}。`,
       kind === 'ask'
         ? '纯模型：不注 persona、默认不带工具；要工具就 /tool add。'

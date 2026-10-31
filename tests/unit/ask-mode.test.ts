@@ -64,10 +64,10 @@ describe('分支 kind ↔ 模式', () => {
   it('一行摘要带分支与工具数', () => {
     expect(
       modeSummary({ kind: 'ask', branch: 'assistant', tools: [] })
-    ).toBe('纯模型（分支 assistant · 无工具）')
+    ).toBe('纯模型（分支 ✨assistant · 无工具）')
     expect(
       modeSummary({ kind: 'chat', branch: 'default', tools: [...ASK_TOOL_SCREEN_NAMES] })
-    ).toBe('聊天（分支 default · 4 个工具）')
+    ).toBe('聊天（分支 ✨default · 4 个工具）')
   })
 })
 

@@ -297,7 +297,7 @@ describe('命令执行', () => {
     const current = await run('/mode')
     expect(current?.kind).toBe('command')
     if (current?.kind !== 'command') return
-    expect(current.text).toContain('当前模式：聊天（分支 default')
+    expect(current.text).toContain('当前模式：聊天（分支 ✨default')
     expect(current.mode).toBeUndefined()
 
     const unknown = await run('/mode 随便')
@@ -479,8 +479,8 @@ describe('命令执行', () => {
     await ensureLineage(lineageFile, { now: 1 })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     const text = textOf(await run('/new 春天'))
-    expect(text).toContain('===this is chun-tian===')
-    expect(text).toContain('从 default 开出')
+    expect(text).toContain('新节点 ✨chun-tian')
+    expect(text).toContain('从 ✨default 开出')
 
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
@@ -503,7 +503,7 @@ describe('命令执行', () => {
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile, now: () => clock })
     expect(textOf(await run('/new'))).toContain('给新节点起个名字')
     clock += 1000
-    expect(textOf(await run('秋天'))).toContain('===this is qiu-tian===')
+    expect(textOf(await run('秋天'))).toContain('新节点 ✨qiu-tian')
   })
 
   it('命名等待 60 秒后过期，普通文本照常走模型', async () => {
@@ -535,7 +535,7 @@ describe('命令执行', () => {
       }
     })
     const text = textOf(await run('/use spring'))
-    expect(text).toContain('===this is spring===')
+    expect(text).toContain('✨spring')
     expect(switched).toBe('spring')
     expect(reloads).toBe(1)
 
@@ -572,8 +572,9 @@ describe('命令执行', () => {
       lineageFile
     })
     const text = textOf(await run('/use default'))
-    expect(text).toContain('===this is default===')
-    expect(text).toContain('=== <贴心大肥鱼> 生命耗尽  ta的女儿 <鱼苗> 将接续ta的使命===')
+    expect(text).toContain('已切到节点 ✨default')
+    expect(text).toContain('🎗️提示')
+    expect(text).toContain('✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命')
   })
 
   it('/log 家谱树显示真名（D82）：有真名就「真名 (分支)」', async () => {
@@ -615,7 +616,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/use 0-1-0'))).toContain('===this is spring===')
+    expect(textOf(await run('/use 0-1-0'))).toContain('✨spring')
     expect(current).toBe('spring')
     expect(textOf(await run('/use 9'))).toContain('没有节点 9')
   })
@@ -665,19 +666,19 @@ describe('命令执行', () => {
     const run = make()
     expect(textOf(await run('/use 0-0'))).toContain('回 0 用默认：记忆 2026-10-30 18:05')
     expect(switched).toEqual([])
-    expect(textOf(await run('0'))).toContain('===this is spring===')
+    expect(textOf(await run('0'))).toContain('✨spring')
     expect(commits).toEqual(['memory: 2026-10-30 18:05'])
     expect(switched).toEqual(['spring'])
 
     // 自定义名字原样存（不转拼音）
     const custom = make()
     expect(textOf(await custom('/use 0-0'))).toContain('给它起个名字')
-    expect(textOf(await custom('装修预算'))).toContain('===this is spring===')
+    expect(textOf(await custom('装修预算'))).toContain('✨spring')
     expect(commits[1]).toBe('memory: 装修预算')
 
     // -d 直接用默认名，不问
     const defaulted = make()
-    expect(textOf(await defaulted('/use 0-0 -d'))).toContain('===this is spring===')
+    expect(textOf(await defaulted('/use 0-0 -d'))).toContain('✨spring')
     expect(commits[2]).toBe('memory: 2026-10-30 18:05')
   })
 
@@ -733,9 +734,9 @@ describe('命令执行', () => {
       lineageFile
     })
     const text = textOf(await run('/use abc1234'))
-    expect(text).toContain('===this is 历史提交 abc1234===')
-    expect(text).toContain('家谱当前节点记作 default')
-    expect(text).toContain('从 default 分叉成 default-2')
+    expect(text).toContain('已停在历史提交 ✨abc1234')
+    expect(text).toContain('家谱当前节点记作 ✨default')
+    expect(text).toContain('从 ✨default 分叉成 ✨default-2')
     expect(checkedOut).toBe('abc1234')
 
     const read = await readLineage(lineageFile)
@@ -762,8 +763,8 @@ describe('命令执行', () => {
     // 先看 spring 的历史（它才是「我 use <sha> 之前在看的那页」）
     expect(textOf(await run('/log 0-0'))).toContain('[0] spring')
     const text = textOf(await run('/use abc1234'))
-    expect(text).toContain('家谱当前节点记作 spring')
-    expect(text).toContain('从 spring 分叉成 spring-2')
+    expect(text).toContain('家谱当前节点记作 ✨spring')
+    expect(text).toContain('从 ✨spring 分叉成 ✨spring-2')
     expect(checkedOut).toBe('abc1234')
 
     const read = await readLineage(lineageFile)

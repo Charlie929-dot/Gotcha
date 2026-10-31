@@ -2,7 +2,7 @@
  * 交接回执（D82）：母亲生命耗尽、下一代接手时给界面的那一行字。
  *
  * 三块：
- * - 文案格式照拍的样板（`=== <母亲> 生命耗尽  ta的女儿 <女儿> 将接续ta的使命===`）；
+ * - 文案格式照拍的样板（D83：`🎗️提示` 抬头 + `✨<母亲> 生命耗尽  ta的女儿 ✨<女儿> 将接续ta的使命`）；
  * - 什么时候有：这一代已经不在（dead / 有 died_at）且有女儿；
  * - 名字从家谱来（真名优先，老数据回退分支名）。
  */
@@ -14,7 +14,12 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { giveBirth } from '../../src/main/give-birth'
-import { displayNameOf, handoverReceiptOf, handoverReceiptText } from '../../src/main/handover'
+import {
+  displayNameOf,
+  handoverReceiptBody,
+  handoverReceiptOf,
+  handoverReceiptText
+} from '../../src/main/handover'
 import {
   ensureLineage,
   generationOf,
@@ -55,9 +60,13 @@ async function handoverLineage(): Promise<{ lineage: Lineage; file: string }> {
 }
 
 describe('回执文案', () => {
-  it('照样板拼：尖括号名字、两处空格、结尾紧跟 ===', () => {
+  it('照样板拼（D83）：🎗️提示抬头 + 名字前面 ✨', () => {
     expect(handoverReceiptText({ mother: '贴心大肥鱼', daughter: '鱼苗' })).toBe(
-      '=== <贴心大肥鱼> 生命耗尽  ta的女儿 <鱼苗> 将接续ta的使命==='
+      '🎗️提示\n✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
+    )
+    // 拼进别的回执时只要正文（抬头由调用方给一次）
+    expect(handoverReceiptBody({ mother: '贴心大肥鱼', daughter: '鱼苗' })).toBe(
+      '✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
     )
   })
 
@@ -65,11 +74,11 @@ describe('回执文案', () => {
     const { lineage } = await handoverLineage()
     // 老数据：母亲那代 nickname = 分支名
     expect(handoverReceiptOf(lineage, 'default')).toBe(
-      '=== <default> 生命耗尽  ta的女儿 <鱼苗> 将接续ta的使命==='
+      '✨<default> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
     )
     const named = withGenerationRealName(lineage, 'default', '贴心大肥鱼')
     expect(handoverReceiptOf(named, 'default')).toBe(
-      '=== <贴心大肥鱼> 生命耗尽  ta的女儿 <鱼苗> 将接续ta的使命==='
+      '✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
     )
   })
 })
@@ -108,7 +117,7 @@ describe('什么时候有回执', () => {
     })
     if (withSide === null) throw new Error('seed failed')
     expect(handoverReceiptOf(withSide, 'test-2')).toBe(
-      '=== <default> 生命耗尽  ta的女儿 <鱼苗> 将接续ta的使命==='
+      '✨<default> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
     )
   })
 })
@@ -161,7 +170,7 @@ describe('真仓：give_birth 写进家谱的是真名，回执能用', () => {
     expect(generationOf(read.lineage, 'yu-miao')?.nickname).toBe('鱼苗')
     expect(generationOf(read.lineage, 'default')?.nickname).toBe('贴心大肥鱼')
     expect(handoverReceiptOf(read.lineage, 'default')).toBe(
-      '=== <贴心大肥鱼> 生命耗尽  ta的女儿 <鱼苗> 将接续ta的使命==='
+      '✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
     )
     // 女儿这一代还活着：她自己身上没有回执
     expect(handoverReceiptOf(read.lineage, 'yu-miao')).toBeNull()

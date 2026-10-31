@@ -65,8 +65,8 @@ export function asksMemoryContext(kind: AskModeKind): boolean {
   return kind === 'chat'
 }
 
-/** 一行摘要：`聊天（分支 default · 7 个工具）` */
+/** 一行摘要：`聊天（分支 ✨default · 7 个工具）`（D83：分支名是占位符，前面加 ✨） */
 export function modeSummary(state: AskModeState): string {
   const tools = state.tools.length === 0 ? '无工具' : `${state.tools.length} 个工具`
-  return `${ASK_MODE_LABELS[state.kind]}（分支 ${state.branch} · ${tools}）`
+  return `${ASK_MODE_LABELS[state.kind]}（分支 ✨${state.branch} · ${tools}）`
 }

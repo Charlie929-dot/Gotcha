@@ -726,6 +726,45 @@ button.stop {
   margin: 12px 0 8px;
 }
 
+/* 折叠分组（D90）：组头可点，默认全折叠；展开状态记在 localStorage */
+#settings-form .sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 10px 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+#settings-form .sec-head::after {
+  content: '▸';
+  color: var(--muted);
+  font-size: 11px;
+  transition: transform 0.12s ease;
+}
+
+#settings-form .sec-head[aria-expanded='true']::after {
+  transform: rotate(90deg);
+}
+
+#settings-form .sec-head:hover {
+  color: var(--accent);
+}
+
+#settings-form .sec-body {
+  padding-bottom: 10px;
+}
+
+#settings-form .sec-body[hidden] {
+  display: none;
+}
+
 #settings-form label {
   display: flex;
   flex-direction: column;

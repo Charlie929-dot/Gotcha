@@ -41,7 +41,10 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
     '像认识很久的老朋友：短句、具体、先给结论；不确定就说不确定，可以有自己的看法，不用端着',
   'memory.persona_redlines': '',
   // 启用的人格卡（D62）：<userData>/persona-cards/ 里的 .md 文件名；空 = 不用卡
-  'memory.persona_card': ''
+  'memory.persona_card': '',
+  // 记忆仓定时（D90）：分钟；0 = 关。commit 只在有改动时记一笔，push 需要先绑 origin
+  'memory.commit_minutes': '10',
+  'memory.push_minutes': '30'
 }
 
 export function getSetting(db: Db, key: string): string {

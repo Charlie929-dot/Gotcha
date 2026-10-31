@@ -52,6 +52,16 @@ function fakeRepo(overrides: Partial<MemoryRepo> = {}): MemoryRepo {
     commit: async () => ({ committed: false, reason: 'clean' }),
     commitDay: async () => ({ committed: false, reason: 'clean' }),
     push: async () => ({ ok: false, reason: 'no-remote' }),
+    remoteUrl: async () => null,
+    setRemote: async (url) => ({ ok: true, url }),
+    pushState: async () => ({
+      ok: true,
+      remote: null,
+      branch: 'default',
+      dirty: false,
+      ahead: null,
+      lastPush: null
+    }),
     lastCommit: async () => ({ hash: 'abc1234', subject: 'memory: 2026-10-30' }),
     writeFile: async () => true,
     readFile: async () => null,
@@ -340,7 +350,7 @@ describe('命令执行', () => {
     expect(textOf(await run('/tool wat'))).toContain('不认识 /tool wat')
   })
 
-  it('/log 画家谱树：按代排序、父子编号、当前标记', async () => {
+  it('/log 画家谱树：按代排序、缩进表示父子、编号递增、当前标记', async () => {
     const lineageFile = tempLineageFile()
     await seededTree(lineageFile)
     const run = createCommandHandler({
@@ -354,10 +364,10 @@ describe('命令执行', () => {
     expect(textOf(await run('/log'))).toBe(
       [
         '[0] life · 主干',
-        '[0-0] ask · 纯模型 · 0 个工具',
-        '[0-1] default · 11 个工具',
-        '[0-1-0] spring · 11 个工具  ← 当前',
-        '[0-2] gen2 · 11 个工具'
+        '  [1] ask · 纯模型 · 0 个工具',
+        '  [2] default · 11 个工具',
+        '    [3] spring · 11 个工具  ← 当前',
+        '  [4] gen2 · 11 个工具'
       ].join('\n')
     )
   })
@@ -380,7 +390,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/log 0-1'))).toBe(
+    expect(textOf(await run('/log 2'))).toBe(
       [
         '[0] default  ← 当前',
         '[0-0] 记忆 2026-10-30 · aaa1111',
@@ -392,7 +402,7 @@ describe('命令执行', () => {
     expect(textOf(await run('/log 9-9'))).toContain('没有节点 9-9')
   })
 
-  it('/log <节点>：从某条提交分出去的分支挂在那条提交下面', async () => {
+  it('/log <节点>：分出去的分支缩进一段、带自己的编号与提交（D91）', async () => {
     const lineageFile = tempLineageFile()
     await seededTree(lineageFile)
     const run = createCommandHandler({
@@ -411,15 +421,30 @@ describe('命令执行', () => {
         mergeBase: async (a, b) =>
           a === 'spring' && b === 'default'
             ? 'aaa1111ffffffffffffffffffffffffffffffff'
-            : null
+            : null,
+        // 子分支的提交走 `git log fork..spring`
+        git: async (args) => {
+          const spec = args[args.length - 1] ?? ''
+          if (spec.endsWith('..spring')) {
+            return {
+              ok: true,
+              code: 0,
+              stdout: 's111111\tmemory: 春天第一笔\ns222222\tmemory: 2026-10-30 21:00\n',
+              stderr: ''
+            }
+          }
+          return { ok: true, code: 0, stdout: '', stderr: '' }
+        }
       }),
       lineageFile
     })
-    expect(textOf(await run('/log 0-1'))).toBe(
+    expect(textOf(await run('/log 2'))).toBe(
       [
         '[0] default  ← 当前',
         '[0-0] 记忆 2026-10-30 · aaa1111',
-        '[0-0-0] spring',
+        '  [1] spring',
+        '    [1-0] 春天第一笔 · s111111',
+        '    [1-1] 记忆 2026-10-30 21:00 · s222222',
         '[0-1] 记忆 2026-10-30 12:00 · bbb2222',
         '[0-2] 记忆 2026-10-30 20:00 · ccc3333'
       ].join('\n')
@@ -618,7 +643,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/use 0-1-0'))).toContain('✨spring')
+    expect(textOf(await run('/use 3'))).toContain('✨spring')
     expect(current).toBe('spring')
     expect(textOf(await run('/use 9'))).toContain('没有节点 9')
   })
@@ -666,7 +691,7 @@ describe('命令执行', () => {
       })
 
     const run = make()
-    expect(textOf(await run('/use 0-0'))).toContain('回 0 用默认：记忆 2026-10-30 18:05')
+    expect(textOf(await run('/use 1'))).toContain('回 0 用默认：记忆 2026-10-30 18:05')
     expect(switched).toEqual([])
     expect(textOf(await run('0'))).toContain('✨spring')
     expect(commits).toEqual(['memory: 2026-10-30 18:05'])
@@ -674,13 +699,13 @@ describe('命令执行', () => {
 
     // 自定义名字原样存（不转拼音）
     const custom = make()
-    expect(textOf(await custom('/use 0-0'))).toContain('给它起个名字')
+    expect(textOf(await custom('/use 1'))).toContain('给它起个名字')
     expect(textOf(await custom('装修预算'))).toContain('✨spring')
     expect(commits[1]).toBe('memory: 装修预算')
 
     // -d 直接用默认名，不问
     const defaulted = make()
-    expect(textOf(await defaulted('/use 0-0 -d'))).toContain('✨spring')
+    expect(textOf(await defaulted('/use 1 -d'))).toContain('✨spring')
     expect(commits[2]).toBe('memory: 2026-10-30 18:05')
   })
 
@@ -707,12 +732,12 @@ describe('命令执行', () => {
       now: () => clock
     })
 
-    expect(textOf(await run('/use 0-0'))).toContain('给它起个名字')
+    expect(textOf(await run('/use 1'))).toContain('给它起个名字')
     expect(textOf(await run('/cancel'))).toBe('已取消。')
     expect(commits).toEqual([])
     expect(switched).toEqual([])
 
-    expect(textOf(await run('/use 0-0'))).toContain('给它起个名字')
+    expect(textOf(await run('/use 1'))).toContain('给它起个名字')
     clock += COMMAND_WAIT_TIMEOUT_MS + 1
     expect(await run('随便问一句')).toBeNull()
     // 默认名按「真正落提交那一刻」算（18:05 起名提示，超时 60 秒后是 18:06）
@@ -763,7 +788,7 @@ describe('命令执行', () => {
       lineageFile
     })
     // 先看 spring 的历史（它才是「我 use <sha> 之前在看的那页」）
-    expect(textOf(await run('/log 0-0'))).toContain('[0] spring')
+    expect(textOf(await run('/log 1'))).toContain('[0] spring')
     const text = textOf(await run('/use abc1234'))
     expect(text).toContain('家谱当前节点记作 ✨spring')
     expect(text).toContain('从 ✨spring 分叉成 ✨spring-2')

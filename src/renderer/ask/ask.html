@@ -185,6 +185,33 @@
             </div>
           </section>
 
+          <section id="sec-memory-repo">
+            <h3>记忆仓</h3>
+            <p class="hint" id="memory-repo-status">读取中…</p>
+            <label>仓库地址（填好后自动绑定 origin；推送用本机 git 凭据，地址里不要带令牌）
+              <input
+                id="set-memory-remote"
+                type="text"
+                placeholder="https://github.com/&lt;你&gt;/gotcha-memory.git"
+              />
+            </label>
+            <div class="memory-actions">
+              <button id="memory-repo-save" type="button" class="primary">绑定并保存</button>
+              <button id="memory-repo-push" type="button">现在推一次</button>
+              <span id="memory-repo-msg" class="hint"></span>
+            </div>
+            <label>定时 commit（分钟；0 = 关，只在有改动时记一笔）
+              <input id="set-memory-commit" type="number" min="0" max="1440" step="1" />
+            </label>
+            <label>定时 push（分钟；0 = 关，要先绑定地址）
+              <input id="set-memory-push" type="number" min="0" max="1440" step="1" />
+            </label>
+            <p class="hint">
+              定时 commit 会先在仓里写一份家谱快照，再记一笔
+              <code>memory: 定时记一笔 HH:mm</code>；<code>/backup</code> 本来就会提交并推送一次。
+            </p>
+          </section>
+
           <section>
             <h3>人格卡</h3>
             <p class="hint" id="persona-card-status">读取中…</p>

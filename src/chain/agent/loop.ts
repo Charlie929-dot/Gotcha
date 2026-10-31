@@ -53,7 +53,13 @@ import {
 import type { ChainAskClientResolution, ChainAskLog } from './ask'
 import { readChainFreshness } from './freshness'
 import { ASK_TOOL_NAMES } from './tool-catalog'
-import { archiveIdOfImage, archiveIdOfText, type RecalledAttachment } from './archive'
+import {
+  archiveIdOfImage,
+  archiveIdOfText,
+  archiveIdOfToolResult,
+  toolResultLabel,
+  type RecalledAttachment
+} from './archive'
 import { isNoEvidenceAnswer, memorySnippet, parseChainReply, parseChainReplyText, type CitationMeta } from './parse'
 import {
   type ChainAskCitation,
@@ -372,6 +378,20 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         const id = archiveIdOfImage(url)
         if (id !== null && !recallArchive.has(id)) {
           recallArchive.set(id, { id, media: 'image', images: [url] })
+        }
+      }
+      // D89：历史工具结果也归档——下一轮它在上下文里只是一行占位符，原文只能从这里回取。
+      // `recall` 自己不带新内容（它回指原文那条 id），`error` 也不归档（占位会让人重复犯错）。
+      if (item.toolCall.name !== 'recall' && item.toolResult.kind !== 'error') {
+        const id = archiveIdOfToolResult(item.toolResult)
+        if (!recallArchive.has(id)) {
+          recallArchive.set(id, {
+            id,
+            media: 'tool',
+            text: JSON.stringify(item.toolResult),
+            name: item.toolCall.name,
+            label: toolResultLabel(id, item.toolCall.name, item.toolCall.arguments, item.toolResult)
+          })
         }
       }
     }

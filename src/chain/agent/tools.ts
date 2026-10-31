@@ -848,7 +848,7 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             return {
               result: {
                 kind: 'error',
-                message: '没有这个归档：只认本会话里出现过的图片 / 文件'
+                message: '没有这个归档：只认本会话里出现过的图片 / 文件 / 工具结果'
               },
               segments: []
             }
@@ -858,8 +858,10 @@ export function createAskToolExecutor(deps: AskToolDeps): {
               kind: 'recall',
               id,
               media: got.media,
-              text: got.media === 'file' ? got.text ?? '' : '',
-              name: got.name ?? ''
+              text: got.media === 'image' ? '' : got.text ?? '',
+              name: got.name ?? '',
+              // D89：回显「回想的是哪一段」，下一轮它自己被占位时模型才认得出
+              ...(got.label !== undefined && got.label !== '' ? { label: got.label } : {})
             },
             segments: [],
             ...(got.media === 'image' && got.images !== undefined && got.images.length > 0

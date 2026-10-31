@@ -55,7 +55,7 @@ export const ASK_TOOL_LABELS: Readonly<Record<AskToolName, string>> = {
   search_info: '检索屏幕记忆段（时间 / 应用 / 标签 / 关键词 / 语义）',
   get_freshness: '查数据新鲜度（最新到哪一刻、采集在不在跑）',
   read_segment: '打开一段的界面文字与截图',
-  recall: '回想归档的图片 / 文件（占位符里 # 后面那串 id）',
+  recall: '回想归档的图片 / 文件 / 工具结果（占位符里 # 后面那串 id）',
   ask_history: '查最近的问答记录',
   recall_diary: '按关键词 / 日期 / 标签检索日记',
   read_diary: '打开某一天的日记全文',

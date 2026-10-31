@@ -404,10 +404,12 @@ export type RedactableAskLoopToolResult =
   | {
       kind: 'recall'
       id: string
-      /** image = 取回的是图；file = 取回的是文本正文 */
-      media: 'image' | 'file'
+      /** image = 取回的是图；file = 用户附件正文；tool = 历史工具结果的原文（D89） */
+      media: 'image' | 'file' | 'tool'
       text: string
       name: string
+      /** 这条记忆在历史里的样子（`#id 用 read_segment 查看了…`；D89 回显用，防模型再查一遍） */
+      label?: string
     }
 
 /** 循环里的一次往返：模型发起的调用 + 执行器给出的摘要 */
@@ -1163,22 +1165,26 @@ export function buildAskLoopPayload(
         break
       }
       case 'recall': {
-        // 回想归档（D88）：图片原样挂回工具轮后面（和 read_segment 的截图同一条路）；
-        // 文本附件的正文是用户的文件内容，照常过策略。
+        // 回想归档（D88 / D89）：图片原样挂回工具轮后面（和 read_segment 的截图同一条路）；
+        // 文本附件与工具结果原文照常过策略。
         if (result.media === 'image') images = guardTurnImages(turn.images)
         const text =
-          result.media === 'file' ? guardText(policy, result.text, Number.MAX_SAFE_INTEGER) : null
+          result.media === 'image' ? null : guardText(policy, result.text, Number.MAX_SAFE_INTEGER)
         if (text !== null && text.blocked) {
-          view = { kind: 'error', message: '这个文件包含敏感内容，不能展开' }
+          view = { kind: 'error', message: '这条记忆包含敏感内容，不能展开' }
           break
         }
         const name = result.name === '' ? null : policy.redact(normalizeText(result.name))
+        const label =
+          result.label === undefined ? null : policy.redact(normalizeText(result.label))
         view = {
           kind: 'recall',
           id: result.id.slice(0, 80),
           media: result.media,
           ...(name !== null && !name.blocked ? { name: name.text.slice(0, 120) } : {}),
-          ...(text !== null ? { text: text.text } : {})
+          ...(text !== null ? { text: text.text } : {}),
+          // 回显的是「这段记忆长什么样」，只做长度收口：它本来就是上一轮已经发出去的占位符
+          ...(label !== null && !label.blocked ? { label: label.text.slice(0, 200) } : {})
         }
         break
       }

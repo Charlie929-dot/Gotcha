@@ -13,7 +13,14 @@
 import { LLM_DEFAULTS } from './constants'
 import { normalizeBaseUrl } from './providers'
 import { ASK_TOOL_LABELS, ASK_TOOL_NAMES, type AskToolName } from '../../chain/agent/tool-catalog'
-import { archiveIdOfImage, imagePlaceholder } from '../../chain/agent/archive'
+import {
+  RECALL_PLACEHOLDER_LIMIT,
+  archiveIdOfImage,
+  archiveIdOfTurnResult,
+  imagePlaceholder,
+  recallPlaceholder,
+  toolResultPlaceholder
+} from '../../chain/agent/archive'
 import {
   LlmAbortError,
   LlmError,
@@ -397,7 +404,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'recall',
       description:
-        '回想一张早先的图片或一个早先的文件：对话里的图过一轮就归档成占位符（形如 `[图片 #a1b2c3d4 已归档]`），需要再看原图 / 读文件正文时按那个 id 取回。只认本会话里出现过的 id。',
+        '回想一段早先的记忆（图片 / 文件 / 早先的工具结果）：对话里过了一轮的内容都会模糊成占位符（形如 `[#a1b2c3d4 用 read_segment 查看了…的内容]`），需要再看原图、读文件正文、或重看当时的原文时按那个 id 取回。只认本会话里出现过的 id。',
       parameters: {
         type: 'object',
         properties: {
@@ -565,7 +572,7 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   search_info: '检索屏幕记忆段（时间 / 应用 / 标签 / 双链 / 关键词 / 语义，命中带 segmentId）',
   get_freshness: '查数据新鲜度（最新证据到哪一刻、采集是否在跑）',
   read_segment: '打开一段的界面文字与截图（要看全文 / 原图时用）',
-  recall: '回想归档的图片 / 文件（占位符里的 id；过一轮就不在上下文里了）',
+  recall: '回想归档的图片 / 文件 / 工具结果（占位符里的 id；过一轮就不在上下文里了）',
   ask_history: '查最近的问答记录（问过什么、答没答上）',
   recall_diary: '按关键词 / 日期 / 标签检索个人日记',
   read_diary: '打开某一天的日记全文',
@@ -653,13 +660,59 @@ function userMessageContent(
  * 历史轮次的图 → 占位符行（D88）：图只在它出现的那一轮发送，之后换成一两行字；
  * 模型想再看原图就 `recall`。
  */
-function archivedImagesText(images: readonly string[]): string {
+function imagesPlaceholderText(images: readonly string[]): string {
   const lines: string[] = []
   for (const url of images) {
     const id = archiveIdOfImage(url)
     lines.push(id === null ? '[图片 已归档，需要时用 recall]' : imagePlaceholder(id))
   }
   return lines.join('\n')
+}
+
+/**
+ * 已经「回想清楚」的 `recall` 轮次（D89）。
+ *
+ * 同一条记忆被 recall 够 `RECALL_PLACEHOLDER_LIMIT` 次，说明它真的重要：
+ * 从第 `LIMIT + 1` 次起，这次回想的结果不再占位，原文就留在上下文里。
+ *
+ * 判定看的是**这一轮在该 id 的回想起点里排第几**，不看「到现在一共几次」——名次只会往上走，
+ * 所以早先那些行渲染出来永远一样：手滑多调一次 recall，旧行的字节不会变回去（缓存不失效），
+ * 模型只是照常又拿到一遍原文。
+ */
+function clearRecallTurns(
+  conversation: ChainAskLoopPayload['conversation'] | undefined
+): Set<object> {
+  const cleared = new Set<object>()
+  const seen = new Map<string, number>()
+  for (const turn of conversation ?? []) {
+    for (const item of turn.turns) {
+      const result = item.toolResult
+      if (item.toolCall.name !== 'recall' || result['kind'] !== 'recall') continue
+      const id = result['id']
+      if (typeof id !== 'string' || id === '') continue
+      const ordinal = (seen.get(id) ?? 0) + 1
+      seen.set(id, ordinal)
+      if (ordinal > RECALL_PLACEHOLDER_LIMIT) cleared.add(item)
+    }
+  }
+  return cleared
+}
+
+/**
+ * 历史轮次的工具结果 → 占位符（D89）：记忆会模糊，看原文用 recall。
+ * `recall` 自己的结果回显「回想的是哪一段」，否则模型看到陌生的自己只会再查一遍。
+ */
+function archivedToolResultText(
+  tool: string,
+  args: Record<string, unknown>,
+  result: Record<string, unknown>,
+  id: string
+): string {
+  if (tool === 'recall') {
+    const label = typeof result['label'] === 'string' ? result['label'] : undefined
+    return recallPlaceholder(id, label)
+  }
+  return toolResultPlaceholder(id, tool, args, result)
 }
 
 /**
@@ -698,6 +751,8 @@ export function buildChainAskLoopMessages(
   ]
 
   const digest = payload.digest !== undefined ? digestBlock(payload.digest) : ''
+  /** 已经回想清楚、不必再模糊的 `recall` 轮次（D89） */
+  const clearRecalls = clearRecallTurns(payload.conversation)
   let callIndex = 0
   const pushTurns = (
     turns: ChainAskLoopPayload['turns'],
@@ -712,36 +767,45 @@ export function buildChainAskLoopMessages(
         // 开 thinking 后，带 tools 的请求必须把历史各轮的 CoT 原样回传，否则第 2 轮起 400
         ...(turn.reasoning !== undefined ? { reasoningContent: turn.reasoning } : {})
       })
+      // D89：历史轮次的工具结果换成占位符（记忆模糊），要看原文用 recall 取回。
+      // 两个例外：`error`（那是「你刚才做错了」的反馈，模糊掉会重复犯错）；
+      // 回想够次数的 `recall`（记忆已经清晰，原文就留在上下文里）。
+      const result = turn.toolResult
+      const archivedId = archiveIdOfTurnResult(turn.toolCall.name, result)
+      const keepFull = result['kind'] === 'error' || clearRecalls.has(turn)
       messages.push({
         role: 'tool',
         toolCallId: id,
-        content: JSON.stringify(turn.toolResult)
+        content:
+          archive && !keepFull
+            ? archivedToolResultText(turn.toolCall.name, turn.toolCall.arguments, result, archivedId)
+            : JSON.stringify(result)
       })
       // 2026-10-29：read_segment 的截图。DeepSeek 只允许 user 消息带图（tool 带图 400），
       // 所以在工具结果后面补一条只含图 / 占位符的 user 消息。
       if (turn.images && turn.images.length > 0) {
-        if (archive) {
-          // D88：历史轮次的图不再原样重发，换成带 id 的占位符（要看用 recall）
-          messages.push({ role: 'user', content: archivedImagesText(turn.images) })
-        } else {
+        if (!archive || keepFull) {
           messages.push({ role: 'user', content: '', images: turn.images })
+        } else {
+          // D88：历史轮次的图不再原样重发，换成带 id 的占位符（要看用 recall）
+          messages.push({ role: 'user', content: imagesPlaceholderText(turn.images) })
         }
       }
     }
   }
 
   // 之前轮次：原样重放（这些消息当时就是按这个形态发出去的）。
-  // 图片例外（D88）：过一轮就换成占位符，省上下文；要原图用 recall 取回。
+  // 图片与工具结果例外（D88 / D89）：过一轮就换成占位符，省上下文；要原文用 recall 取回。
   let firstPrior = true
   for (const turn of payload.conversation ?? []) {
     const files = turn.attachments?.files
     const attachments = turn.attachments
-    const archived = attachments?.images ?? []
+    const pictures = imagesPlaceholderText(attachments?.images ?? [])
     const base = userMessageContent(turn.question, files, turn.now, firstPrior ? digest : '')
     messages.push({
       role: 'user',
       content:
-        archived.length > 0 ? [base, archivedImagesText(archived)].filter((part) => part !== '').join('\n') : base
+        pictures === '' ? base : [base, pictures].filter((part) => part !== '').join('\n')
     })
     firstPrior = false
     pushTurns(turn.turns, true)

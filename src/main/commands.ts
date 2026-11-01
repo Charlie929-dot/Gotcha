@@ -228,10 +228,16 @@ function formatTokens(tokens: number): string {
   return `${Math.round(value / 1000)}k`
 }
 
-/** 命令回执：形状与问答复保持一致，界面当一条普通答复显示 */
+/**
+ * 命令回执：形状与问答复保持一致，界面当一条普通答复显示。
+ *
+ * 首行统一 `🎗️提示`（D83；2026-11-01 补齐）：只在**这个唯一出口**加，别处不要再手写；
+ * 已经带抬头的（`/new` `/use` 那些多段回执）原样跳过，不会叠两个。
+ */
 export function commandResult(text: string, mode?: AskModeState): ChainAskResult {
   const stats: ChainAskStats = { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
-  return { kind: 'command', text, stats, ...(mode !== undefined ? { mode } : {}) }
+  const withHead = text.startsWith(RECEIPT_HEAD) ? text : `${RECEIPT_HEAD}\n${text}`
+  return { kind: 'command', text: withHead, stats, ...(mode !== undefined ? { mode } : {}) }
 }
 
 function pad2(value: number): string {

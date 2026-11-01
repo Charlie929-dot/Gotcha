@@ -13,6 +13,7 @@
  */
 
 import Database from 'better-sqlite3'
+import { existsSync } from 'node:fs'
 
 import type { Db } from '../db'
 import {
@@ -69,14 +70,28 @@ export interface TaskRuntime {
 export const TASK_MERGE_WINDOW_MS = 10 * 60 * 1000
 
 /**
- * 打开任务库的独立写连接。打不开（文件不存在 / 被占用）就返回 null：
- * 运行时不建库，也不影响提问。
+ * 打开任务库的独立写连接。两条红线（沿用采集的 A3 与迁移口径）：
+ *
+ * 1. **文件不存在就不建库**：`new Database()` 会凭空造一个空文件，等于「为了看一眼就建库」；
+ * 2. **表不存在（还没迁到 v11）就当没有**：`mem_tasks` 缺失时查询会抛 `no such table`，
+ *    调度器启动就会把主进程带崩——宁可这条链路不可用，也不让启动失败。
  */
-export function openTaskDb(dbPath: string): Db | null {
+export function openTaskDb(
+  dbPath: string,
+  exists: (path: string) => boolean = existsSync
+): Db | null {
+  if (!exists(dbPath)) return null
   try {
     const db = new Database(dbPath)
     db.pragma('journal_mode = WAL')
     db.pragma('busy_timeout = 5000')
+    const table = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mem_tasks'`)
+      .get() as { name: string } | undefined
+    if (table === undefined) {
+      db.close()
+      return null
+    }
     return db
   } catch {
     return null
@@ -87,10 +102,16 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
   const now = deps.now ?? ((): number => Date.now())
   let db: Db | null = null
   let closed = false
+  /** 打不开的冷却：不让每次提问都去 existsSync + 开一次库（30 秒后再试） */
+  let unavailableUntil = 0
 
   const handle = (): Db | null => {
     if (closed) return null
-    if (db === null) db = openTaskDb(deps.dbPath)
+    if (db === null) {
+      if (now() < unavailableUntil) return null
+      db = openTaskDb(deps.dbPath)
+      if (db === null) unavailableUntil = now() + 30_000
+    }
     return db
   }
 

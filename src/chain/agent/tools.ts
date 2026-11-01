@@ -156,7 +156,7 @@ export interface LetterToolDeps {
 /** 任务来源 / 交付（与 `memory/agent/tasks.ts` 同口径，类型在这里重复一份避免链层依赖记忆层） */
 export type TaskOriginArg = 'user' | 'agent' | 'system'
 export type TaskDeliveryArg = 'foreground' | 'background' | 'auto'
-export type TaskRepeatArg = '' | 'daily' | 'weekly' | 'monthly'
+export type TaskRepeatArg = '' | 'daily' | 'weekly' | 'monthly' | 'yearly'
 export type TaskStateArg = 'active' | 'paused' | 'completed' | 'cancelled'
 
 /** 新建请求：时间已经被工具层解析成本地毫秒时间戳（模型只给 `YYYY-MM-DD HH:mm`） */
@@ -168,6 +168,10 @@ export interface TaskScheduleRequest {
   weekdays?: number[]
   /** repeat=monthly 时生效：每月几号，1–31，可多选 */
   monthDays?: number[]
+  /** repeat=yearly 时生效：每年几月（1–12） */
+  yearlyMonth?: number
+  /** repeat=yearly 时生效：每年几号（1–31；2-29 合法） */
+  yearlyDay?: number
   origin: TaskOriginArg
   delivery: TaskDeliveryArg
   validUntil: number | null
@@ -181,6 +185,8 @@ export interface TaskUpdateRequest {
   repeat?: TaskRepeatArg
   weekdays?: number[]
   monthDays?: number[]
+  yearlyMonth?: number
+  yearlyDay?: number
   delivery?: TaskDeliveryArg
   validUntil?: number | null
   state?: TaskStateArg
@@ -472,6 +478,26 @@ function parseRepeatDays(
     days.add(item)
   }
   return [...days].sort((a, b) => a - b)
+}
+
+/**
+ * yearly 的月 / 日参数：两个一起给才算数。
+ * `undefined` = 都没给；`null` = 给了但非法（缺一个 / 越界 / 2 月 30 这种）。
+ * 用 2028（闰年）校验：2-29 合法，2-30、13 月不合法。
+ */
+function parseYearlyDateArgs(
+  monthValue: unknown,
+  dayValue: unknown
+): { month: number; day: number } | null | undefined {
+  if (monthValue === undefined && dayValue === undefined) return undefined
+  const month = optionalNumber(monthValue)
+  const day = optionalNumber(dayValue)
+  if (month === undefined || day === undefined) return null
+  if (!Number.isInteger(month) || !Number.isInteger(day)) return null
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
+  const probe = new Date(2028, month - 1, day)
+  if (probe.getMonth() !== month - 1 || probe.getDate() !== day) return null
+  return { month, day }
 }
 
 function pad2(value: number): string {
@@ -1230,7 +1256,10 @@ export function createAskToolExecutor(deps: AskToolDeps): {
           }
           const rawRepeat = call.arguments['repeat']
           const repeat: TaskRepeatArg =
-            rawRepeat === 'daily' || rawRepeat === 'weekly' || rawRepeat === 'monthly'
+            rawRepeat === 'daily' ||
+            rawRepeat === 'weekly' ||
+            rawRepeat === 'monthly' ||
+            rawRepeat === 'yearly'
               ? rawRepeat
               : ''
           const weekdays = parseRepeatDays(call.arguments['weekdays'], 1, 7)
@@ -1253,6 +1282,19 @@ export function createAskToolExecutor(deps: AskToolDeps): {
               segments: []
             }
           }
+          const yearly = parseYearlyDateArgs(
+            call.arguments['yearly_month'],
+            call.arguments['yearly_day']
+          )
+          if (yearly === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'yearly_month / yearly_day 要一起给：month 1–12、day 1–31（2 月最多 29 日）'
+              },
+              segments: []
+            }
+          }
           const rawOrigin = call.arguments['origin']
           const origin: TaskOriginArg =
             rawOrigin === 'user' || rawOrigin === 'system' ? rawOrigin : 'agent'
@@ -1265,6 +1307,7 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             repeat,
             ...(weekdays === undefined ? {} : { weekdays }),
             ...(monthDays === undefined ? {} : { monthDays }),
+            ...(yearly === undefined ? {} : { yearlyMonth: yearly.month, yearlyDay: yearly.day }),
             origin,
             delivery,
             validUntil
@@ -1355,6 +1398,7 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             rawRepeat === 'daily' ||
             rawRepeat === 'weekly' ||
             rawRepeat === 'monthly' ||
+            rawRepeat === 'yearly' ||
             rawRepeat === ''
               ? rawRepeat
               : undefined
@@ -1374,6 +1418,19 @@ export function createAskToolExecutor(deps: AskToolDeps): {
               result: {
                 kind: 'error',
                 message: 'month_days 要用 1–31 的整数数组，可多选，例如 [1,15]'
+              },
+              segments: []
+            }
+          }
+          const yearly = parseYearlyDateArgs(
+            call.arguments['yearly_month'],
+            call.arguments['yearly_day']
+          )
+          if (yearly === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'yearly_month / yearly_day 要一起给：month 1–12、day 1–31（2 月最多 29 日）'
               },
               segments: []
             }
@@ -1398,6 +1455,7 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             ...(repeat === undefined ? {} : { repeat }),
             ...(weekdays === undefined ? {} : { weekdays }),
             ...(monthDays === undefined ? {} : { monthDays }),
+            ...(yearly === undefined ? {} : { yearlyMonth: yearly.month, yearlyDay: yearly.day }),
             ...(delivery === undefined ? {} : { delivery }),
             ...(validUntil === undefined ? {} : { validUntil }),
             ...(state === undefined ? {} : { state })

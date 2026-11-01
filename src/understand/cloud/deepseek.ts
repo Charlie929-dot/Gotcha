@@ -566,9 +566,9 @@ const ASK_LOOP_TOOLS = [
           },
           repeat: {
             type: 'string',
-            enum: ['', 'daily', 'weekly', 'monthly'],
+            enum: ['', 'daily', 'weekly', 'monthly', 'yearly'],
             description:
-              '重复：空 = 一次性；daily = 每天同一时刻；weekly = 每周（周几见 weekdays）；monthly = 每月（几号见 month_days）。weekly / monthly 不传列表就沿用第一次到点的星期几 / 日号。'
+              '重复：空 = 一次性；daily = 每天同一时刻；weekly = 每周（周几见 weekdays）；monthly = 每月（几号见 month_days）；yearly = 每年（月日见 yearly_month / yearly_day）。weekly / monthly / yearly 不传细节就沿用第一次到点的时间。'
           },
           weekdays: {
             type: 'array',
@@ -581,6 +581,18 @@ const ASK_LOOP_TOOLS = [
             items: { type: 'integer', minimum: 1, maximum: 31 },
             description:
               'repeat=monthly 时生效：每月哪几号，可多选（如 [1,15]）；短月没有这一号时落到当月最后一天'
+          },
+          yearly_month: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 12,
+            description: 'repeat=yearly 时生效：每年几月（1–12）'
+          },
+          yearly_day: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 31,
+            description: 'repeat=yearly 时生效：每年几号（1–31；2-29 合法，平年落到 2 月 28）'
           },
           origin: {
             type: 'string',
@@ -637,8 +649,9 @@ const ASK_LOOP_TOOLS = [
           when: { type: 'string', description: '新的到点时间（`YYYY-MM-DD HH:mm`）' },
           repeat: {
             type: 'string',
-            enum: ['', 'daily', 'weekly', 'monthly'],
-            description: '新的重复规则：空 = 一次性；daily / weekly / monthly（周几与几号见 weekdays / month_days）'
+            enum: ['', 'daily', 'weekly', 'monthly', 'yearly'],
+            description:
+              '新的重复规则：空 = 一次性；daily / weekly / monthly / yearly（细节见 weekdays / month_days / yearly_month / yearly_day）'
           },
           weekdays: {
             type: 'array',
@@ -649,6 +662,18 @@ const ASK_LOOP_TOOLS = [
             type: 'array',
             items: { type: 'integer', minimum: 1, maximum: 31 },
             description: 'repeat=monthly 时生效：每月哪几号，可多选；短月没有这一号时落到当月最后一天'
+          },
+          yearly_month: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 12,
+            description: 'repeat=yearly 时生效：每年几月（1–12）'
+          },
+          yearly_day: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 31,
+            description: 'repeat=yearly 时生效：每年几号（1–31；2-29 合法，平年落到 2 月 28）'
           },
           delivery: {
             type: 'string',

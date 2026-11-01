@@ -22,7 +22,7 @@ import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-s
 import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
 import type { MemoryDeleteView, MemoryListView, MemoryRestoreView } from '../main/memory-admin'
 import type { MemoryRepoSettingsView } from '../main/memory-repo-settings'
-import type { TaskAdminView } from '../main/task-runtime'
+import type { TaskAdminSaveInput, TaskAdminView } from '../main/task-runtime'
 import type { NotebookAdminView } from '../main/notebook'
 import type { GrowthEntryView, GrowthPage } from '../main/growth'
 import type { GrowthKind } from '../memory/growth'
@@ -100,9 +100,10 @@ export interface AskApi {
     view?: MemoryRepoSettingsView
   }>
   pushMemoryRepo(): Promise<{ ok: boolean; error?: string; view?: MemoryRepoSettingsView }>
-  /* ---- 任务（自调用 v0.2 §12.1）：列表 / 暂停 / 继续 / 取消 ---- */
+  /* ---- 任务（自调用 v0.2 §12.1）：列表 / 暂停 / 继续 / 取消 / 新建 / 编辑 ---- */
   tasksView(): Promise<TaskAdminView>
   taskAction(id: number, action: 'pause' | 'resume' | 'cancel'): Promise<TaskAdminActionResult>
+  taskSave(input: TaskAdminSaveInput): Promise<TaskAdminActionResult>
   /* ---- 小本本（自调用 v0.2 §7）：四分区查看 / 按编号删除 ---- */
   notebookView(): Promise<NotebookAdminView>
   notebookRemove(id: string): Promise<NotebookAdminActionResult>
@@ -192,6 +193,8 @@ const api: AskApi = {
   tasksView: () => ipcRenderer.invoke('ask:tasks:get') as Promise<TaskAdminView>,
   taskAction: (id, action) =>
     ipcRenderer.invoke('ask:tasks:action', { id, action }) as Promise<TaskAdminActionResult>,
+  taskSave: (input) =>
+    ipcRenderer.invoke('ask:tasks:save', input) as Promise<TaskAdminActionResult>,
   notebookView: () => ipcRenderer.invoke('ask:notebook:get') as Promise<NotebookAdminView>,
   notebookRemove: (id) =>
     ipcRenderer.invoke('ask:notebook:remove', { id }) as Promise<NotebookAdminActionResult>,

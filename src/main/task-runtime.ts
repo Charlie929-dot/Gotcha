@@ -24,8 +24,10 @@ import {
   listDueTasks,
   listLiveTasks,
   nextDueTask,
+  parseRepeat,
   readableTaskTime,
   settleTask,
+  type RepeatKind,
   type TaskOutcome,
   type TaskRow
 } from '../memory/agent/tasks'
@@ -65,6 +67,33 @@ export interface TaskAdminItem {
   instruction: string
   /** 共建计划的 Obsidian 同步状态；空 = 不需要同步 */
   sync: string
+  /** 原始到点时间（编辑表单用）；null = 只记着、不到点叫醒 */
+  nextDueAt: number | null
+  /** 重复种类与明细（编辑表单用；人话在 `repeat`） */
+  repeatKind: RepeatKind
+  weekdays: number[]
+  monthDays: number[]
+  yearlyMonth: number | null
+  yearlyDay: number | null
+  /** 原始有效期；null = 一直有效 */
+  validUntil: number | null
+}
+
+/**
+ * 设置抽屉里新建 / 编辑一条任务（不是模型工具）：
+ * 新建时分给 `origin='user'`（共建计划，走 Obsidian 同步）；编辑保留原来的来源。
+ */
+export interface TaskAdminSaveInput {
+  id?: number
+  instruction: string
+  when: number | null
+  repeat: RepeatKind
+  weekdays?: number[]
+  monthDays?: number[]
+  yearlyMonth?: number | null
+  yearlyDay?: number | null
+  delivery: 'foreground' | 'background' | 'auto'
+  validUntil: number | null
 }
 
 /** 设置抽屉「任务」块的视图；不可用 = 任务库还没起来（没采集过 / 没迁到 v11） */
@@ -268,16 +297,26 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
       return {
         available: true,
         total: countLiveTasks(current),
-        tasks: rows.map((task) => ({
-          id: task.id,
-          when: readableTaskTime(task.next_due_at, at),
-          repeat: describeRepeat(task.repeat, task.next_due_at),
-          origin: task.origin,
-          delivery: task.delivery,
-          state: task.state === 'paused' ? 'paused' : 'active',
-          instruction: task.instruction,
-          sync: task.obsidian_state
-        })),
+        tasks: rows.map((task) => {
+          const rule = parseRepeat(task.repeat)
+          return {
+            id: task.id,
+            when: readableTaskTime(task.next_due_at, at),
+            repeat: describeRepeat(task.repeat, task.next_due_at),
+            origin: task.origin,
+            delivery: task.delivery,
+            state: task.state === 'paused' ? 'paused' : 'active',
+            instruction: task.instruction,
+            sync: task.obsidian_state,
+            nextDueAt: task.next_due_at,
+            repeatKind: rule.kind,
+            weekdays: rule.weekdays,
+            monthDays: rule.monthDays,
+            yearlyMonth: rule.yearlyMonth,
+            yearlyDay: rule.yearlyDay,
+            validUntil: task.valid_until
+          }
+        }),
         running:
           runningTask === null
             ? null

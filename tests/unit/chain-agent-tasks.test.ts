@@ -286,6 +286,54 @@ describe('重复多选参数', () => {
     const call = (tasks.update as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0]
     expect(call).toEqual({ id: 3, weekdays: [3] })
   })
+
+  it('yearly + yearly_month / yearly_day：传给任务库', async () => {
+    const tasks = fakeTasks()
+    const { tool } = executor(tasks)
+    await tool.execute({
+      name: 'schedule_task',
+      arguments: {
+        instruction: '每年纪念日',
+        when: '2026-11-01 09:00',
+        repeat: 'yearly',
+        yearly_month: 11,
+        yearly_day: 1,
+        origin: 'agent'
+      }
+    })
+    const call = (tasks.schedule as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0] as {
+      repeat: string
+      yearlyMonth: number
+      yearlyDay: number
+    }
+    expect(call.repeat).toBe('yearly')
+    expect(call.yearlyMonth).toBe(11)
+    expect(call.yearlyDay).toBe(1)
+  })
+
+  it('yearly 缺一半 / 2-30 / 13 月：直接拒，不落库', async () => {
+    for (const extra of [
+      { yearly_month: 11 },
+      { yearly_month: 2, yearly_day: 30 },
+      { yearly_month: 13, yearly_day: 1 }
+    ]) {
+      const tasks = fakeTasks()
+      const { tool } = executor(tasks)
+      const outcome = await tool.execute({
+        name: 'schedule_task',
+        arguments: {
+          instruction: '每年纪念日',
+          when: '2026-11-01 09:00',
+          repeat: 'yearly',
+          origin: 'agent',
+          ...extra
+        }
+      })
+      expect(outcome.result.kind).toBe('error')
+      expect(JSON.stringify(outcome.result)).toContain('yearly_month')
+      expect(tasks.schedule).not.toHaveBeenCalled()
+    }
+  })
 })
 
 describe('循环里的回执与合流', () => {

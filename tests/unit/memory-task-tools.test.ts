@@ -573,4 +573,64 @@ describe('重复规则：每周多选 / 每月多选', () => {
     expect(cleared.message).toContain('不能把到点时间清掉')
     expect(getTaskById(db, created.task!.id)?.next_due_at).not.toBeNull()
   })
+
+  it('每年 11 月 1 日：落库 yearly:11-01，回执说人话', () => {
+    const result = port().schedule({
+      instruction: '每年纪念日',
+      when: new Date(2026, 10, 1, 9, 0, 0, 0).getTime(),
+      repeat: 'yearly',
+      yearlyMonth: 11,
+      yearlyDay: 1,
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(result.ok).toBe(true)
+    expect(result.message).toContain('每年 11 月 1 日')
+    expect(getTaskById(db, result.task!.id)?.repeat).toBe('yearly:11-01')
+  })
+
+  it('只改月日（不给 repeat）：按现有 yearly 规则改', () => {
+    const p = port()
+    const created = p.schedule({
+      instruction: '每年纪念日',
+      when: new Date(2026, 10, 1, 9, 0, 0, 0).getTime(),
+      repeat: 'yearly',
+      yearlyMonth: 11,
+      yearlyDay: 1,
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    const updated = p.update({ id: created.task!.id, yearlyMonth: 12, yearlyDay: 24 })
+    expect(updated.ok).toBe(true)
+    expect(updated.message).toContain('每年 12 月 24 日')
+    expect(getTaskById(db, created.task!.id)?.repeat).toBe('yearly:12-24')
+  })
+})
+
+describe('编辑暂停中的共建计划', () => {
+  it('不会把 Obsidian 那一行又写回去；继续时按新说明写回', () => {
+    writeNote(DAY)
+    const p = port()
+    const created = p.schedule({
+      instruction: '买猫粮',
+      when: WHEN,
+      repeat: '',
+      origin: 'user',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(created.task?.sync).toBe('synced')
+    p.setState(created.task!.id, 'paused')
+    expect(note()).not.toContain('买猫粮')
+
+    const updated = p.update({ id: created.task!.id, instruction: '买猫砂' })
+    expect(updated.ok).toBe(true)
+    expect(note()).not.toContain('买猫砂')
+    expect(getTaskById(db, created.task!.id)?.obsidian_state).toBe('pending')
+
+    p.setState(created.task!.id, 'active')
+    expect(note()).toContain('买猫砂')
+  })
 })

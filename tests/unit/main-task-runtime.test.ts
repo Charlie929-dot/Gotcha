@@ -184,6 +184,16 @@ describe('运行时', () => {
     expect(view.tasks.map((task) => task.state)).toEqual(['active', 'paused'])
     expect(view.tasks[0].when).toContain('13:00')
     expect(view.tasks[0].origin).toBe('user')
+    // 编辑表单要用的原始字段也带出来
+    expect(view.tasks[0]).toMatchObject({
+      nextDueAt: at('2026-11-01', '13:00'),
+      repeatKind: '',
+      weekdays: [],
+      monthDays: [],
+      yearlyMonth: null,
+      yearlyDay: null,
+      validUntil: null
+    })
     expect(view.tasks[1].instruction).toBe('问他吃没吃饭')
     runtime.stop()
   })

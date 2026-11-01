@@ -16,7 +16,11 @@ import {
 } from '../memory/vectors'
 import { buildPersonaPrompt, personaCardDir, readPersona, readPersonaCard, resolveVaultDir, savePersonaCard } from '../memory/persona'
 import type { TaskOutcome, TaskRow } from '../memory/agent/tasks'
-import { createTaskRuntime, type TaskRuntime } from './task-runtime'
+import {
+  createTaskRuntime,
+  type TaskAdminSaveInput,
+  type TaskRuntime
+} from './task-runtime'
 import { isGrowthWritingTask } from '../memory/agent/growth-tasks'
 import {
   applyMemoryPatch,
@@ -3219,6 +3223,47 @@ if (primaryInstance) {
           return { ok: result.ok, message: result.message, view: taskRuntime.admin() }
         } catch (error) {
           captureLog('warn', 'task admin action failed', { id, action, error: String(error) })
+          return { ok: false, message: '任务库暂时不可用（重启后再试）。' }
+        }
+      },
+      // 抽屉里新建 / 编辑任务：新建一律算共建计划（origin=user，走 Obsidian 计划区同步）；
+      // 编辑保留原来源（自主任务不碰用户日记）。语义校验仍由任务端口做。
+      taskSave: (input: TaskAdminSaveInput) => {
+        if (taskRuntime === null) {
+          return { ok: false, message: '任务库还没起来（重启后再试）。' }
+        }
+        try {
+          const yearly =
+            input.yearlyMonth == null || input.yearlyDay == null
+              ? {}
+              : { yearlyMonth: input.yearlyMonth, yearlyDay: input.yearlyDay }
+          const outcome =
+            input.id === undefined
+              ? taskRuntime.port.schedule({
+                  instruction: input.instruction,
+                  when: input.when,
+                  repeat: input.repeat,
+                  ...(input.weekdays === undefined ? {} : { weekdays: input.weekdays }),
+                  ...(input.monthDays === undefined ? {} : { monthDays: input.monthDays }),
+                  ...yearly,
+                  origin: 'user',
+                  delivery: input.delivery,
+                  validUntil: input.validUntil
+                })
+              : taskRuntime.port.update({
+                  id: input.id,
+                  instruction: input.instruction,
+                  when: input.when,
+                  repeat: input.repeat,
+                  ...(input.weekdays === undefined ? {} : { weekdays: input.weekdays }),
+                  ...(input.monthDays === undefined ? {} : { monthDays: input.monthDays }),
+                  ...yearly,
+                  delivery: input.delivery,
+                  validUntil: input.validUntil
+                })
+          return { ok: outcome.ok, message: outcome.message, view: taskRuntime.admin() }
+        } catch (error) {
+          captureLog('warn', 'task admin save failed', { error: String(error) })
           return { ok: false, message: '任务库暂时不可用（重启后再试）。' }
         }
       },

@@ -89,6 +89,14 @@ function textOf(result: ChainAskResult | null): string {
   return result.text
 }
 
+/**
+ * 回执正文（D83）：首行 `🎗️提示` 由 `commandResult` 统一加，
+ * 断言正文的用例先摘掉它——抬头本身另有专门的用例守着。
+ */
+function bodyOf(result: ChainAskResult | null): string {
+  return textOf(result).replace(/^🎗️提示\n/u, '')
+}
+
 async function seededLineage(file: string): Promise<Lineage> {
   const seeded = await ensureLineage(file, { now: 1 })
   const next = withBranchAdded(seeded.lineage, {
@@ -186,13 +194,39 @@ describe('命令解析', () => {
     expect(parseCommand(' / ')).toBeNull()
   })
 
-  it('回执形状：command + 全 0 stats', () => {
+  it('回执形状：command + 全 0 stats + 🎗️提示 抬头（D83）', () => {
     const result = commandResult('ok')
     expect(result).toMatchObject({
       kind: 'command',
-      text: 'ok',
+      text: '🎗️提示\nok',
       stats: { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
     })
+    // 已经带抬头的原样返回，不叠第二个
+    expect(commandResult('🎗️提示\nok')).toMatchObject({ text: '🎗️提示\nok' })
+  })
+
+  it('每条命令回执都带 🎗️提示 抬头，且只带一个（D83 补齐）', async () => {
+    const lineageFile = tempLineageFile()
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    for (const command of [
+      '/help',
+      '/tasks',
+      '/notebook',
+      '/growth',
+      '/life',
+      '/git',
+      '/cancel',
+      '/nope',
+      '/compact',
+      '/mode',
+      '/log'
+    ]) {
+      const result = await run(command)
+      expect(result?.kind, command).toBe('command')
+      if (result === null || result.kind !== 'command') continue
+      expect(result.text.startsWith('🎗️提示'), command).toBe(true)
+      expect(result.text.split('🎗️提示').length - 1, command).toBe(1)
+    }
   })
 
   it('提交主题按本地日', () => {
@@ -455,7 +489,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/log'))).toBe(
+    expect(bodyOf(await run('/log'))).toBe(
       [
         '[0] life · 主干',
         '  [1] ask · 纯模型 · 0 个工具',
@@ -484,7 +518,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/log 2'))).toBe(
+    expect(bodyOf(await run('/log 2'))).toBe(
       [
         '[0] default  ← 当前',
         '[0-0] 记忆 2026-10-30 · aaa1111',
@@ -492,7 +526,7 @@ describe('命令执行', () => {
       ].join('\n')
     )
     // 不是当前节点：不标节点，也不标「正在用」
-    expect(textOf(await run('/log ask')).split('\n')[0]).toBe('[0] ask')
+    expect(bodyOf(await run('/log ask')).split('\n')[0]).toBe('[0] ask')
     expect(textOf(await run('/log 9-9'))).toContain('没有节点 9-9')
   })
 
@@ -532,7 +566,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/log 2'))).toBe(
+    expect(bodyOf(await run('/log 2'))).toBe(
       [
         '[0] default  ← 当前',
         '[0-0] 记忆 2026-10-30 · aaa1111',
@@ -564,20 +598,20 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    const first = textOf(await run('/log 0'))
+    const first = bodyOf(await run('/log 0'))
     const firstLines = first.split('\n')
     expect(firstLines[0]).toBe('[0] default  ← 当前')
     expect(firstLines[1]).toBe('[0-0] m0 · h000000')
     expect(firstLines[20]).toBe('[0-19] m19 · h000019')
     expect(first).toContain('/log n 下一页（更新）')
 
-    const second = textOf(await run('/log n'))
+    const second = bodyOf(await run('/log n'))
     expect(second.split('\n')[1]).toBe('[0-0] m20 · h000020')
     expect(second.split('\n')[5]).toBe('[0-4] m24 · h000024')
     expect(second).toContain('/log l 上一页（更旧）')
     expect(second).not.toContain('/log n 下一页（更新）')
 
-    const back = textOf(await run('/log l'))
+    const back = bodyOf(await run('/log l'))
     expect(back.split('\n')[1]).toBe('[0-0] m0 · h000000')
     expect(back).toContain('/log n 下一页（更新）')
   })
@@ -827,7 +861,7 @@ describe('命令执行', () => {
     })
 
     expect(textOf(await run('/use 1'))).toContain('给它起个名字')
-    expect(textOf(await run('/cancel'))).toBe('已取消。')
+    expect(bodyOf(await run('/cancel'))).toBe('已取消。')
     expect(commits).toEqual([])
     expect(switched).toEqual([])
 
@@ -1012,7 +1046,7 @@ describe('命令执行', () => {
     expect(textOf(await pushFailed('/backup -d'))).toContain('推送失败（网络 / 凭据）')
 
     const clean = createCommandHandler({ repo: fakeRepo(), lineageFile })
-    expect(textOf(await clean('/backup -d'))).toBe('没有新内容要提交。')
+    expect(bodyOf(await clean('/backup -d'))).toBe('没有新内容要提交。')
 
     const unavailable = createCommandHandler({
       repo: fakeRepo({ commit: async () => ({ committed: false, reason: 'unavailable' }) }),
@@ -1062,7 +1096,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    const text = textOf(await run('/git log --oneline -2'))
+    const text = bodyOf(await run('/git log --oneline -2'))
     expect(seen).toEqual([['log', '--oneline', '-2']])
     expect(text).toContain('/git log --oneline -2')
     expect(text.split('\n')[1]).toBe('1b2d9b3 save')
@@ -1094,18 +1128,18 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    const first = textOf(await run('/git log -45'))
+    const first = bodyOf(await run('/git log -45'))
     expect(first.split('\n')[1]).toBe('l0')
     expect(first.split('\n')[20]).toBe('l19')
     expect(first).toContain('第 1/3 页')
     expect(first).toContain('/git n 下一页')
 
-    const second = textOf(await run('/git n'))
+    const second = bodyOf(await run('/git n'))
     expect(second.split('\n')[1]).toBe('l20')
     expect(second).toContain('/git l 上一页')
     expect(calls).toBe(1)
 
-    expect(textOf(await run('/git l')).split('\n')[1]).toBe('l0')
+    expect(bodyOf(await run('/git l')).split('\n')[1]).toBe('l0')
   })
 
   it('/git：改了 HEAD 就同步家谱当前节点并重载会话', async () => {
@@ -1146,9 +1180,9 @@ describe('命令执行', () => {
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     expect(textOf(await run('/nope'))).toContain('未知命令：/nope')
     expect(textOf(await run('/compact'))).toContain('/compact 还没接上')
-    expect(textOf(await run('/cancel'))).toBe('没有等待中的操作。')
+    expect(bodyOf(await run('/cancel'))).toBe('没有等待中的操作。')
     await run('/new')
-    expect(textOf(await run('/cancel'))).toBe('已取消。')
+    expect(bodyOf(await run('/cancel'))).toBe('已取消。')
     expect(await run('秋天')).toBeNull()
   })
 
@@ -1193,7 +1227,7 @@ describe('命令执行', () => {
       )
     })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
-    const text = textOf(await run('/life'))
+    const text = bodyOf(await run('/life'))
     expect(text).toBe('❤️剩余生命✨80%\n🔤上下文 已使用✨200k，剩余✨800k（1000k）')
   })
 
@@ -1211,7 +1245,7 @@ describe('命令执行', () => {
     if (withAsk === null) return
     await writeLineage(lineageFile, { ...withAsk, active: 'ask' })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
-    const text = textOf(await run('/life'))
+    const text = bodyOf(await run('/life'))
     expect(text).toContain('❤️剩余生命✨100%')
     expect(text).toContain('已使用✨0，剩余✨500k（500k）')
   })
@@ -1247,7 +1281,7 @@ describe('命令串行锁（M5：桌面 + QQ 共用一份 handler）', () => {
     })
     const both = await Promise.all([run('/log'), run('/life')])
     expect(order).toEqual(['start:/log', 'end:/log', 'start:/life', 'end:/life'])
-    expect(both.map((result) => (result?.kind === 'command' ? result.text : ''))).toEqual([
+    expect(both.map((result) => (result?.kind === 'command' ? result.text.replace(/^🎗️提示\n/u, '') : ''))).toEqual([
       'done:/log',
       'done:/life'
     ])

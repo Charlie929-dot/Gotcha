@@ -40,6 +40,11 @@ function textOf(result: { kind: string; text?: string } | null): string {
   return result?.text ?? ''
 }
 
+/** 回执正文（D83）：首行 🎗️提示 是 commandResult 统一加的，断言正文先摘掉 */
+function bodyOf(result: { kind: string; text?: string } | null): string {
+  return textOf(result).replace(/^🎗️提示\n/u, '')
+}
+
 describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () => {
   it('/mode ask：life 的第一个提交是出生 default，ask 从 life 分叉', async () => {
     const { repo, lineageFile } = await setup()
@@ -106,7 +111,7 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
     const { repo, lineageFile } = await setup()
     const run = createCommandHandler({ repo, lineageFile })
     await run('/mode ask')
-    const tree = textOf(await run('/log'))
+    const tree = bodyOf(await run('/log'))
     expect(tree).toBe(
       [
         '[0] life · 主干',
@@ -114,7 +119,7 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
         '  [2] default · 17 个工具'
       ].join('\n')
     )
-    const history = textOf(await run('/log 1'))
+    const history = bodyOf(await run('/log 1'))
     expect(history.split('\n')[0]).toBe('[0] ask  ← 当前')
     // 旧 → 新；ask 的最新提交就是 HEAD：正在用的那条记忆
     expect(history).toMatch(/\[0-0\] 出生 default · [0-9a-f]{7,}/u)

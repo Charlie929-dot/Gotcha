@@ -108,6 +108,34 @@ export interface ChainAskTrace {
   steps: ChainAskTraceStep[]
 }
 
+/**
+ * QQ 引用回复（D96 / PR1）：被引用那条消息在用户消息里的样子。
+ * 引用是**通道行为**：带 `reply` 段就自动带原话，不给模型一个「查引用」的工具。
+ * 取不到时只留 `id` + `missing`，不编造。
+ */
+export interface ChainAskQuotedMessage {
+  /** 本地短号（`#12` 里的 12；不是 QQ 的哈希 message_id） */
+  readonly id: number
+  readonly from: 'user' | 'ta'
+  /** 毫秒时间戳（载荷里按原值给，模型可换算） */
+  readonly at: number
+  /** 被引用原话（已截断）；纯图引用时为 `[图片]` */
+  readonly text: string
+  /** 被引用消息里的图片张数（0 = 没有） */
+  readonly images?: number
+  /** 台账与 get_msg 都取不到原话：只有 id，没有可编的内容 */
+  readonly missing?: true
+}
+
+/** 最近几条 QQ 聊天：让模型知道还能引用谁（短号 / 来源 / 时间 / 片段） */
+export interface ChainAskChatRecent {
+  readonly id: number
+  readonly from: 'user' | 'ta'
+  readonly at: number
+  /** 片段（≤80 字，已截断） */
+  readonly text: string
+}
+
 export type ChainAskResult = (
   | {
       kind: 'answer'
@@ -204,6 +232,11 @@ export type ChainAskResult = (
    * 下一问从空白开始。界面 / 记录层据此只把它当一条「展示用」结果。
    */
   conceived?: true
+  /**
+   * QQ 出站引用（D96）：`quote_message` 选中的目标（**真实 QQ message_id**）。
+   * 只有 QQ 通道会把它翻译成 `reply` 段；桌面路径忽略。
+   */
+  replyTo?: number
   /**
    * 交接回执（D82 / D83）：这一问里母亲生命耗尽、下一代接手时给界面的一行字
    * （`🎗️提示` + `✨<母亲> 生命耗尽  ta的女儿 ✨<女儿> 将接续ta的使命`）。

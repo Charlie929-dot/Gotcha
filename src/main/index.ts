@@ -29,7 +29,7 @@ import {
   type MemorySettingsSaveResult
 } from './memory-settings'
 import { buildMemoryListView, deleteMemoryView, parseMemoryListQuery, restoreMemoryView } from './memory-admin'
-import type { GiveBirthResult, DiaryToolDeps, LetterAt } from '../chain/agent/tools'
+import type { GiveBirthResult, DiaryToolDeps, LetterAt, QuoteMessageLookup } from '../chain/agent/tools'
 import { askModeKindOfBranch, asksMemoryContext, type AskModeState } from '../chain/agent/mode'
 import {
   defaultToolsForBranchKind,
@@ -37,7 +37,8 @@ import {
   hasGrowthTools,
   hasLetterTools,
   hasScreenTools,
-  hasTaskTools
+  hasTaskTools,
+  QQ_TOOL_NAMES
 } from '../chain/agent/tool-catalog'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
@@ -194,6 +195,7 @@ import {
   toHistoryEntry
 } from './ask-history'
 import { createQqChannel, formatAskResult, QQ_REPLY_DEFAULT_CHARS, type QqChannel, type QqChannelConfig } from './qq/channel'
+import { ChatLog } from './qq/chat-log'
 import { QqOb11Server } from './qq/ob11'
 import { NapcatManager } from './qq/napcat'
 import {
@@ -328,6 +330,8 @@ let taskRuntime: TaskRuntime | null = null
 let growthDailyTaskId: number | null = null
 /** QQ 通道（D63）：默认关闭；挂在这里是为了 before-quit 能直接收口端口 */
 let qqChannel: QqChannel | null = null
+/** QQ 聊天台账（D96）：短号 ↔ QQ id + 原话；退出前 flush 一次 */
+let qqChatLog: ChatLog | null = null
 /** NapCat 托管（D66）：退出只停轮询，不结束用户正在用的 QQ（拍板：退出不关） */
 let qqNapcat: NapcatManager | null = null
 /**
@@ -1235,6 +1239,9 @@ app.on('before-quit', (event) => {
   qqNapcat = null
   void qqChannel?.stop()
   qqChannel = null
+  // 聊天台账：把合并窗口里没写盘的几条落下去
+  qqChatLog?.dispose()
+  qqChatLog = null
   ballMenuShell?.dispose()
   ballMenuShell = null
   inductionRuntime?.dispose()
@@ -2766,11 +2773,16 @@ if (primaryInstance) {
       const previous = qqHistories.get(conversationId) ?? []
       qqHistories.set(conversationId, [...previous, { question, answer }].slice(-6))
     }
+    qqChatLog = new ChatLog({
+      file: join(app.getPath('userData'), 'qq', 'chat-log.json'),
+      log: (level, message, data) => captureLog(level, message, data)
+    })
     qqChannel = createQqChannel(new QqOb11Server(), {
       log: (level, message, data) => captureLog(level, message, data),
+      chatLog: qqChatLog,
       // 命令（M5）：与桌面同一个 handler；命中就不进模型，也不占限流 / 排队
       command,
-      ask: async ({ text, conversationId, signal, images, files }) => {
+      ask: async ({ text, conversationId, signal, images, files, quoted, recent }) => {
         // 与桌面同一套前置：历史提交只读查看中先分叉（M2），再同步日记、取只读连接
         await forkDetachedIfNeeded({
           repo: memoryRepo,
@@ -2822,19 +2834,49 @@ if (primaryInstance) {
           state?.unreadLetters,
           onBirth
         )
+        /**
+         * QQ 专属（D96 / PR1）：聊天台账 + `quote_message` 工具只在 QQ 路径挂，
+         * 桌面看不到、也不进分支 `/tool` 白名单。短号查询限定在本会话台账里。
+         */
+        const chatLog = qqChatLog
+        const quotePort =
+          chatLog !== null
+            ? (id: number): QuoteMessageLookup => {
+                const record = chatLog.bySeq(conversationId, id)
+                const recentSeqs = chatLog.recentSeqs(conversationId, 6)
+                return record !== null
+                  ? {
+                      target: {
+                        id: record.seq,
+                        from: record.role,
+                        text: record.text,
+                        qqId: record.qqId
+                      },
+                      recent: recentSeqs
+                    }
+                  : { recent: recentSeqs }
+              }
+            : undefined
+        const qqOptions: ChainAskOptions = {
+          ...options,
+          tools: [...mode.tools, ...QQ_TOOL_NAMES],
+          ...(quoted !== undefined ? { quoted } : {}),
+          ...(recent !== undefined && recent.length > 0 ? { chatRecent: recent } : {}),
+          ...(quotePort !== undefined ? { quoteMessage: quotePort } : {})
+        }
         // QQ 发来的图片 / 文本文件（D88）：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
         const hasImages = images !== undefined && images.length > 0
         const hasFiles = files !== undefined && files.length > 0
         const result = await askChain(
           hasImages || hasFiles
             ? {
-                ...options,
+                ...qqOptions,
                 attachments: {
                   ...(hasImages ? { images } : {}),
                   ...(hasFiles ? { files } : {})
                 }
               }
-            : options,
+            : qqOptions,
           text
         )
         // 传承那一问不记进 QQ 的短上下文 / 说话时刻（女儿从空白开始；M4）
@@ -2862,6 +2904,26 @@ if (primaryInstance) {
           signal
         }
         const momLetter = await momLetterFor(life)
+        // 续查也保留 QQ 专属工具（D96）：引用不因「继续查」而失效
+        const resumeChatLog = qqChatLog
+        const quotePort =
+          resumeChatLog !== null
+            ? (id: number): QuoteMessageLookup => {
+                const record = resumeChatLog.bySeq(conversationId, id)
+                const recentSeqs = resumeChatLog.recentSeqs(conversationId, 6)
+                return record !== null
+                  ? {
+                      target: {
+                        id: record.seq,
+                        from: record.role,
+                        text: record.text,
+                        qqId: record.qqId
+                      },
+                      recent: recentSeqs
+                    }
+                  : { recent: recentSeqs }
+              }
+            : undefined
         const result = await askChain(
           {
             ...askOptionsFor(
@@ -2880,6 +2942,8 @@ if (primaryInstance) {
               momLetter,
               state?.unreadLetters
             ),
+            tools: [...mode.tools, ...QQ_TOOL_NAMES],
+            ...(quotePort !== undefined ? { quoteMessage: quotePort } : {}),
             resume: { id: resumeId, decision }
           },
           ''

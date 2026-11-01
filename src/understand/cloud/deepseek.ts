@@ -13,6 +13,7 @@
 import { LLM_DEFAULTS } from './constants'
 import { normalizeBaseUrl } from './providers'
 import { ASK_TOOL_LABELS, ASK_TOOL_NAMES, type AskToolName } from '../../chain/agent/tool-catalog'
+import type { ChainAskChatRecent, ChainAskQuotedMessage } from '../../chain/agent/types'
 import {
   RECALL_PLACEHOLDER_LIMIT,
   archiveIdOfImage,
@@ -756,6 +757,24 @@ const ASK_LOOP_TOOLS = [
         required: ['kind', 'content']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'quote_message',
+      description:
+        '引用这次聊天里的一条消息再回答（QQ 里会出现「回复」框）。id 是消息短号：`#12` 或 `12`，看 `recent` 列表或者你记得的那条。只认这次聊天里出现过的消息，太早的取不到；一轮只能引用一条，引用后就正常回答（不用另外发消息）。取不到就如实说，别猜内容。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: '消息短号，例如 "#12" 或 "12"（不带 # 也行）'
+          }
+        },
+        required: ['id']
+      }
+    }
   }
 ] as const
 
@@ -828,7 +847,9 @@ function buildAskLoopSystemPrompt(
       const brief =
         tool.function.name === 'give_birth'
           ? '生命快用完时生一个女儿，把之后的日子交给她'
-          : ASK_LOOP_TOOL_BRIEFS[tool.function.name]
+          : tool.function.name === 'quote_message'
+            ? '引用这次聊天里的一条消息再回答（id 是消息短号 #N）'
+            : ASK_LOOP_TOOL_BRIEFS[tool.function.name]
       lines.push(`- ${tool.function.name}：${brief}`)
     }
     lines.push('</tools>', '')
@@ -862,11 +883,16 @@ function userMessageContent(
   question: string,
   files: readonly { readonly name: string; readonly text: string }[] | undefined,
   now: string,
-  prefix?: string
+  prefix?: string,
+  quoted?: ChainAskQuotedMessage,
+  chatRecent?: readonly ChainAskChatRecent[]
 ): string {
   const body = JSON.stringify({
     question,
-    ...(files !== undefined && files.length > 0 ? { files } : {})
+    ...(files !== undefined && files.length > 0 ? { files } : {}),
+    // QQ 引用（D96）：被引用原话（取不到就 id + missing）与最近几条聊天
+    ...(quoted !== undefined ? { quoted } : {}),
+    ...(chatRecent !== undefined && chatRecent.length > 0 ? { recent: chatRecent } : {})
   })
   const text = now.trim()
   const nowPart = text === '' ? '' : `<now>\n${text}\n</now>`
@@ -1018,7 +1044,14 @@ export function buildChainAskLoopMessages(
     const files = turn.attachments?.files
     const attachments = turn.attachments
     const pictures = imagesPlaceholderText(attachments?.images ?? [])
-    const base = userMessageContent(turn.question, files, turn.now, firstPrior ? digest : '')
+    const base = userMessageContent(
+      turn.question,
+      files,
+      turn.now,
+      firstPrior ? digest : '',
+      turn.quoted,
+      turn.chatRecent
+    )
     messages.push({
       role: 'user',
       content:
@@ -1036,7 +1069,9 @@ export function buildChainAskLoopMessages(
       payload.question,
       payload.attachments?.files,
       payload.now,
-      firstPrior ? digest : ''
+      firstPrior ? digest : '',
+      payload.quoted,
+      payload.chatRecent
     ),
     ...(images.length > 0 ? { images } : {})
   })

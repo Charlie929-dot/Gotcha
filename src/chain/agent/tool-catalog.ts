@@ -45,6 +45,16 @@ export const ASK_TOOL_NOTEBOOK_NAMES = ['update_notebook'] as const
 /** 成长档案（自调用 v0.2 §8 / §12.3）：ta 自己的日记 / 周记，一天 / 一周一篇 */
 export const ASK_TOOL_GROWTH_NAMES = ['write_growth'] as const
 
+/**
+ * QQ 专属工具（D96 / PR1）：只在 QQ 通道挂载，**不进** `ASK_TOOL_NAMES` 与分支
+ * `/tool` 白名单——桌面看不到，也不会被 `/tool` 改动。
+ */
+export const QQ_TOOL_NAMES = ['quote_message'] as const
+export type QqToolName = (typeof QQ_TOOL_NAMES)[number]
+export const QQ_TOOL_LABELS: Readonly<Record<QqToolName, string>> = {
+  quote_message: '引用这次聊天里的一条消息再回答（消息短号）'
+}
+
 export type AskToolName =
   | (typeof ASK_TOOL_SCREEN_NAMES)[number]
   | (typeof ASK_TOOL_DIARY_NAMES)[number]

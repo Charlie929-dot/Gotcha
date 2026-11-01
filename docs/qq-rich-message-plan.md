@@ -1,6 +1,6 @@
 # QQ 富消息与说说 / 空间设计（v0.1）
 
-> **状态**：设计已拍板，**代码未实现**（2026-11-01）。
+> **状态**：设计已拍板；**PR1 已实现**（2026-11-01，`feat/qq-quote`：短号 / 引用 / 台账落盘 / `quote_message`），**PR2 / PR3 未开工**。
 > **权威**：拍板结论见 `docs/agent/decisions.md` **D96**；本文件是详细设计、边界与验收口径。代码与本文冲突时，**先改本文再改代码**。
 > **关联**：D63（QQ 通道 M1）、D65（入站图片）、D87（QQ 命令）、D88 / D89（归档与 `recall`）、D93（QQ 推送）。
 > **一句话**：给 ta 补上 QQ 的引用、表情包、发图、说说与空间浏览；分三支落地，引用先行；只走白名单私聊，不碰群聊，不改提示词。
@@ -453,7 +453,8 @@ trash/      # 回收站（软删）
 
 | 文件 | 作用 |
 | - | - |
-| `src/main/qq/ob11.ts` | OneBot 11 报文解析 / 反向 WS / action 调用 |
+| `src/main/qq/ob11.ts` | OneBot 11 报文解析 / 反向 WS / action 调用（含 `reply` 段与 `get_msg`） |
+| `src/main/qq/chat-log.ts` | 聊天台账：短号 ↔ QQ id + 原话；落盘 `<userData>/qq/chat-log.json` |
 | `src/main/qq/channel.ts` | 白名单、限流、排队、分条、`formatAskResult` |
 | `src/main/qq/media.ts` | 入站图片 / 文件 → data URL；大小与超时 |
 | `src/main/qq/qq-settings.ts` | QQ 设置键与视图（settings 表） |

@@ -365,6 +365,28 @@ export interface AskToolDeps {
    * 不传 = 这个分支没挂成长档案（或记忆仓不可用）：工具会如实回「现在写不了」。
    */
   growth?: GrowthToolDeps
+  /**
+   * QQ 引用（D96 / PR1）：按本地短号取回可引用的消息。
+   * 不传 = 这条通道没有聊天台账：`quote_message` 会如实回「引用不了」。
+   */
+  quoteMessage?: (id: number) => QuoteMessageLookup
+}
+
+/** `quote_message` 能引用的目标（真实 QQ id 只在执行器 outcome 里流转，不进工具结果） */
+export interface QuoteMessageTarget {
+  /** 本地短号（`#12` 里的 12） */
+  readonly id: number
+  readonly from: 'user' | 'ta'
+  /** 被引用原话（已截断） */
+  readonly text: string
+  /** 真实 QQ message_id（出站 `reply` 段用） */
+  readonly qqId: number
+}
+
+/** 短号查询结果：命中给 target，没命中给最近几条可用短号（别让模型瞎猜） */
+export interface QuoteMessageLookup {
+  readonly target?: QuoteMessageTarget
+  readonly recent: readonly number[]
 }
 
 export interface AskToolOutcome {
@@ -385,6 +407,11 @@ export interface AskToolOutcome {
    * 以 user 消息送给模型（DeepSeek 只允许 user 消息带图）。没有就是没开 / 没图。
    */
   images?: readonly string[]
+  /**
+   * `quote_message` 选中的目标（真实 QQ message_id）：驱动层把它挂到最终结果上，
+   * 由 QQ 通道翻译成出站 `reply` 段；桌面通道忽略。
+   */
+  replyTo?: number
 }
 
 /* ------------------------------------------------------------------ */
@@ -410,6 +437,15 @@ function optionalText(value: unknown, maxChars: number): string | undefined {
   if (typeof value !== 'string') return undefined
   const trimmed = value.trim()
   return trimmed === '' ? undefined : trimmed.slice(0, maxChars)
+}
+
+/** QQ 消息短号：接受 `#12` / `12` / 数字 12；不是正整数返回 null */
+function quoteShortId(value: unknown): number | null {
+  const raw = typeof value === 'number' ? String(value) : typeof value === 'string' ? value : ''
+  const trimmed = raw.trim().replace(/^#+/u, '')
+  if (!/^\d{1,9}$/u.test(trimmed)) return null
+  const id = Number(trimmed)
+  return Number.isInteger(id) && id > 0 ? id : null
 }
 
 function clampLimit(value: unknown, fallback: number, max: number): number {
@@ -1050,6 +1086,8 @@ export function createAskToolExecutor(deps: AskToolDeps): {
   freshness: () => AskLoopFreshness
   execute: (call: AskToolCall) => Promise<AskToolOutcome>
 } {
+  /** 这一问里已经引用过的消息（D96：一轮只认一次，第二次调用给错误） */
+  let quotedTarget: QuoteMessageTarget | null = null
   return {
     freshness: () => currentFreshness(deps),
     async execute(call: AskToolCall): Promise<AskToolOutcome> {
@@ -1601,6 +1639,63 @@ export function createAskToolExecutor(deps: AskToolDeps): {
               message: outcome.message
             },
             segments: []
+          }
+        }
+        if (call.name === 'quote_message') {
+          if (deps.quoteMessage === undefined) {
+            return {
+              result: {
+                kind: 'error',
+                message: '现在引用不了（这条通道没有聊天台账）'
+              },
+              segments: []
+            }
+          }
+          if (quotedTarget !== null) {
+            return {
+              result: {
+                kind: 'error',
+                message: `这一轮已经引用过 #${quotedTarget.id} 了，回答里直接说就行`
+              },
+              segments: []
+            }
+          }
+          const id = quoteShortId(call.arguments['id'])
+          if (id === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'quote_message 需要消息短号（例如 #12 或 12）'
+              },
+              segments: []
+            }
+          }
+          const lookup = deps.quoteMessage(id)
+          const target = lookup.target
+          if (target === undefined) {
+            const recent = lookup.recent.slice(0, 6)
+            return {
+              result: {
+                kind: 'error',
+                message:
+                  recent.length === 0
+                    ? `没有 #${id} 这条消息（这次聊天里还没有能引用的）`
+                    : `没有 #${id} 这条消息；最近能引用的是：${recent.map((n) => `#${n}`).join('、')}`
+              },
+              segments: []
+            }
+          }
+          quotedTarget = target
+          return {
+            result: {
+              kind: 'quote_message',
+              id: target.id,
+              from: target.from,
+              text: target.text,
+              ok: true
+            },
+            segments: [],
+            replyTo: target.qqId
           }
         }
         return { result: { kind: 'error', message: `未知工具：${call.name}` }, segments: [] }

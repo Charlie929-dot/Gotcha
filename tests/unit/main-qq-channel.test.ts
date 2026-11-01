@@ -13,15 +13,29 @@ import {
   formatAskResult,
   parseResumeChoice,
   type QqChannelConfig,
+  type QqAskInput,
+  type QqChatLog,
+  type QqChatRecordView,
   type QqResumeInput,
   type QqTransport
 } from '../../src/main/qq/channel'
-import type { QqInbound } from '../../src/main/qq/ob11'
+import type { QqInbound, QqQuotedMessage } from '../../src/main/qq/ob11'
 
 class FakeTransport implements QqTransport {
   started: { host: string; port: number; accessToken: string; onMessage: (inbound: QqInbound) => void } | null =
     null
-  sent: { userId: number; text: string }[] = []
+  /** 每条发出去的消息（D96：replyTo = 这一条带的引用目标） */
+  sent: { userId: number; text: string; replyTo?: number }[] = []
+  /** 回去的 message_id（台账要记；从 9001 起，避免和真实 id 撞） */
+  nextMessageId = 9001
+  /** 第一次带引用发送失败一次（验证「退化成纯文本」） */
+  failReplyOnce = false
+  /** message_id → get_msg 回执（D96 兜底解引用） */
+  quoted = new Map<number, QqQuotedMessage>()
+
+  async getMsg(messageId: number): Promise<QqQuotedMessage | null> {
+    return this.quoted.get(messageId) ?? null
+  }
   /** file → get_image 回执（测试按需塞） */
   images = new Map<string, { base64?: string; url?: string }>()
   /** 改过的昵称（M4 传承） */
@@ -44,8 +58,17 @@ class FakeTransport implements QqTransport {
     this.state = { listening: false, connections: 0, port: null }
   }
 
-  async sendPrivate(userId: number, text: string): Promise<void> {
-    this.sent.push({ userId, text })
+  async sendPrivate(
+    userId: number,
+    text: string,
+    options?: { replyTo?: number }
+  ): Promise<number | null> {
+    if (options?.replyTo !== undefined && this.failReplyOnce) {
+      this.failReplyOnce = false
+      throw new Error('OneBot 发送失败（100）引用的消息已过期')
+    }
+    this.sent.push({ userId, text, ...(options?.replyTo !== undefined ? { replyTo: options.replyTo } : {}) })
+    return this.nextMessageId++
   }
 
   async getImage(file: string): Promise<{ base64?: string; url?: string }> {
@@ -74,6 +97,56 @@ class FakeTransport implements QqTransport {
 const TINY_PNG =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
+/** 内存版聊天台账（D96）：只实现通道用到的那几个方法 */
+class FakeChatLog implements QqChatLog {
+  private conversations = new Map<string, QqChatRecordView[]>()
+  private next = new Map<string, number>()
+
+  append(
+    conversationId: string,
+    input: {
+      qqId: number
+      role: 'user' | 'ta'
+      text: string
+      at: number
+      imageCount?: number
+      quoteSeq?: number
+    }
+  ): QqChatRecordView {
+    const list = this.conversations.get(conversationId) ?? []
+    const seq = this.next.get(conversationId) ?? 1
+    const record: QqChatRecordView = {
+      seq,
+      qqId: input.qqId,
+      role: input.role,
+      text: input.text,
+      at: input.at,
+      imageCount: input.imageCount ?? 0,
+      ...(input.quoteSeq !== undefined ? { quoteSeq: input.quoteSeq } : {})
+    }
+    list.push(record)
+    this.conversations.set(conversationId, list)
+    this.next.set(conversationId, seq + 1)
+    return record
+  }
+
+  byQqId(conversationId: string, qqId: number): QqChatRecordView | null {
+    return this.conversations.get(conversationId)?.find((record) => record.qqId === qqId) ?? null
+  }
+
+  bySeq(conversationId: string, seq: number): QqChatRecordView | null {
+    return this.conversations.get(conversationId)?.find((record) => record.seq === seq) ?? null
+  }
+
+  recent(conversationId: string, limit = 6): readonly QqChatRecordView[] {
+    return (this.conversations.get(conversationId) ?? []).slice(-limit)
+  }
+
+  all(conversationId: string): readonly QqChatRecordView[] {
+    return this.conversations.get(conversationId) ?? []
+  }
+}
+
 function config(overrides: Partial<QqChannelConfig> = {}): QqChannelConfig {
   return {
     enabled: true,
@@ -90,7 +163,8 @@ function inbound(
   text: string,
   userId = 20002,
   images?: QqInbound['images'],
-  files?: QqInbound['files']
+  files?: QqInbound['files'],
+  quoteId?: number
 ): QqInbound {
   return {
     userId,
@@ -99,7 +173,8 @@ function inbound(
     messageId: Math.floor(Math.random() * 1e9),
     at: Date.now(),
     ...(images !== undefined ? { images } : {}),
-    ...(files !== undefined ? { files } : {})
+    ...(files !== undefined ? { files } : {}),
+    ...(quoteId !== undefined ? { quoteId } : {})
   }
 }
 
@@ -778,5 +853,153 @@ describe('主动推送（D93：前台任务到点也发一份到 QQ）', () => {
     await channel.stop()
     expect(await channel.push('到点啦')).toMatchObject({ sent: false, reason: 'not-running' })
     expect(transport.sent).toHaveLength(0)
+  })
+})
+describe('引用与台账（D96 / PR1）', () => {
+  it('台账命中：quoted 带短号与原话，入站记台账带 quoteSeq，recent 含本轮', async () => {
+    const transport = new FakeTransport()
+    const chatLog = new FakeChatLog()
+    const quoted = chatLog.append('qq-20002', {
+      qqId: 7001,
+      role: 'ta',
+      text: 'ta 之前说过的话',
+      at: 1_700_000_000_000
+    })
+    const seen: QqAskInput[] = []
+    const channel = createQqChannel(transport, {
+      ask: async (input) => {
+        seen.push(input)
+        return answer('好')
+      },
+      log: () => {},
+      chatLog
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('这是啥意思', 20002, undefined, undefined, 7001))
+
+    expect(seen[0]?.quoted).toEqual({
+      id: quoted.seq,
+      from: 'ta',
+      at: quoted.at,
+      text: 'ta 之前说过的话',
+      images: 0
+    })
+    expect(seen[0]?.recent?.map((item) => item.id)).toEqual([1, 2])
+    const records = chatLog.all('qq-20002')
+    expect(records[1]).toMatchObject({ role: 'user', text: '这是啥意思', quoteSeq: 1 })
+    // ta 发出的回答也进台账（用户之后引用它时能解出原话）
+    expect(records.some((record) => record.role === 'ta' && record.text.includes('好'))).toBe(true)
+  })
+
+  it('台账没命中：get_msg 兜底解出原话并补进台账；再取不到就 missing', async () => {
+    const transport = new FakeTransport()
+    const chatLog = new FakeChatLog()
+    transport.quoted.set(8001, {
+      text: '兜底拿到的原话',
+      senderId: 20002,
+      fromSelf: false,
+      at: 1_700_000_005_000,
+      nickname: '测试'
+    })
+    const seen: QqAskInput[] = []
+    const channel = createQqChannel(transport, {
+      ask: async (input) => {
+        seen.push(input)
+        return answer('好')
+      },
+      log: () => {},
+      chatLog
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('那这个呢', 20002, undefined, undefined, 8001))
+    expect(seen[0]?.quoted).toMatchObject({ from: 'user', text: '兜底拿到的原话' })
+    expect(chatLog.byQqId('qq-20002', 8001)?.seq).toBe(seen[0]?.quoted?.id)
+
+    // 取不到：如实 missing，不编内容
+    const channel2 = createQqChannel(new FakeTransport(), {
+      ask: async (input: QqAskInput) => {
+        seen.push(input)
+        return answer('好')
+      },
+      log: () => {},
+      chatLog
+    })
+    await channel2.start(config({ allowUsers: ['20002'] }))
+    await channel2.handleMessage(inbound('引用一条老的', 20002, undefined, undefined, 9999))
+    expect(seen[1]?.quoted).toMatchObject({ missing: true, text: '' })
+  })
+
+  it('首段带引用、后续段不带；ta 记台账带真实 message_id', async () => {
+    const transport = new FakeTransport()
+    const chatLog = new FakeChatLog()
+    const channel = createQqChannel(transport, {
+      ask: async () => ({
+        kind: 'answer',
+        answer: '第一段。\n\n第二段。',
+        citations: [],
+        stats: stats(),
+        replyTo: 5001
+      }),
+      log: () => {},
+      chatLog,
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('引用再回答'))
+
+    expect(transport.sent).toHaveLength(2)
+    expect(transport.sent[0]).toMatchObject({ text: '第一段。', replyTo: 5001 })
+    expect(transport.sent[1]).toMatchObject({ text: '第二段。' })
+    expect(transport.sent[1]?.replyTo).toBeUndefined()
+    const taRecords = chatLog.all('qq-20002').filter((record) => record.role === 'ta')
+    expect(taRecords.map((record) => record.qqId)).toEqual([9001, 9002])
+  })
+
+  it('引用发送被拒：重试一次纯文本，回答照常送达', async () => {
+    const transport = new FakeTransport()
+    transport.failReplyOnce = true
+    const channel = createQqChannel(transport, {
+      ask: async () => ({
+        kind: 'answer',
+        answer: '还是答出来了',
+        citations: [],
+        stats: stats(),
+        replyTo: 5001
+      }),
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('引用已被撤回的消息'))
+    expect(transport.sent).toHaveLength(1)
+    expect(transport.sent[0]?.text).toBe('还是答出来了')
+    expect(transport.sent[0]?.replyTo).toBeUndefined()
+  })
+
+  it('只有引用、没打字：放行并给一句中性问题；被引用图最多补 1 张', async () => {
+    const transport = new FakeTransport()
+    transport.images.set('q.png', { base64: TINY_PNG })
+    transport.quoted.set(8100, {
+      text: '[图片]',
+      images: [{ file: 'q.png' }],
+      senderId: 20002,
+      fromSelf: false,
+      at: 1,
+      nickname: '测试'
+    })
+    const seen: QqAskInput[] = []
+    const channel = createQqChannel(transport, {
+      ask: async (input) => {
+        seen.push(input)
+        return answer('这张图里是个小白点。')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('', 20002, undefined, undefined, 8100))
+    expect(seen[0]?.text).toContain('引用了这条消息')
+    expect(seen[0]?.quoted).toMatchObject({ text: '[图片]', images: 1 })
+    expect(seen[0]?.images).toHaveLength(1)
   })
 })

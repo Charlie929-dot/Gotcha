@@ -17,6 +17,7 @@
  */
 
 import type { CloudAskAttachments, CloudAskLoopTurn } from './payload'
+import type { ChainAskChatRecent, ChainAskQuotedMessage } from './types'
 
 /** 会话里的一轮：问题 + 当时的 <now> + 工具轮 + 最终答复 + 随问题发出去的附件 */
 export interface CloudAskConversationTurn {
@@ -33,6 +34,12 @@ export interface CloudAskConversationTurn {
    * 少一张图，这条 user 消息的字节就变了，后面的前缀缓存全断。
    */
   readonly attachments?: CloudAskAttachments
+  /**
+   * QQ 引用与最近聊天（D96）。回放时必须原样带上：少一段，这条 user 消息的字节
+   * 就变了，后面的前缀缓存全断。
+   */
+  readonly quoted?: ChainAskQuotedMessage
+  readonly chatRecent?: readonly ChainAskChatRecent[]
 }
 
 /** 一次会话的完整可见历史：更早的部分压成 digest，最近的在 turns 里 */

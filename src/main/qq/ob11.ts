@@ -34,6 +34,11 @@ export interface QqInbound {
    * 通道会按扩展名再判一次：是图就取字节当图，是文本就取正文。
    */
   files?: readonly QqFileRef[]
+  /**
+   * 这条消息引用了哪条（D96 / PR1）：QQ 的 `reply` 段里只有 message_id，不带原话。
+   * 由通道查台账 / `get_msg` 解出正文；解不出就如实标 missing。
+   */
+  quoteId?: number
 }
 
 /** 图片段里的引用：`file` 可交给 OneBot `get_image`，`url` 是可直接下载的地址 */
@@ -52,6 +57,21 @@ export interface QqFileRef {
   fileId?: string
   /** 直链（有就直接下载） */
   url?: string
+}
+
+/**
+ * `get_msg` 解出来的被引用消息（D96）：台账里没有时用它兜底。
+ * `fromSelf` 由传输层按登录号判断（sender.user_id === self_id）。
+ */
+export interface QqQuotedMessage {
+  text: string
+  images?: readonly QqImageRef[]
+  senderId: number
+  /** 发这条的是不是 ta 自己（决定引用块里显示「ta」还是「用户」） */
+  fromSelf: boolean
+  /** 毫秒时间戳 */
+  at: number
+  nickname: string
 }
 
 /** 一条消息里的图片上限（与桌面附件一致） */
@@ -168,13 +188,24 @@ function filePlaceholderText(ref: QqFileRef): string {
   return ref.name !== undefined && ref.name !== '' ? `[文件：${ref.name}]` : '[文件]'
 }
 
-/** CQ 字符串 → 纯文本 + 图片引用（只留 text 段，其余按占位符；`at` / `reply` 直接丢） */
-function parseCqMessage(raw: string): { text: string; images: QqImageRef[]; files: QqFileRef[] } {
+/** CQ 字符串 → 纯文本 + 图片 / 文件引用 + 引用目标（只留 text 段，其余按占位符；`at` 直接丢） */
+function parseCqMessage(raw: string): {
+  text: string
+  images: QqImageRef[]
+  files: QqFileRef[]
+  quoteId?: number
+} {
   const images: QqImageRef[] = []
   const files: QqFileRef[] = []
+  let quoteId: number | null = null
   const text = raw
     .replace(CQ_RE, (_match: string, type: string, params: string) => {
-      if (type === 'at' || type === 'reply') return ''
+      if (type === 'at') return ''
+      if (type === 'reply') {
+        // D96：reply 段只有 id；同一条消息里出现多次就认第一个
+        quoteId = quoteId ?? positiveInt(cqParams(params)['id'])
+        return ''
+      }
       if (type === 'image') {
         pushImage(images, imageRefOf(cqParams(params)))
         return '[图片]'
@@ -191,30 +222,38 @@ function parseCqMessage(raw: string): { text: string; images: QqImageRef[]; file
     .replace(/&#93;/gu, ']')
     .replace(/&#44;/gu, ',')
     .replace(/&amp;/gu, '&')
-  return { text, images, files }
+  return {
+    text,
+    images,
+    files,
+    ...(quoteId !== null ? { quoteId } : {})
+  }
 }
 
 /**
- * 报文里的 `message` → 纯文本 + 图片 / 文件引用。
+ * 报文里的 `message` → 纯文本 + 图片 / 文件引用 + 引用目标（D96）。
  * 段数组优先（NapCat 的默认形态）；字符串按 CQ 码解析；其它形态当空。
  */
 export function parseMessageContent(message: unknown): {
   text: string
   images: QqImageRef[]
   files: QqFileRef[]
+  quoteId?: number
 } {
   if (typeof message === 'string') {
     const parsed = parseCqMessage(message)
     return {
       text: parsed.text.replace(/\r\n/gu, '\n').trim(),
       images: parsed.images,
-      files: parsed.files
+      files: parsed.files,
+      ...(parsed.quoteId !== undefined ? { quoteId: parsed.quoteId } : {})
     }
   }
   if (!Array.isArray(message)) return { text: '', images: [], files: [] }
   let out = ''
   const images: QqImageRef[] = []
   const files: QqFileRef[] = []
+  let quoteId: number | null = null
   for (const segment of message) {
     if (!isPlainObject(segment)) continue
     const type = typeof segment.type === 'string' ? segment.type : ''
@@ -223,7 +262,11 @@ export function parseMessageContent(message: unknown): {
       out += typeof data['text'] === 'string' ? (data['text'] as string) : ''
       continue
     }
-    if (type === 'at' || type === 'reply') continue
+    if (type === 'at') continue
+    if (type === 'reply') {
+      quoteId = quoteId ?? positiveInt(data['id'])
+      continue
+    }
     if (type === 'image') {
       pushImage(images, imageRefOf(data))
       out += '[图片]'
@@ -237,7 +280,12 @@ export function parseMessageContent(message: unknown): {
     }
     out += SEGMENT_PLACEHOLDER[type] ?? ''
   }
-  return { text: out.replace(/\r\n/gu, '\n').trim(), images, files }
+  return {
+    text: out.replace(/\r\n/gu, '\n').trim(),
+    images,
+    files,
+    ...(quoteId !== null ? { quoteId } : {})
+  }
 }
 
 /** 兼容旧调用方：只要纯文本 */
@@ -248,6 +296,9 @@ export function segmentsToText(message: unknown): string {
 /**
  * 严格解析一条入站事件：不是私聊消息、缺 user_id、自己发给自己、空文本 → null。
  * 「群聊一律丢」在这里就落定，通道层不需要再判断。
+ *
+ * 2026-11-01（D96）：正文为空但带引用 / 图片 / 文件时**不再整条丢**——
+ * 「只引用一张图、没打字」也是消息，丢的话引用永远看不到。
  */
 export function parsePrivateMessageEvent(raw: unknown): QqInbound | null {
   if (!isPlainObject(raw)) return null
@@ -262,7 +313,9 @@ export function parsePrivateMessageEvent(raw: unknown): QqInbound | null {
   // 这里按 message_id 丢掉（OneBot 11 正常用 message_sent，本就不解析）。
   const parsed = parseMessageContent(raw['message'])
   const text = parsed.text
-  if (text === '') return null
+  const quoteId = parsed.quoteId
+  const hasAttachments = parsed.images.length > 0 || parsed.files.length > 0
+  if (text === '' && quoteId === undefined && !hasAttachments) return null
   const sender = isPlainObject(raw['sender']) ? raw['sender'] : {}
   const nickname = typeof sender['nickname'] === 'string' ? (sender['nickname'] as string).slice(0, 40) : ''
   const seconds = typeof raw['time'] === 'number' ? raw['time'] : NaN
@@ -273,7 +326,8 @@ export function parsePrivateMessageEvent(raw: unknown): QqInbound | null {
     messageId: positiveInt(raw['message_id']) ?? 0,
     at: Number.isFinite(seconds) ? Math.round(seconds * 1000) : Date.now(),
     ...(parsed.images.length > 0 ? { images: parsed.images } : {}),
-    ...(parsed.files.length > 0 ? { files: parsed.files } : {})
+    ...(parsed.files.length > 0 ? { files: parsed.files } : {}),
+    ...(quoteId !== undefined ? { quoteId } : {})
   }
 }
 
@@ -324,6 +378,8 @@ export class QqOb11Server {
    */
   private readonly selfSent = new Set<number>()
   private readonly selfSentOrder: number[] = []
+  /** 登录号（从最近一条事件的 self_id 记住；D96 解引用判「是不是 ta 自己发的」） */
+  private selfId: number | null = null
   private seq = 0
   private port: number | null = null
   private onMessage: ((inbound: QqInbound) => void) | null = null
@@ -404,6 +460,9 @@ export class QqOb11Server {
       return
     }
     if (!isPlainObject(payload)) return
+    // 记住登录号（D96）：get_msg 兜底时用 sender.user_id === self_id 判「是不是 ta 发的」
+    const eventSelfId = positiveInt(payload['self_id'])
+    if (eventSelfId !== null) this.selfId = eventSelfId
     // 回执：带 echo 的才是我们发出去的调用
     if (typeof payload['echo'] === 'string') {
       const waiter = this.pending.get(payload['echo'])
@@ -495,10 +554,19 @@ export class QqOb11Server {
     }
   }
 
-  /** 私聊发一条纯文本（OneBot `send_private_msg`） */
-  async sendPrivate(userId: number, text: string): Promise<void> {    const response = await this.callAction('send_private_msg', {
+  /** 私聊发一条消息（OneBot `send_private_msg`）；带 `replyTo` 时 `reply` 段放第一位 */
+  async sendPrivate(
+    userId: number,
+    text: string,
+    options?: { replyTo?: number }
+  ): Promise<number | null> {
+    const replyTo = positiveInt(options?.replyTo)
+    const message: Array<{ type: string; data: Record<string, unknown> }> = []
+    if (replyTo !== null) message.push({ type: 'reply', data: { id: String(replyTo) } })
+    message.push({ type: 'text', data: { text } })
+    const response = await this.callAction('send_private_msg', {
       user_id: userId,
-      message: [{ type: 'text', data: { text } }]
+      message
     })
     if (typeof response.retcode === 'number' && response.retcode !== 0) {
       throw new Error(`OneBot 发送失败（${response.retcode}）${response.wording ?? ''}`)
@@ -513,6 +581,39 @@ export class QqOb11Server {
         const oldest = this.selfSentOrder.shift()
         if (oldest !== undefined) this.selfSent.delete(oldest)
       }
+    }
+    return sentId
+  }
+
+  /**
+   * 按 message_id 取一条消息（D96，OneBot `get_msg`）：台账没命中时兜底解引用。
+   * 取不到 / 超时 / 回执非 0 一律返回 null——调用方据此标 missing，不许编。
+   */
+  async getMsg(messageId: number): Promise<QqQuotedMessage | null> {
+    if (!Number.isInteger(messageId) || messageId <= 0) return null
+    try {
+      const response = await this.callAction('get_msg', { message_id: messageId })
+      if (typeof response.retcode === 'number' && response.retcode !== 0) return null
+      const data = isPlainObject(response.data) ? response.data : {}
+      const parsed = parseMessageContent(data['message'] ?? data['raw_message'])
+      const sender = isPlainObject(data['sender']) ? data['sender'] : {}
+      const senderId = positiveInt(sender['user_id']) ?? 0
+      const nickname =
+        typeof sender['nickname'] === 'string' ? (sender['nickname'] as string).slice(0, 40) : ''
+      const seconds = typeof data['time'] === 'number' ? data['time'] : NaN
+      // 台账兜底时角色这样判：发送者就是登录号 → ta；selfSent 只作辅助（重连后可能丢）
+      const fromSelf =
+        (this.selfId !== null && senderId === this.selfId) || this.selfSent.has(messageId)
+      return {
+        text: parsed.text,
+        ...(parsed.images.length > 0 ? { images: parsed.images } : {}),
+        senderId,
+        fromSelf,
+        at: Number.isFinite(seconds) ? Math.round(seconds * 1000) : Date.now(),
+        nickname
+      }
+    } catch {
+      return null
     }
   }
 

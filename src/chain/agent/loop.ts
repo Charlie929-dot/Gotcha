@@ -62,8 +62,10 @@ import {
 } from './archive'
 import { isNoEvidenceAnswer, memorySnippet, parseChainReply, parseChainReplyText, type CitationMeta } from './parse'
 import {
+  type ChainAskChatRecent,
   type ChainAskCitation,
   type ChainAskMemoryCitation,
+  type ChainAskQuotedMessage,
   type ChainAskResult,
   type ChainAskRelatedSegment,
   type ChainAskStats,
@@ -81,6 +83,7 @@ import {
   type MemoryCitationMeta,
   type NotebookToolDeps,
   type GrowthToolDeps,
+  type QuoteMessageLookup,
   type TaskToolDeps
 } from './tools'
 import type { ChainDb } from '../store'
@@ -210,6 +213,11 @@ export interface AskLoopContext {
     readonly images?: readonly string[]
     readonly files?: readonly { readonly name: string; readonly text: string }[]
   }
+  /** QQ 引用回复（D96）：被引用原话与最近几条聊天；送云前过策略 */
+  quoted?: ChainAskQuotedMessage
+  chatRecent?: readonly ChainAskChatRecent[]
+  /** `quote_message` 的短号查询端口（QQ 通道注入；不传 = 没这个工具可调） */
+  quoteMessage?: (id: number) => QuoteMessageLookup
   /** 记账：整次循环结束后一次（含失败路径已消耗的量） */
   onUsage?: (usage: LlmUsage, meta: AskUsageMeta) => void
   /** 从暂停点恢复（`ask.ts` 按检查点回填）；暂停轮的 turns / 白名单 / 计数都在里面 */
@@ -340,6 +348,8 @@ function summarizeToolOutcome(
       return result.ok
         ? `${result.growthKind === 'weekly' ? '周记' : '日记'}已写（${result.period}，${result.chars} 字）`
         : '成长档案没写成'
+    case 'quote_message':
+      return result.ok ? `引用 #${result.id}` : '引用没成'
     default:
       return `失败：${result.message}`
   }
@@ -368,11 +378,22 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   const steps: ChainAskTraceStep[] = resume ? [...resume.steps] : []
   /** 这一问里传承成功（M4）：答复只显示，不写会话；下一问从空白开始 */
   let conceived = resume?.conceived === true
-  const withTrace = (result: ChainAskResult): ChainAskResult => ({
-    ...result,
-    ...(conceived ? { conceived: true as const } : {}),
-    ...(steps.length > 0 ? { trace: { steps } } : {})
-  })
+  /**
+   * QQ 出站引用（D96）：`quote_message` 选中的真实 QQ message_id。
+   * 只挂在「有正文的回答」上；报错 / 澄清不带（引用一句报错很奇怪）。
+   */
+  let replyToTarget: number | undefined
+  const withTrace = (result: ChainAskResult): ChainAskResult => {
+    const quoted =
+      replyToTarget !== undefined &&
+      (result.kind === 'answer' || result.kind === 'insufficient' || result.kind === 'no-evidence')
+    return {
+      ...result,
+      ...(quoted ? { replyTo: replyToTarget } : {}),
+      ...(conceived ? { conceived: true as const } : {}),
+      ...(steps.length > 0 ? { trace: { steps } } : {})
+    }
+  }
 
   /** 归档表（D88）：本会话出现过的图 / 文本附件 → 可按 id 取回（数据只从会话历史来，不碰磁盘） */
   const recallArchive = new Map<string, RecalledAttachment>()
@@ -390,6 +411,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.tasks ? { tasks: ctx.tasks } : {}),
     ...(ctx.notebook ? { notebook: ctx.notebook } : {}),
     ...(ctx.growth ? { growth: ctx.growth } : {}),
+    ...(ctx.quoteMessage ? { quoteMessage: ctx.quoteMessage } : {}),
     ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId),
@@ -447,6 +469,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         recallArchive.set(id, { id, media: 'file', text: file.text, name: file.name })
       }
     }
+    // QQ 引用 / 最近聊天不在归档表里：它们只跟着对应的 user 消息走
   }
 
   // 问题敏感：循环开始前一次判定（与单发路径同口径——宁可答「没找到」，不发敏感问题）
@@ -466,7 +489,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.history ? { history: ctx.history } : {}),
     ...(ctx.recent ? { recent: ctx.recent } : {}),
     ...(ctx.life ? { life: ctx.life } : {}),
-    ...(ctx.attachments ? { attachments: ctx.attachments } : {})
+    ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+    ...(ctx.quoted ? { quoted: ctx.quoted } : {}),
+    ...(ctx.chatRecent ? { chatRecent: ctx.chatRecent } : {})
   })
   if (probe.questionBlocked) {
     return { kind: 'error', reason: 'question-blocked', message: '问题里含敏感内容，未出云', stats }
@@ -517,7 +542,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
             now: payload.now,
             turns: payload.turns,
             answer: text,
-            ...(attachments !== undefined ? { attachments } : {})
+            ...(attachments !== undefined ? { attachments } : {}),
+            ...(payload.quoted !== undefined ? { quoted: payload.quoted } : {}),
+            ...(payload.chatRecent !== undefined ? { chatRecent: payload.chatRecent } : {})
           }
         )
       )
@@ -595,7 +622,9 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       ...(ctx.unreadLetters !== undefined ? { letters: { unread: ctx.unreadLetters } } : {}),
       ...(ctx.dueTasks ? { tasks: { due: ctx.dueTasks() } } : {}),
       ...(ctx.notebook ? { notebook: ctx.notebook.read() } : {}),
-      ...(ctx.attachments ? { attachments: ctx.attachments } : {})
+      ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
+      ...(ctx.quoted ? { quoted: ctx.quoted } : {}),
+      ...(ctx.chatRecent ? { chatRecent: ctx.chatRecent } : {})
     })
     // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；
     // 用可见集合而不是「累加后删除被挡 id」，是避免粘性误删——同一段后续轮次
@@ -688,6 +717,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         const toolStartedAt = Date.now()
         const outcome = await executor.execute({ name: call.name, arguments: call.arguments })
         if (outcome.result.kind === 'give_birth') conceived = true
+        // QQ 引用（D96）：记下这一问要回复的那条（真实 QQ id），最后挂到结果上
+        if (outcome.replyTo !== undefined) replyToTarget = outcome.replyTo
         const toolMs = Date.now() - toolStartedAt
         turns.push({
           toolCall: { name: call.name, arguments: call.arguments },

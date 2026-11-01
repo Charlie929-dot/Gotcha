@@ -42,10 +42,13 @@ import type {
   LetterToolDeps,
   NotebookToolDeps,
   GrowthToolDeps,
+  QuoteMessageLookup,
   TaskToolDeps
 } from './tools'
 import {
   EVIDENCE_TEXT_CHARS,
+  type ChainAskChatRecent,
+  type ChainAskQuotedMessage,
   type ChainAskRelatedSegment,
   type ChainAskResult,
   type ChainAskResumeDecision,
@@ -150,6 +153,16 @@ export interface ChainAskOptions {
     readonly images?: readonly string[]
     readonly files?: readonly { readonly name: string; readonly text: string }[]
   }
+  /**
+   * QQ 引用回复（D96 / PR1）：通道解出来的被引用原话与最近几条聊天。
+   * 只进用户消息，不动 system；单发回退路径不带（QQ 走工具循环）。
+   */
+  quoted?: ChainAskQuotedMessage
+  chatRecent?: readonly ChainAskChatRecent[]
+  /**
+   * `quote_message` 的短号查询端口（QQ 通道注入；桌面不传 = 没这个工具）。
+   */
+  quoteMessage?: (id: number) => QuoteMessageLookup
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 默认回忆助手口吻） */
   personaPrompt?: string
   /**
@@ -370,6 +383,9 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.imageDataUrl ? { image: { dataUrl: options.imageDataUrl } } : {}),
         ...(options.attachments ? { attachments: options.attachments } : {}),
+        ...(options.quoted ? { quoted: options.quoted } : {}),
+        ...(options.chatRecent ? { chatRecent: options.chatRecent } : {}),
+        ...(options.quoteMessage ? { quoteMessage: options.quoteMessage } : {}),
         ...(options.conversation ? { conversation: options.conversation } : {}),
         ...(options.onUsage ? { onUsage: options.onUsage } : {}),
         log

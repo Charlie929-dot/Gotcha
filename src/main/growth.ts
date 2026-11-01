@@ -2,11 +2,11 @@
  * 成长档案 · 主进程接线（自调用 v0.2 §8 / §12.3，2026-11-01）
  *
  * 把 `src/memory/growth.ts` 的文件读写包成链层要的口子：
- * - `write()`：`write_growth` 的执行端口（日记 / 周记落盘，已有就覆盖）；
+ * - `write()`：`write_growth` 的执行端口（日记 / 周记 / 月末总结 / 年终总结落盘，已有就覆盖）；
  * - `list()` / `show()`：`/growth` 的列表与全文；
- * - `hasEntry()`：周日日记写完后判断「这周周记写了没」（串周记用）。
+ * - `hasEntry()`：上一层的写作任务写完后判断「这一篇写了没」（串下一篇用）。
  *
- * 文件在**记忆仓**里：`<memory-repo>/growth/{daily,weekly}/`。用户 Obsidian 的日记
+ * 文件在**记忆仓**里：`<memory-repo>/growth/{daily,weekly,monthly,yearly}/`。用户 Obsidian 的日记
  * 一个字节都不碰；成长档案也不每轮注入（§8：只有少量结论回流小本本）。
  */
 
@@ -17,6 +17,8 @@ import {
   emptyGrowthText,
   growthEntryText,
   growthKeyOf,
+  growthKindLabel,
+  growthKindOfKey,
   growthListText,
   isGrowthKey,
   readGrowthEntry,
@@ -82,14 +84,17 @@ export function createGrowthStore(options: {
     list: () => growthListText(options.root),
     show: (rawKey) => {
       const key = rawKey.trim()
-      if (key === '') return '用法：/growth <日期 2026-11-01 | 周 2026-W44>'
-      const kind: GrowthKind = /^\d{4}-W\d{2}$/u.test(key) ? 'weekly' : 'daily'
-      if (!isGrowthKey(kind, key)) {
-        return `不认识的日期 / 周：${key}（日记写 2026-11-01，周记写 2026-W44）`
+      if (key === '') {
+        return '用法：/growth <日期 2026-11-01 | 周 2026-W44 | 月 2026-11 | 年 2026>'
+      }
+      // 四层键各有形状（2026 / 2026-11 / 2026-11-01 / 2026-W44）：不猜，认不出来就说不认识
+      const kind = growthKindOfKey(key)
+      if (kind === null || !isGrowthKey(kind, key)) {
+        return `不认识的日期 / 周 / 月 / 年：${key}（日记 2026-11-01，周记 2026-W44，月末总结 2026-11，年终总结 2026）`
       }
       const entry = readGrowthEntry(options.root, kind, key)
       if (entry === null) {
-        return `成长档案里还没有 ${key} 这一篇（${emptyGrowthText()}）`
+        return `成长档案里还没有 ${key} 这一篇${growthKindLabel(kind)}（${emptyGrowthText()}）`
       }
       return growthEntryText(entry)
     },

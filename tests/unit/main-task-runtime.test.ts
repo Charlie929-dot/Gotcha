@@ -257,10 +257,48 @@ describe('运行时', () => {
     expect(daily).toMatchObject({ origin: 'agent', delivery: 'background', repeat: '每天' })
 
     // 周日 + 这周没写：排一条周记；再问一次不重复
-    const weekly = runtime.scheduleWeeklyWriting({ weeklyWritten: false })
+    const weekly = runtime.scheduleNextGrowthWriting({
+      weekly: false,
+      monthly: false,
+      yearly: false
+    })
     expect(weekly).not.toBeNull()
-    expect(runtime.scheduleWeeklyWriting({ weeklyWritten: false })).toBeNull()
-    expect(runtime.scheduleWeeklyWriting({ weeklyWritten: true })).toBeNull()
+    expect(
+      runtime.scheduleNextGrowthWriting({ weekly: false, monthly: false, yearly: false })
+    ).toBeNull()
+    expect(runtime.scheduleNextGrowthWriting({ weekly: true, monthly: false, yearly: false })).toBeNull()
+    runtime.stop()
+  })
+
+  it('成长档案：12-31 日记写完先串月末总结，写完再串年终总结（一次只排一件）', () => {
+    openDatabase(dbPath).close()
+    const yearEnd = at('2026-12-31', '23:35')
+    const runtime = createTaskRuntime({
+      dbPath,
+      now: () => yearEnd,
+      vaultDir: () => null,
+      backupDir: () => null,
+      deliver: () => undefined,
+      log: () => {},
+      setTimer: () => null,
+      clearTimer: () => undefined
+    })
+    runtime.seedGrowthTask()
+    // 12-31 不是周日 → 先月末总结
+    const monthly = runtime.scheduleNextGrowthWriting({
+      weekly: false,
+      monthly: false,
+      yearly: false
+    })
+    expect(monthly).not.toBeNull()
+    // 月末那条还挂着：年终总结不许插队
+    expect(
+      runtime.scheduleNextGrowthWriting({ weekly: false, monthly: false, yearly: false })
+    ).toBeNull()
+    const view = runtime.admin()
+    const instructionOf = (id: number | null): string =>
+      view.tasks.find((task) => task.id === id)?.instruction ?? ''
+    expect(instructionOf(monthly)).toBe('写月末总结')
     runtime.stop()
   })
 

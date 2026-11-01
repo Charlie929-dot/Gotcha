@@ -31,7 +31,7 @@ import {
 } from '../memory/agent/tasks'
 import { createTaskToolPort, type TaskToolPort } from '../memory/agent/task-tools'
 import { createTaskScheduler, type TaskScheduler } from '../memory/agent/scheduler'
-import { ensureGrowthDailyTask, ensureWeeklyWritingTask } from '../memory/agent/growth-tasks'
+import { ensureGrowthDailyTask, ensureNextGrowthWriting } from '../memory/agent/growth-tasks'
 
 export interface TaskRuntimeDeps {
   /** 库文件路径（`userData/memory.db`）；文件不存在 = 还没采集过，运行时不建库 */
@@ -103,10 +103,14 @@ export interface TaskRuntime {
    */
   seedGrowthTask: () => number | null
   /**
-   * 日记写完后串一条「写这一周的周记」（周日 / 这周没写 / 今天没排过才建）。
+   * 一层成长档案写完 → 串下一篇（周日周记 / 月末总结 / 年终总结，一次只做一件）。
    * 返回新任务 id；这次不用排 = null。
    */
-  scheduleWeeklyWriting: (input: { weeklyWritten: boolean }) => number | null
+  scheduleNextGrowthWriting: (progress: {
+    weekly: boolean
+    monthly: boolean
+    yearly: boolean
+  }) => number | null
 }
 
 /** 合流窗口：到点前多久就把它列进 `<now>`（与既有 10 分钟窗口同口径） */
@@ -290,13 +294,13 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
         return null
       }
     },
-    scheduleWeeklyWriting: ({ weeklyWritten }) => {
+    scheduleNextGrowthWriting: (progress) => {
       const current = handle()
       if (current === null) return null
       try {
-        return ensureWeeklyWritingTask(current, now(), { weeklyWritten })?.task.id ?? null
+        return ensureNextGrowthWriting(current, now(), progress)?.task.id ?? null
       } catch (error) {
-        deps.log('warn', 'weekly writing schedule failed', { error: String(error) })
+        deps.log('warn', 'growth writing schedule failed', { error: String(error) })
         return null
       }
     }

@@ -57,6 +57,21 @@ describe('createGrowthStore', () => {
     expect(store.hasEntry('daily', NOW)).toBe(false)
   })
 
+  it('写月末总结 / 年终总结：落在 growth/monthly/<YYYY-MM> 与 growth/yearly/<YYYY>', () => {
+    const store = createGrowthStore({ root, now: () => NOW })
+    const monthly = store.write({ kind: 'monthly', content: '这个月把第三层做完了。' })
+    expect(monthly).toMatchObject({ ok: true, kind: 'monthly', period: '2026-11' })
+    expect(monthly.message).toContain(join('growth', 'monthly', '2026-11.md'))
+    expect(store.hasEntry('monthly', NOW)).toBe(true)
+
+    const yearly = store.write({ kind: 'yearly', content: '这一年从头到尾。' })
+    expect(yearly).toMatchObject({ ok: true, kind: 'yearly', period: '2026' })
+    expect(yearly.message).toContain(join('growth', 'yearly', '2026.md'))
+    expect(store.hasEntry('yearly', NOW)).toBe(true)
+    // 互不串台：写了年终不代表写过月末
+    expect(store.hasEntry('weekly', NOW)).toBe(false)
+  })
+
   it('空 / 超长：不落盘，旧文件不动', () => {
     const store = createGrowthStore({ root, now: () => NOW })
     store.write({ kind: 'daily', content: '原来的' })
@@ -90,5 +105,21 @@ describe('createGrowthStore', () => {
     expect(store.show('2026-10-30')).toContain('还没有')
     expect(store.show('不是日期')).toContain('不认识的')
     expect(store.show('')).toContain('用法')
+  })
+
+  it('show 认得四层键（不把 2026-11 当日期、不把 2026 当月份）', () => {
+    const store = createGrowthStore({ root, now: () => NOW })
+    store.write({ kind: 'daily', content: '今天的日记' })
+    store.write({ kind: 'monthly', content: '这个月的月末总结' })
+    store.write({ kind: 'yearly', content: '这一年的年终总结' })
+
+    expect(store.show('2026-11')).toContain('这个月的月末总结')
+    expect(store.show('2026-11')).toContain(join('growth', 'monthly', '2026-11.md'))
+    expect(store.show('2026')).toContain('这一年的年终总结')
+    expect(store.show('2026')).toContain(join('growth', 'yearly', '2026.md'))
+    // 越界 / 形状不对：说不认识，不猜成别的层
+    expect(store.show('2026-13')).toContain('不认识的')
+    expect(store.show('2026-11-1')).toContain('不认识的')
+    expect(store.show('2025-11')).toContain('还没有')
   })
 })

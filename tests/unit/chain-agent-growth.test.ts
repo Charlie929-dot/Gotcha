@@ -86,12 +86,47 @@ describe('write_growth 参数', () => {
     expect(callsOf(growth)).toEqual([{ kind: 'weekly', content: '这一周……' }])
   })
 
-  it('缺 kind / 缺正文 / 太长都拒，不调存储层', async () => {
+  it('monthly / yearly 也走同一个口（月末总结 / 年终总结）', async () => {
+    const monthly = fakeGrowth({
+      write: vi.fn(() => ({
+        ok: true,
+        message: '月末总结已写入 growth/monthly/2026-11.md（20 字）',
+        kind: 'monthly' as const,
+        period: '2026-11',
+        chars: 20
+      }))
+    })
+    const monthlyRun = executor(monthly)
+    const first = await monthlyRun.tool.execute({
+      name: 'write_growth',
+      arguments: { kind: 'monthly', content: '这个月……' }
+    })
+    expect(first.result).toMatchObject({ kind: 'write_growth', growthKind: 'monthly', period: '2026-11' })
+    expect(callsOf(monthly)).toEqual([{ kind: 'monthly', content: '这个月……' }])
+
+    const yearly = fakeGrowth({
+      write: vi.fn(() => ({
+        ok: true,
+        message: '年终总结已写入 growth/yearly/2026.md（30 字）',
+        kind: 'yearly' as const,
+        period: '2026',
+        chars: 30
+      }))
+    })
+    const yearlyRun = executor(yearly)
+    await yearlyRun.tool.execute({
+      name: 'write_growth',
+      arguments: { kind: 'yearly', content: '这一年……' }
+    })
+    expect(callsOf(yearly)).toEqual([{ kind: 'yearly', content: '这一年……' }])
+  })
+
+  it('缺 kind / 缺正文 / 太长的正文 / 认不出的 kind 都拒，不调存储层', async () => {
     const growth = fakeGrowth()
     const { tool } = executor(growth)
     for (const args of [
       {},
-      { kind: 'monthly', content: 'x' },
+      { kind: 'month', content: 'x' },
       { kind: 'daily' },
       { kind: 'daily', content: '   ' },
       { kind: 'daily', content: 'a'.repeat(4001) }

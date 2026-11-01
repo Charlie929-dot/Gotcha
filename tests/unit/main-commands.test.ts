@@ -281,7 +281,7 @@ describe('命令执行', () => {
     expect(textOf(await run('/notebook whatever'))).toContain('用法')
   })
 
-  it('/growth：没接上时如实说；接上后列表与按日期 / 周看全文', async () => {
+  it('/growth：没接上时如实说；接上后列表与按日期 / 周 / 月 / 年看全文', async () => {
     const lineageFile = tempLineageFile()
     await ensureLineage(lineageFile, { now: 1 })
     const bare = createCommandHandler({ repo: fakeRepo(), lineageFile })
@@ -305,7 +305,10 @@ describe('命令执行', () => {
     expect(list).toContain('2026-11-01（周日）')
     expect(textOf(await run('/growth 2026-11-01'))).toContain('今天在改自调用。')
     expect(textOf(await run('/growth 2026-W44'))).toContain('2026-W44')
-    expect(shown).toEqual(['2026-11-01', '2026-W44'])
+    // 月末总结 / 年终总结：键原样交给 store（形状由它判）
+    expect(textOf(await run('/growth 2026-11'))).toContain('2026-11')
+    expect(textOf(await run('/growth 2026'))).toContain('2026')
+    expect(shown).toEqual(['2026-11-01', '2026-W44', '2026-11', '2026'])
     // 多余参数不猜
     expect(textOf(await run('/growth 2026-11-01 extra'))).toContain('用法')
   })

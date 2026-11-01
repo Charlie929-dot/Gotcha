@@ -17,7 +17,7 @@ import {
 import { buildPersonaPrompt, personaCardDir, readPersona, readPersonaCard, resolveVaultDir, savePersonaCard } from '../memory/persona'
 import type { TaskOutcome, TaskRow } from '../memory/agent/tasks'
 import { createTaskRuntime, type TaskRuntime } from './task-runtime'
-import { isGrowthDailyTask } from '../memory/agent/growth-tasks'
+import { isGrowthWritingTask } from '../memory/agent/growth-tasks'
 import {
   applyMemoryPatch,
   buildMemorySettingsView,
@@ -319,7 +319,7 @@ let disposeAskIpc: (() => void) | null = null
 let stopMemorySchedule: (() => void) | null = null
 /** 任务运行时（自调用 v0.2）：任务库连接 + 到点调度器；退出时停掉 */
 let taskRuntime: TaskRuntime | null = null
-/** 成长档案（§8）：「每天写日记」那条自主任务的 id（周日串周记用；没有 = null） */
+/** 成长档案（§8）：「每天写日记」那条自主任务的 id（写完串下一篇用；没有 = null） */
 let growthDailyTaskId: number | null = null
 /** QQ 通道（D63）：默认关闭；挂在这里是为了 before-quit 能直接收口端口 */
 let qqChannel: QqChannel | null = null
@@ -3316,17 +3316,22 @@ if (primaryInstance) {
             askWindow.webContents.send('ask:task-said', { conversationId })
           }
         }
-        // 成长档案（自调用 v0.2 §8）：周日那篇日记写完后，串一条周记——
-        // 一次只做一件事，周记排到几分钟后；这周已经写过就不排。
-        if (task.id === growthDailyTaskId || isGrowthDailyTask(task)) {
+        // 成长档案（自调用 v0.2 §8）：一层写完串下一篇——
+        // 日记 →（周日）周记 →（月末）月末总结 →（年末）年终总结；一次只做一件，每步 +2 分钟。
+        if (task.id === growthDailyTaskId || isGrowthWritingTask(task)) {
           try {
-            const weeklyWritten = growthStore.hasEntry('weekly', Date.now())
-            const scheduled = taskRuntime?.scheduleWeeklyWriting({ weeklyWritten }) ?? null
+            const at = Date.now()
+            const scheduled =
+              taskRuntime?.scheduleNextGrowthWriting({
+                weekly: growthStore.hasEntry('weekly', at),
+                monthly: growthStore.hasEntry('monthly', at),
+                yearly: growthStore.hasEntry('yearly', at)
+              }) ?? null
             if (scheduled !== null) {
-              captureLog('info', 'weekly writing scheduled', { id: scheduled })
+              captureLog('info', 'growth writing scheduled', { id: scheduled })
             }
           } catch (error) {
-            captureLog('warn', 'weekly writing schedule failed', { error: String(error) })
+            captureLog('warn', 'growth writing schedule failed', { error: String(error) })
           }
         }
         return {}

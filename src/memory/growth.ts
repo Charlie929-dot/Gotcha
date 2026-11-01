@@ -2,7 +2,8 @@
  * 成长档案 · ta 自己的日记与周记（自调用 v0.2 §8 / §12.3，2026-11-01）
  *
  * 载体：**记忆仓里的 `growth/` 目录**（`growth/daily/YYYY-MM-DD.md`、
- * `growth/weekly/YYYY-Www.md`）。三条边界：
+ * `growth/weekly/YYYY-Www.md`、`growth/monthly/YYYY-MM.md`、`growth/yearly/YYYY.md`）。
+ * 三条边界：
  *
  * 1. 只写 ta 自己的记忆仓库——用户 Obsidian 的日记一个字节都不碰（计划区是唯一例外，
  *    而且由计划同步器写）；
@@ -28,17 +29,59 @@ import { dirname, join } from 'node:path'
 /* 类型与上限                                                          */
 /* ------------------------------------------------------------------ */
 
-export const GROWTH_KINDS = ['daily', 'weekly'] as const
+export const GROWTH_KINDS = ['daily', 'weekly', 'monthly', 'yearly'] as const
 export type GrowthKind = (typeof GROWTH_KINDS)[number]
 
 /** 日记一天一篇：太长就不是日记了，让 ta 挑重点（不静默截断） */
 export const GROWTH_DAILY_MAX_CHARS = 1200
 /** 周记一篇一周：比日记长一点，但仍然有界 */
 export const GROWTH_WEEKLY_MAX_CHARS = 2000
+/** 月末总结一篇一月（2026-11-01 拍板：与周记同口径 2000 字） */
+export const GROWTH_MONTHLY_MAX_CHARS = 2000
+/** 年终总结一篇一年（同样 2000 字：一年也只留真正变了的线） */
+export const GROWTH_YEARLY_MAX_CHARS = 2000
 /** 记忆仓里的目录名 */
 export const GROWTH_DIR_NAME = 'growth'
 export const GROWTH_DAILY_DIR = 'daily'
 export const GROWTH_WEEKLY_DIR = 'weekly'
+export const GROWTH_MONTHLY_DIR = 'monthly'
+export const GROWTH_YEARLY_DIR = 'yearly'
+
+/** 种类 → 目录（一层表格，别再写 binary 三元） */
+const GROWTH_DIRS: Readonly<Record<GrowthKind, string>> = {
+  daily: GROWTH_DAILY_DIR,
+  weekly: GROWTH_WEEKLY_DIR,
+  monthly: GROWTH_MONTHLY_DIR,
+  yearly: GROWTH_YEARLY_DIR
+}
+
+/** 种类 → 字数上限 */
+const GROWTH_LIMITS: Readonly<Record<GrowthKind, number>> = {
+  daily: GROWTH_DAILY_MAX_CHARS,
+  weekly: GROWTH_WEEKLY_MAX_CHARS,
+  monthly: GROWTH_MONTHLY_MAX_CHARS,
+  yearly: GROWTH_YEARLY_MAX_CHARS
+}
+
+/** 种类 → 人话（回执 / 列表 / 拒绝文案都用它） */
+const GROWTH_LABELS: Readonly<Record<GrowthKind, string>> = {
+  daily: '日记',
+  weekly: '周记',
+  monthly: '月末总结',
+  yearly: '年终总结'
+}
+
+/** 种类 → 键是什么（「不认识的月份」这类拒绝文案用） */
+const GROWTH_KEY_NOUNS: Readonly<Record<GrowthKind, string>> = {
+  daily: '日期',
+  weekly: '周',
+  monthly: '月份',
+  yearly: '年份'
+}
+
+export function growthKindLabel(kind: GrowthKind): string {
+  return GROWTH_LABELS[kind]
+}
 
 export interface GrowthEntry {
   kind: GrowthKind
@@ -75,6 +118,8 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const
 const DAILY_KEY_RE = /^(\d{4})-(\d{2})-(\d{2})$/u
 const WEEKLY_KEY_RE = /^(\d{4})-W(\d{2})$/u
+const MONTHLY_KEY_RE = /^(\d{4})-(\d{2})$/u
+const YEARLY_KEY_RE = /^(\d{4})$/u
 
 function pad2(value: number): string {
   return value < 10 ? `0${value}` : String(value)
@@ -117,26 +162,77 @@ export function isGrowthKind(value: string): value is GrowthKind {
   return (GROWTH_KINDS as readonly string[]).includes(value)
 }
 
-/** 某时刻该写哪一篇：日记 = 本地日，周记 = ISO 周 */
+/** `2026-11`（月末总结的键，本地月） */
+export function localMonthKey(ts: number): string {
+  const date = new Date(ts)
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`
+}
+
+/** `2026`（年终总结的键，本地年） */
+export function localYearKey(ts: number): string {
+  return String(new Date(ts).getFullYear())
+}
+
+/** 某时刻该写哪一篇：日记 = 本地日，周记 = ISO 周，月末总结 = 本地月，年终总结 = 本地年 */
 export function growthKeyOf(kind: GrowthKind, ts: number): string {
-  return kind === 'daily' ? localDayKey(ts) : isoWeekKey(ts)
+  if (kind === 'daily') return localDayKey(ts)
+  if (kind === 'weekly') return isoWeekKey(ts)
+  if (kind === 'monthly') return localMonthKey(ts)
+  return localYearKey(ts)
+}
+
+/**
+ * `/growth <键>` 的键属于哪一层：`2026-11-01` 日记 / `2026-W44` 周记 /
+ * `2026-11` 月末总结 / `2026` 年终总结；都不像就给 null（不猜）。
+ */
+export function growthKindOfKey(key: string): GrowthKind | null {
+  const trimmed = key.trim()
+  if (DAILY_KEY_RE.test(trimmed)) return 'daily'
+  if (WEEKLY_KEY_RE.test(trimmed)) return 'weekly'
+  if (MONTHLY_KEY_RE.test(trimmed)) return 'monthly'
+  if (YEARLY_KEY_RE.test(trimmed)) return 'yearly'
+  return null
 }
 
 export function isGrowthKey(kind: GrowthKind, key: string): boolean {
-  const match = kind === 'daily' ? DAILY_KEY_RE.exec(key) : WEEKLY_KEY_RE.exec(key)
+  if (kind === 'daily') {
+    const match = DAILY_KEY_RE.exec(key)
+    if (match === null) return false
+    const year = Number(match[1])
+    const month = Number(match[2])
+    const day = Number(match[3])
+    return year >= 1970 && month >= 1 && month <= 12 && day >= 1 && day <= 31
+  }
+  if (kind === 'weekly') {
+    const match = WEEKLY_KEY_RE.exec(key)
+    if (match === null) return false
+    const year = Number(match[1])
+    const week = Number(match[2])
+    return year >= 1970 && week >= 1 && week <= 53
+  }
+  if (kind === 'monthly') {
+    const match = MONTHLY_KEY_RE.exec(key)
+    if (match === null) return false
+    const year = Number(match[1])
+    const month = Number(match[2])
+    return year >= 1970 && month >= 1 && month <= 12
+  }
+  const match = YEARLY_KEY_RE.exec(key)
   if (match === null) return false
   const year = Number(match[1])
-  const n = Number(match[2])
-  if (kind === 'daily') {
-    const month = n
-    const day = Number(match[3])
-    return month >= 1 && month <= 12 && day >= 1 && day <= 31
-  }
-  return n >= 1 && n <= 53 && year >= 1970
+  return year >= 1970 && year <= 9999
 }
 
-/** 标题里的人话：`2026-11-01（周六）` / `2026 第 44 周（11-01 ~ 11-07）` */
+/** 标题里的人话：`2026-11-01（周六）` / `2026 第 44 周（11-01 ~ 11-07）` / `2026 年 11 月` / `2026 年` */
 export function growthTitle(kind: GrowthKind, key: string): string {
+  if (kind === 'monthly') {
+    const match = MONTHLY_KEY_RE.exec(key)
+    if (match === null) return key
+    return `${match[1]} 年 ${Number(match[2])} 月`
+  }
+  if (kind === 'yearly') {
+    return `${key} 年`
+  }
   if (kind === 'daily') {
     const match = DAILY_KEY_RE.exec(key)
     if (match === null) return key
@@ -161,7 +257,7 @@ export function growthTitle(kind: GrowthKind, key: string): string {
 /* ------------------------------------------------------------------ */
 
 export function growthRelativePath(kind: GrowthKind, key: string): string {
-  return join(GROWTH_DIR_NAME, kind === 'daily' ? GROWTH_DAILY_DIR : GROWTH_WEEKLY_DIR, `${key}.md`)
+  return join(GROWTH_DIR_NAME, GROWTH_DIRS[kind], `${key}.md`)
 }
 
 export function growthFilePath(root: string, kind: GrowthKind, key: string): string {
@@ -173,7 +269,7 @@ export function growthFilePath(root: string, kind: GrowthKind, key: string): str
 /* ------------------------------------------------------------------ */
 
 export function growthBodyLimit(kind: GrowthKind): number {
-  return kind === 'daily' ? GROWTH_DAILY_MAX_CHARS : GROWTH_WEEKLY_MAX_CHARS
+  return GROWTH_LIMITS[kind]
 }
 
 /**
@@ -205,7 +301,7 @@ export function checkGrowthBody(
   if (body.length > limit) {
     return {
       ok: false,
-      message: `太长（${body.length} 字，${kind === 'daily' ? '日记' : '周记'}最多 ${limit} 字）。挑最重要的写；细节留在记忆里。`
+      message: `太长（${body.length} 字，${growthKindLabel(kind)}最多 ${limit} 字）。挑最重要的写；细节留在记忆里。`
     }
   }
   return { ok: true, body }
@@ -257,7 +353,9 @@ export function writeGrowthEntry(
   key: string,
   rawBody: string
 ): GrowthWriteOutcome {
-  if (!isGrowthKey(kind, key)) return { ok: false, message: `不认识的${kind === 'daily' ? '日期' : '周'}：${key}` }
+  if (!isGrowthKey(kind, key)) {
+    return { ok: false, message: `不认识的${GROWTH_KEY_NOUNS[kind]}：${key}` }
+  }
   const checked = checkGrowthBody(kind, rawBody)
   if (!checked.ok) return checked
   const path = growthFilePath(root, kind, key)
@@ -278,7 +376,7 @@ export function writeGrowthEntry(
     body: checked.body,
     path: growthRelativePath(kind, key)
   }
-  const label = kind === 'daily' ? '日记' : '周记'
+  const label = growthKindLabel(kind)
   return {
     ok: true,
     entry,
@@ -289,7 +387,7 @@ export function writeGrowthEntry(
 
 /** 目录里已有的键，新到旧；目录不存在 = 空 */
 export function listGrowthKeys(root: string, kind: GrowthKind): string[] {
-  const dir = join(root, GROWTH_DIR_NAME, kind === 'daily' ? GROWTH_DAILY_DIR : GROWTH_WEEKLY_DIR)
+  const dir = join(root, GROWTH_DIR_NAME, GROWTH_DIRS[kind])
   if (!existsSync(dir)) return []
   let names: string[]
   try {
@@ -312,29 +410,34 @@ export function emptyGrowthText(): string {
   return '成长档案还是空的——等 ta 写下第一篇日记，这里就会有内容。'
 }
 
-/** `/growth` 的列表：最近 7 篇日记 + 最近 3 篇周记（只给键与字数，全文按需看） */
-export function growthListText(root: string, dailyLimit = 7, weeklyLimit = 3): string {
-  const daily = listGrowthKeys(root, 'daily').slice(0, dailyLimit)
-  const weekly = listGrowthKeys(root, 'weekly').slice(0, weeklyLimit)
-  if (daily.length === 0 && weekly.length === 0) return emptyGrowthText()
+/** `/growth` 的列表：最近 7 篇日记 + 3 篇周记 + 3 篇月末总结 + 2 篇年终总结（只给键与字数，全文按需看） */
+export function growthListText(
+  root: string,
+  dailyLimit = 7,
+  weeklyLimit = 3,
+  monthlyLimit = 3,
+  yearlyLimit = 2
+): string {
+  const sections: ReadonlyArray<{ kind: GrowthKind; limit: number; heading: string }> = [
+    { kind: 'daily', limit: dailyLimit, heading: '日记（最近几篇）' },
+    { kind: 'weekly', limit: weeklyLimit, heading: '周记（最近几篇）' },
+    { kind: 'monthly', limit: monthlyLimit, heading: '月末总结（最近几篇）' },
+    { kind: 'yearly', limit: yearlyLimit, heading: '年终总结（最近几篇）' }
+  ]
+  const keys = sections.map((section) => listGrowthKeys(root, section.kind).slice(0, section.limit))
+  if (keys.every((list) => list.length === 0)) return emptyGrowthText()
   const lines = [`成长档案（ta 自己的日记；文件在记忆仓的 ${GROWTH_DIR_NAME}/）`]
-  if (daily.length > 0) {
-    lines.push('', '日记（最近几篇）')
-    for (const key of daily) {
-      const entry = readGrowthEntry(root, 'daily', key)
+  for (const [index, section] of sections.entries()) {
+    const list = keys[index] ?? []
+    if (list.length === 0) continue
+    lines.push('', section.heading)
+    for (const key of list) {
+      const entry = readGrowthEntry(root, section.kind, key)
       if (entry === null) continue
       lines.push(`  ${entry.title} · ${entry.body.length} 字`)
     }
   }
-  if (weekly.length > 0) {
-    lines.push('', '周记（最近几篇）')
-    for (const key of weekly) {
-      const entry = readGrowthEntry(root, 'weekly', key)
-      if (entry === null) continue
-      lines.push(`  ${entry.title} · ${entry.body.length} 字`)
-    }
-  }
-  lines.push('', '看全文：/growth 2026-11-01 或 /growth 2026-W44')
+  lines.push('', '看全文：/growth 2026-11-01（日记）· 2026-W44（周记）· 2026-11（月末）· 2026（年终）')
   return lines.join('\n')
 }
 

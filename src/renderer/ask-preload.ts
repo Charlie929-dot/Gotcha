@@ -18,6 +18,8 @@ import type { MemoryDeleteView, MemoryListView, MemoryRestoreView } from '../mai
 import type { MemoryRepoSettingsView } from '../main/memory-repo-settings'
 import type { TaskAdminView } from '../main/task-runtime'
 import type { NotebookAdminView } from '../main/notebook'
+import type { GrowthEntryView, GrowthPage } from '../main/growth'
+import type { GrowthKind } from '../memory/growth'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from '../main/qq/qq-settings'
 import type { NapcatView } from '../main/qq/napcat'
@@ -99,6 +101,9 @@ export interface AskApi {
   notebookView(): Promise<NotebookAdminView>
   notebookRemove(id: string): Promise<NotebookAdminActionResult>
   notebookUpdate(id: string, text: string): Promise<NotebookAdminActionResult>
+  /* ---- 成长档案（自调用 v0.2 §8）：四类各自翻页 / 点开一篇看全文（只读） ---- */
+  growthPage(kind: GrowthKind, page: number): Promise<GrowthPage | null>
+  growthEntry(key: string): Promise<GrowthEntryView>
   /* ---- QQ 通道（D63）：NapCat 反向 WS 拨入本机；默认关闭 ---- */
   qqSettings(): Promise<QqSettingsView | { error: string }>
   saveQqSettings(patch: unknown): Promise<QqSettingsSaveResult>
@@ -184,6 +189,9 @@ const api: AskApi = {
     ipcRenderer.invoke('ask:notebook:remove', { id }) as Promise<NotebookAdminActionResult>,
   notebookUpdate: (id, text) =>
     ipcRenderer.invoke('ask:notebook:update', { id, text }) as Promise<NotebookAdminActionResult>,
+  growthPage: (kind, page) =>
+    ipcRenderer.invoke('ask:growth:page', { kind, page }) as Promise<GrowthPage | null>,
+  growthEntry: (key) => ipcRenderer.invoke('ask:growth:entry', { key }) as Promise<GrowthEntryView>,
   qqSettings: () => ipcRenderer.invoke('ask:qq:get') as Promise<QqSettingsView | { error: string }>,
   saveQqSettings: (patch) =>
     ipcRenderer.invoke('ask:qq:save', patch) as Promise<QqSettingsSaveResult>,

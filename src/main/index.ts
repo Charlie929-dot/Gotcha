@@ -3218,6 +3218,9 @@ if (primaryInstance) {
         const result = notebookStore.update({ action: 'revise', id, text })
         return { ok: result.ok, message: result.message, view: notebookStore.view() }
       },
+      // 设置抽屉「成长档案」（自调用 v0.2 §8）：四类各自翻页 + 点开一篇看全文。只读。
+      growthPage: (kind, page) => growthStore.page(kind, page),
+      growthEntry: (key) => growthStore.entry(key),
       // 人格卡（D62）：导入即启用；写卡不碰库，启用卡要写 settings（回答中拒绝开写连接）
       savePersonaCard: (name, text) => {
         const root = app.getPath('userData')

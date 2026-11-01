@@ -1280,6 +1280,95 @@ button.stop {
   line-height: 1.7;
 }
 
+/* ---- 成长档案（四类各自翻页；点一条就地展开全文） ---- */
+
+.growth-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.growth-group-title {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.growth-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.growth-item {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.growth-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.growth-item-head:hover {
+  background: var(--panel);
+}
+
+.growth-item-title {
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.growth-item-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.growth-item-body {
+  margin: 0;
+  padding: 4px 10px 10px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-top: 1px dashed var(--line);
+}
+
+.growth-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.growth-pager button {
+  padding: 0 8px;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
+.growth-pager .hint {
+  font-size: 11px;
+}
+
 /* ---- 模式条（D62）：三个预设 + 可展开的组合开关 ---- */
 
 .ask-modes {

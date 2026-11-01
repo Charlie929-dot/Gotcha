@@ -38,6 +38,8 @@ import type { QqSettingsSaveResult, QqSettingsView } from './qq/qq-settings'
 import type { NapcatView } from './qq/napcat'
 import type { TaskAdminView } from './task-runtime'
 import type { NotebookAdminView } from './notebook'
+import type { GrowthEntryView, GrowthPage } from './growth'
+import { GROWTH_KINDS, type GrowthKind } from '../memory/growth'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -270,6 +272,12 @@ export interface AskIpcDeps {
   notebookRemove?: (id: string) => NotebookAdminActionResult
   /** 抽屉里直接改写一条（等价于模型调用 `update_notebook` 的 revise） */
   notebookUpdate?: (input: { id: string; text: string }) => NotebookAdminActionResult
+  /**
+   * 设置抽屉「成长档案」（自调用 v0.2 §8）：四类各自翻页 + 点开一篇看全文。
+   * **只读**：不提供改写 / 删除 / 「现在写一篇」入口，写不写由 ta 自己决定。
+   */
+  growthPage?: (kind: GrowthKind, page: number) => GrowthPage
+  growthEntry?: (key: string) => GrowthEntryView
   /**
    * 在途提问状态变化（自调用 v0.2 §9 合流）：任务到点要「先接用户」，
    * 组合根靠这个信号知道现在有没有一轮用户问答在跑。
@@ -1030,6 +1038,44 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask notebook update failed', { error: String(error) })
           return { ok: false, message: '改写失败，细节看日志' }
+        }
+      }
+    ],
+    [
+      'ask:growth:page',
+      (event, input) => {
+        if (!ensureSender(event)) return null
+        if (!deps.growthPage) return null
+        if (!isPlainObject(input)) return null
+        const kind = input.kind
+        if (typeof kind !== 'string' || !(GROWTH_KINDS as readonly string[]).includes(kind)) {
+          return null
+        }
+        const page = input.page
+        const wanted = typeof page === 'number' && Number.isInteger(page) && page > 0 ? page : 1
+        try {
+          return deps.growthPage(kind as GrowthKind, Math.min(wanted, 10_000))
+        } catch (error) {
+          deps.log('error', 'ask growth page failed', { error: String(error) })
+          return null
+        }
+      }
+    ],
+    [
+      'ask:growth:entry',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, message: 'forbidden' }
+        if (!deps.growthEntry) return { ok: false, message: '当前版本不支持查看成长档案' }
+        if (!isPlainObject(input)) return { ok: false, message: '参数不合法' }
+        const key = input.key
+        if (typeof key !== 'string' || key.trim() === '' || key.length > 40) {
+          return { ok: false, message: '看哪一篇？键的形状是 2026-11-01 / 2026-W44 / 2026-11 / 2026' }
+        }
+        try {
+          return deps.growthEntry(key)
+        } catch (error) {
+          deps.log('error', 'ask growth entry failed', { error: String(error) })
+          return { ok: false, message: '读取失败，细节看日志' }
         }
       }
     ]

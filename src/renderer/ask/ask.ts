@@ -33,6 +33,8 @@ import type { QqSettingsView } from '../../main/qq/qq-settings'
 import type { NapcatView } from '../../main/qq/napcat'
 import type { TaskAdminItem, TaskAdminView } from '../../main/task-runtime'
 import type { NotebookAdminView } from '../../main/notebook'
+import type { GrowthEntryView, GrowthPage } from '../../main/growth'
+import type { GrowthKind } from '../../memory/growth'
 import type { AskApi } from '../ask-preload'
 import { createSettingsPanel } from '../graph/graph-settings-panel'
 
@@ -95,6 +97,11 @@ const notebookStatusEl = must<HTMLElement>('notebook-status')
 const notebookGroupsEl = must<HTMLElement>('notebook-groups')
 const notebookRefreshButton = must<HTMLButtonElement>('notebook-refresh')
 const notebookMsg = must<HTMLElement>('notebook-msg')
+/* ---- 设置抽屉 · 成长档案（自调用 v0.2 §8：四类各自翻页，只读） ---- */
+const growthStatusEl = must<HTMLElement>('growth-status')
+const growthGroupsEl = must<HTMLElement>('growth-groups')
+const growthRefreshButton = must<HTMLButtonElement>('growth-refresh')
+const growthMsg = must<HTMLElement>('growth-msg')
 /* ---- 设置抽屉 · 任务（自调用 v0.2 §12.1：暂停 / 继续 / 取消） ---- */
 const tasksStatusEl = must<HTMLElement>('tasks-status')
 const tasksListEl = must<HTMLUListElement>('tasks-list')
@@ -1752,6 +1759,155 @@ async function runNotebookRemove(id: string): Promise<void> {
   }
 }
 
+/* ---- 设置抽屉 · 成长档案（自调用 v0.2 §8：四类各自翻页，只读） -------- */
+
+/** 四类的顺序与标题（与 `/growth` 同口径；顺序就是接力顺序） */
+const GROWTH_SECTIONS: ReadonlyArray<{ kind: GrowthKind; heading: string }> = [
+  { kind: 'daily', heading: '日记' },
+  { kind: 'weekly', heading: '周记' },
+  { kind: 'monthly', heading: '月末总结' },
+  { kind: 'yearly', heading: '年终总结' }
+]
+
+/** 每类各自记「翻到第几页」：四类互不影响，刷新后停在同一页 */
+const growthPages = new Map<GrowthKind, number>()
+/** 已经点开的篇目（键 = 2026-11-01 / 2026-W44 …）；收起就移出去 */
+const growthExpanded = new Set<string>()
+/** 已经取回来的全文（只活到窗口关闭；改写后点刷新才看得到新的） */
+const growthBodies = new Map<string, GrowthEntryView>()
+
+/** 一篇的正文（失败就把人话原样显示，不冒充正文） */
+function growthBodyText(view: GrowthEntryView): string {
+  return view.ok ? `${view.body}\n\n（${view.chars} 字 · ${view.path}）` : view.message
+}
+
+/** 一类的一页：标题 + 字数，点开就地展开正文；多于一层就带翻页 */
+function renderGrowthGroup(page: GrowthPage, heading: string): HTMLElement {
+  const wrap = document.createElement('div')
+  wrap.className = 'growth-group'
+  const title = document.createElement('p')
+  title.className = 'growth-group-title'
+  title.textContent = page.total === 0 ? `${heading}（还没有）` : `${heading}（共 ${page.total} 篇）`
+  wrap.append(title)
+  if (page.items.length === 0) return wrap
+  const list = document.createElement('ul')
+  list.className = 'growth-items'
+  for (const item of page.items) {
+    const row = document.createElement('li')
+    row.className = 'growth-item'
+    const head = document.createElement('button')
+    head.type = 'button'
+    head.className = 'growth-item-head'
+    const opened = growthExpanded.has(item.key)
+    head.setAttribute('aria-expanded', String(opened))
+    const name = document.createElement('span')
+    name.className = 'growth-item-title'
+    name.textContent = item.title
+    const meta = document.createElement('span')
+    meta.className = 'growth-item-meta'
+    meta.textContent = `${item.chars} 字`
+    head.append(name, meta)
+    const body = document.createElement('div')
+    body.className = 'growth-item-body'
+    body.hidden = !opened
+    const cached = growthBodies.get(item.key)
+    if (cached !== undefined) body.textContent = growthBodyText(cached)
+    head.addEventListener('click', () => {
+      if (!body.hidden) {
+        body.hidden = true
+        growthExpanded.delete(item.key)
+        head.setAttribute('aria-expanded', 'false')
+        return
+      }
+      body.hidden = false
+      growthExpanded.add(item.key)
+      head.setAttribute('aria-expanded', 'true')
+      if (growthBodies.has(item.key)) return
+      body.textContent = '读取中…'
+      void (async () => {
+        if (!api) return
+        try {
+          const view = await api.growthEntry(item.key)
+          growthBodies.set(item.key, view)
+          body.textContent = growthBodyText(view)
+        } catch (error) {
+          body.textContent = `读取失败：${String(error)}`
+        }
+      })()
+    })
+    row.append(head, body)
+    list.append(row)
+  }
+  wrap.append(list)
+  if (page.pages > 1) wrap.append(renderGrowthPager(page))
+  return wrap
+}
+
+/** 翻页条：上一页 / 第 n/m 页 / 下一页（到头就禁用） */
+function renderGrowthPager(page: GrowthPage): HTMLElement {
+  const nav = document.createElement('div')
+  nav.className = 'growth-pager'
+  const prev = document.createElement('button')
+  prev.type = 'button'
+  prev.textContent = '上一页'
+  prev.disabled = page.page <= 1
+  prev.addEventListener('click', () => {
+    growthPages.set(page.kind, page.page - 1)
+    void refreshGrowth('翻页中…')
+  })
+  const label = document.createElement('span')
+  label.className = 'hint'
+  label.textContent = `第 ${page.page}/${page.pages} 页（每页 ${page.pageSize} 篇）`
+  const next = document.createElement('button')
+  next.type = 'button'
+  next.textContent = '下一页'
+  next.disabled = page.page >= page.pages
+  next.addEventListener('click', () => {
+    growthPages.set(page.kind, page.page + 1)
+    void refreshGrowth('翻页中…')
+  })
+  nav.append(prev, label, next)
+  return nav
+}
+
+async function refreshGrowth(note = ''): Promise<void> {
+  if (!api) return
+  growthMsg.textContent = note
+  growthMsg.style.color = ''
+  try {
+    const pages: GrowthPage[] = []
+    for (const section of GROWTH_SECTIONS) {
+      const wanted = growthPages.get(section.kind) ?? 1
+      const page = await api.growthPage(section.kind, wanted)
+      if (page === null) {
+        growthStatusEl.textContent = '读取成长档案失败（主进程没接上，细节看日志）'
+        return
+      }
+      // 主进程会把越界页夹回来（比如最后一篇被删了），这里跟着它记
+      growthPages.set(section.kind, page.page)
+      pages.push(page)
+    }
+    growthGroupsEl.replaceChildren()
+    if (pages.every((page) => page.total === 0)) {
+      growthStatusEl.textContent = '成长档案还是空的——等 ta 写下第一篇日记，这里就会有内容。'
+      return
+    }
+    const summary = GROWTH_SECTIONS.map((section, index) => {
+      const page = pages[index]
+      return `${section.heading} ${page === undefined ? 0 : page.total}`
+    }).join(' · ')
+    const total = pages.reduce((sum, page) => sum + page.total, 0)
+    growthStatusEl.textContent = `共 ${total} 篇（${summary}）`
+    for (const [index, section] of GROWTH_SECTIONS.entries()) {
+      const page = pages[index]
+      if (page === undefined) continue
+      growthGroupsEl.append(renderGrowthGroup(page, section.heading))
+    }
+  } catch (error) {
+    growthStatusEl.textContent = `读取成长档案失败：${String(error)}`
+  }
+}
+
 /* ---- 设置抽屉 · 任务（自调用 v0.2 §12.1：暂停 / 继续 / 取消） -------- */
 
 const TASK_ORIGIN_TEXT: Readonly<Record<TaskAdminItem['origin'], string>> = {
@@ -1928,6 +2084,7 @@ function openSettingsDrawer(): void {
   void refreshMemoryRepo()
   void refreshQqSettings()
   void refreshNotebook()
+  void refreshGrowth()
   void refreshTasks()
   startNapcatPolling()
   void loadMemoryList(true)
@@ -1939,6 +2096,9 @@ if (api) {
   })
   tasksRefreshButton.addEventListener('click', () => {
     void refreshTasks('刷新中…')
+  })
+  growthRefreshButton.addEventListener('click', () => {
+    void refreshGrowth('刷新中…')
   })
   memoryRepoSaveButton.addEventListener('click', async () => {
     const remote = memoryRemoteInput.value.trim()

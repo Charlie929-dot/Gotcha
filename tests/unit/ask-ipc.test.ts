@@ -830,4 +830,63 @@ describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () =
       })
     ).toMatchObject({ ok: false, message: 'forbidden' })
   })
+
+  it('ask:growth:page：认四类、页号夹住；没接上 / 参数不合法一律不越权读', async () => {
+    // 没接上：返回 null（渲染层显示「读取失败」，不当成空仓）
+    const missing = createAskIpcHandlers(buildDeps()).get('ask:growth:page')!
+    expect(await missing(SENDER_OK as never, { kind: 'daily', page: 1 })).toBeNull()
+
+    const page = {
+      kind: 'daily' as const,
+      page: 2,
+      pages: 3,
+      pageSize: 10,
+      total: 25,
+      items: [{ key: '2026-10-30', title: '2026-10-30（周五）', chars: 120 }]
+    }
+    const growthPage = vi.fn(() => page)
+    const read = handler(buildDeps({ growthPage }), 'ask:growth:page')
+
+    for (const bad of [{ kind: 'hourly', page: 1 }, { kind: 3, page: 1 }, {}, null]) {
+      expect(await read(SENDER_OK as never, bad)).toBeNull()
+    }
+    expect(growthPage).not.toHaveBeenCalled()
+
+    // 页号不合法按第 1 页问（不把 NaN / 负数丢给主进程）；超大页号也夹住
+    await read(SENDER_OK as never, { kind: 'daily', page: 0 })
+    expect(growthPage).toHaveBeenLastCalledWith('daily', 1)
+    await read(SENDER_OK as never, { kind: 'weekly', page: Number.NaN })
+    expect(growthPage).toHaveBeenLastCalledWith('weekly', 1)
+    await read(SENDER_OK as never, { kind: 'yearly', page: 1e9 })
+    expect(growthPage).toHaveBeenLastCalledWith('yearly', 10_000)
+
+    expect(
+      await read({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, { kind: 'daily', page: 1 })
+    ).toBeNull()
+  })
+
+  it('ask:growth:entry：键在边界校验；合法键交给注入的实现', async () => {
+    const missing = handler(buildDeps(), 'ask:growth:entry')
+    expect(await missing(SENDER_OK as never, { key: '2026-11-01' })).toMatchObject({ ok: false })
+
+    const growthEntry = vi.fn(() => ({
+      ok: true as const,
+      key: '2026-11-01',
+      title: '2026-11-01（周日）',
+      body: '今天的日记。',
+      chars: 6,
+      path: 'growth/daily/2026-11-01.md'
+    }))
+    const read = handler(buildDeps({ growthEntry }), 'ask:growth:entry')
+    for (const bad of [{}, { key: '' }, { key: '   ' }, { key: 'x'.repeat(41) }, null]) {
+      expect(await read(SENDER_OK as never, bad)).toMatchObject({ ok: false })
+    }
+    expect(growthEntry).not.toHaveBeenCalled()
+
+    expect(await read(SENDER_OK as never, { key: ' 2026-11-01 ' })).toMatchObject({ ok: true })
+    expect(growthEntry).toHaveBeenCalledWith(' 2026-11-01 ')
+    expect(
+      await read({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, { key: '2026-11-01' })
+    ).toMatchObject({ ok: false, message: 'forbidden' })
+  })
 })

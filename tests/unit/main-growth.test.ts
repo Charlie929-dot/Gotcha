@@ -14,7 +14,7 @@ import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { createGrowthStore } from '../../src/main/growth'
+import { GROWTH_PAGE_SIZE, createGrowthStore } from '../../src/main/growth'
 import { isoWeekKey } from '../../src/memory/growth'
 
 const NOW = new Date(2026, 10, 1, 23, 30, 0, 0).getTime()
@@ -121,5 +121,68 @@ describe('createGrowthStore', () => {
     expect(store.show('2026-13')).toContain('不认识的')
     expect(store.show('2026-11-1')).toContain('不认识的')
     expect(store.show('2025-11')).toContain('还没有')
+  })
+
+  it('page：四类各自分页（新到旧）、越界页夹回、每页条数可调，空仓不建目录', () => {
+    let clock = NOW
+    const store = createGrowthStore({ root, now: () => clock })
+    // 空仓先看一眼：一页 0 条，但不因为「看一眼」就把 growth/ 建出来
+    expect(store.page('daily', 1)).toMatchObject({ total: 0, pages: 1, pageSize: GROWTH_PAGE_SIZE })
+    expect(store.page('daily', 1).items).toHaveLength(0)
+    expect(existsSync(join(root, 'growth'))).toBe(false)
+
+    for (const day of ['2026-10-28', '2026-10-29', '2026-10-30', '2026-11-01']) {
+      clock = new Date(`${day}T23:30:00`).getTime()
+      store.write({ kind: 'daily', content: `${day} 的日记` })
+    }
+    clock = NOW
+
+    const first = store.page('daily', 1)
+    expect(first).toMatchObject({ kind: 'daily', page: 1, pages: 1, total: 4 })
+    expect(first.items.map((item) => item.key)).toEqual([
+      '2026-11-01',
+      '2026-10-30',
+      '2026-10-29',
+      '2026-10-28'
+    ])
+    expect(first.items[0]?.title).toContain('2026-11-01')
+    expect(first.items[0]?.chars).toBeGreaterThan(0)
+
+    const second = store.page('daily', 2, 2)
+    expect(second).toMatchObject({ page: 2, pages: 2, pageSize: 2, total: 4 })
+    expect(second.items.map((item) => item.key)).toEqual(['2026-10-29', '2026-10-28'])
+    // 越界页夹回（翻页按钮和主进程口径一致，不会翻出一片空白）
+    expect(store.page('daily', 99, 2)).toMatchObject({ page: 2, pages: 2 })
+    expect(store.page('daily', 0, 2)).toMatchObject({ page: 1 })
+    // 其它三类互不串台
+    expect(store.page('weekly', 1)).toMatchObject({ total: 0 })
+  })
+
+  it('entry：抽屉点开一篇给标题 / 正文 / 字数 / 路径；缺篇与坏键给人话不抛', () => {
+    const store = createGrowthStore({ root, now: () => NOW })
+    store.write({ kind: 'daily', content: '抽屉里要能看全文。' })
+
+    const view = store.entry(TODAY)
+    expect(view.ok).toBe(true)
+    if (!view.ok) return
+    expect(view.body).toContain('抽屉里要能看全文。')
+    expect(view.path).toBe(join('growth', 'daily', `${TODAY}.md`))
+    expect(view.chars).toBe(view.body.length)
+    expect(view.title).toContain(TODAY)
+
+    const missing = store.entry('2026-10-30')
+    expect(missing.ok).toBe(false)
+    if (missing.ok) return
+    expect(missing.message).toContain('还没有')
+
+    const bad = store.entry('2026-13')
+    expect(bad.ok).toBe(false)
+    if (bad.ok) return
+    expect(bad.message).toContain('不认识')
+
+    const blank = store.entry('   ')
+    expect(blank.ok).toBe(false)
+    if (blank.ok) return
+    expect(blank.message).toContain('不认识')
   })
 })

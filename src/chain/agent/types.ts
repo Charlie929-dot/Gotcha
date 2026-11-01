@@ -136,6 +136,22 @@ export interface ChainAskChatRecent {
   readonly text: string
 }
 
+/**
+ * 一轮回答之后要跟着发出去的媒体（D96 / PR2：表情 / 图）。
+ *
+ * 这里只放**已经能发的东西**：`dataUrl` 是压过口径的字节（长边 ≤1600 / ≤3MB，
+ * GIF ≤3MB 原样）。谁挑的（表情池 / 本会话归档图）由工具决定，通道只管发。
+ * 只有 QQ 通道会发它；桌面路径忽略。
+ */
+export interface ChainAskOutboundMedia {
+  readonly kind: 'sticker' | 'image'
+  readonly dataUrl: string
+  /** 表情的标签 / 图片的一句说明（日志与界面用，不发出去） */
+  readonly label?: string
+  /** 表情 id / 图片归档 id：通道据此做「同一张 24h 内不连发」去重 */
+  readonly ref?: string
+}
+
 export type ChainAskResult = (
   | {
       kind: 'answer'
@@ -237,6 +253,11 @@ export type ChainAskResult = (
    * 只有 QQ 通道会把它翻译成 `reply` 段；桌面路径忽略。
    */
   replyTo?: number
+  /**
+   * QQ 出站媒体（D96 / PR2）：这一轮之后要跟着发的表情 / 图。
+   * 只有「有正文的回答」才带（报错 / 澄清不发图）；桌面路径忽略。
+   */
+  outboundMedia?: readonly ChainAskOutboundMedia[]
   /**
    * 交接回执（D82 / D83）：这一问里母亲生命耗尽、下一代接手时给界面的一行字
    * （`🎗️提示` + `✨<母亲> 生命耗尽  ta的女儿 ✨<女儿> 将接续ta的使命`）。

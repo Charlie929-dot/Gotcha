@@ -586,6 +586,44 @@ export class QqOb11Server {
   }
 
   /**
+   * 私聊发一张图 / 表情（D96 / PR2，OneBot `send_private_msg` + image 段）。
+   *
+   * 只接受 data URL（内部已经按 §6.4 口径压到 ≤3MB）：不接受任意本地路径 / 远端 URL，
+   * 这样「发哪张图」永远由本进程里的字节决定，模型没法让 ta 去读盘上的别的文件。
+   */
+  async sendPrivateImage(
+    userId: number,
+    dataUrl: string,
+    options?: { replyTo?: number }
+  ): Promise<number | null> {
+    const matched = /^data:image\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$/iu.exec(dataUrl.trim())
+    if (matched === null) throw new Error('发图只接受 data URL')
+    const replyTo = positiveInt(options?.replyTo)
+    const message: Array<{ type: string; data: Record<string, unknown> }> = []
+    if (replyTo !== null) message.push({ type: 'reply', data: { id: String(replyTo) } })
+    // NapCat 的图片段认 `base64://`：不用先把图传到某个目录再传路径
+    message.push({ type: 'image', data: { file: `base64://${matched[1]}` } })
+    const response = await this.callAction('send_private_msg', {
+      user_id: userId,
+      message
+    })
+    if (typeof response.retcode === 'number' && response.retcode !== 0) {
+      throw new Error(`OneBot 发图失败（${response.retcode}）${response.wording ?? ''}`)
+    }
+    const data = isPlainObject(response.data) ? response.data : {}
+    const sentId = positiveInt(data['message_id'])
+    if (sentId !== null) {
+      this.selfSent.add(sentId)
+      this.selfSentOrder.push(sentId)
+      if (this.selfSentOrder.length > 100) {
+        const oldest = this.selfSentOrder.shift()
+        if (oldest !== undefined) this.selfSent.delete(oldest)
+      }
+    }
+    return sentId
+  }
+
+  /**
    * 按 message_id 取一条消息（D96，OneBot `get_msg`）：台账没命中时兜底解引用。
    * 取不到 / 超时 / 回执非 0 一律返回 null——调用方据此标 missing，不许编。
    */

@@ -199,9 +199,20 @@ export class ChatLog {
     return this.recent(conversationId, limit).map((record) => record.seq)
   }
 
+  /**
+   * 清空全部台账（设置抽屉「清空聊天索引」，D96 §5.4）：
+   * 只删本机的引用索引，**不影响 QQ 服务器上的聊天**；清完短号从 #1 重新开始。
+   */
+  clear(): void {
+    this.ensureLoaded()
+    this.conversations.clear()
+    this.byQq.clear()
+    this.seqIndex.clear()
+    this.flush()
+  }
+
   /** 立即写盘（退出 / 测试用）；没有改动时也安全 */
-  flush(): void {
-    if (this.timer !== null) {
+  flush(): void {    if (this.timer !== null) {
       clearTimeout(this.timer)
       this.timer = null
     }

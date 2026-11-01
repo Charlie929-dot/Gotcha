@@ -36,6 +36,7 @@ import type {
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from './qq/qq-settings'
 import type { NapcatView } from './qq/napcat'
+import type { QqStickerListView } from './qq/stickers'
 import type { TaskAdminSaveInput, TaskAdminView } from './task-runtime'
 import type { NotebookAdminView } from './notebook'
 import type { GrowthEntryView, GrowthPage } from './growth'
@@ -255,6 +256,18 @@ export interface AskIpcDeps {
   qqNapcatStop?: () => Promise<void>
   qqNapcatInstall?: () => Promise<{ ok: boolean; error?: string }>
   qqNapcatChooseDir?: () => Promise<{ ok: boolean; error?: string; view?: NapcatView }>
+  /**
+   * QQ 表情包（D96 / PR2）：列表 / 导入（系统文件选择器）/ 改标签 / 移入回收站与还原 / 彻底删。
+   * 池子是本机文件，出问题只回 `{ ok:false, error }`，不抛给渲染层。
+   */
+  qqStickers?: () => QqStickerListView | { error: string }
+  qqStickerImport?: () => Promise<QqStickerListView | { ok: false; error: string }>
+  qqStickerUpdate?: (input: unknown) => QqStickerListView | { ok: false; error: string }
+  qqStickerTrash?: (input: unknown) => QqStickerListView | { ok: false; error: string }
+  qqStickerRestore?: (input: unknown) => QqStickerListView | { ok: false; error: string }
+  qqStickerRemove?: (input: unknown) => QqStickerListView | { ok: false; error: string }
+  /** 清空本机聊天索引（D96 §5.4）：不影响 QQ 服务器上的聊天 */
+  qqChatLogClear?: () => { ok: boolean; error?: string }
   /**
    * 记忆仓（D90）：远端绑定 / 推送状态 / 定时。
    * 地址写进仓的 git 配置（不落设置表）；间隔进设置表。
@@ -811,6 +824,96 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask qq napcat choose dir failed', { error: String(error) })
           return { ok: false, error: '选择目录失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:stickers:get',
+      (event) => {
+        if (!ensureSender(event)) return { error: 'forbidden' }
+        try {
+          return deps.qqStickers?.() ?? { error: 'unsupported' }
+        } catch (error) {
+          deps.log('error', 'ask qq stickers read failed', { error: String(error) })
+          return { error: 'stickers-read-failed' }
+        }
+      }
+    ],
+    [
+      'ask:qq:stickers:import',
+      async (event) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqStickerImport) return { ok: false, error: '当前版本不支持表情包' }
+        try {
+          return await deps.qqStickerImport()
+        } catch (error) {
+          deps.log('error', 'ask qq sticker import failed', { error: String(error) })
+          return { ok: false, error: '导入失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:stickers:update',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqStickerUpdate) return { ok: false, error: '当前版本不支持表情包' }
+        try {
+          return deps.qqStickerUpdate(input)
+        } catch (error) {
+          deps.log('error', 'ask qq sticker update failed', { error: String(error) })
+          return { ok: false, error: '改标签失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:stickers:trash',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqStickerTrash) return { ok: false, error: '当前版本不支持表情包' }
+        try {
+          return deps.qqStickerTrash(input)
+        } catch (error) {
+          deps.log('error', 'ask qq sticker trash failed', { error: String(error) })
+          return { ok: false, error: '移入回收站失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:stickers:restore',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqStickerRestore) return { ok: false, error: '当前版本不支持表情包' }
+        try {
+          return deps.qqStickerRestore(input)
+        } catch (error) {
+          deps.log('error', 'ask qq sticker restore failed', { error: String(error) })
+          return { ok: false, error: '还原失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:stickers:remove',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqStickerRemove) return { ok: false, error: '当前版本不支持表情包' }
+        try {
+          return deps.qqStickerRemove(input)
+        } catch (error) {
+          deps.log('error', 'ask qq sticker remove failed', { error: String(error) })
+          return { ok: false, error: '删除失败' }
+        }
+      }
+    ],
+    [
+      'ask:qq:chatlog:clear',
+      (event) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        if (!deps.qqChatLogClear) return { ok: false, error: '当前版本不支持清空聊天索引' }
+        try {
+          return deps.qqChatLogClear()
+        } catch (error) {
+          deps.log('error', 'ask qq chat log clear failed', { error: String(error) })
+          return { ok: false, error: '清空失败' }
         }
       }
     ],

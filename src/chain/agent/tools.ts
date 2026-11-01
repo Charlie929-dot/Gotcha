@@ -370,6 +370,44 @@ export interface AskToolDeps {
    * 不传 = 这条通道没有聊天台账：`quote_message` 会如实回「引用不了」。
    */
   quoteMessage?: (id: number) => QuoteMessageLookup
+  /**
+   * QQ 表情包 / 发图（D96 / PR2）：图鉴、挑图、收藏。
+   * 不传 = 这条通道没有表情池：三个新工具会如实回「这边发不了图」。
+   */
+  stickers?: QqStickerToolDeps
+  /**
+   * 本会话里见过的图片 id → data URL（本轮附件 / 会话归档 / read_segment 截图）。
+   * 只认真的在会话里出现过的图；不传 = `save_sticker` / `send_image` 找不到图。
+   */
+  imageById?: (id: string) => string | null
+  /** 已经挑过的媒体（续查恢复时从这里接上，避免同一轮重复挑） */
+  pickedMedia?: { readonly sticker?: string; readonly image?: string }
+}
+
+/** 表情包池里的一张（给模型的图鉴视图） */
+export interface QqStickerView {
+  readonly id: string
+  readonly label: string
+  readonly desc: string
+  readonly tags: readonly string[]
+  readonly useCount: number
+}
+
+/**
+ * `send_sticker` / `save_sticker` / `send_image` 的执行端口（QQ 通道注入）。
+ * 真实实现在 `main/qq/stickers.ts`：这里只认「图鉴 / 挑一张 / 收一张」三件事。
+ */
+export interface QqStickerToolDeps {
+  /** 正式收藏的图鉴（按常用度排好，最多 40 条） */
+  list(): readonly QqStickerView[]
+  /** 挑一张准备发：返回压过口径的 data URL 与标签；找不到 / 文件坏了返回 null */
+  pick(id: string): { readonly view: QqStickerView; readonly dataUrl: string } | null
+  /** 收进池子；`dataUrl` 由驱动层从本会话图片里取到 */
+  save(input: {
+    readonly dataUrl: string
+    readonly label: string
+    readonly desc?: string
+  }): { ok: true; id: string; label: string; duplicate: boolean } | { ok: false; error: string }
 }
 
 /** `quote_message` 能引用的目标（真实 QQ id 只在执行器 outcome 里流转，不进工具结果） */
@@ -412,6 +450,17 @@ export interface AskToolOutcome {
    * 由 QQ 通道翻译成出站 `reply` 段；桌面通道忽略。
    */
   replyTo?: number
+  /**
+   * 这一轮要跟着发出去的媒体（D96 / PR2）：`send_sticker` / `send_image` 挑中的那张。
+   * 驱动层收集成 `outboundMedia`，QQ 通道在文字之后发送；桌面忽略。
+   */
+  media?: {
+    readonly kind: 'sticker' | 'image'
+    readonly dataUrl: string
+    readonly label?: string
+    /** 表情 id / 图片归档 id：通道用它做 24h 同图去重 */
+    readonly ref?: string
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -428,6 +477,11 @@ const HISTORY_LIMIT_DEFAULT = 10
 const HISTORY_LIMIT_MAX = 50
 const HISTORY_QUESTION_CHARS = 120
 const SNIPPET_CHARS = 80
+/** 表情图鉴一次最多列几条（与 `main/qq/stickers.ts` 的 `QQ_STICKER_CATALOG_MAX` 同口径） */
+const STICKER_CATALOG_MAX = 40
+/** 表情标签 / 描述长度上限（模型不能无限写；与池子的钳制同口径） */
+const STICKER_LABEL_MAX_CHARS = 20
+const STICKER_DESC_MAX_CHARS = 100
 
 function optionalNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
@@ -1088,6 +1142,9 @@ export function createAskToolExecutor(deps: AskToolDeps): {
 } {
   /** 这一问里已经引用过的消息（D96：一轮只认一次，第二次调用给错误） */
   let quotedTarget: QuoteMessageTarget | null = null
+  /** 这一问里已经挑好的媒体（D96 / PR2：表情、图片各最多一张） */
+  let pickedSticker = deps.pickedMedia?.sticker ?? null
+  let pickedImage = deps.pickedMedia?.image ?? null
   return {
     freshness: () => currentFreshness(deps),
     async execute(call: AskToolCall): Promise<AskToolOutcome> {
@@ -1696,6 +1753,194 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             },
             segments: [],
             replyTo: target.qqId
+          }
+        }
+        // ---- QQ 表情 ／ 发图（D96 / PR2）------------------------------------
+        if (call.name === 'send_sticker') {
+          const port = deps.stickers
+          if (port === undefined) {
+            return {
+              result: { kind: 'error', message: '这边发不了表情（这条通道没有表情池）' },
+              segments: []
+            }
+          }
+          const rawId = call.arguments['id']
+          const stickerId =
+            typeof rawId === 'string' || typeof rawId === 'number'
+              ? normalizeArchiveId(String(rawId))
+              : null
+          if (stickerId === null) {
+            // 不带 id = 只看图鉴，不发（模型据此挑一张）
+            const catalog = port.list().slice(0, STICKER_CATALOG_MAX).map((entry) => ({
+              id: entry.id,
+              label: entry.label,
+              desc: entry.desc,
+              tags: [...entry.tags],
+              useCount: entry.useCount
+            }))
+            return {
+              result: {
+                kind: 'send_sticker',
+                ok: true,
+                stickerId: null,
+                label: '',
+                catalog,
+                message:
+                  catalog.length === 0
+                    ? '表情包还是空的：先收几张（收到图可以让我存成表情），以后才发得出来'
+                    : '图鉴在上；挑一张，带 id 再调一次才会发（不带 id 只给你看）'
+              },
+              segments: []
+            }
+          }
+          if (pickedSticker !== null) {
+            return {
+              result: {
+                kind: 'error',
+                message: `这一轮已经挑过表情 #${pickedSticker} 了：一条回答最多带一张表情`
+              },
+              segments: []
+            }
+          }
+          const picked = port.pick(stickerId)
+          if (picked === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: `没有 #${stickerId} 这张表情（id 不对，或者文件已经没了）：不带 id 调一次看图鉴`
+              },
+              segments: []
+            }
+          }
+          pickedSticker = picked.view.id
+          return {
+            result: {
+              kind: 'send_sticker',
+              ok: true,
+              stickerId: picked.view.id,
+              label: picked.view.label,
+              catalog: [],
+              message: `排好了：回答之后发「${picked.view.label}」`
+            },
+            segments: [],
+            media: {
+              kind: 'sticker',
+              dataUrl: picked.dataUrl,
+              label: picked.view.label,
+              ref: picked.view.id
+            }
+          }
+        }
+        if (call.name === 'save_sticker') {
+          const port = deps.stickers
+          if (port === undefined) {
+            return {
+              result: { kind: 'error', message: '这边收不了表情（这条通道没有表情池）' },
+              segments: []
+            }
+          }
+          const rawImageId = call.arguments['image_id']
+          const imageId = typeof rawImageId === 'string' ? normalizeArchiveId(rawImageId) : null
+          const label = optionalText(call.arguments['label'], STICKER_LABEL_MAX_CHARS)
+          if (imageId === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'save_sticker 需要 image_id：图片占位符里的 #id（只收这次会话里真实出现过的图）'
+              },
+              segments: []
+            }
+          }
+          if (label === undefined) {
+            return {
+              result: { kind: 'error', message: 'save_sticker 需要 label：给这张图起个名字（≤20 字）' },
+              segments: []
+            }
+          }
+          const image = deps.imageById?.(imageId) ?? null
+          if (image === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: '这次会话里没有这张图的原始字节：只能收你这一轮收到 / 看到的图'
+              },
+              segments: []
+            }
+          }
+          const desc = optionalText(call.arguments['desc'], STICKER_DESC_MAX_CHARS)
+          const saved = port.save({
+            dataUrl: image,
+            label,
+            ...(desc !== undefined ? { desc } : {})
+          })
+          if (!saved.ok) {
+            return {
+              result: {
+                kind: 'save_sticker',
+                ok: false,
+                stickerId: null,
+                label,
+                duplicate: false,
+                message: saved.error
+              },
+              segments: []
+            }
+          }
+          return {
+            result: {
+              kind: 'save_sticker',
+              ok: true,
+              stickerId: saved.id,
+              label: saved.label,
+              duplicate: saved.duplicate,
+              message: saved.duplicate
+                ? `这张图本来就在表情包里（#${saved.id}「${saved.label}」），标签已经按你说的更新`
+                : `收好了：#${saved.id}「${saved.label}」`
+            },
+            segments: []
+          }
+        }
+        if (call.name === 'send_image') {
+          const rawImageId = call.arguments['archive_id'] ?? call.arguments['image_id']
+          const imageId = typeof rawImageId === 'string' ? normalizeArchiveId(rawImageId) : null
+          if (imageId === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'send_image 需要 archive_id：图片占位符里的 #id（只发这次会话里真实出现过的图）'
+              },
+              segments: []
+            }
+          }
+          if (pickedImage !== null) {
+            return {
+              result: {
+                kind: 'error',
+                message: `这一轮已经挑过图片 #${pickedImage} 了：一条回答最多带一张图`
+              },
+              segments: []
+            }
+          }
+          const image = deps.imageById?.(imageId) ?? null
+          if (image === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: '这次会话里没有这张图（只能发你这一轮收到 / 看到过、或者我打开过的截图）'
+              },
+              segments: []
+            }
+          }
+          pickedImage = imageId
+          return {
+            result: {
+              kind: 'send_image',
+              ok: true,
+              imageId,
+              message: '排好了：回答之后把这张图发出去'
+            },
+            segments: [],
+            media: { kind: 'image', dataUrl: image, ref: imageId }
           }
         }
         return { result: { kind: 'error', message: `未知工具：${call.name}` }, segments: [] }

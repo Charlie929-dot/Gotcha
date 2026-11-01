@@ -335,6 +335,49 @@ describe('反向 WS 服务端', () => {
     socket.close()
   })
 
+  it('sendPrivateImage：图片段用 base64://（不传本地路径）；带 replyTo 时 reply 仍在最前（D96 / PR2）', async () => {
+    server = new QqOb11Server()
+    const { port } = await server.start({ port: 0, accessToken: TOKEN, onMessage: () => {} })
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    const actions: Record<string, unknown>[] = []
+    socket.on('message', (data) => {
+      const frame = JSON.parse(data.toString()) as Record<string, unknown>
+      actions.push(frame)
+      socket.send(
+        JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 666 }, echo: frame['echo'] })
+      )
+    })
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+
+    const dataUrl = 'data:image/png;base64,iVBORw0KGgo='
+    expect(await server.sendPrivateImage(20002, dataUrl)).toBe(666)
+    expect(actions[0]).toMatchObject({
+      action: 'send_private_msg',
+      params: {
+        user_id: 20002,
+        message: [{ type: 'image', data: { file: 'base64://iVBORw0KGgo=' } }]
+      }
+    })
+
+    await server.sendPrivateImage(20002, dataUrl, { replyTo: 88 })
+    expect(actions[1]).toMatchObject({
+      params: {
+        message: [
+          { type: 'reply', data: { id: '88' } },
+          { type: 'image', data: { file: 'base64://iVBORw0KGgo=' } }
+        ]
+      }
+    })
+
+    // 不是 data URL 一律拒绝（不接受任意本地路径 / 远端地址）
+    await expect(server.sendPrivateImage(20002, 'C:\\secret\\a.png')).rejects.toThrow('data URL')
+    socket.close()
+  })
+
   it('getMsg 兜底：解出原话 / 图片 / 是不是 ta 自己发的；失败返回 null（D96）', async () => {
     server = new QqOb11Server()
     const { port } = await server.start({ port: 0, accessToken: TOKEN, onMessage: () => {} })

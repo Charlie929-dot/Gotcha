@@ -46,13 +46,16 @@ export const ASK_TOOL_NOTEBOOK_NAMES = ['update_notebook'] as const
 export const ASK_TOOL_GROWTH_NAMES = ['write_growth'] as const
 
 /**
- * QQ 专属工具（D96 / PR1）：只在 QQ 通道挂载，**不进** `ASK_TOOL_NAMES` 与分支
+ * QQ 专属工具（D96 / PR1–PR2）：只在 QQ 通道挂载，**不进** `ASK_TOOL_NAMES` 与分支
  * `/tool` 白名单——桌面看不到，也不会被 `/tool` 改动。
  */
-export const QQ_TOOL_NAMES = ['quote_message'] as const
+export const QQ_TOOL_NAMES = ['quote_message', 'send_sticker', 'save_sticker', 'send_image'] as const
 export type QqToolName = (typeof QQ_TOOL_NAMES)[number]
 export const QQ_TOOL_LABELS: Readonly<Record<QqToolName, string>> = {
-  quote_message: '引用这次聊天里的一条消息再回答（消息短号）'
+  quote_message: '引用这次聊天里的一条消息再回答（消息短号）',
+  send_sticker: '发一张表情包（不带 id 只看图鉴）',
+  save_sticker: '把这次收到 / 看到的图收进表情包',
+  send_image: '把这次会话里的一张图发给对方'
 }
 
 export type AskToolName =

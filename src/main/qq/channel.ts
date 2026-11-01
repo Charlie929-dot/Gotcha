@@ -12,7 +12,11 @@
  * - 日志只记计数与结果种类，**不记问题正文、不记 token**。
  */
 
-import type { ChainAskResult, ChainAskResumeDecision } from '../../chain/agent/types'
+import type {
+  ChainAskOutboundMedia,
+  ChainAskResult,
+  ChainAskResumeDecision
+} from '../../chain/agent/types'
 import type { QqImageRef, QqInbound, QqLog, QqQuotedMessage, QqTransportStatus } from './ob11'
 import { QQ_INBOUND_FILE_MAX, QQ_INBOUND_IMAGE_MAX } from './ob11'
 import {
@@ -88,6 +92,15 @@ export interface QqTransport {
    * 返回发出去的 message_id（拿不到就 null）：通道要把它记进台账。
    */
   sendPrivate(userId: number, text: string, options?: { replyTo?: number }): Promise<number | null>
+  /**
+   * 发一张图 / 表情（D96 / PR2）：只收压过口径的 data URL（`prepareOutboundImage`），
+   * 不接受任意本地路径 / 远端地址。可选：假实现不接 = 这条通道发不了图。
+   */
+  sendPrivateImage?(
+    userId: number,
+    dataUrl: string,
+    options?: { replyTo?: number }
+  ): Promise<number | null>
   /** NapCat `get_image`：拿 base64（优先）或 url（兜底） */
   getImage(file: string): Promise<{ base64?: string; url?: string }>
   /** NapCat `get_msg`（D96）：台账没命中时兜底解引用；可选，假实现不接就当取不到 */
@@ -146,6 +159,13 @@ export interface QqChannelDeps {
    * 不传 = 没有台账：引用只能靠 `getMsg` 兜底，重启后引用不了旧消息。
    */
   chatLog?: QqChatLog
+  /**
+   * 发图闸门（D96 / PR2）：同一张表情 24h 内不连发、表情 / 图片每日上限。
+   * 不传 = 不做计数（测试 / 没接闸门的路径）。
+   */
+  mediaGate?: {
+    allow(kind: 'sticker' | 'image', ref?: string): boolean
+  }
   /** 每用户每分钟最多几条（默认 6） */
   perMinute?: number
   /** 全局排队上限（默认 8）：超了回一句「排队中」 */
@@ -587,6 +607,44 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
   }
 
   /**
+   * 文字发完之后的媒体（D96 / PR2 §6.4）：
+   * - 每轮最多 1 张表情 + 1 张图，顺序固定（表情在前）；
+   * - 过闸门（24h 同表情 / 每日上限）才发；
+   * - 图发失败只记一条 warn，**文字已经送达**，不重发、不吞回答。
+   */
+  const sendOutboundMedia = async (
+    userId: number,
+    media: readonly ChainAskOutboundMedia[] | undefined
+  ): Promise<void> => {
+    if (media === undefined || media.length === 0) return
+    const sendImage = transport.sendPrivateImage?.bind(transport)
+    if (sendImage === undefined) {
+      log('warn', 'qq outbound media skipped', { reason: 'no-send-image' })
+      return
+    }
+    const picked = [
+      ...media.filter((item) => item.kind === 'sticker').slice(0, 1),
+      ...media.filter((item) => item.kind === 'image').slice(0, 1)
+    ]
+    for (const item of picked) {
+      const allowed = deps.mediaGate?.allow(item.kind, item.ref) ?? true
+      if (!allowed) {
+        log('info', 'qq outbound media gated', { kind: item.kind })
+        continue
+      }
+      try {
+        await sendImage(userId, item.dataUrl)
+        log('info', 'qq outbound media sent', { kind: item.kind })
+      } catch (error) {
+        log('warn', 'qq outbound media failed', { kind: item.kind, error: String(error) })
+      }
+      if (partGapMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, partGapMs))
+      }
+    }
+  }
+
+  /**
    * 解引用（D96 §5.5）：台账 → `get_msg` → missing，三档都如实。
    * 返回给模型的 `quoted`，以及能附上的被引用图（最多 1 张）。
    */
@@ -777,6 +835,8 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
         pendingChoices.delete(conversationId)
       }
       const parts = await sendParts(inbound.userId, formatAskResult(result), result.replyTo)
+      // 文字先送达，再发图（D96 / PR2 §6.4）；图失败不影响已经发出去的文字
+      await sendOutboundMedia(inbound.userId, result.outboundMedia)
       log('info', 'qq answered', {
         userId: inbound.userId,
         kind: result.kind,

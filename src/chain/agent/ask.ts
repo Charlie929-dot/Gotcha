@@ -42,6 +42,7 @@ import type {
   LetterToolDeps,
   NotebookToolDeps,
   GrowthToolDeps,
+  QqStickerToolDeps,
   QuoteMessageLookup,
   TaskToolDeps
 } from './tools'
@@ -163,6 +164,11 @@ export interface ChainAskOptions {
    * `quote_message` 的短号查询端口（QQ 通道注入；桌面不传 = 没这个工具）。
    */
   quoteMessage?: (id: number) => QuoteMessageLookup
+  /**
+   * QQ 表情包 / 发图端口（D96 / PR2）：只在 QQ 路径注入；
+   * 桌面不传 = 三个媒体工具不存在，也不会出现在 tools 参数里。
+   */
+  stickers?: QqStickerToolDeps
   /** 人设提示（本地配置，拼在 system 最前面；不传 = 默认回忆助手口吻） */
   personaPrompt?: string
   /**
@@ -386,6 +392,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.quoted ? { quoted: options.quoted } : {}),
         ...(options.chatRecent ? { chatRecent: options.chatRecent } : {}),
         ...(options.quoteMessage ? { quoteMessage: options.quoteMessage } : {}),
+        ...(options.stickers ? { stickers: options.stickers } : {}),
         ...(options.conversation ? { conversation: options.conversation } : {}),
         ...(options.onUsage ? { onUsage: options.onUsage } : {}),
         log

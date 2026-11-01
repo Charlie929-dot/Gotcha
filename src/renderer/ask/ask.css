@@ -1020,6 +1020,83 @@ button.stop {
   margin: 4px 0;
 }
 
+/* ---- QQ 通道 · 表情包（D96 / PR2）：一行一张，缩略图 48px ---- */
+
+.qq-stickers {
+  margin: 8px 0 4px;
+  padding: 8px 10px 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.qq-stickers-list {
+  margin-top: 6px;
+  /* 抽屉底部的「保存」栏是 sticky 的：别让最后一行被盖住 */
+  padding-bottom: 56px;
+}
+
+.qq-sticker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px dashed var(--line);
+}
+
+.qq-sticker-row:first-child {
+  border-top: none;
+}
+
+.qq-sticker-thumb {
+  flex: 0 0 auto;
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: rgba(127, 127, 127, 0.12);
+}
+
+.qq-sticker-thumb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.qq-sticker-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.qq-sticker-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qq-sticker-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qq-sticker-label-input,
+.qq-sticker-desc-input {
+  width: 100%;
+  margin-top: 2px;
+}
+
+.qq-sticker-row .memory-actions {
+  flex: 0 0 auto;
+  margin: 0;
+  gap: 4px;
+}
+
 /* ---- 个人记忆 · 记忆条目（浏览 / 删除；一条一行小卡片） ---- */
 
 .memory-browse {

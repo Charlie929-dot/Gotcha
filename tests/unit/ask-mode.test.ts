@@ -19,6 +19,7 @@ import {
 } from '../../src/chain/agent/mode'
 import {
   ASK_TOOL_DIARY_NAMES,
+  ASK_TOOL_GROWTH_NAMES,
   ASK_TOOL_LABELS,
   ASK_TOOL_LETTER_NAMES,
   ASK_TOOL_NAMES,
@@ -75,20 +76,22 @@ describe('分支 kind ↔ 模式', () => {
 })
 
 describe('工具目录', () => {
-  it('五个集合：屏幕记忆 5 / 日记 3 / 信 3 / 任务 4 / 小本本 1，编号顺序固定', () => {
+  it('六个集合：屏幕记忆 5 / 日记 3 / 信 3 / 任务 4 / 小本本 1 / 成长档案 1，编号顺序固定', () => {
     expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual([
       'screen',
       'diary',
       'letter',
       'task',
-      'notebook'
+      'notebook',
+      'growth'
     ])
     expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual([
       '屏幕记忆',
       '日记',
       '信',
       '任务',
-      '小本本'
+      '小本本',
+      '成长档案'
     ])
     expect(ASK_TOOL_SCREEN_NAMES).toEqual([
       'search_info',
@@ -106,7 +109,8 @@ describe('工具目录', () => {
       'cancel_task'
     ])
     expect(ASK_TOOL_NOTEBOOK_NAMES).toEqual(['update_notebook'])
-    expect(ASK_TOOL_NAMES).toHaveLength(16)
+    expect(ASK_TOOL_GROWTH_NAMES).toEqual(['write_growth'])
+    expect(ASK_TOOL_NAMES).toHaveLength(17)
   })
 
   it('每个元素都有说明，且只属于一个集合', () => {

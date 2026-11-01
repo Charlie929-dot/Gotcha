@@ -457,6 +457,19 @@ export type RedactableAskLoopToolResult =
       total: number
       message: string
     }
+  /**
+   * 成长档案（自调用 v0.2 §8）：日记 / 周记落盘后的真实回执。
+   * 只回「写到哪一篇、多少字」，正文不回显（成长档案全文不每轮进上下文）。
+   */
+  | {
+      kind: 'write_growth'
+      ok: boolean
+      growthKind: string
+      /** `2026-11-01` / `2026-W44`；失败时为空串 */
+      period: string
+      chars: number
+      message: string
+    }
 
 /** 一条小本本条目在送云视图里的样子（正文是 ta 从经历里写的，照样过脱敏） */
 export interface RedactableNotebookEntryView {
@@ -1434,6 +1447,23 @@ export function buildAskLoopPayload(
           ok: result.ok === true,
           entry,
           total: result.total,
+          message
+        }
+        break
+      }
+      case 'write_growth': {
+        const message = guardTaskMessage(
+          policy,
+          result.message,
+          '成长档案已处理（回执含敏感内容，不展开）'
+        )
+        view = {
+          kind: 'write_growth',
+          // 真落盘了才算成功；正文不回显（成长档案全文不每轮进上下文）
+          ok: result.ok === true,
+          growthKind: result.growthKind.slice(0, 10),
+          period: result.period.slice(0, 20),
+          chars: result.chars,
           message
         }
         break

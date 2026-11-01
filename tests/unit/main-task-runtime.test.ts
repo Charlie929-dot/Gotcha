@@ -139,7 +139,7 @@ describe('运行时', () => {
     })
     expect(runtime.admin().available).toBe(true)
     runtime.stop()
-    expect(runtime.admin()).toEqual({ available: false, total: 0, tasks: [] })
+    expect(runtime.admin()).toEqual({ available: false, total: 0, tasks: [], running: null })
   })
 
   it('admin：列出 active + paused（active 在前），取消 / 完成的不列', () => {
@@ -234,5 +234,65 @@ describe('运行时', () => {
     expect(runtime.count()).toBe(0)
     runtime.stop()
     expect(runtime.dueHints()).toEqual([])
+  })
+
+  it('成长档案：播种「每天写日记」（幂等），周日串周记（这周写过就不排）', () => {
+    openDatabase(dbPath).close()
+    const sunday = at('2026-11-01', '23:35')
+    const runtime = createTaskRuntime({
+      dbPath,
+      now: () => sunday,
+      vaultDir: () => null,
+      backupDir: () => null,
+      deliver: () => undefined,
+      log: () => {},
+      setTimer: () => null,
+      clearTimer: () => undefined
+    })
+    const first = runtime.seedGrowthTask()
+    expect(first).not.toBeNull()
+    expect(runtime.seedGrowthTask()).toBe(first)
+    const view = runtime.admin()
+    const daily = view.tasks.find((task) => task.id === first)
+    expect(daily).toMatchObject({ origin: 'agent', delivery: 'background', repeat: '每天' })
+
+    // 周日 + 这周没写：排一条周记；再问一次不重复
+    const weekly = runtime.scheduleWeeklyWriting({ weeklyWritten: false })
+    expect(weekly).not.toBeNull()
+    expect(runtime.scheduleWeeklyWriting({ weeklyWritten: false })).toBeNull()
+    expect(runtime.scheduleWeeklyWriting({ weeklyWritten: true })).toBeNull()
+    runtime.stop()
+  })
+
+  it('正在做：跑任务期间 admin().running 指向那一条，结束后清空', async () => {
+    const nowAt = at('2026-11-01', '12:00')
+    const db = openDatabase(dbPath)
+    const task = createTask(db, {
+      instruction: '写周报',
+      nextDueAt: nowAt,
+      origin: 'agent',
+      now: nowAt
+    })
+    db.close()
+
+    let seen: { id: number; instruction: string } | null = null
+    const runtime = createTaskRuntime({
+      dbPath,
+      now: () => nowAt,
+      vaultDir: () => null,
+      backupDir: () => null,
+      deliver: () => {
+        seen = runtime.admin().running
+        return {}
+      },
+      log: () => {},
+      setTimer: () => null,
+      clearTimer: () => undefined
+    })
+    runtime.start()
+    await runtime.pump()
+    expect(seen).toEqual({ id: task.id, instruction: '写周报' })
+    expect(runtime.admin().running).toBeNull()
+    runtime.stop()
   })
 })

@@ -684,6 +684,29 @@ const ASK_LOOP_TOOLS = [
         required: ['action']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'write_growth',
+      description:
+        '写你自己的成长档案（日记 / 周记）。kind=daily 写今天的日记（一天一篇，再写就是覆盖；最多 1200 字）；kind=weekly 写这一周的周记（最多 2000 字）。只写真实发生的事、你自己真实的感受和还没想完的事——没发生的不编，某天没内容就不要调用这个工具。成长档案全文不会每轮进上下文；如果今天形成了重要而稳定的理解，写完可以顺手 update_notebook 记进小本本。',
+      parameters: {
+        type: 'object',
+        properties: {
+          kind: {
+            type: 'string',
+            enum: ['daily', 'weekly'],
+            description: 'daily 今天的日记 / weekly 这一周的周记'
+          },
+          content: {
+            type: 'string',
+            description: '正文（第一人称；只写真实发生的，不写「我猜」当成事实）'
+          }
+        },
+        required: ['kind', 'content']
+      }
+    }
   }
 ] as const
 
@@ -723,7 +746,8 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   search_tasks: '查任务（未完成 / 某一天 / 往后 / 按事项关键词）',
   update_task: '按 id 改任务的时间 / 说明 / 重复 / 交付方式',
   cancel_task: '按 id 取消任务（共享计划会同步到他的 Obsidian 计划区）',
-  update_notebook: '改你自己的小本本（add 补一条 / revise 改一条 / remove 放下一条）'
+  update_notebook: '改你自己的小本本（add 补一条 / revise 改一条 / remove 放下一条）',
+  write_growth: '写你自己的成长档案（今天的日记 / 这一周的周记）'
 }
 
 /**

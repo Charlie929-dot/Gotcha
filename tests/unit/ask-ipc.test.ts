@@ -722,7 +722,7 @@ describe('ask IPC：模式与分支（D72）', () => {
 })
 
 describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () => {
-  const emptyTasks = { available: false, total: 0, tasks: [] }
+  const emptyTasks = { available: false, total: 0, tasks: [], running: null }
   const emptyNotebook = { path: '', total: 0, groups: [] }
 
   it('ask:tasks:get：越权 / 没接时回不可用，不抛错', async () => {
@@ -746,7 +746,8 @@ describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () =
           instruction: '写周报',
           sync: 'synced'
         }
-      ]
+      ],
+      running: null
     }))
     const view = await createAskIpcHandlers(buildDeps({ tasksAdmin }))
       .get('ask:tasks:get')!(SENDER_OK as never)

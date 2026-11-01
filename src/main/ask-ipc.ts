@@ -946,7 +946,7 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     [
       'ask:tasks:get',
       (event) => {
-        const empty: TaskAdminView = { available: false, total: 0, tasks: [] }
+        const empty: TaskAdminView = { available: false, total: 0, tasks: [], running: null }
         if (!ensureSender(event)) return empty
         if (!deps.tasksAdmin) return empty
         try {

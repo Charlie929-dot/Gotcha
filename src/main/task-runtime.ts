@@ -31,6 +31,7 @@ import {
 } from '../memory/agent/tasks'
 import { createTaskToolPort, type TaskToolPort } from '../memory/agent/task-tools'
 import { createTaskScheduler, type TaskScheduler } from '../memory/agent/scheduler'
+import { ensureGrowthDailyTask, ensureWeeklyWritingTask } from '../memory/agent/growth-tasks'
 
 export interface TaskRuntimeDeps {
   /** 库文件路径（`userData/memory.db`）；文件不存在 = 还没采集过，运行时不建库 */
@@ -72,6 +73,8 @@ export interface TaskAdminView {
   /** 活着（active / paused）的总数，可能比 tasks 多（列表截到 50 条） */
   total: number
   tasks: TaskAdminItem[]
+  /** 此刻正在跑的那条（单飞：一次只做一件事）；没在跑 = null */
+  running: { id: number; instruction: string } | null
 }
 
 export interface TaskRuntime {
@@ -88,10 +91,22 @@ export interface TaskRuntime {
   stop: () => void
   reschedule: () => void
   busy: () => boolean
+  /** 立刻打一轮（启动恢复 / 手动触发 / 测试）；单飞，重入直接返回 */
+  pump: () => Promise<void>
   /** 库里还有几条活着的任务（设置 / 状态行用） */
   count: () => number
   /** 设置抽屉：活着的任务（active / paused），暂停 / 继续 / 取消都走 port.setState / port.cancel */
   admin: () => TaskAdminView
+  /**
+   * 播种「每天写日记」的自主任务（自调用 v0.2 §8，幂等）。
+   * 任务库不可用 = null；返回任务 id（用户取消过也不会复活）。
+   */
+  seedGrowthTask: () => number | null
+  /**
+   * 日记写完后串一条「写这一周的周记」（周日 / 这周没写 / 今天没排过才建）。
+   * 返回新任务 id；这次不用排 = null。
+   */
+  scheduleWeeklyWriting: (input: { weeklyWritten: boolean }) => number | null
 }
 
 /** 合流窗口：到点前多久就把它列进 `<now>`（与既有 10 分钟窗口同口径） */
@@ -132,6 +147,8 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
   let closed = false
   /** 打不开的冷却：不让每次提问都去 existsSync + 开一次库（30 秒后再试） */
   let unavailableUntil = 0
+  /** 此刻正在跑的那条（单飞；设置抽屉显示「正在做」） */
+  let runningTask: TaskRow | null = null
 
   const handle = (): Db | null => {
     if (closed) return null
@@ -169,7 +186,14 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
       const current = handle()
       return current === null ? null : claimTask(current, id, at)
     },
-    run: (task) => deps.deliver(task),
+    run: async (task) => {
+      runningTask = task
+      try {
+        return await deps.deliver(task)
+      } finally {
+        runningTask = null
+      }
+    },
     settle: (id, outcome, at) => {
       const current = handle()
       if (current === null) return
@@ -223,6 +247,7 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
     },
     reschedule: () => scheduler.reschedule(),
     busy: () => scheduler.busy(),
+    pump: () => scheduler.pump(),
     count: () => {
       const current = handle()
       if (current === null) return 0
@@ -233,7 +258,7 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
     },
     admin: () => {
       const current = handle()
-      if (current === null) return { available: false, total: 0, tasks: [] }
+      if (current === null) return { available: false, total: 0, tasks: [], running: null }
       const at = now()
       const rows = listLiveTasks(current, 50)
       return {
@@ -248,7 +273,31 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
           state: task.state === 'paused' ? 'paused' : 'active',
           instruction: task.instruction,
           sync: task.obsidian_state
-        }))
+        })),
+        running:
+          runningTask === null
+            ? null
+            : { id: runningTask.id, instruction: runningTask.instruction }
+      }
+    },
+    seedGrowthTask: () => {
+      const current = handle()
+      if (current === null) return null
+      try {
+        return ensureGrowthDailyTask(current, now()).task.id
+      } catch (error) {
+        deps.log('warn', 'growth task seed failed', { error: String(error) })
+        return null
+      }
+    },
+    scheduleWeeklyWriting: ({ weeklyWritten }) => {
+      const current = handle()
+      if (current === null) return null
+      try {
+        return ensureWeeklyWritingTask(current, now(), { weeklyWritten })?.task.id ?? null
+      } catch (error) {
+        deps.log('warn', 'weekly writing schedule failed', { error: String(error) })
+        return null
       }
     }
   }

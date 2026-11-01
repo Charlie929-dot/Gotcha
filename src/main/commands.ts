@@ -103,6 +103,14 @@ export interface CommandDeps {
     list: () => string
     remove: (id: string) => string
   }
+  /**
+   * `/growth`（自调用 v0.2 §8 / §12.3）：看 ta 自己的成长档案（日记 / 周记）。
+   * `show` 按日期（`2026-11-01`）或周（`2026-W44`）看全文。没注入就回「还没接上」。
+   */
+  growth?: {
+    list: () => string
+    show: (key: string) => string
+  }
   now?: () => number
   /** 名字 → slug；测试可注入固定实现（默认 pinyin-pro） */
   slugify?: (name: string) => string | null
@@ -152,6 +160,7 @@ export const KNOWN_COMMANDS = [
   'tool',
   'tasks',
   'notebook',
+  'growth',
   'git'
 ] as const
 
@@ -170,6 +179,7 @@ export const READY_COMMANDS = [
   'tool',
   'tasks',
   'notebook',
+  'growth',
   'git'
 ] as const
 
@@ -494,6 +504,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /tool            看当前分支的工具；set / ele / add / rm',
     '  /tasks [cancel <编号>]  看挂着的计划 / 自主任务；cancel 取消一条',
     '  /notebook [rm <编号>]  看 ta 的小本本（当前理解）；rm 删掉一条',
+    '  /growth [日期|周]  看 ta 的成长档案（日记 / 周记）；给键看全文',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
     '  /life            看剩余生命（token；纯模型分支也有，但不冻结）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
@@ -1657,6 +1668,15 @@ export function createCommandHandler(
         }
         if (sub !== '') return commandResult('用法：/notebook 或 /notebook rm <编号>')
         return commandResult(deps.notebook.list())
+      }
+      case 'growth': {
+        if (deps.growth === undefined) return commandResult('/growth 还没接上（重启后再试）。')
+        const key = parsed.args.join(' ').trim()
+        if (key === '') return commandResult(deps.growth.list())
+        if (parsed.args.length > 1) {
+          return commandResult('用法：/growth 或 /growth 2026-11-01（周记写 2026-W44）')
+        }
+        return commandResult(deps.growth.show(key))
       }
       case 'log': {
         const target = parsed.args.join(' ').trim()

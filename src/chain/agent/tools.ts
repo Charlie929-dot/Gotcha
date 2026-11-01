@@ -245,6 +245,32 @@ export interface NotebookToolDeps {
   update(input: NotebookUpdateRequest): NotebookUpdateResult
 }
 
+/* ------------------------------------------------------------------ */
+/* 成长档案（自调用 v0.2 §8 / §12.3）：一个工具写日记 / 周记            */
+/* ------------------------------------------------------------------ */
+
+export type GrowthKindArg = 'daily' | 'weekly'
+
+export interface GrowthWriteRequest {
+  kind: GrowthKindArg
+  content: string
+}
+
+/** 回执：真的落盘了才 ok；`kind` / `period` 在失败时为空串 */
+export interface GrowthWriteResult {
+  ok: boolean
+  message: string
+  kind: GrowthKindArg | ''
+  /** 写到哪一篇：`2026-11-01` / `2026-W44` */
+  period: string
+  chars: number
+}
+
+/** 主进程注入的成长档案实现（记忆仓里的 growth/）；不传 = 这个分支没挂成长档案 */
+export interface GrowthToolDeps {
+  write(input: GrowthWriteRequest): GrowthWriteResult
+}
+
 /** 日记引用的白名单元数据（模型最终给的 itemId 必须落在这里面） */
 export interface MemoryCitationMeta {
   itemId: number
@@ -314,6 +340,11 @@ export interface AskToolDeps {
    * 不传 = 这个分支没挂小本本工具（或记忆仓不可用）：工具会如实回「现在写不了」。
    */
   notebook?: NotebookToolDeps
+  /**
+   * 成长档案（自调用 v0.2 §8）：写日记 / 周记的执行端口。
+   * 不传 = 这个分支没挂成长档案（或记忆仓不可用）：工具会如实回「现在写不了」。
+   */
+  growth?: GrowthToolDeps
 }
 
 export interface AskToolOutcome {
@@ -1374,6 +1405,48 @@ export function createAskToolExecutor(deps: AskToolDeps): {
               ok: outcome.ok,
               entry: outcome.entry,
               total: outcome.total,
+              message: outcome.message
+            },
+            segments: []
+          }
+        }
+        if (call.name === 'write_growth') {
+          const rawKind = call.arguments['kind']
+          if (rawKind !== 'daily' && rawKind !== 'weekly') {
+            return {
+              result: { kind: 'error', message: 'write_growth 需要 kind：daily（今天的日记）/ weekly（这一周的周记）' },
+              segments: []
+            }
+          }
+          const rawContent = call.arguments['content']
+          const content = typeof rawContent === 'string' ? rawContent : ''
+          if (content.trim() === '') {
+            return { result: { kind: 'error', message: 'write_growth 需要 content（正文）' }, segments: [] }
+          }
+          // 不静默截断：超过安全线就如实拒绝，让 ta 自己挑重点
+          if (content.length > 4000) {
+            return {
+              result: { kind: 'error', message: `正文太长（${content.length} 字，最多 2000 字）：挑最重要的写。` },
+              segments: []
+            }
+          }
+          if (deps.growth === undefined) {
+            return {
+              result: {
+                kind: 'error',
+                message: '现在写不了成长档案（这个分支没挂工具，或记忆仓不可用）'
+              },
+              segments: []
+            }
+          }
+          const outcome = deps.growth.write({ kind: rawKind, content })
+          return {
+            result: {
+              kind: 'write_growth',
+              ok: outcome.ok,
+              growthKind: outcome.kind,
+              period: outcome.period,
+              chars: outcome.chars,
               message: outcome.message
             },
             segments: []

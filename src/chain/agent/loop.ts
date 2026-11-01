@@ -80,6 +80,7 @@ import {
   type LetterToolDeps,
   type MemoryCitationMeta,
   type NotebookToolDeps,
+  type GrowthToolDeps,
   type TaskToolDeps
 } from './tools'
 import type { ChainDb } from '../store'
@@ -153,6 +154,11 @@ export interface AskLoopContext {
   notebook?: NotebookToolDeps & {
     read(): readonly { id: string; section: string; text: string }[]
   }
+  /**
+   * 成长档案（自调用 v0.2 §8）：`write` 是 `write_growth` 的执行端口。
+   * 不传 = 这个分支没有成长档案工具（或记忆仓不可用）。
+   */
+  growth?: GrowthToolDeps
   /**
    * 到点 / 临近的任务（v0.2 §9 合流）：每一轮现取，拼进 `<now>` 末尾。
    * 不传 = 没有任务（或这个分支不给任务），`<now>` 里就不会出现这一节。
@@ -330,6 +336,10 @@ function summarizeToolOutcome(
       return result.ok
         ? `小本本 ${result.entry !== null ? `${result.entry.id} ` : ''}已改（${result.total} 条）`
         : '小本本没改成'
+    case 'write_growth':
+      return result.ok
+        ? `${result.growthKind === 'weekly' ? '周记' : '日记'}已写（${result.period}，${result.chars} 字）`
+        : '成长档案没写成'
     default:
       return `失败：${result.message}`
   }
@@ -379,6 +389,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.letters ? { letters: ctx.letters } : {}),
     ...(ctx.tasks ? { tasks: ctx.tasks } : {}),
     ...(ctx.notebook ? { notebook: ctx.notebook } : {}),
+    ...(ctx.growth ? { growth: ctx.growth } : {}),
     ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId),

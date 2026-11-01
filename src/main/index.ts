@@ -17,6 +17,7 @@ import {
 import { buildPersonaPrompt, personaCardDir, readPersona, readPersonaCard, resolveVaultDir, savePersonaCard } from '../memory/persona'
 import type { TaskOutcome, TaskRow } from '../memory/agent/tasks'
 import { createTaskRuntime, type TaskRuntime } from './task-runtime'
+import { isGrowthDailyTask } from '../memory/agent/growth-tasks'
 import {
   applyMemoryPatch,
   buildMemorySettingsView,
@@ -26,7 +27,14 @@ import {
 import { buildMemoryListView, deleteMemoryView, parseMemoryListQuery, restoreMemoryView } from './memory-admin'
 import type { GiveBirthResult, DiaryToolDeps, LetterAt } from '../chain/agent/tools'
 import { askModeKindOfBranch, asksMemoryContext, type AskModeState } from '../chain/agent/mode'
-import { defaultToolsForBranchKind, hasDiaryTools, hasLetterTools, hasScreenTools, hasTaskTools } from '../chain/agent/tool-catalog'
+import {
+  defaultToolsForBranchKind,
+  hasDiaryTools,
+  hasGrowthTools,
+  hasLetterTools,
+  hasScreenTools,
+  hasTaskTools
+} from '../chain/agent/tool-catalog'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
@@ -165,6 +173,7 @@ import {
 } from './memory-repo-settings'
 import { createMemoryScheduler } from './memory-schedule'
 import { createNotebookStore } from './notebook'
+import { createGrowthStore } from './growth'
 import { forkDetachedIfNeeded } from './node-fork'
 import {
   appendAskConversationTurn,
@@ -310,6 +319,8 @@ let disposeAskIpc: (() => void) | null = null
 let stopMemorySchedule: (() => void) | null = null
 /** 任务运行时（自调用 v0.2）：任务库连接 + 到点调度器；退出时停掉 */
 let taskRuntime: TaskRuntime | null = null
+/** 成长档案（§8）：「每天写日记」那条自主任务的 id（周日串周记用；没有 = null） */
+let growthDailyTaskId: number | null = null
 /** QQ 通道（D63）：默认关闭；挂在这里是为了 before-quit 能直接收口端口 */
 let qqChannel: QqChannel | null = null
 /** NapCat 托管（D66）：退出只停轮询，不结束用户正在用的 QQ（拍板：退出不关） */
@@ -1213,6 +1224,7 @@ app.on('before-quit', (event) => {
   // 任务调度器：停掉定时器并关掉任务库那条独立写连接
   taskRuntime?.stop()
   taskRuntime = null
+  growthDailyTaskId = null
   // QQ 通道先释放端口（不等回执；在途问答随进程退出一起收口）
   qqNapcat?.dispose()
   qqNapcat = null
@@ -2051,6 +2063,14 @@ if (primaryInstance) {
       now: () => Date.now()
     })
     /**
+     * 成长档案（自调用 v0.2 §8）：记忆仓里的 `growth/`（日记 / 周记），跟着分支走。
+     * `write` 是 `write_growth` 的端口；`/growth` 看列表与全文；全文不每轮注入。
+     */
+    const growthStore = createGrowthStore({
+      root: memoryRepo.root,
+      now: () => Date.now()
+    })
+    /**
      * 信（D81）：写在当前分支的 `letters/`；`<now>` 只报未读数，
      * 正文走 read_letter。桌面落点是 `<桌面>/记忆球的信/`。
      */
@@ -2505,6 +2525,9 @@ if (primaryInstance) {
         // 小本本（自调用 v0.2 §7）：chat（persona）每轮注入当前核心页；
         // 工具在不在由分支白名单决定（没挂 update_notebook 时只看不改）。
         ...(chat ? { notebook: notebookStore } : {}),
+        // 成长档案（自调用 v0.2 §8）：只有挂了 write_growth 的分支才接后端；
+        // 全文不注入，写不写、写哪篇由 ta 在写作轮里自己决定。
+        ...(hasGrowthTools(tools) ? { growth: growthStore } : {}),
         ...(personaPrompt !== undefined ? { personaPrompt } : {}),
         // 这次给哪些工具（D72：当前分支的 /tool 白名单）：链层据此决定单轮 / 工具循环
         tools,
@@ -2631,6 +2654,11 @@ if (primaryInstance) {
         notebook: {
           list: () => notebookStore.list(),
           remove: (id) => notebookStore.remove(id)
+        },
+        // /growth：ta 自己的成长档案（记忆仓里的 growth/），给键看全文
+        growth: {
+          list: () => growthStore.list(),
+          show: (key) => growthStore.show(key)
         }
       })
     )
@@ -3116,7 +3144,7 @@ if (primaryInstance) {
       },
       // 设置抽屉「任务」（自调用 v0.2 §12.1）：只读视图 + 暂停 / 继续 / 取消。
       // 运行时还没起来（没采集过 / 没迁到 v11）就如实报不可用，不建库。
-      tasksAdmin: () => taskRuntime?.admin() ?? { available: false, total: 0, tasks: [] },
+      tasksAdmin: () => taskRuntime?.admin() ?? { available: false, total: 0, tasks: [], running: null },
       taskAction: ({ id, action }) => {
         if (taskRuntime === null) {
           return { ok: false, message: '任务库还没起来（重启后再试）。' }
@@ -3252,6 +3280,9 @@ if (primaryInstance) {
         const at = Date.now()
         // 用户优先：他正在说话，这一条等两分钟再来（合流，不并发说两份）
         if (askBusy) return { nextDueAt: at + 2 * 60 * 1000 }
+        // 后台交付（成长档案写作）：不开口、不进用户问答历史；只把真实结果留在记忆仓。
+        // 前台 / auto 仍然走同一条通道，说完记进历史并通知窗口重画。
+        const quiet = task.delivery === 'background'
         const conversationId = lastAskConversationId ?? `c${at.toString(36)}`
         const history = await conversationHistoryFor(conversationId)
         const controller = new AbortController()
@@ -3264,29 +3295,49 @@ if (primaryInstance) {
           captureLog('warn', 'task deliver failed', { id: task.id, reason: result.reason })
           return { nextDueAt: at + 10 * 60 * 1000 }
         }
-        try {
-          appendAskHistory(
-            askHistoryPath,
-            toHistoryEntry(
-              task.instruction,
-              result,
-              Date.now(),
-              conversationId,
-              undefined,
-              undefined,
-              await activeBranchNow()
+        if (!quiet) {
+          try {
+            appendAskHistory(
+              askHistoryPath,
+              toHistoryEntry(
+                task.instruction,
+                result,
+                Date.now(),
+                conversationId,
+                undefined,
+                undefined,
+                await activeBranchNow()
+              )
             )
-          )
-        } catch (error) {
-          captureLog('warn', 'task history record failed', { error: String(error) })
+          } catch (error) {
+            captureLog('warn', 'task history record failed', { error: String(error) })
+          }
+          if (askWindow !== null && !askWindow.isDestroyed()) {
+            askWindow.webContents.send('ask:task-said', { conversationId })
+          }
         }
-        if (askWindow !== null && !askWindow.isDestroyed()) {
-          askWindow.webContents.send('ask:task-said', { conversationId })
+        // 成长档案（自调用 v0.2 §8）：周日那篇日记写完后，串一条周记——
+        // 一次只做一件事，周记排到几分钟后；这周已经写过就不排。
+        if (task.id === growthDailyTaskId || isGrowthDailyTask(task)) {
+          try {
+            const weeklyWritten = growthStore.hasEntry('weekly', Date.now())
+            const scheduled = taskRuntime?.scheduleWeeklyWriting({ weeklyWritten }) ?? null
+            if (scheduled !== null) {
+              captureLog('info', 'weekly writing scheduled', { id: scheduled })
+            }
+          } catch (error) {
+            captureLog('warn', 'weekly writing schedule failed', { error: String(error) })
+          }
         }
         return {}
       }
     })
     taskRuntime.start()
+    // 成长档案（§8）：播种「每天写日记」的自主任务（幂等；取消过不复活）
+    growthDailyTaskId = taskRuntime.seedGrowthTask()
+    if (growthDailyTaskId !== null) {
+      captureLog('info', 'growth daily task ready', { id: growthDailyTaskId })
+    }
 
     // 启动后在后台同步一遍日记（不阻塞窗口；第一次问记忆时通常已经就绪）
     setTimeout(syncMemoryIfDue, 2_000)

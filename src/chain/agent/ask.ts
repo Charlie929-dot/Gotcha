@@ -41,6 +41,7 @@ import type {
   GiveBirthResult,
   LetterToolDeps,
   NotebookToolDeps,
+  GrowthToolDeps,
   TaskToolDeps
 } from './tools'
 import {
@@ -120,6 +121,11 @@ export interface ChainAskOptions {
   notebook?: NotebookToolDeps & {
     read(): readonly { id: string; section: string; text: string }[]
   }
+  /**
+   * 成长档案（自调用 v0.2 §8）：`write` 是 `write_growth` 的端口；
+   * 不传 = 这个分支没有成长档案工具（或记忆仓不可用）。
+   */
+  growth?: GrowthToolDeps
   /** 到点 / 临近的任务（v0.2 §9 合流）：拼进 `<now>` 末尾，说不说由 ta 定 */
   dueTasks?: () => readonly {
     id: number
@@ -331,6 +337,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.letters ? { letters: options.letters } : {}),
         ...(options.tasks ? { tasks: options.tasks } : {}),
         ...(options.notebook ? { notebook: options.notebook } : {}),
+        ...(options.growth ? { growth: options.growth } : {}),
         ...(options.dueTasks ? { dueTasks: options.dueTasks } : {}),
         ...(options.unreadLetters !== undefined ? { unreadLetters: options.unreadLetters } : {}),
         ...(options.momLetter ? { momLetter: options.momLetter } : {}),

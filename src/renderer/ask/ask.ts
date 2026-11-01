@@ -1766,12 +1766,15 @@ function fillTasks(view: TaskAdminView): void {
     tasksStatusEl.textContent = '任务库还没起来（没采集过，或还没迁到 v11）'
     return
   }
+  const runningText =
+    view.running === null ? '' : ` · 正在做 #${view.running.id} ${view.running.instruction}`
   if (view.total === 0) {
-    tasksStatusEl.textContent = '现在没有挂着的计划或自主任务。'
+    tasksStatusEl.textContent =
+      view.running === null ? '现在没有挂着的计划或自主任务。' : `正在做 #${view.running.id} ${view.running.instruction}`
     return
   }
   const suffix = view.total > view.tasks.length ? `，只显示前 ${view.tasks.length} 条` : ''
-  tasksStatusEl.textContent = `挂着的任务（${view.total} 条${suffix}）`
+  tasksStatusEl.textContent = `挂着的任务（${view.total} 条${suffix}）${runningText}`
   for (const task of view.tasks) {
     const item = document.createElement('li')
     item.className = 'task-item'

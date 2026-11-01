@@ -1687,6 +1687,16 @@ function startNotebookEdit(
     delete item.dataset.editing
   }
   cancel.addEventListener('click', finish)
+  // 行内编辑在设置表单里：回车不要提交整张设置表单（那是「保存供应商」），Esc 取消
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      save.click()
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      finish()
+    }
+  })
   save.addEventListener('click', () => {
     const body = input.value.trim()
     if (body === '') {

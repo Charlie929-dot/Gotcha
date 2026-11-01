@@ -289,13 +289,26 @@ function failureReasonText(result: MemorySwitchResult, action: string): string {
 /**
  * 当前节点先落一次；干净（clean）也算成功。返回错误文本时不切换。
  * 主题默认是时间戳名（`memory: 2026-10-30 18:05`，D75），自定义名由回执命名传进来。
+ * `info` 用来把「这次到底存没存、存成什么主题」带回回执（`/new` 会写进回执）。
  */
-async function saveBefore(deps: CommandDeps, at: number, name?: string): Promise<string | null> {
+async function saveBefore(
+  deps: CommandDeps,
+  at: number,
+  name?: string,
+  info?: { saved: boolean; subject: string }
+): Promise<string | null> {
   // detached（历史提交只读查看）没有「当前节点」可保存：直接切，脏树由 repo 层拒绝
   const head = await deps.repo.head()
   if (head.detached) return null
-  const result = await deps.repo.commit(`memory: ${name ?? defaultMemoryName(at)}`)
-  if (result.committed || result.reason === 'clean' || result.reason === 'already') return null
+  const subject = `memory: ${name ?? defaultMemoryName(at)}`
+  const result = await deps.repo.commit(subject)
+  if (result.committed || result.reason === 'clean' || result.reason === 'already') {
+    if (info !== undefined) {
+      info.saved = result.committed
+      info.subject = subject
+    }
+    return null
+  }
   if (result.reason === 'unavailable') return '记忆仓不可用，没有切换（记忆不会丢）。'
   return `保存当前节点失败${result.detail ? `（${result.detail}）` : ''}，没有切换。`
 }
@@ -474,7 +487,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '可用命令：',
     '  /help            看这一页',
     '  /log [节点]      看家谱；给编号（0 / 1 / 2）看那个节点的记忆（/log n|l 翻页）',
-    '  /new <名字>      从当前节点开新分支（ask 分支 = 从它分叉并清空会话）',
+    '  /new <名字>      从当前节点开新分支（切之前先把当前节点存一份；ask 分支还会清空会话）',
     '  /use <编号|名字|提交> [-d]  切节点；切历史提交 = 只读查看',
     '  /del <名字>      删节点（要回 confirm）',
     '  /mode ask|chat   切模式（ask = 纯模型，chat = 带 persona；切分支）',
@@ -963,7 +976,8 @@ async function createNode(
   // 纯模型分支的 `/new` = 从当前 ask 分叉（图上是真分支）+ 清空会话（上下文空白）；
   // persona 分支仍从当前节点分叉，带着它的记忆（D74）
   if (currentKind === 'assistant') {
-    const saved = await saveBefore(deps, at)
+    const saveInfo = { saved: false, subject: '' }
+    const saved = await saveBefore(deps, at, undefined, saveInfo)
     if (saved !== null) return { text: saved }
     const created = await deps.repo.switchCreate(slug)
     if (!created.ok) return { text: failureReasonText(created, `开出空会话 ${slug}`) }
@@ -989,6 +1003,7 @@ async function createNode(
     return {
       text: [
         RECEIPT_HEAD,
+        ...(saveInfo.saved ? [`切之前先把 ✨${current} 存了一份：${saveInfo.subject}。`] : []),
         `新会话 ✨${slug} 已开出（从 ✨${current} 分叉，上下文清空：只有之后的对话）。`,
         '发一句话就开始记；/use 可以回以前的会话。'
       ].join('\n'),
@@ -996,7 +1011,8 @@ async function createNode(
     }
   }
 
-  const saved = await saveBefore(deps, at)
+  const saveInfo = { saved: false, subject: '' }
+  const saved = await saveBefore(deps, at, undefined, saveInfo)
   if (saved !== null) return { text: saved }
 
   const created = await deps.repo.switchCreate(slug)
@@ -1017,6 +1033,7 @@ async function createNode(
   return {
     text: [
       RECEIPT_HEAD,
+      ...(saveInfo.saved ? [`切之前先把 ✨${current} 存了一份：${saveInfo.subject}。`] : []),
       `新节点 ✨${slug} 已从 ✨${parent} 开出，当前在这里。`,
       '发一句话就开始记到这条线上；/use 可以切回去。'
     ].join('\n'),
@@ -1074,8 +1091,12 @@ async function finishMemoryAction(
 ): Promise<MemoryOutcome> {
   if (action.kind === 'backup') return { text: await backupText(deps, at, name) }
 
-  const saved = await saveBefore(deps, at, name)
+  const saveInfo = { saved: false, subject: '' }
+  const saved = await saveBefore(deps, at, name, saveInfo)
   if (saved !== null) return { text: saved }
+  const savedNote = saveInfo.saved
+    ? [`切之前先把当前记忆存了一份：${saveInfo.subject}。`]
+    : []
 
   if (action.kind === 'commit') {
     const checkedOut = await deps.repo.checkoutCommit(action.sha)
@@ -1096,6 +1117,7 @@ async function finishMemoryAction(
       return {
         text: [
           RECEIPT_HEAD,
+          ...savedNote,
           `已停在历史提交 ✨${action.sha}——这里是只读的旧位置，家谱不变。`,
           `发第一句话会从这里分叉成 ✨${action.from}-<序号>；只看不聊不会留下分支。`
         ].join('\n')
@@ -1104,6 +1126,7 @@ async function finishMemoryAction(
     return {
       text: [
         RECEIPT_HEAD,
+        ...savedNote,
         `已停在历史提交 ✨${action.sha}——只读旧位置，家谱当前节点记作 ✨${action.owner}。`,
         `发第一句话会从 ✨${action.owner} 分叉${action.forkName !== undefined ? `成 ✨${action.forkName}` : ''}；只看不聊不会留下分支。`
       ].join('\n')
@@ -1120,7 +1143,7 @@ async function finishMemoryAction(
   const receipt = synced !== undefined ? handoverReceiptOf(synced, action.branch) : null
   return {
     text: receiptText(
-      `已切到节点 ✨${action.branch}。这一问开始用它的记忆。${receipt !== null ? `\n\n${receipt}` : ''}`
+      [...savedNote, `已切到节点 ✨${action.branch}。这一问开始用它的记忆。${receipt !== null ? `\n\n${receipt}` : ''}`].join('\n')
     ),
     ...(synced !== undefined ? { mode: modeStateOf(synced, action.branch) } : action.mode !== undefined ? { mode: action.mode } : {})
   }

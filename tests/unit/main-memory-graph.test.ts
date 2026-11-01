@@ -80,6 +80,28 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
     expect(read.lineage.branches.find((node) => node.branch === 'di-er-hui-hua')?.parent).toBe('ask')
   })
 
+  it('persona 上的 /new：切之前先把当前节点存一份（时间戳主题），改动跟着过去', async () => {
+    const { repo, lineageFile } = await setup()
+    const at = new Date(2026, 10, 1, 15, 13, 0, 0).getTime()
+    const run = createCommandHandler({ repo, lineageFile, now: () => at })
+    // 当前节点有未提交的改动（小本本 / 会话等）
+    expect(await repo.writeFile('notebook.md', '# 小本本\n- n1 · 喜欢周深\n')).toBe(true)
+
+    const text = textOf(await run('/new 秋天'))
+    expect(text).toContain('新节点 ✨qiu-tian')
+    expect(text).toContain('切之前先把 ✨default 存了一份：memory: 2026-11-01 15:13')
+
+    // 旧分支上多了一次自动保存提交（时间戳名）
+    const saved = await repo.branchLog('default')
+    expect(saved[0]?.subject).toBe('memory: 2026-11-01 15:13')
+    // 新分支从保存后的提交分叉：刚写的内容还在
+    expect(await repo.readFile('notebook.md')).toContain('喜欢周深')
+
+    const read = await readLineage(lineageFile)
+    if (read.status !== 'ok') throw new Error('lineage unreadable')
+    expect(read.lineage.active).toBe('qiu-tian')
+  })
+
   it('/log：画家谱树（缩进 + 递增编号）；/log 1 看 ask 的记忆历史', async () => {
     const { repo, lineageFile } = await setup()
     const run = createCommandHandler({ repo, lineageFile })

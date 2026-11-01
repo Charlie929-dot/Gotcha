@@ -1280,6 +1280,70 @@ button.stop {
   line-height: 1.7;
 }
 
+/* 新建 / 编辑任务：三块重复明细按种类显示，默认收起 */
+.task-form {
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--panel-2);
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-form[hidden],
+.task-form [hidden] {
+  display: none !important;
+}
+
+.task-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.task-form-row label,
+.task-weekdays label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.task-weekdays {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.task-weekdays label {
+  flex-direction: row;
+  align-items: center;
+  gap: 3px;
+}
+
+.task-form input,
+.task-form select {
+  font: inherit;
+  padding: 3px 6px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.task-form input[type='checkbox'] {
+  padding: 0;
+}
+
+.task-form .memory-actions {
+  margin-top: 2px;
+}
+
 /* ---- 成长档案（四类各自翻页；点一条就地展开全文） ---- */
 
 .growth-groups {

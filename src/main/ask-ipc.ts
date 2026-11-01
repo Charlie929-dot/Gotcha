@@ -36,7 +36,7 @@ import type {
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from './qq/qq-settings'
 import type { NapcatView } from './qq/napcat'
-import type { TaskAdminView } from './task-runtime'
+import type { TaskAdminSaveInput, TaskAdminView } from './task-runtime'
 import type { NotebookAdminView } from './notebook'
 import type { GrowthEntryView, GrowthPage } from './growth'
 import { GROWTH_KINDS, type GrowthKind } from '../memory/growth'
@@ -277,6 +277,8 @@ export interface AskIpcDeps {
     id: number
     action: 'pause' | 'resume' | 'cancel'
   }) => TaskAdminActionResult
+  /** 抽屉里新建 / 编辑一条任务（新建 = 共建计划，走 Obsidian 计划区同步） */
+  taskSave?: (input: TaskAdminSaveInput) => TaskAdminActionResult
   /**
    * 设置抽屉「小本本」（自调用 v0.2 §7）：四分区查看 + 按编号删除。
    * 删除只动记忆仓里的 notebook.md，不碰用户 Obsidian 日记。
@@ -313,6 +315,27 @@ const PENDING_RESUME_MAX = 8
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+/**
+ * 任务表单里的整数组（周几 / 几号）：没给 = undefined，空数组 = 没选（undefined），
+ * 给了但越界 / 非整数 = null（由调用方如实报错）。
+ */
+function checklistOf(value: unknown, min: number, max: number): number[] | null | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) return null
+  if (value.length === 0) return undefined
+  const days = new Set<number>()
+  for (const item of value) {
+    if (typeof item !== 'number' || !Number.isInteger(item) || item < min || item > max) {
+      return null
+    }
+    days.add(item)
+  }
+  return [...days].sort((a, b) => a - b)
+}
+
+/** 抽屉表单里的重复种类 */
+const TASK_REPEAT_KINDS: readonly string[] = ['', 'daily', 'weekly', 'monthly', 'yearly']
 
 /** 只认问记忆窗口自己的主框架（子框架 / 其它 webContents 一律拒） */
 function createSenderCheck(deps: AskIpcDeps): (event: IpcMainInvokeEvent) => boolean {
@@ -999,6 +1022,88 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask task action failed', { error: String(error) })
           return { ok: false, message: '操作失败，细节看日志' }
+        }
+      }
+    ],
+    [
+      'ask:tasks:save',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, message: 'forbidden' }
+        if (!deps.taskSave) return { ok: false, message: '当前版本不支持编辑任务' }
+        if (!isPlainObject(input)) return { ok: false, message: '参数不合法' }
+        const rawId = input.id
+        if (
+          rawId !== undefined &&
+          (typeof rawId !== 'number' || !Number.isInteger(rawId) || rawId <= 0)
+        ) {
+          return { ok: false, message: '任务编号不合法' }
+        }
+        const instruction = typeof input.instruction === 'string' ? input.instruction.trim() : ''
+        if (instruction === '') return { ok: false, message: '说明不能为空' }
+        if (instruction.length > 500) return { ok: false, message: '说明最多 500 字' }
+        const when =
+          input.when === null
+            ? null
+            : typeof input.when === 'number' && Number.isFinite(input.when)
+              ? Math.round(input.when)
+              : undefined
+        if (when === undefined) return { ok: false, message: '到点时间不合法' }
+        const validUntil =
+          input.validUntil === undefined || input.validUntil === null
+            ? null
+            : typeof input.validUntil === 'number' && Number.isFinite(input.validUntil)
+              ? Math.round(input.validUntil)
+              : undefined
+        if (validUntil === undefined) return { ok: false, message: '有效期不合法' }
+        const repeat = input.repeat
+        if (typeof repeat !== 'string' || !TASK_REPEAT_KINDS.includes(repeat)) {
+          return { ok: false, message: '重复规则不合法' }
+        }
+        const delivery = input.delivery
+        if (delivery !== 'foreground' && delivery !== 'background' && delivery !== 'auto') {
+          return { ok: false, message: '交付方式不合法' }
+        }
+        const weekdays = checklistOf(input.weekdays, 1, 7)
+        if (weekdays === null) return { ok: false, message: 'weekdays 要用 1–7 的整数' }
+        const monthDays = checklistOf(input.monthDays, 1, 31)
+        if (monthDays === null) return { ok: false, message: 'monthDays 要用 1–31 的整数' }
+        const yearlyMonth = input.yearlyMonth ?? null
+        const yearlyDay = input.yearlyDay ?? null
+        if (
+          (yearlyMonth !== null || yearlyDay !== null) &&
+          (typeof yearlyMonth !== 'number' ||
+            typeof yearlyDay !== 'number' ||
+            !Number.isInteger(yearlyMonth) ||
+            !Number.isInteger(yearlyDay) ||
+            yearlyMonth < 1 ||
+            yearlyMonth > 12 ||
+            yearlyDay < 1 ||
+            yearlyDay > 31)
+        ) {
+          return { ok: false, message: '每年几月几号不合法' }
+        }
+        if (yearlyMonth !== null && yearlyDay !== null) {
+          const probe = new Date(2028, yearlyMonth - 1, yearlyDay)
+          if (probe.getMonth() !== yearlyMonth - 1 || probe.getDate() !== yearlyDay) {
+            return { ok: false, message: '这个月没有这一号（2 月最多 29 日）' }
+          }
+        }
+        try {
+          return deps.taskSave({
+            ...(rawId === undefined ? {} : { id: rawId as number }),
+            instruction,
+            when,
+            repeat: repeat as TaskAdminSaveInput['repeat'],
+            ...(weekdays === undefined ? {} : { weekdays }),
+            ...(monthDays === undefined ? {} : { monthDays }),
+            yearlyMonth,
+            yearlyDay,
+            delivery,
+            validUntil
+          })
+        } catch (error) {
+          deps.log('error', 'ask task save failed', { error: String(error) })
+          return { ok: false, message: '保存失败，细节看日志' }
         }
       }
     ],

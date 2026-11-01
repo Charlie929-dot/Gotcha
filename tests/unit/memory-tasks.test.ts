@@ -114,18 +114,26 @@ describe('重复规则：解析 / 多选 / 短月', () => {
     expect(parseRepeat('weekly:5,1,3,3')).toEqual({
       kind: 'weekly',
       weekdays: [1, 3, 5],
-      monthDays: []
+      monthDays: [],
+      yearlyMonth: null,
+      yearlyDay: null
     })
     expect(parseRepeat('monthly:15,1')).toEqual({
       kind: 'monthly',
       weekdays: [],
-      monthDays: [1, 15]
+      monthDays: [1, 15],
+      yearlyMonth: null,
+      yearlyDay: null
     })
-    expect(parseRepeat('weekly:0')).toEqual({ kind: '', weekdays: [], monthDays: [] })
-    expect(parseRepeat('monthly:32')).toEqual({ kind: '', weekdays: [], monthDays: [] })
-    expect(parseRepeat('hourly')).toEqual({ kind: '', weekdays: [], monthDays: [] })
-    expect(formatRepeat({ kind: 'weekly', weekdays: [3, 1], monthDays: [] })).toBe('weekly:1,3')
-    expect(formatRepeat({ kind: 'monthly', weekdays: [], monthDays: [15, 1] })).toBe('monthly:1,15')
+    expect(parseRepeat('weekly:0')).toMatchObject({ kind: '' })
+    expect(parseRepeat('monthly:32')).toMatchObject({ kind: '' })
+    expect(parseRepeat('hourly')).toMatchObject({ kind: '' })
+    expect(
+      formatRepeat({ kind: 'weekly', weekdays: [3, 1], monthDays: [], yearlyMonth: null, yearlyDay: null })
+    ).toBe('weekly:1,3')
+    expect(
+      formatRepeat({ kind: 'monthly', weekdays: [], monthDays: [15, 1], yearlyMonth: null, yearlyDay: null })
+    ).toBe('monthly:1,15')
   })
 
   it('没给列表：按第一次到点补出周几 / 日号（新写入不落裸 weekly / monthly）', () => {
@@ -133,7 +141,44 @@ describe('重复规则：解析 / 多选 / 短月', () => {
     expect(resolveRepeat({ kind: 'monthly', anchor: at('2026-11-30', '09:30') })).toBe('monthly:30')
     expect(resolveRepeat({ kind: 'weekly', weekdays: [5, 1] })).toBe('weekly:1,5')
     expect(resolveRepeat({ kind: 'daily', anchor: at('2026-11-04', '09:30') })).toBe('daily')
+    expect(resolveRepeat({ kind: 'yearly', anchor: at('2026-11-01', '09:30') })).toBe('yearly:11-01')
     expect(resolveRepeat({ kind: 'weekly' })).toBe('weekly')
+  })
+
+  it('yearly：解析 / 持久化 / 跨年推进 / 平年 2-29 钳到 2-28', () => {
+    expect(parseRepeat('yearly:11-01')).toEqual({
+      kind: 'yearly',
+      weekdays: [],
+      monthDays: [],
+      yearlyMonth: 11,
+      yearlyDay: 1
+    })
+    expect(parseRepeat('yearly:2-29')).toMatchObject({ kind: 'yearly', yearlyMonth: 2, yearlyDay: 29 })
+    expect(parseRepeat('yearly:2-30')).toMatchObject({ kind: '' })
+    expect(parseRepeat('yearly:13-01')).toMatchObject({ kind: '' })
+    expect(
+      formatRepeat({
+        kind: 'yearly',
+        weekdays: [],
+        monthDays: [],
+        yearlyMonth: 11,
+        yearlyDay: 1
+      })
+    ).toBe('yearly:11-01')
+    // 从 2026-11-01 出发，下一次是 2027-11-01（跨年）
+    expect(dayKeyOf(advanceOccurrence(at('2026-11-01', '09:30'), 'yearly:11-01'))).toBe('2027-11-01')
+    // 平年没有 2-29：钳到 2 月 28；闰年 2028 照常 2-29
+    expect(dayKeyOf(advanceOccurrence(at('2026-03-01', '09:30'), 'yearly:02-29'))).toBe('2027-02-28')
+    expect(dayKeyOf(advanceOccurrence(at('2027-03-01', '09:30'), 'yearly:02-29'))).toBe('2028-02-29')
+  })
+
+  it('yearly 首次到点归一：when 对不上月日就顺延到下一次', () => {
+    expect(dayKeyOf(alignFirstOccurrence(at('2026-11-05', '07:00'), 'yearly:11-01') ?? 0)).toBe(
+      '2027-11-01'
+    )
+    expect(alignFirstOccurrence(at('2026-11-01', '07:00'), 'yearly:11-01')).toBe(
+      at('2026-11-01', '07:00')
+    )
   })
 
   it('weekly 多选：周一推到周三、周五推到下周一（钟点不变）', () => {
@@ -457,11 +502,13 @@ describe('人话描述', () => {
     expect(line).toContain('Obsidian 未同步')
   })
 
-  it('describeRepeat：多选周几 / 每月几号；旧裸 weekly 按下一次的星期几说', () => {
+  it('describeRepeat：多选周几 / 每月几号 / 每年月日；旧裸值按下一次说', () => {
     expect(describeRepeat('weekly:1,3,5')).toBe('每周一、三、五')
     expect(describeRepeat('monthly:1,15')).toBe('每月 1、15 号')
+    expect(describeRepeat('yearly:11-01')).toBe('每年 11 月 1 日')
     expect(describeRepeat('weekly', at('2026-11-04', '09:30'))).toBe('每周三')
     expect(describeRepeat('monthly', at('2026-11-15', '09:30'))).toBe('每月 15 号')
+    expect(describeRepeat('yearly', at('2026-11-01', '09:30'))).toBe('每年 11 月 1 日')
     expect(describeRepeat('daily')).toBe('每天')
     expect(describeRepeat('')).toBe('')
   })

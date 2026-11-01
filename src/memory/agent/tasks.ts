@@ -20,12 +20,13 @@ export type TaskOrigin = 'user' | 'agent' | 'system'
 /** 交付：foreground 可开口；background 不打断当前回答；auto 由本轮结合上下文决定 */
 export type TaskDelivery = 'foreground' | 'background' | 'auto'
 /** 重复种类：空 = 一次性 */
-export type RepeatKind = '' | 'daily' | 'weekly' | 'monthly'
+export type RepeatKind = '' | 'daily' | 'weekly' | 'monthly' | 'yearly'
 /**
- * 重复的持久化文本：`''` / `daily` / `weekly` / `weekly:1,3,5` / `monthly:1,15`。
+ * 重复的持久化文本：`''` / `daily` / `weekly` / `weekly:1,3,5` / `monthly:1,15` / `yearly:11-01`。
  * - weekly 的周几用 ISO 口径（1=周一 … 7=周日），monthly 的几号用 1–31；都升序去重；
- * - 裸 `weekly` / `monthly`（没有列表）=「沿用当前 occurrence 的星期几 / 日号」，只为兼容旧行；
- *   新写入的都会由 `resolveRepeat` 补成显式列表，避免短月钳制后日号漂移。
+ * - yearly 用 `MM-DD`（本地日历；平年 2-29 钳到 2 月 28，不跳过这一年）；
+ * - 裸 `weekly` / `monthly` / `yearly`（没有列表 / 日期）=「沿用当前 occurrence」，只为兼容旧行；
+ *   新写入的都会由 `resolveRepeat` 补成显式值，避免短月钳制后日号漂移。
  */
 export type TaskRepeat = string
 /** 业务状态：`due` 是派生状态，「正在跑」是进程内租约，都不写进这里 */
@@ -40,6 +41,10 @@ export interface RepeatRule {
   weekdays: number[]
   /** monthly 的几号（1–31，升序去重）；空 = 沿用当前 occurrence 的日号 */
   monthDays: number[]
+  /** yearly 的月（1–12）；空 = 沿用当前 occurrence 的月 */
+  yearlyMonth: number | null
+  /** yearly 的日（1–31；2-29 合法，平年推进时钳到 2-28） */
+  yearlyDay: number | null
 }
 
 export const TASK_ORIGINS: readonly TaskOrigin[] = ['user', 'agent', 'system']
@@ -188,15 +193,59 @@ export function cleanMonthDays(values: readonly number[] | undefined): number[] 
   return cleanDays(values, 1, 31)
 }
 
+/** 某年某月（1–12）有多少天 */
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month, 0).getDate()
+}
+
+/**
+ * yearly 的月 / 日：两个都给且合法才算数（用 2028 闰年校验，2-29 合法、2-30 不合法）。
+ * 只给一个 / 都不给 → null（由 `resolveRepeat` 从第一次到点补）。
+ */
+function cleanYearlyDate(
+  month: number | null | undefined,
+  day: number | null | undefined
+): { month: number; day: number } | null {
+  if (month == null || day == null) return null
+  if (!Number.isInteger(month) || !Number.isInteger(day)) return null
+  if (month < 1 || month > 12) return null
+  if (day < 1 || day > daysInMonth(2028, month)) return null
+  return { month, day }
+}
+
 /** 解析持久化文本；认不出的一律当一次性（不写坏枚举，与旧版口径一致） */
 export function parseRepeat(value: string | null | undefined): RepeatRule {
-  const empty: RepeatRule = { kind: '', weekdays: [], monthDays: [] }
+  const empty: RepeatRule = {
+    kind: '',
+    weekdays: [],
+    monthDays: [],
+    yearlyMonth: null,
+    yearlyDay: null
+  }
   if (typeof value !== 'string') return empty
   const text = value.trim().toLowerCase()
   if (text === '') return empty
-  if (text === 'daily') return { kind: 'daily', weekdays: [], monthDays: [] }
-  const match = /^(weekly|monthly)(?::(.+))?$/u.exec(text)
+  if (text === 'daily') {
+    return { kind: 'daily', weekdays: [], monthDays: [], yearlyMonth: null, yearlyDay: null }
+  }
+  const match = /^(weekly|monthly|yearly)(?::(.+))?$/u.exec(text)
   if (match === null) return empty
+  if (match[1] === 'yearly') {
+    if (match[2] === undefined) {
+      return { kind: 'yearly', weekdays: [], monthDays: [], yearlyMonth: null, yearlyDay: null }
+    }
+    const date = /^(\d{1,2})-(\d{1,2})$/u.exec(match[2].trim())
+    if (date === null) return empty
+    const cleaned = cleanYearlyDate(Number(date[1]), Number(date[2]))
+    if (cleaned === null) return empty
+    return {
+      kind: 'yearly',
+      weekdays: [],
+      monthDays: [],
+      yearlyMonth: cleaned.month,
+      yearlyDay: cleaned.day
+    }
+  }
   const kind: RepeatKind = match[1] === 'weekly' ? 'weekly' : 'monthly'
   const max = kind === 'weekly' ? 7 : 31
   const parsed: number[] = []
@@ -212,7 +261,9 @@ export function parseRepeat(value: string | null | undefined): RepeatRule {
   return {
     kind,
     weekdays: kind === 'weekly' ? days : [],
-    monthDays: kind === 'monthly' ? days : []
+    monthDays: kind === 'monthly' ? days : [],
+    yearlyMonth: null,
+    yearlyDay: null
   }
 }
 
@@ -227,11 +278,15 @@ export function formatRepeat(rule: RepeatRule): string {
     const days = cleanDays(rule.monthDays, 1, 31)
     return days.length === 0 ? 'monthly' : `monthly:${days.join(',')}`
   }
+  if (rule.kind === 'yearly') {
+    const date = cleanYearlyDate(rule.yearlyMonth, rule.yearlyDay)
+    return date === null ? 'yearly' : `yearly:${pad2(date.month)}-${pad2(date.day)}`
+  }
   return ''
 }
 
 /**
- * 把「种类 + 可选的周几 / 几号」落成持久化文本。
+ * 把「种类 + 可选的周几 / 几号 / 月日」落成持久化文本。
  * 没给列表时用 `anchor`（第一次到点）补出来——这样短月钳制之后日号不会漂
  * （1 月 31 号 → 2 月 28 号，下一次仍是 3 月 31 号，而不是 3 月 28 号）。
  */
@@ -239,6 +294,8 @@ export function resolveRepeat(input: {
   kind: RepeatKind
   weekdays?: readonly number[] | undefined
   monthDays?: readonly number[] | undefined
+  yearlyMonth?: number | null | undefined
+  yearlyDay?: number | null | undefined
   anchor?: number | null | undefined
 }): string {
   if (input.kind === '' || input.kind === 'daily') return input.kind
@@ -250,7 +307,21 @@ export function resolveRepeat(input: {
   if (input.kind === 'monthly' && monthDays.length === 0 && input.anchor != null) {
     monthDays.push(new Date(input.anchor).getDate())
   }
-  return formatRepeat({ kind: input.kind, weekdays, monthDays })
+  if (input.kind === 'yearly') {
+    let date = cleanYearlyDate(input.yearlyMonth, input.yearlyDay)
+    if (date === null && input.anchor != null) {
+      const at = new Date(input.anchor)
+      date = cleanYearlyDate(at.getMonth() + 1, at.getDate())
+    }
+    return formatRepeat({
+      kind: 'yearly',
+      weekdays,
+      monthDays,
+      yearlyMonth: date?.month ?? null,
+      yearlyDay: date?.day ?? null
+    })
+  }
+  return formatRepeat({ kind: input.kind, weekdays, monthDays, yearlyMonth: null, yearlyDay: null })
 }
 
 /** 不早于 / 晚于 `ts` 的下一次 weekly occurrence（同一天同一钟点；跨周用日历加天） */
@@ -294,11 +365,33 @@ function nextMonthlyAt(ts: number, rule: RepeatRule, inclusive: boolean): number
 function nextOccurrenceAt(ts: number, rule: RepeatRule, inclusive: boolean): number | null {
   if (rule.kind === 'weekly') return nextWeeklyAt(ts, rule, inclusive)
   if (rule.kind === 'monthly') return nextMonthlyAt(ts, rule, inclusive)
+  if (rule.kind === 'yearly') return nextYearlyAt(ts, rule, inclusive)
   return null
 }
 
 /**
- * 把「第一次到点」归一到规则上：weekly / monthly 时返回不小于 `at` 的第一次 occurrence
+ * 下一次 yearly occurrence：在当年 / 后面 8 年里找所选月日。
+ * 平年没有 2-29 就钳到 2 月 28（不跳过这一年）。
+ */
+function nextYearlyAt(ts: number, rule: RepeatRule, inclusive: boolean): number | null {
+  const source = new Date(ts)
+  const month = rule.yearlyMonth ?? source.getMonth() + 1
+  const day = rule.yearlyDay ?? source.getDate()
+  const hour = source.getHours()
+  const minute = source.getMinutes()
+  const second = source.getSeconds()
+  const millisecond = source.getMilliseconds()
+  for (let offset = 0; offset <= 8; offset += 1) {
+    const year = source.getFullYear() + offset
+    const effectiveDay = Math.min(day, daysInMonth(year, month))
+    const candidate = new Date(year, month - 1, effectiveDay, hour, minute, second, millisecond).getTime()
+    if (candidate > ts || (inclusive && candidate === ts)) return candidate
+  }
+  return null
+}
+
+/**
+ * 把「第一次到点」归一到规则上：weekly / monthly / yearly 时返回不小于 `at` 的第一次 occurrence
  * （规则是每周一三五、when 落在周二 → 顺延到周三；当天的钟点不变）。
  * 一次性 / 每天 / `at` 为空时原样返回。
  */
@@ -311,7 +404,7 @@ export function alignFirstOccurrence(at: number | null, repeat: TaskRepeat): num
 
 /**
  * 按日历推下一次（不用 +86400000：跨月 / 跨年 / 月长都要分开算）；
- * weekly 落在所选周几里，monthly 落在所选日号（短月钳到月末）。
+ * weekly 落在所选周几里，monthly 落在所选日号（短月钳到月末），yearly 落在所选月日（平年 2-29 钳到 2-28）。
  */
 export function advanceOccurrence(ts: number, repeat: TaskRepeat): number {
   const rule = parseRepeat(repeat)
@@ -359,6 +452,12 @@ export function describeRepeat(repeat: TaskRepeat, nextDueAt?: number | null): s
           ? [new Date(nextDueAt).getDate()]
           : []
     return days.length === 0 ? '每月' : `每月 ${days.join('、')} 号`
+  }
+  if (rule.kind === 'yearly') {
+    const month =
+      rule.yearlyMonth ?? (nextDueAt != null ? new Date(nextDueAt).getMonth() + 1 : null)
+    const day = rule.yearlyDay ?? (nextDueAt != null ? new Date(nextDueAt).getDate() : null)
+    return month == null || day == null ? '每年' : `每年 ${month} 月 ${day} 日`
   }
   return ''
 }
@@ -419,6 +518,8 @@ export function createTask(db: Db, input: NewTaskInput): TaskRow {
     kind: parsedRepeat.kind,
     weekdays: parsedRepeat.weekdays,
     monthDays: parsedRepeat.monthDays,
+    yearlyMonth: parsedRepeat.yearlyMonth,
+    yearlyDay: parsedRepeat.yearlyDay,
     anchor: due
   })
   const firstDue = alignFirstOccurrence(due, repeat)
@@ -477,6 +578,8 @@ export function updateTask(db: Db, input: TaskUpdateInput): TaskRow | null {
       kind: parsed.kind,
       weekdays: parsed.weekdays,
       monthDays: parsed.monthDays,
+      yearlyMonth: parsed.yearlyMonth,
+      yearlyDay: parsed.yearlyDay,
       anchor: hasDue ? optionalStamp(input.nextDueAt) : current.next_due_at
     })
   }

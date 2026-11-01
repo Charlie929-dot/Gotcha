@@ -102,6 +102,10 @@ export interface TaskToolPort {
     weekdays?: number[]
     /** repeat=monthly 时生效：每月几号，1–31，可多选 */
     monthDays?: number[]
+    /** repeat=yearly 时生效：每年几月（1–12） */
+    yearlyMonth?: number | null
+    /** repeat=yearly 时生效：每年几号（1–31；2-29 合法） */
+    yearlyDay?: number | null
     origin: 'user' | 'agent' | 'system'
     delivery: 'foreground' | 'background' | 'auto'
     validUntil: number | null
@@ -119,6 +123,8 @@ export interface TaskToolPort {
     repeat?: RepeatKind
     weekdays?: number[]
     monthDays?: number[]
+    yearlyMonth?: number | null
+    yearlyDay?: number | null
     delivery?: 'foreground' | 'background' | 'auto'
     validUntil?: number | null
     state?: 'active' | 'paused' | 'completed' | 'cancelled'
@@ -355,6 +361,8 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
         kind: input.repeat,
         weekdays: cleanWeekdays(input.weekdays),
         monthDays: cleanMonthDays(input.monthDays),
+        yearlyMonth: input.yearlyMonth,
+        yearlyDay: input.yearlyDay,
         anchor: input.when
       })
       const task = createTask(db, {
@@ -417,15 +425,26 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
           kind: input.repeat,
           weekdays: cleanWeekdays(input.weekdays),
           monthDays: cleanMonthDays(input.monthDays),
+          yearlyMonth: input.yearlyMonth,
+          yearlyDay: input.yearlyDay,
           anchor
         })
-      } else if (input.weekdays !== undefined || input.monthDays !== undefined) {
-        // 只给周几 / 几号（不给 repeat）：按这条任务现有的重复种类改
+      } else if (
+        input.weekdays !== undefined ||
+        input.monthDays !== undefined ||
+        input.yearlyMonth !== undefined ||
+        input.yearlyDay !== undefined
+      ) {
+        // 只给周几 / 几号 / 月日（不给 repeat）：按这条任务现有的重复种类改
         const currentRule = parseRepeat(before.repeat)
-        if (currentRule.kind !== 'weekly' && currentRule.kind !== 'monthly') {
+        if (
+          currentRule.kind !== 'weekly' &&
+          currentRule.kind !== 'monthly' &&
+          currentRule.kind !== 'yearly'
+        ) {
           return {
             ok: false,
-            message: `#${input.id} 现在不是重复任务：先用 repeat=weekly / monthly 设重复，再给 weekdays / month_days`,
+            message: `#${input.id} 现在不是重复任务：先用 repeat=weekly / monthly / yearly 设重复，再给 weekdays / month_days / yearly_month / yearly_day`,
             task: viewOf(before, now)
           }
         }
@@ -435,6 +454,9 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
             input.weekdays !== undefined ? cleanWeekdays(input.weekdays) : currentRule.weekdays,
           monthDays:
             input.monthDays !== undefined ? cleanMonthDays(input.monthDays) : currentRule.monthDays,
+          yearlyMonth:
+            input.yearlyMonth !== undefined ? input.yearlyMonth : currentRule.yearlyMonth,
+          yearlyDay: input.yearlyDay !== undefined ? input.yearlyDay : currentRule.yearlyDay,
           anchor
         })
       }
@@ -466,7 +488,12 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
       if (after === null) {
         return { ok: false, message: `没改成 #${input.id}`, task: null }
       }
-      const sync = before.origin === 'user' ? syncPlanEdit(before, 'update', after, options) : null
+      // 暂停中的共建计划：Obsidian 那行已经收起了，编辑时别再写回去；
+      // 等「继续」时按新说明写回（setState 走 syncPlanCreate）。
+      const sync =
+        before.origin === 'user' && before.state !== 'paused'
+          ? syncPlanEdit(before, 'update', after, options)
+          : null
       const stored = sync === null ? after : applySync(db, after, sync, now)
       options.onChanged?.()
       const tail = sync === null ? '' : ` · ${syncLabel(sync)}`

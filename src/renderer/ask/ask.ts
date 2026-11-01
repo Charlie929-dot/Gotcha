@@ -31,7 +31,11 @@ import type { MemoryRepoSettingsView } from '../../main/memory-repo-settings'
 import type { MemoryListItemView } from '../../main/memory-admin'
 import type { QqSettingsView } from '../../main/qq/qq-settings'
 import type { NapcatView } from '../../main/qq/napcat'
-import type { TaskAdminItem, TaskAdminView } from '../../main/task-runtime'
+import type {
+  TaskAdminItem,
+  TaskAdminSaveInput,
+  TaskAdminView
+} from '../../main/task-runtime'
 import type { NotebookAdminView } from '../../main/notebook'
 import type { GrowthEntryView, GrowthPage } from '../../main/growth'
 import type { GrowthKind } from '../../memory/growth'
@@ -102,11 +106,29 @@ const growthStatusEl = must<HTMLElement>('growth-status')
 const growthGroupsEl = must<HTMLElement>('growth-groups')
 const growthRefreshButton = must<HTMLButtonElement>('growth-refresh')
 const growthMsg = must<HTMLElement>('growth-msg')
-/* ---- 设置抽屉 · 任务（自调用 v0.2 §12.1：暂停 / 继续 / 取消） ---- */
+/* ---- 设置抽屉 · 任务（自调用 v0.2 §12.1：暂停 / 继续 / 取消 / 新建 / 编辑） ---- */
 const tasksStatusEl = must<HTMLElement>('tasks-status')
 const tasksListEl = must<HTMLUListElement>('tasks-list')
+const tasksNewButton = must<HTMLButtonElement>('tasks-new')
 const tasksRefreshButton = must<HTMLButtonElement>('tasks-refresh')
 const tasksMsg = must<HTMLElement>('tasks-msg')
+const taskFormEl = must<HTMLElement>('task-form')
+const taskInstructionInput = must<HTMLInputElement>('task-instruction')
+const taskWhenInput = must<HTMLInputElement>('task-when')
+const taskValidInput = must<HTMLInputElement>('task-valid')
+const taskRepeatSelect = must<HTMLSelectElement>('task-repeat')
+const taskDeliverySelect = must<HTMLSelectElement>('task-delivery')
+const taskWeekdaysEl = must<HTMLElement>('task-weekdays')
+const taskMonthdaysEl = must<HTMLElement>('task-monthdays')
+const taskMonthdaysInput = must<HTMLInputElement>('task-monthdays-input')
+const taskYearlyEl = must<HTMLElement>('task-yearly')
+const taskYearlyMonthSelect = must<HTMLSelectElement>('task-yearly-month')
+const taskYearlyDayInput = must<HTMLInputElement>('task-yearly-day')
+const taskSaveButton = must<HTMLButtonElement>('task-save')
+const taskCancelButton = must<HTMLButtonElement>('task-cancel')
+const taskWeekdayBoxes = [
+  ...document.querySelectorAll<HTMLInputElement>('.task-weekday')
+]
 /* ---- 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销） ---- */
 const memorySearchInput = must<HTMLInputElement>('memory-search')
 const memoryKindSelect = must<HTMLSelectElement>('memory-kind')
@@ -1922,6 +1944,170 @@ const TASK_ORIGIN_TEXT: Readonly<Record<TaskAdminItem['origin'], string>> = {
   system: '例行'
 }
 
+/** 正在编辑的任务 id；null = 新建（或表单关着） */
+let editingTaskId: number | null = null
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/** 毫秒 → datetime-local 的本地写法（`YYYY-MM-DDTHH:mm`）；null = 空 */
+function toLocalInput(ts: number | null): string {
+  if (ts === null) return ''
+  const date = new Date(ts)
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}T${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
+/** datetime-local 的值 → 毫秒；空 = null，写坏了 = undefined（表单如实报错，不猜） */
+function fromLocalInput(value: string): number | null | undefined {
+  if (value.trim() === '') return null
+  const ts = new Date(value).getTime()
+  return Number.isFinite(ts) ? ts : undefined
+}
+
+/** 按重复种类显示 / 隐藏「周几 / 几号 / 月日」三块 */
+function setRepeatPanels(): void {
+  const kind = taskRepeatSelect.value
+  taskWeekdaysEl.hidden = kind !== 'weekly'
+  taskMonthdaysEl.hidden = kind !== 'monthly'
+  taskYearlyEl.hidden = kind !== 'yearly'
+}
+
+function clearTaskForm(): void {
+  taskInstructionInput.value = ''
+  taskWhenInput.value = ''
+  taskValidInput.value = ''
+  taskRepeatSelect.value = ''
+  taskDeliverySelect.value = 'auto'
+  taskMonthdaysInput.value = ''
+  taskYearlyMonthSelect.value = String(new Date().getMonth() + 1)
+  taskYearlyDayInput.value = '1'
+  for (const box of taskWeekdayBoxes) box.checked = false
+  setRepeatPanels()
+}
+
+/** 打开表单：不传 = 新建；传一条 = 编辑它（来源不在这里改） */
+function openTaskForm(task?: TaskAdminItem): void {
+  clearTaskForm()
+  editingTaskId = task?.id ?? null
+  if (task !== undefined) {
+    taskInstructionInput.value = task.instruction
+    taskWhenInput.value = toLocalInput(task.nextDueAt)
+    taskValidInput.value = toLocalInput(task.validUntil)
+    taskRepeatSelect.value = task.repeatKind
+    taskDeliverySelect.value = task.delivery
+    for (const box of taskWeekdayBoxes) {
+      box.checked = task.weekdays.includes(Number(box.value))
+    }
+    taskMonthdaysInput.value = task.monthDays.join(',')
+    if (task.yearlyMonth !== null) taskYearlyMonthSelect.value = String(task.yearlyMonth)
+    if (task.yearlyDay !== null) taskYearlyDayInput.value = String(task.yearlyDay)
+    setRepeatPanels()
+  }
+  taskFormEl.hidden = false
+  tasksMsg.textContent = task === undefined ? '新建任务（会算共建计划，写进 Obsidian 计划区）' : `编辑 #${task.id}`
+  tasksMsg.style.color = ''
+  taskInstructionInput.focus()
+}
+
+function closeTaskForm(): void {
+  taskFormEl.hidden = true
+  editingTaskId = null
+}
+
+/** 「1,15」「1，15」→ [1,15]；空 = []；有坏值 = null（表单如实报错） */
+function parseDayListInput(text: string): number[] | null {
+  const parts = text.split(/[,，、\s]+/u).filter((part) => part !== '')
+  const days: number[] = []
+  for (const part of parts) {
+    if (!/^\d{1,2}$/u.test(part)) return null
+    const day = Number(part)
+    if (day < 1 || day > 31) return null
+    days.push(day)
+  }
+  return [...new Set(days)].sort((a, b) => a - b)
+}
+
+async function saveTask(): Promise<void> {
+  if (!api) return
+  const instruction = taskInstructionInput.value.trim()
+  if (instruction === '') {
+    tasksMsg.textContent = '说明不能为空'
+    tasksMsg.style.color = 'var(--error)'
+    return
+  }
+  const when = fromLocalInput(taskWhenInput.value)
+  if (when === undefined) {
+    tasksMsg.textContent = '到点时间写得不对（用日期时间选择器重选一次）'
+    tasksMsg.style.color = 'var(--error)'
+    return
+  }
+  const validUntil = fromLocalInput(taskValidInput.value)
+  if (validUntil === undefined) {
+    tasksMsg.textContent = '有效期写得不对（用日期时间选择器重选一次）'
+    tasksMsg.style.color = 'var(--error)'
+    return
+  }
+  const repeat = taskRepeatSelect.value as TaskAdminSaveInput['repeat']
+  if (repeat !== '' && when === null) {
+    tasksMsg.textContent = '重复任务要先填到点时间（只在对话里记着的那种不用设重复）'
+    tasksMsg.style.color = 'var(--error)'
+    return
+  }
+  const weekdays = taskWeekdayBoxes
+    .filter((box) => box.checked)
+    .map((box) => Number(box.value))
+    .sort((a, b) => a - b)
+  const monthDays =
+    taskMonthdaysInput.value.trim() === '' ? [] : parseDayListInput(taskMonthdaysInput.value)
+  if (monthDays === null) {
+    tasksMsg.textContent = '每月几号只能填 1–31 的整数（逗号分隔，如 1,15）'
+    tasksMsg.style.color = 'var(--error)'
+    return
+  }
+  let yearlyMonth: number | null = null
+  let yearlyDay: number | null = null
+  if (repeat === 'yearly') {
+    yearlyMonth = Number(taskYearlyMonthSelect.value)
+    const day = Number(taskYearlyDayInput.value)
+    if (
+      taskYearlyDayInput.value.trim() === '' ||
+      !Number.isInteger(day) ||
+      day < 1 ||
+      day > 31
+    ) {
+      tasksMsg.textContent = '每年几号要填 1–31（2 月最多 29 日）'
+      tasksMsg.style.color = 'var(--error)'
+      return
+    }
+    yearlyDay = day
+  }
+  const input: TaskAdminSaveInput = {
+    ...(editingTaskId === null ? {} : { id: editingTaskId }),
+    instruction,
+    when,
+    repeat,
+    ...(weekdays.length === 0 ? {} : { weekdays }),
+    ...(monthDays.length === 0 ? {} : { monthDays }),
+    yearlyMonth,
+    yearlyDay,
+    delivery: taskDeliverySelect.value as TaskAdminSaveInput['delivery'],
+    validUntil
+  }
+  tasksMsg.textContent = '保存中…'
+  tasksMsg.style.color = ''
+  try {
+    const result = await api.taskSave(input)
+    if (result.view) fillTasks(result.view)
+    tasksMsg.textContent = result.message
+    tasksMsg.style.color = result.ok ? '' : 'var(--error)'
+    if (result.ok) closeTaskForm()
+  } catch (error) {
+    tasksMsg.textContent = `保存失败：${String(error)}`
+    tasksMsg.style.color = 'var(--error)'
+  }
+}
+
 function fillTasks(view: TaskAdminView): void {
   tasksListEl.replaceChildren()
   if (!view.available) {
@@ -1969,6 +2155,11 @@ function fillTasks(view: TaskAdminView): void {
     text.textContent = task.instruction
     const actions = document.createElement('div')
     actions.className = 'task-item-actions'
+    const edit = document.createElement('button')
+    edit.type = 'button'
+    edit.textContent = '编辑'
+    edit.title = '改说明 / 时间 / 重复规则 / 交付 / 有效期（来源不变）'
+    edit.addEventListener('click', () => openTaskForm(task))
     const toggle = document.createElement('button')
     toggle.type = 'button'
     toggle.textContent = task.state === 'paused' ? '继续' : '暂停'
@@ -1985,7 +2176,7 @@ function fillTasks(view: TaskAdminView): void {
     armConfirm(cancel, '取消', () => {
       void runTaskAction(task, 'cancel')
     })
-    actions.append(toggle, cancel)
+    actions.append(edit, toggle, cancel)
     item.append(head, text, actions)
     tasksListEl.append(item)
   }
@@ -2103,6 +2294,12 @@ if (api) {
   tasksRefreshButton.addEventListener('click', () => {
     void refreshTasks('刷新中…')
   })
+  tasksNewButton.addEventListener('click', () => openTaskForm())
+  taskSaveButton.addEventListener('click', () => {
+    void saveTask()
+  })
+  taskCancelButton.addEventListener('click', closeTaskForm)
+  taskRepeatSelect.addEventListener('change', setRepeatPanels)
   growthRefreshButton.addEventListener('click', () => {
     void refreshGrowth('刷新中…')
   })

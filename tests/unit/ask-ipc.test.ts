@@ -744,7 +744,14 @@ describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () =
           delivery: 'auto' as const,
           state: 'active' as const,
           instruction: '写周报',
-          sync: 'synced'
+          sync: 'synced',
+          nextDueAt: null,
+          repeatKind: '' as const,
+          weekdays: [],
+          monthDays: [],
+          yearlyMonth: null,
+          yearlyDay: null,
+          validUntil: null
         }
       ],
       running: null
@@ -775,6 +782,72 @@ describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () =
     expect(taskAction).toHaveBeenCalledWith({ id: 3, action: 'pause' })
     expect(
       await action({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, { id: 3, action: 'cancel' })
+    ).toMatchObject({ ok: false, message: 'forbidden' })
+  })
+
+  it('ask:tasks:save：校验表单，合法输入交给注入实现', async () => {
+    const taskSave = vi.fn(() => ({ ok: true, message: '记下了共建计划 #3' }))
+    const save = handler(buildDeps({ taskSave }), 'ask:tasks:save')
+    expect(await save(SENDER_OK as never, null)).toMatchObject({ ok: false })
+    expect(
+      await save(SENDER_OK as never, {
+        instruction: '   ',
+        when: null,
+        repeat: '',
+        delivery: 'auto',
+        validUntil: null
+      })
+    ).toMatchObject({ ok: false, message: expect.stringContaining('说明') })
+    expect(
+      await save(SENDER_OK as never, {
+        instruction: '喝水',
+        when: null,
+        repeat: 'weekly',
+        weekdays: [8],
+        delivery: 'auto',
+        validUntil: null
+      })
+    ).toMatchObject({ ok: false, message: expect.stringContaining('weekdays') })
+    expect(
+      await save(SENDER_OK as never, {
+        instruction: '纪念日',
+        when: 1000,
+        repeat: 'yearly',
+        yearlyMonth: 2,
+        yearlyDay: 30,
+        delivery: 'auto',
+        validUntil: null
+      })
+    ).toMatchObject({ ok: false, message: expect.stringContaining('2 月') })
+    expect(taskSave).not.toHaveBeenCalled()
+
+    expect(
+      await save(SENDER_OK as never, {
+        instruction: ' 每周一三五提醒他喝水 ',
+        when: 1000,
+        repeat: 'weekly',
+        weekdays: [5, 1, 3, 3],
+        delivery: 'foreground',
+        validUntil: null
+      })
+    ).toMatchObject({ ok: true, message: '记下了共建计划 #3' })
+    expect(taskSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        instruction: '每周一三五提醒他喝水',
+        when: 1000,
+        repeat: 'weekly',
+        weekdays: [1, 3, 5],
+        delivery: 'foreground'
+      })
+    )
+    expect(
+      await save({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, {
+        instruction: 'x',
+        when: null,
+        repeat: '',
+        delivery: 'auto',
+        validUntil: null
+      })
     ).toMatchObject({ ok: false, message: 'forbidden' })
   })
 

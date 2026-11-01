@@ -55,6 +55,12 @@ export interface LineageGeneration {
   /** 当前节点最近一次请求的上下文占用（M3 记账；M1 恒为 0） */
   life_tokens_used: number
   letter: string | null
+  /**
+   * 这一代的主线分支（2026-11-01 拍板：一代只有一条主线，只有主线写成长档案）。
+   * **缺省 = 这一代出生那条分支**（`branch`）——旧家谱没有这个字段，按缺省读，
+   * 不写回磁盘；`/main <分支>` 才显式落到这里。
+   */
+  main_branch?: string
 }
 
 export interface LineageBranch {
@@ -132,6 +138,8 @@ function parseGeneration(value: unknown): LineageGeneration | null {
   if (id === null || branch === null || nickname === null || bornAt === null) return null
   const mother = value.mother === null ? null : readString(value.mother)
   const diedAt = value.died_at === null ? null : readNumber(value.died_at)
+  // 主线：旧家谱没有这个字段（缺省 = 这一代出生那条分支），这里只在显式写过时带上
+  const mainBranch = readString(value.main_branch)
   return {
     id,
     branch,
@@ -140,7 +148,8 @@ function parseGeneration(value: unknown): LineageGeneration | null {
     born_at: bornAt,
     died_at: diedAt,
     life_tokens_used: readNumber(value.life_tokens_used) ?? 0,
-    letter: value.letter === null ? null : readString(value.letter)
+    letter: value.letter === null ? null : readString(value.letter),
+    ...(mainBranch !== null ? { main_branch: mainBranch } : {})
   }
 }
 
@@ -385,6 +394,54 @@ export function generationOf(lineage: Lineage, branch: string): LineageGeneratio
 /** 直接挂在某节点下的子节点（`/del` 的「有后代不许删」） */
 export function childBranches(lineage: Lineage, branch: string): LineageBranch[] {
   return lineage.branches.filter((item) => item.parent === branch)
+}
+
+/* ------------------------------------------------------------------ */
+/* 主线（2026-11-01 拍板）：一代只有一条，只有主线写成长档案            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 一代的主线：显式写过就用它；没写过 / 写了个已经不存在的分支，就回到这一代出生那条。
+ * 代不存在 = null。
+ */
+export function mainBranchOf(lineage: Lineage, generationId: string): string | null {
+  const generation = lineage.generations.find((item) => item.id === generationId)
+  if (generation === undefined) return null
+  const explicit = generation.main_branch
+  if (explicit !== undefined && explicit !== '' && findBranch(lineage, explicit) !== null) {
+    return explicit
+  }
+  return generation.branch
+}
+
+/** 检出分支所属那一代的主线；分支不在家谱里 = null */
+export function mainBranchForBranch(lineage: Lineage, branch: string): string | null {
+  const node = findBranch(lineage, branch)
+  if (node === null) return null
+  return mainBranchOf(lineage, node.generation)
+}
+
+/** 这条分支是不是它那一代的主线（null = 认不出，按「不是」算，宁可不写） */
+export function isMainlineBranch(lineage: Lineage, branch: string): boolean {
+  return mainBranchForBranch(lineage, branch) === branch
+}
+
+/**
+ * 把某条分支设成它那一代的主线（纯函数；不合法返回 null）。
+ * 只认活着的代里的 `persona` 分支——assistant（纯模型）/ 已死的代不能当主线。
+ */
+export function withMainBranch(lineage: Lineage, branch: string): Lineage | null {
+  const node = findBranch(lineage, branch)
+  if (node === null) return null
+  if (node.kind !== 'persona') return null
+  const generation = lineage.generations.find((item) => item.id === node.generation)
+  if (generation === undefined || generation.died_at !== null) return null
+  return {
+    ...lineage,
+    generations: lineage.generations.map((item) =>
+      item.id === generation.id ? { ...item, main_branch: branch } : item
+    )
+  }
 }
 
 /** 追加一条节点；重名 / 代不存在 / 父节点不存在返回 null */

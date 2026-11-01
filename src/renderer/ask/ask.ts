@@ -1888,8 +1888,14 @@ async function refreshGrowth(note = ''): Promise<void> {
       pages.push(page)
     }
     growthGroupsEl.replaceChildren()
+    // 主线（2026-11-01）：检出分支不是这一代主线时，先说清楚「今晚不会写」，别让人等
+    const status = await api.growthStatus().catch(() => null)
+    const hint =
+      status !== null && status.ok && !status.isMainline && status.main !== null
+        ? `当前在 ${status.branch}，这一代的主线是 ${status.main}——只在主线写日记，今晚不会写 · `
+        : ''
     if (pages.every((page) => page.total === 0)) {
-      growthStatusEl.textContent = '成长档案还是空的——等 ta 写下第一篇日记，这里就会有内容。'
+      growthStatusEl.textContent = `${hint}成长档案还是空的——等 ta 写下第一篇日记，这里就会有内容。`
       return
     }
     const summary = GROWTH_SECTIONS.map((section, index) => {
@@ -1897,7 +1903,7 @@ async function refreshGrowth(note = ''): Promise<void> {
       return `${section.heading} ${page === undefined ? 0 : page.total}`
     }).join(' · ')
     const total = pages.reduce((sum, page) => sum + page.total, 0)
-    growthStatusEl.textContent = `共 ${total} 篇（${summary}）`
+    growthStatusEl.textContent = `${hint}共 ${total} 篇（${summary}）`
     for (const [index, section] of GROWTH_SECTIONS.entries()) {
       const page = pages[index]
       if (page === undefined) continue

@@ -160,6 +160,7 @@ import {
   generationOf,
   lifeOf,
   lineageSnapshot,
+  mainBranchForBranch,
   readLineage,
   recordLineageUsage,
   toolsOfBranch,
@@ -2170,6 +2171,20 @@ if (primaryInstance) {
         return 'default'
       }
     }
+    /**
+     * 这一代的主线（2026-11-01 拍板）：一代只有一条，**只有主线写成长档案**。
+     * `ok=false` = 家谱读不出来（认不出主线就不拦，按老行为写，不静默罢工）。
+     */
+    const mainlineNow = async (): Promise<{ ok: boolean; branch: string; main: string | null }> => {
+      const branch = await activeBranchNow()
+      try {
+        const read = await readLineage(lineageFile)
+        if (read.status !== 'ok') return { ok: false, branch, main: null }
+        return { ok: true, branch, main: mainBranchForBranch(read.lineage, branch) }
+      } catch {
+        return { ok: false, branch, main: null }
+      }
+    }
     /** 家谱读不到时的兜底模式：chat + 全工具（老行为），不静默降成纯模型 */
     const fallbackMode: AskModeState = {
       kind: 'chat',
@@ -3221,6 +3236,16 @@ if (primaryInstance) {
       // 设置抽屉「成长档案」（自调用 v0.2 §8）：四类各自翻页 + 点开一篇看全文。只读。
       growthPage: (kind, page) => growthStore.page(kind, page),
       growthEntry: (key) => growthStore.entry(key),
+      // 抽屉顶端那句提示（2026-11-01）：检出分支不是这一代主线时，「今晚不会写」
+      growthStatus: async () => {
+        const line = await mainlineNow()
+        return {
+          ok: line.ok,
+          branch: line.branch,
+          main: line.main,
+          isMainline: line.ok && line.main !== null && line.main === line.branch
+        }
+      },
       // 人格卡（D62）：导入即启用；写卡不碰库，启用卡要写 settings（回答中拒绝开写连接）
       savePersonaCard: (name, text) => {
         const root = app.getPath('userData')
@@ -3330,6 +3355,20 @@ if (primaryInstance) {
         const at = Date.now()
         // 用户优先：他正在说话，这一条等两分钟再来（合流，不并发说两份）
         if (askBusy) return { nextDueAt: at + 2 * 60 * 1000 }
+        // 成长档案（2026-11-01 拍板）：只有**主线**写日记 / 周记 / 月末 / 年终。
+        // 检出分支不是这一代的主线就跳过这次：不切分支、也不把这一条的日记写进别人的分支；
+        // 返回 undefined = 按默认规则结算（每天那条顺延到下一周期，一次性那条这次就算了）。
+        if (isGrowthWritingTask(task)) {
+          const line = await mainlineNow()
+          if (line.ok && line.main !== null && line.main !== line.branch) {
+            captureLog('warn', 'growth writing skipped: not mainline', {
+              id: task.id,
+              branch: line.branch,
+              main: line.main
+            })
+            return undefined
+          }
+        }
         // 后台交付（成长档案写作）：不开口、不进用户问答历史；只把真实结果留在记忆仓。
         // 前台 / auto 仍然走同一条通道，说完记进历史并通知窗口重画。
         const quiet = task.delivery === 'background'

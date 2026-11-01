@@ -13,9 +13,12 @@ import {
   emptyLineage,
   ensureLineage,
   generationOf,
+  isMainlineBranch,
   lifeOf,
   lineageSnapshot,
   LINEAGE_LIFE_TOKENS,
+  mainBranchForBranch,
+  mainBranchOf,
   parseLineage,
   readLineage,
   recordLineageUsage,
@@ -24,6 +27,7 @@ import {
   withBranchAdded,
   withBranchRemoved,
   withGenerationAdded,
+  withMainBranch,
   writeLineage
 } from '../../src/main/lineage'
 
@@ -195,6 +199,86 @@ describe('家谱 · 节点（分支）操作', () => {
     const base = emptyLineage(1000)
     expect(generationOf(base, 'default')?.id).toBe('gen-1')
     expect(generationOf(base, 'nope')).toBeNull()
+  })
+})
+
+describe('主线（2026-11-01：一代只有一条，只有主线写成长档案）', () => {
+  function twoBranches() {
+    const base = emptyLineage(1000)
+    const next = withBranchAdded(base, {
+      branch: 'ask-2',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2_000
+    })
+    expect(next).not.toBeNull()
+    return next ?? base
+  }
+
+  it('缺省 = 这一代出生那条分支；没写进文件也算数', () => {
+    const base = emptyLineage(1000)
+    expect(base.generations[0]?.main_branch).toBeUndefined()
+    expect(mainBranchOf(base, 'gen-1')).toBe('default')
+    expect(mainBranchForBranch(base, 'default')).toBe('default')
+    expect(isMainlineBranch(base, 'default')).toBe(true)
+    // 分支 / 代认不出来 = null，不猜
+    expect(mainBranchOf(base, 'gen-9')).toBeNull()
+    expect(mainBranchForBranch(base, 'nope')).toBeNull()
+    expect(isMainlineBranch(base, 'nope')).toBe(false)
+  })
+
+  it('设主线：只认活着的代里的 persona 分支；同一代只有一条', () => {
+    const lineage = twoBranches()
+    const next = withMainBranch(lineage, 'ask-2')
+    expect(next).not.toBeNull()
+    if (next === null) return
+    expect(next.generations[0]?.main_branch).toBe('ask-2')
+    expect(mainBranchOf(next, 'gen-1')).toBe('ask-2')
+    // 一代只有一条：default 与 ask-2 都在 gen-1，主线只有一个
+    expect(isMainlineBranch(next, 'ask-2')).toBe(true)
+    expect(isMainlineBranch(next, 'default')).toBe(false)
+    // 纯函数：原来的对象不动
+    expect(lineage.generations[0]?.main_branch).toBeUndefined()
+
+    // 不存在的分支
+    expect(withMainBranch(next, 'ghost')).toBeNull()
+  })
+
+  it('assistant 分支 / 已结束的代不能当主线', () => {
+    const base = emptyLineage(1000)
+    const withAssistant = withBranchAdded(base, {
+      branch: 'plain',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2_000,
+      kind: 'assistant'
+    })
+    expect(withAssistant).not.toBeNull()
+    if (withAssistant === null) return
+    expect(withMainBranch(withAssistant, 'plain')).toBeNull()
+
+    const dead = {
+      ...withAssistant,
+      generations: withAssistant.generations.map((item) => ({ ...item, died_at: 3_000 }))
+    }
+    expect(withMainBranch(dead, 'default')).toBeNull()
+  })
+
+  it('显式主线：写进快照能读回；指向不存在的分支就回落到代分支', () => {
+    const lineage = twoBranches()
+    const next = withMainBranch(lineage, 'ask-2')
+    expect(next).not.toBeNull()
+    if (next === null) return
+    const parsed = parseLineage(JSON.parse(lineageSnapshot(next)))
+    expect(parsed?.generations[0]?.main_branch).toBe('ask-2')
+    expect(mainBranchForBranch(parsed ?? next, 'default')).toBe('ask-2')
+
+    // 文件里写着一条已经删掉的分支：不编造，回落
+    const dangling = {
+      ...next,
+      generations: next.generations.map((item) => ({ ...item, main_branch: 'ghost' }))
+    }
+    expect(mainBranchOf(dangling, 'gen-1')).toBe('default')
   })
 })
 

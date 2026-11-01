@@ -150,6 +150,19 @@ export interface NotebookAdminActionResult {
   view?: NotebookAdminView
 }
 
+/**
+ * 设置抽屉「成长档案」上的主线提示（2026-11-01 拍板：一代只有一条主线，
+ * 只有主线写日记 / 周记）。`ok=false` = 家谱没读出来，界面就别提示（不编造）。
+ */
+export interface GrowthMainlineStatus {
+  ok: boolean
+  /** 现在检出的分支 */
+  branch: string
+  /** 这一代的主线；认不出 = null */
+  main: string | null
+  isMainline: boolean
+}
+
 export interface AskIpcDeps {
   getWindow: () => BrowserWindow | null
   ask: (question: string, context: AskQueryContext) => Promise<ChainAskResult>
@@ -278,6 +291,8 @@ export interface AskIpcDeps {
    */
   growthPage?: (kind: GrowthKind, page: number) => GrowthPage
   growthEntry?: (key: string) => GrowthEntryView
+  /** 抽屉顶端那句「当前不是主线，今晚不会写」；家谱读不出来就回 ok=false */
+  growthStatus?: () => Promise<GrowthMainlineStatus>
   /**
    * 在途提问状态变化（自调用 v0.2 §9 合流）：任务到点要「先接用户」，
    * 组合根靠这个信号知道现在有没有一轮用户问答在跑。
@@ -1076,6 +1091,25 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask growth entry failed', { error: String(error) })
           return { ok: false, message: '读取失败，细节看日志' }
+        }
+      }
+    ],
+    [
+      'ask:growth:status',
+      async (event) => {
+        const unknown: GrowthMainlineStatus = {
+          ok: false,
+          branch: '',
+          main: null,
+          isMainline: false
+        }
+        if (!ensureSender(event)) return unknown
+        if (!deps.growthStatus) return unknown
+        try {
+          return await deps.growthStatus()
+        } catch (error) {
+          deps.log('error', 'ask growth status failed', { error: String(error) })
+          return unknown
         }
       }
     ]

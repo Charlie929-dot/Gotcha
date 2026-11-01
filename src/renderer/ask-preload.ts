@@ -10,7 +10,13 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision } from '../chain/agent/types'
 import type { AskModeState } from '../chain/agent/mode'
 import type { SegmentEvidence } from '../chain/agent/evidence'
-import type { AskConsentView, AskAttachmentInput, TaskAdminActionResult, NotebookAdminActionResult } from '../main/ask-ipc'
+import type {
+  AskConsentView,
+  AskAttachmentInput,
+  TaskAdminActionResult,
+  NotebookAdminActionResult,
+  GrowthMainlineStatus
+} from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
 import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
@@ -104,6 +110,8 @@ export interface AskApi {
   /* ---- 成长档案（自调用 v0.2 §8）：四类各自翻页 / 点开一篇看全文（只读） ---- */
   growthPage(kind: GrowthKind, page: number): Promise<GrowthPage | null>
   growthEntry(key: string): Promise<GrowthEntryView>
+  /** 当前分支是不是这一代的主线（不是就「今晚不会写」） */
+  growthStatus(): Promise<GrowthMainlineStatus>
   /* ---- QQ 通道（D63）：NapCat 反向 WS 拨入本机；默认关闭 ---- */
   qqSettings(): Promise<QqSettingsView | { error: string }>
   saveQqSettings(patch: unknown): Promise<QqSettingsSaveResult>
@@ -192,6 +200,8 @@ const api: AskApi = {
   growthPage: (kind, page) =>
     ipcRenderer.invoke('ask:growth:page', { kind, page }) as Promise<GrowthPage | null>,
   growthEntry: (key) => ipcRenderer.invoke('ask:growth:entry', { key }) as Promise<GrowthEntryView>,
+  growthStatus: () =>
+    ipcRenderer.invoke('ask:growth:status') as Promise<GrowthMainlineStatus>,
   qqSettings: () => ipcRenderer.invoke('ask:qq:get') as Promise<QqSettingsView | { error: string }>,
   saveQqSettings: (patch) =>
     ipcRenderer.invoke('ask:qq:save', patch) as Promise<QqSettingsSaveResult>,

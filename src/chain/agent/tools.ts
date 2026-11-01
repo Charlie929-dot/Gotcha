@@ -208,6 +208,43 @@ export interface TaskToolDeps {
   cancel(id: number): TaskMutationResult
 }
 
+/* ------------------------------------------------------------------ */
+/* 小本本（自调用 v0.2 §7 / §12.2）：一个工具管增改删                    */
+/* ------------------------------------------------------------------ */
+
+export type NotebookSectionArg = 'about_you' | 'recent_you' | 'between_us' | 'reminders'
+
+export interface NotebookUpdateRequest {
+  action: 'add' | 'revise' | 'remove'
+  /** add 时必填 */
+  section?: NotebookSectionArg
+  /** revise / remove 时必填（如 n3） */
+  id?: string
+  /** add / revise 时必填 */
+  text?: string
+}
+
+/** 一条小本本条目在工具结果里的样子（section 是中文栏名，给人看） */
+export interface NotebookEntryView {
+  id: string
+  section: string
+  text: string
+  at: string
+}
+
+export interface NotebookUpdateResult {
+  ok: boolean
+  message: string
+  /** 这条的新样子；失败 / 内容被脱敏时为 null */
+  entry: NotebookEntryView | null
+  total: number
+}
+
+/** 主进程注入的小本本实现（记忆仓里的 notebook.md）；不传 = 这个分支没挂小本本 */
+export interface NotebookToolDeps {
+  update(input: NotebookUpdateRequest): NotebookUpdateResult
+}
+
 /** 日记引用的白名单元数据（模型最终给的 itemId 必须落在这里面） */
 export interface MemoryCitationMeta {
   itemId: number
@@ -272,6 +309,11 @@ export interface AskToolDeps {
    * 不传 = 这台机器没有任务库：工具会如实回「现在记不下」，而不是假装记下。
    */
   tasks?: TaskToolDeps
+  /**
+   * 小本本（自调用 v0.2 §7）：增改删的执行端口。
+   * 不传 = 这个分支没挂小本本工具（或记忆仓不可用）：工具会如实回「现在写不了」。
+   */
+  notebook?: NotebookToolDeps
 }
 
 export interface AskToolOutcome {
@@ -1267,6 +1309,71 @@ export function createAskToolExecutor(deps: AskToolDeps): {
               freshness: currentFreshness(deps),
               ok: outcome.ok,
               task: outcome.task,
+              message: outcome.message
+            },
+            segments: []
+          }
+        }
+        if (call.name === 'update_notebook') {
+          const action = call.arguments['action']
+          if (action !== 'add' && action !== 'revise' && action !== 'remove') {
+            return {
+              result: { kind: 'error', message: 'update_notebook 需要 action：add / revise / remove' },
+              segments: []
+            }
+          }
+          if (deps.notebook === undefined) {
+            return {
+              result: { kind: 'error', message: '现在写不了小本本（这个分支没挂工具，或记忆仓不可用）' },
+              segments: []
+            }
+          }
+          const rawSection = call.arguments['section']
+          const section: NotebookSectionArg | undefined =
+            rawSection === 'about_you' ||
+            rawSection === 'recent_you' ||
+            rawSection === 'between_us' ||
+            rawSection === 'reminders'
+              ? rawSection
+              : undefined
+          const id = optionalText(call.arguments['id'], 20)
+          const text = optionalText(call.arguments['text'], 400)
+          if (action === 'add') {
+            if (section === undefined) {
+              return {
+                result: {
+                  kind: 'error',
+                  message:
+                    'add 需要 section：about_you（关于你）/ recent_you（最近的你）/ between_us（我们之间）/ reminders（给自己的提醒）'
+                },
+                segments: []
+              }
+            }
+            if (text === undefined) {
+              return { result: { kind: 'error', message: 'add 需要 text（要记下的那句话）' }, segments: [] }
+            }
+          }
+          if (action === 'revise' && (id === undefined || text === undefined)) {
+            return {
+              result: { kind: 'error', message: 'revise 需要 id（如 n3）和新的 text' },
+              segments: []
+            }
+          }
+          if (action === 'remove' && id === undefined) {
+            return { result: { kind: 'error', message: 'remove 需要 id（如 n3）' }, segments: [] }
+          }
+          const outcome = deps.notebook.update({
+            action,
+            ...(section === undefined || action !== 'add' ? {} : { section }),
+            ...(id === undefined ? {} : { id }),
+            ...(text === undefined ? {} : { text })
+          })
+          return {
+            result: {
+              kind: 'update_notebook',
+              ok: outcome.ok,
+              entry: outcome.entry,
+              total: outcome.total,
               message: outcome.message
             },
             segments: []

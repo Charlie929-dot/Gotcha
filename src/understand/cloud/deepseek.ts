@@ -657,6 +657,33 @@ const ASK_LOOP_TOOLS = [
         required: ['id']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_notebook',
+      description:
+        '改你自己的小本本（`<now>` 里那份当前理解）。action=add 补一条新的；revise 按编号改写旧条目；remove 放下不再重要 / 不再准确的。只记重要而稳定的：关于他的事实与偏好、最近的处境、你们之间的约定与相处方式、你给自己的提醒。观察和猜测要写清楚，别把一次的观察写成对他的结论；纠正时就改掉旧的那条，别让两句相反的话一起留着。小本本不是计划：之后要做的事用 schedule_task。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['add', 'revise', 'remove'],
+            description: 'add 补一条 / revise 改写一条 / remove 放下一条'
+          },
+          section: {
+            type: 'string',
+            enum: ['about_you', 'recent_you', 'between_us', 'reminders'],
+            description:
+              'add 时写到哪一栏：about_you 关于你 / recent_you 最近的你 / between_us 我们之间 / reminders 我给自己的提醒'
+          },
+          id: { type: 'string', description: 'revise / remove 的条目编号（如 n3；小本本里每条前面就是）' },
+          text: { type: 'string', description: 'add / revise 的新内容（一句，最多 140 字）' }
+        },
+        required: ['action']
+      }
+    }
   }
 ] as const
 
@@ -695,7 +722,8 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   schedule_task: '记下一个计划或后续意图（到点会被叫醒；user = 共建，agent = 自己的）',
   search_tasks: '查任务（未完成 / 某一天 / 往后 / 按事项关键词）',
   update_task: '按 id 改任务的时间 / 说明 / 重复 / 交付方式',
-  cancel_task: '按 id 取消任务（共享计划会同步到他的 Obsidian 计划区）'
+  cancel_task: '按 id 取消任务（共享计划会同步到他的 Obsidian 计划区）',
+  update_notebook: '改你自己的小本本（add 补一条 / revise 改一条 / remove 放下一条）'
 }
 
 /**

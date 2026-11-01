@@ -1163,7 +1163,8 @@ describe('工具循环 · schema 与执行器一致性', () => {
       'schedule_task',
       'search_tasks',
       'update_task',
-      'cancel_task'
+      'cancel_task',
+      'update_notebook'
     ])
     // search_info 的参数名必须与执行器解析的键完全一致（多一个 = 模型给了没人读，少一个 = 模型给不了）
     expect(Object.keys(body.tools[0].function.parameters.properties).sort()).toEqual([

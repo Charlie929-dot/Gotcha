@@ -445,6 +445,28 @@ export type RedactableAskLoopToolResult =
       task: RedactableTaskView | null
       message: string
     }
+  /**
+   * 小本本（自调用 v0.2 §7）：add / revise / remove 之后的真实回执。
+   * `ok` 只代表本子上真的写成了；`entry` 为 null = 没写成或内容含敏感串不回显。
+   */
+  | {
+      kind: 'update_notebook'
+      ok: boolean
+      entry: RedactableNotebookEntryView | null
+      /** 改完一共几条 */
+      total: number
+      message: string
+    }
+
+/** 一条小本本条目在送云视图里的样子（正文是 ta 从经历里写的，照样过脱敏） */
+export interface RedactableNotebookEntryView {
+  id: string
+  /** 中文栏名（关于你 / 最近的你 / 我们之间 / 我给自己的提醒） */
+  section: string
+  text: string
+  /** 最近一次写下的本地日期 `YYYY-MM-DD` */
+  at: string
+}
 
 /** 一条任务在送云视图里的样子（说明文字是屏幕 / 用户文本，照样过脱敏） */
 export interface RedactableTaskView {
@@ -565,6 +587,16 @@ export interface ChainAskLoopBuildInput {
       origin: string
     }[]
   }
+  /**
+   * 小本本的当前核心页（自调用 v0.2 §7.2）：每轮由组合根从记忆仓现读，拼进 `<now>`。
+   * 只给有界的一页；正文逐条过策略，命中阻断的那条不出云。
+   */
+  notebook?: readonly {
+    readonly id: string
+    /** 中文栏名 */
+    readonly section: string
+    readonly text: string
+  }[]
   /** 用户随本轮问题上传的附件（用户主动提供，不过脱敏墙） */
   attachments?: RedactableAskAttachments
 }
@@ -1046,6 +1078,44 @@ function renderDueTasks(
   return lines.length === 1 ? '' : lines.join('\n')
 }
 
+/** 小本本注入的硬上限（正常写入口已经把本子限住；这里防手工改大） */
+const ASK_LOOP_NOTEBOOK_MAX_CHARS = 2200
+
+/**
+ * 小本本（自调用 v0.2 §7.2）：每轮把当前核心页递给 ta，不靠它记得主动查。
+ *
+ * - 每条带编号（revise / remove 要用）与栏名；
+ * - 正文逐条过策略：命中阻断的那条不出云（本子里的内容也是从用户经历里来的）；
+ * - 有界：超过硬上限就不再往下铺，并说明还有几条没展开。
+ */
+function renderNotebook(
+  policy: AskTextPolicy,
+  entries: ChainAskLoopBuildInput['notebook']
+): string {
+  if (entries === undefined || entries.length === 0) return ''
+  const lines: string[] = [
+    '小本本（你自己记的当前理解，不是判决；过时了就改——编号就是前面的 nX）：'
+  ]
+  let used = 0
+  let shown = 0
+  let skipped = 0
+  for (const entry of entries) {
+    const text = policy.redact(normalizeText(entry.text))
+    if (text.blocked || text.text.trim() === '') continue
+    const line = `- ${entry.id.slice(0, 12)}（${entry.section.slice(0, 20)}）${text.text.slice(0, 200)}`
+    if (used + line.length > ASK_LOOP_NOTEBOOK_MAX_CHARS) {
+      skipped += 1
+      continue
+    }
+    used += line.length
+    shown += 1
+    lines.push(line)
+  }
+  if (shown === 0) return ''
+  if (skipped > 0) lines.push(`（还有 ${skipped} 条没展开）`)
+  return lines.join('\n')
+}
+
 /**
  * 循环载荷的组装。问题与单发口径完全一致（先剥后截、阻断整次不出云）；
  * 每一轮的 toolResult 按 kind 过策略——search_info 的命中被阻断就整条剔掉
@@ -1095,7 +1165,8 @@ export function buildAskLoopPayload(
   // <now>：本轮处境事实（时间 / 此刻 / 想到的 / 数据边界 / 最近段），追加在 user 之后
   const nowText = renderNowText(input, opening, recent)
   const dueTasks = renderDueTasks(policy, input.tasks)
-  const now = dueTasks === '' ? nowText : `${nowText}\n${dueTasks}`
+  const notebookText = renderNotebook(policy, input.notebook)
+  const now = [nowText, notebookText, dueTasks].filter((part) => part !== '').join('\n')
 
   const turns: CloudAskLoopTurn[] = []
   const blockedSegmentIds: number[] = []
@@ -1336,6 +1407,34 @@ export function buildAskLoopPayload(
           tasks,
           total: result.total,
           truncated: result.truncated === true
+        }
+        break
+      }
+      case 'update_notebook': {
+        const message = guardTaskMessage(
+          policy,
+          result.message,
+          '小本本已处理（回执含敏感内容，不展开）'
+        )
+        let entry: RedactableNotebookEntryView | null = null
+        if (result.entry !== null) {
+          const text = policy.redact(normalizeText(result.entry.text))
+          if (!text.blocked && text.text.trim() !== '') {
+            entry = {
+              id: result.entry.id.slice(0, 20),
+              section: result.entry.section.slice(0, 20),
+              text: text.text.slice(0, 200),
+              at: result.entry.at.slice(0, 10)
+            }
+          }
+        }
+        view = {
+          kind: 'update_notebook',
+          // 真写成了才算成功；内容被墙挡住时不回显（entry = null），但改动本身是落盘的
+          ok: result.ok === true,
+          entry,
+          total: result.total,
+          message
         }
         break
       }

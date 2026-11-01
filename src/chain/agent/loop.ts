@@ -79,6 +79,7 @@ import {
   type DiaryToolDeps,
   type LetterToolDeps,
   type MemoryCitationMeta,
+  type NotebookToolDeps,
   type TaskToolDeps
 } from './tools'
 import type { ChainDb } from '../store'
@@ -145,6 +146,13 @@ export interface AskLoopContext {
   letters?: LetterToolDeps
   /** 任务记忆（自调用 v0.2 §6）：四个任务工具的端口；不传 = 这台机器没有任务库 */
   tasks?: TaskToolDeps
+  /**
+   * 小本本（自调用 v0.2 §7）：`read()` 给 `<now>` 每轮注入当前核心页，
+   * `update` 是 `update_notebook` 的执行端口。不传 = 这个分支没有小本本。
+   */
+  notebook?: NotebookToolDeps & {
+    read(): readonly { id: string; section: string; text: string }[]
+  }
   /**
    * 到点 / 临近的任务（v0.2 §9 合流）：每一轮现取，拼进 `<now>` 末尾。
    * 不传 = 没有任务（或这个分支不给任务），`<now>` 里就不会出现这一节。
@@ -366,6 +374,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.giveBirth ? { giveBirth: ctx.giveBirth } : {}),
     ...(ctx.letters ? { letters: ctx.letters } : {}),
     ...(ctx.tasks ? { tasks: ctx.tasks } : {}),
+    ...(ctx.notebook ? { notebook: ctx.notebook } : {}),
     ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId),
@@ -570,6 +579,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       ...(ctx.life ? { life: ctx.life } : {}),
       ...(ctx.unreadLetters !== undefined ? { letters: { unread: ctx.unreadLetters } } : {}),
       ...(ctx.dueTasks ? { tasks: { due: ctx.dueTasks() } } : {}),
+      ...(ctx.notebook ? { notebook: ctx.notebook.read() } : {}),
       ...(ctx.attachments ? { attachments: ctx.attachments } : {})
     })
     // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；

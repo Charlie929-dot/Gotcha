@@ -95,6 +95,14 @@ export interface CommandDeps {
     list: () => string
     cancel: (id: number) => string
   }
+  /**
+   * `/notebook`（自调用 v0.2 §7.3）：看 ta 的小本本，删一条不再准确的。
+   * 没注入就回「还没接上」。
+   */
+  notebook?: {
+    list: () => string
+    remove: (id: string) => string
+  }
   now?: () => number
   /** 名字 → slug；测试可注入固定实现（默认 pinyin-pro） */
   slugify?: (name: string) => string | null
@@ -143,6 +151,7 @@ export const KNOWN_COMMANDS = [
   'mode',
   'tool',
   'tasks',
+  'notebook',
   'git'
 ] as const
 
@@ -160,6 +169,7 @@ export const READY_COMMANDS = [
   'mode',
   'tool',
   'tasks',
+  'notebook',
   'git'
 ] as const
 
@@ -470,6 +480,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /mode ask|chat   切模式（ask = 纯模型，chat = 带 persona；切分支）',
     '  /tool            看当前分支的工具；set / ele / add / rm',
     '  /tasks [cancel <编号>]  看挂着的计划 / 自主任务；cancel 取消一条',
+    '  /notebook [rm <编号>]  看 ta 的小本本（当前理解）；rm 删掉一条',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
     '  /life            看剩余生命（token；纯模型分支也有，但不冻结）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
@@ -1609,6 +1620,20 @@ export function createCommandHandler(
         }
         if (sub !== '') return commandResult('用法：/tasks 或 /tasks cancel <编号>')
         return commandResult(deps.tasks.list())
+      }
+      case 'notebook': {
+        if (deps.notebook === undefined) return commandResult('/notebook 还没接上（重启后再试）。')
+        const sub = (parsed.args[0] ?? '').toLowerCase()
+        if (sub === 'rm' || sub === 'del' || sub === 'remove') {
+          const raw = (parsed.args[1] ?? '').trim().toLowerCase()
+          const id = /^n\d+$/u.test(raw) ? raw : /^\d+$/u.test(raw) ? `n${raw}` : ''
+          if (id === '') {
+            return commandResult('用法：/notebook rm <编号>\n编号在 /notebook 列表里（如 n3）。')
+          }
+          return commandResult(deps.notebook.remove(id))
+        }
+        if (sub !== '') return commandResult('用法：/notebook 或 /notebook rm <编号>')
+        return commandResult(deps.notebook.list())
       }
       case 'log': {
         const target = parsed.args.join(' ').trim()

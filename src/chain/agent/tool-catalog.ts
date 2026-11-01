@@ -40,18 +40,22 @@ export const ASK_TOOL_TASK_NAMES = [
   'update_task',
   'cancel_task'
 ] as const
+/** 小本本（自调用 v0.2 §7 / §12.2）：自己的当前理解，增改删都走这一个工具 */
+export const ASK_TOOL_NOTEBOOK_NAMES = ['update_notebook'] as const
 
 export type AskToolName =
   | (typeof ASK_TOOL_SCREEN_NAMES)[number]
   | (typeof ASK_TOOL_DIARY_NAMES)[number]
   | (typeof ASK_TOOL_LETTER_NAMES)[number]
   | (typeof ASK_TOOL_TASK_NAMES)[number]
+  | (typeof ASK_TOOL_NOTEBOOK_NAMES)[number]
 
 export const ASK_TOOL_SETS: readonly AskToolSet[] = [
   { id: 'screen', label: '屏幕记忆', tools: [...ASK_TOOL_SCREEN_NAMES] },
   { id: 'diary', label: '日记', tools: [...ASK_TOOL_DIARY_NAMES] },
   { id: 'letter', label: '信', tools: [...ASK_TOOL_LETTER_NAMES] },
-  { id: 'task', label: '任务', tools: [...ASK_TOOL_TASK_NAMES] }
+  { id: 'task', label: '任务', tools: [...ASK_TOOL_TASK_NAMES] },
+  { id: 'notebook', label: '小本本', tools: [...ASK_TOOL_NOTEBOOK_NAMES] }
 ]
 
 /** 全部工具元素（顺序：先屏幕后日记，与 `ASK_TOOL_SETS` 一致） */
@@ -75,7 +79,8 @@ export const ASK_TOOL_LABELS: Readonly<Record<AskToolName, string>> = {
   schedule_task: '记下一个计划或自己想做的事（到点会被叫醒）',
   search_tasks: '查任务：未完成 / 某一天 / 往后 / 按事项关键词',
   update_task: '改一条任务的时间 / 说明 / 重复 / 交付方式',
-  cancel_task: '取消一条任务'
+  cancel_task: '取消一条任务',
+  update_notebook: '改自己的小本本：补一条 / 修正 / 放下（编号在小本本里）'
 }
 
 export function isAskToolName(value: string): value is AskToolName {
@@ -105,6 +110,11 @@ export function hasLetterTools(tools: readonly string[]): boolean {
 /** 这组工具里有没有任务工具（决定要不要接任务后端） */
 export function hasTaskTools(tools: readonly string[]): boolean {
   return tools.some((name) => (ASK_TOOL_TASK_NAMES as readonly string[]).includes(name))
+}
+
+/** 这组工具里有没有小本本工具（决定要不要接小本本后端） */
+export function hasNotebookTools(tools: readonly string[]): boolean {
+  return tools.some((name) => (ASK_TOOL_NOTEBOOK_NAMES as readonly string[]).includes(name))
 }
 
 /**

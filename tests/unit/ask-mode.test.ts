@@ -22,6 +22,7 @@ import {
   ASK_TOOL_LABELS,
   ASK_TOOL_LETTER_NAMES,
   ASK_TOOL_NAMES,
+  ASK_TOOL_NOTEBOOK_NAMES,
   ASK_TOOL_TASK_NAMES,
   ASK_TOOL_SCREEN_NAMES,
   ASK_TOOL_SETS,
@@ -74,9 +75,21 @@ describe('分支 kind ↔ 模式', () => {
 })
 
 describe('工具目录', () => {
-  it('三个集合：屏幕记忆 5 个 / 日记 3 个 / 信 3 个，编号顺序固定', () => {
-    expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual(['screen', 'diary', 'letter', 'task'])
-    expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual(['屏幕记忆', '日记', '信', '任务'])
+  it('五个集合：屏幕记忆 5 / 日记 3 / 信 3 / 任务 4 / 小本本 1，编号顺序固定', () => {
+    expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual([
+      'screen',
+      'diary',
+      'letter',
+      'task',
+      'notebook'
+    ])
+    expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual([
+      '屏幕记忆',
+      '日记',
+      '信',
+      '任务',
+      '小本本'
+    ])
     expect(ASK_TOOL_SCREEN_NAMES).toEqual([
       'search_info',
       'get_freshness',
@@ -92,7 +105,8 @@ describe('工具目录', () => {
       'update_task',
       'cancel_task'
     ])
-    expect(ASK_TOOL_NAMES).toHaveLength(15)
+    expect(ASK_TOOL_NOTEBOOK_NAMES).toEqual(['update_notebook'])
+    expect(ASK_TOOL_NAMES).toHaveLength(16)
   })
 
   it('每个元素都有说明，且只属于一个集合', () => {

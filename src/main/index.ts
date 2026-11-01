@@ -164,6 +164,7 @@ import {
   readMemorySchedule
 } from './memory-repo-settings'
 import { createMemoryScheduler } from './memory-schedule'
+import { createNotebookStore } from './notebook'
 import { forkDetachedIfNeeded } from './node-fork'
 import {
   appendAskConversationTurn,
@@ -2042,6 +2043,14 @@ if (primaryInstance) {
     })
     const lineageFile = join(app.getPath('userData'), 'memory-lineage.json')
     /**
+     * 小本本（自调用 v0.2 §7）：记忆仓里的 `notebook.md`，跟着分支走。
+     * `read()` 每轮进 `<now>`，`update` 是 `update_notebook` 的端口；`/notebook` 看 / 删。
+     */
+    const notebookStore = createNotebookStore({
+      root: memoryRepo.root,
+      now: () => Date.now()
+    })
+    /**
      * 信（D81）：写在当前分支的 `letters/`；`<now>` 只报未读数，
      * 正文走 read_letter。桌面落点是 `<桌面>/记忆球的信/`。
      */
@@ -2493,6 +2502,9 @@ if (primaryInstance) {
               dueTasks: () => taskRuntime?.dueHints() ?? []
             }
           : {}),
+        // 小本本（自调用 v0.2 §7）：chat（persona）每轮注入当前核心页；
+        // 工具在不在由分支白名单决定（没挂 update_notebook 时只看不改）。
+        ...(chat ? { notebook: notebookStore } : {}),
         ...(personaPrompt !== undefined ? { personaPrompt } : {}),
         // 这次给哪些工具（D72：当前分支的 /tool 白名单）：链层据此决定单轮 / 工具循环
         tools,
@@ -2614,6 +2626,11 @@ if (primaryInstance) {
             return lines.join('\n')
           },
           cancel: (id) => taskRuntime?.port.cancel(id).message ?? '任务库还没起来（重启后再试）。'
+        },
+        // /notebook：ta 的小本本（记忆仓里的 notebook.md），删一条不再准确的
+        notebook: {
+          list: () => notebookStore.list(),
+          remove: (id) => notebookStore.remove(id)
         }
       })
     )

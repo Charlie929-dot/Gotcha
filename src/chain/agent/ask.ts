@@ -40,6 +40,7 @@ import type {
   DiaryToolDeps,
   GiveBirthResult,
   LetterToolDeps,
+  NotebookToolDeps,
   TaskToolDeps
 } from './tools'
 import {
@@ -112,6 +113,13 @@ export interface ChainAskOptions {
   letters?: LetterToolDeps
   /** 任务记忆（自调用 v0.2 §6）：四个任务工具的端口；不传 = 这台机器没有任务库 */
   tasks?: TaskToolDeps
+  /**
+   * 小本本（自调用 v0.2 §7）：`read()` 每轮注入 `<now>`，`update` 是
+   * `update_notebook` 的端口；不传 = 这个分支没有小本本。
+   */
+  notebook?: NotebookToolDeps & {
+    read(): readonly { id: string; section: string; text: string }[]
+  }
   /** 到点 / 临近的任务（v0.2 §9 合流）：拼进 `<now>` 末尾，说不说由 ta 定 */
   dueTasks?: () => readonly {
     id: number
@@ -322,6 +330,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.giveBirth ? { giveBirth: options.giveBirth } : {}),
         ...(options.letters ? { letters: options.letters } : {}),
         ...(options.tasks ? { tasks: options.tasks } : {}),
+        ...(options.notebook ? { notebook: options.notebook } : {}),
         ...(options.dueTasks ? { dueTasks: options.dueTasks } : {}),
         ...(options.unreadLetters !== undefined ? { unreadLetters: options.unreadLetters } : {}),
         ...(options.momLetter ? { momLetter: options.momLetter } : {}),

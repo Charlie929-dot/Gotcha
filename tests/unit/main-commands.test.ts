@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 本地命令（memory-life M1/M2/M3）：解析 / /help / /log / /new / /use / /del / /compact / /backup / 未知。
  * 用假仓，不碰真 git（真仓行为在 main-memory-repo.test.ts）。
  */
@@ -252,6 +252,35 @@ describe('命令执行', () => {
     expect(textOf(await run('/tasks whatever'))).toContain('用法')
   })
 
+  it('/notebook：没接上时如实说；接上后列表与按编号删（n3 / 3 都认）', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    const bare = createCommandHandler({ repo: fakeRepo(), lineageFile })
+    expect(textOf(await bare('/notebook'))).toContain('还没接上')
+
+    const removed: string[] = []
+    const run = createCommandHandler({
+      repo: fakeRepo(),
+      lineageFile,
+      notebook: {
+        list: () => '小本本（2 条）\n\n关于你\n  n1 喜欢周深\n\n我给自己的提醒\n  n2 别连续追问',
+        remove: (id) => {
+          removed.push(id)
+          return `放下了 ${id}。`
+        }
+      }
+    })
+    const list = textOf(await run('/notebook'))
+    expect(list).toContain('小本本（2 条）')
+    expect(list).toContain('n1 喜欢周深')
+    expect(textOf(await run('/notebook rm n1'))).toContain('放下了 n1')
+    expect(textOf(await run('/notebook rm 2'))).toContain('放下了 n2')
+    expect(removed).toEqual(['n1', 'n2'])
+    // 编号不合法 / 多余参数都不猜
+    expect(textOf(await run('/notebook rm abc'))).toContain('用法')
+    expect(textOf(await run('/notebook whatever'))).toContain('用法')
+  })
+
   it('/help 在仓不可用时如实说，不假装可用', async () => {
     const lineageFile = tempLineageFile()
     await ensureLineage(lineageFile, { now: 1 })
@@ -351,12 +380,12 @@ describe('命令执行', () => {
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     expect(textOf(await run('/tool set'))).toContain('[1] screen · 屏幕记忆（5 个）')
     expect(textOf(await run('/tool ele 1'))).toContain('[1] search_info')
-    expect(textOf(await run('/tool'))).toContain('15 个工具')
+    expect(textOf(await run('/tool'))).toContain('16 个工具')
 
     // 默认分支（persona）全开 → 先 rm 掉整组日记
-    expect(textOf(await run('/tool rm diary'))).toContain('工具（12 个）')
-    expect(textOf(await run('/tool add diary:recall_diary,memory_profile'))).toContain('工具（14 个）')
-    expect(textOf(await run('/tool rm screen:get_freshness'))).toContain('工具（13 个）')
+    expect(textOf(await run('/tool rm diary'))).toContain('工具（13 个）')
+    expect(textOf(await run('/tool add diary:recall_diary,memory_profile'))).toContain('工具（15 个）')
+    expect(textOf(await run('/tool rm screen:get_freshness'))).toContain('工具（14 个）')
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
@@ -373,7 +402,8 @@ describe('命令执行', () => {
       'schedule_task',
       'search_tasks',
       'update_task',
-      'cancel_task'
+      'cancel_task',
+      'update_notebook'
     ])
     // 不认识的名字 / 集合如实报错
     expect(textOf(await run('/tool add nope'))).toContain('没有集合')
@@ -396,9 +426,9 @@ describe('命令执行', () => {
       [
         '[0] life · 主干',
         '  [1] ask · 纯模型 · 0 个工具',
-        '  [2] default · 15 个工具',
-        '    [3] spring · 15 个工具  ← 当前',
-        '  [4] gen2 · 15 个工具'
+        '  [2] default · 16 个工具',
+        '    [3] spring · 16 个工具  ← 当前',
+        '  [4] gen2 · 16 个工具'
       ].join('\n')
     )
   })
@@ -841,7 +871,7 @@ describe('命令执行', () => {
       }),
       lineageFile
     })
-    expect(textOf(await run('/log'))).toContain('[0] default · 15 个工具  ← 正在看')
+    expect(textOf(await run('/log'))).toContain('[0] default · 16 个工具  ← 正在看')
   })
 
   it('/use 不存在的目标如实报错', async () => {

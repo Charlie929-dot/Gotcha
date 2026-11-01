@@ -314,6 +314,19 @@ export interface QqChannel {
   isRunning(): boolean
   /** 改 QQ 昵称（M4 传承）：transport 没接就静默跳过，调用方记日志 */
   setProfile?(nickname: string): Promise<void>
+  /**
+   * 主动推一条（前台任务到点，2026-11-01 拍板 D93）：窗口没开时手机上也能看到。
+   * 只在通道跑着、白名单非空时发，发给白名单第一个人；失败只记日志、不重试。
+   */
+  push(text: string): Promise<QqPushResult>
+}
+
+/** `push` 的结果：没发出去时带原因（调用方只记日志，不重试也不改口） */
+export interface QqPushResult {
+  sent: boolean
+  /** 实际发出去几条（长回答按 `splitForQq` 分段） */
+  parts: number
+  reason?: 'not-running' | 'no-owner' | 'empty' | 'send-failed'
 }
 
 export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): QqChannel {
@@ -460,6 +473,32 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       }
     }
     return parts.length
+  }
+
+  /**
+   * 主动推一条（2026-11-01 拍板 D93：前台任务到点，桌面气泡之外也发一份到 QQ）。
+   * - 通道没跑 / 白名单空 / 主人号不合法：不发明说原因，调用方只记日志；
+   * - 发给白名单第一个人（用户在设置里填的那个号），不发群、不发所有人；
+   * - 发送失败也不抛：到点这一轮已经算交付过，重试只会重复提醒。
+   */
+  const push = async (text: string): Promise<QqPushResult> => {
+    if (!running) return { sent: false, parts: 0, reason: 'not-running' }
+    const current = config
+    if (current === null || current.allowUsers.length === 0) {
+      return { sent: false, parts: 0, reason: 'no-owner' }
+    }
+    const owner = Number(current.allowUsers[0])
+    if (!Number.isInteger(owner) || owner <= 0) return { sent: false, parts: 0, reason: 'no-owner' }
+    const parts = splitForQq(text, current.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
+    if (parts.length === 0) return { sent: false, parts: 0, reason: 'empty' }
+    try {
+      const sent = await sendParts(owner, text)
+      log('info', 'qq push sent', { parts: sent })
+      return { sent: true, parts: sent }
+    } catch (error) {
+      log('warn', 'qq push failed', { error: String(error) })
+      return { sent: false, parts: 0, reason: 'send-failed' }
+    }
   }
 
   /**
@@ -658,6 +697,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     },
     handleMessage,
     isRunning: () => running,
+    push,
     async setProfile(nickname: string) {
       if (transport.setProfile === undefined) return
       await transport.setProfile(nickname)

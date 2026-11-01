@@ -27,6 +27,7 @@ import {
 } from '../../chain/agent/mode'
 import type { AskHistoryEntry } from '../../main/ask-history'
 import type { MemorySettingsView } from '../../main/memory-settings'
+import type { MemoryRepoSettingsView } from '../../main/memory-repo-settings'
 import type { MemoryListItemView } from '../../main/memory-admin'
 import type { QqSettingsView } from '../../main/qq/qq-settings'
 import type { NapcatView } from '../../main/qq/napcat'
@@ -79,6 +80,14 @@ const memoryToneInput = must<HTMLInputElement>('set-persona-tone')
 const memoryRedlinesInput = must<HTMLTextAreaElement>('set-persona-redlines')
 const memorySaveButton = must<HTMLButtonElement>('memory-save')
 const memoryMsg = must<HTMLElement>('memory-msg')
+/* ---- 设置抽屉 · 记忆仓（D90：远端绑定 / 推送状态 / 定时） ---- */
+const memoryRepoStatus = must<HTMLElement>('memory-repo-status')
+const memoryRemoteInput = must<HTMLInputElement>('set-memory-remote')
+const memoryCommitInput = must<HTMLInputElement>('set-memory-commit')
+const memoryPushInput = must<HTMLInputElement>('set-memory-push')
+const memoryRepoSaveButton = must<HTMLButtonElement>('memory-repo-save')
+const memoryRepoPushButton = must<HTMLButtonElement>('memory-repo-push')
+const memoryRepoMsg = must<HTMLElement>('memory-repo-msg')
 /* ---- 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销） ---- */
 const memorySearchInput = must<HTMLInputElement>('memory-search')
 const memoryKindSelect = must<HTMLSelectElement>('memory-kind')
@@ -1482,15 +1491,160 @@ async function refreshMemorySettings(note = ''): Promise<void> {
   }
 }
 
+/* ---- 设置抽屉 · 记忆仓（D90） ---------------------------------------- */
+
+/** 一行状态：远端 / 分支 / 未推送 / 未提交 / 上次推送，能一眼看出「现在到底通不通」 */
+function fillMemoryRepo(view: MemoryRepoSettingsView): void {
+  memoryCommitInput.value = String(view.commitMinutes)
+  memoryPushInput.value = String(view.pushMinutes)
+  memoryRepoPushButton.disabled = view.remote === null
+  if (view.remote !== null) memoryRemoteInput.value = view.remote
+  if (!view.available) {
+    memoryRepoStatus.textContent = '记忆仓不可用（没找到 git，或仓读不出来）'
+    return
+  }
+  const parts: string[] = [
+    view.remote === null ? '还没绑定远端（只在本机提交）' : `远端：${view.remote}`,
+    `分支 ${view.branch}`
+  ]
+  if (view.remote !== null) {
+    parts.push(
+      view.ahead === null ? '还没推过' : view.ahead === 0 ? '与远端一致' : `有 ${view.ahead} 个提交没推`
+    )
+  }
+  if (view.dirty) parts.push('有未提交的改动')
+  if (view.lastPush !== null) {
+    parts.push(
+      view.lastPush.ok ? '上次推送成功' : `上次推送失败（${view.lastPush.reason ?? '未知'}）`
+    )
+  }
+  memoryRepoStatus.textContent = parts.join(' · ')
+}
+
+/** 读一次记忆仓状态（开抽屉 / 保存 / 推送后都走这里） */
+async function refreshMemoryRepo(note = ''): Promise<void> {
+  if (!api) return
+  memoryRepoMsg.textContent = note
+  memoryRepoMsg.style.color = ''
+  try {
+    const view = await api.memoryRepo()
+    if ('error' in view) {
+      memoryRepoStatus.textContent = '读取记忆仓状态失败（主进程那一侧报错）'
+      return
+    }
+    fillMemoryRepo(view)
+  } catch (error) {
+    memoryRepoStatus.textContent = `读取记忆仓状态失败：${String(error)}`
+  }
+}
+
+/* ---- 设置抽屉 · 折叠分组（D90） -------------------------------------- */
+
+/** 展开状态记在渲染层本地（不进设置库：它只是界面偏好） */
+const SETTINGS_OPEN_KEY = 'gotcha.settings.open'
+
+function readOpenSections(): string[] {
+  try {
+    const raw = localStorage.getItem(SETTINGS_OPEN_KEY)
+    if (raw === null) return []
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 把每个 `<section>` 改造成「可点的组头 + 可折叠的内容」：默认全折叠，
+ * 点开才展开；展开的是哪几组记在 localStorage，关掉窗口再开还是那几组。
+ *
+ * 在运行时改造而不是改 HTML：控件 id 与事件什么都不动，样式也只多一层 `.sec-body`。
+ */
+function setupCollapsibleSettings(): void {
+  const form = document.getElementById('settings-form')
+  if (form === null) return
+  let open = readOpenSections()
+  const sections = [...form.querySelectorAll<HTMLElement>(':scope > section')]
+  sections.forEach((section, index) => {
+    const title = section.querySelector('h3')
+    if (!(title instanceof HTMLElement)) return
+    const id = section.id !== '' ? section.id : `settings-sec-${index}`
+    section.id = id
+    const body = document.createElement('div')
+    body.className = 'sec-body'
+    // 把标题之外的内容整体搬进 body（移动节点，不是复制：事件与引用都还在）
+    for (const child of [...section.childNodes]) {
+      if (child !== title) body.appendChild(child)
+    }
+    title.remove()
+    const head = document.createElement('button')
+    head.type = 'button'
+    head.className = 'sec-head'
+    head.textContent = title.textContent ?? ''
+    const expanded = open.includes(id)
+    head.setAttribute('aria-expanded', String(expanded))
+    body.hidden = !expanded
+    head.addEventListener('click', () => {
+      const next = body.hidden
+      body.hidden = !next
+      head.setAttribute('aria-expanded', String(next))
+      const set = new Set(open)
+      if (next) set.add(id)
+      else set.delete(id)
+      open = [...set]
+      try {
+        localStorage.setItem(SETTINGS_OPEN_KEY, JSON.stringify(open))
+      } catch {
+        // 存不住就只在这次会话里生效，不打断使用
+      }
+    })
+    section.append(head, body)
+  })
+}
+
 function openSettingsDrawer(): void {
   void settingsPanel?.open()
   void refreshMemorySettings()
+  void refreshMemoryRepo()
   void refreshQqSettings()
   startNapcatPolling()
   void loadMemoryList(true)
 }
 
 if (api) {
+  memoryRepoSaveButton.addEventListener('click', async () => {
+    const remote = memoryRemoteInput.value.trim()
+    const commitMinutes = Number(memoryCommitInput.value)
+    const pushMinutes = Number(memoryPushInput.value)
+    const patch: Record<string, unknown> = { commitMinutes, pushMinutes }
+    if (remote !== '') patch.remote = remote
+    memoryRepoMsg.textContent = '保存中…'
+    memoryRepoMsg.style.color = ''
+    try {
+      const result = await api.saveMemoryRepo(patch)
+      if (result.view) fillMemoryRepo(result.view)
+      memoryRepoMsg.textContent = result.ok ? '已保存（定时按新间隔生效）' : result.error ?? '保存失败'
+      memoryRepoMsg.style.color = result.ok ? '' : 'var(--error)'
+    } catch (error) {
+      memoryRepoMsg.textContent = `保存失败：${String(error)}`
+      memoryRepoMsg.style.color = 'var(--error)'
+    }
+  })
+
+  memoryRepoPushButton.addEventListener('click', async () => {
+    memoryRepoMsg.textContent = '推送中…'
+    memoryRepoMsg.style.color = ''
+    try {
+      const result = await api.pushMemoryRepo()
+      if (result.view) fillMemoryRepo(result.view)
+      memoryRepoMsg.textContent = result.ok ? '推送成功' : result.error ?? '推送失败'
+      memoryRepoMsg.style.color = result.ok ? '' : 'var(--error)'
+    } catch (error) {
+      memoryRepoMsg.textContent = `推送失败：${String(error)}`
+      memoryRepoMsg.style.color = 'var(--error)'
+    }
+  })
+
   memorySaveButton.addEventListener('click', async () => {
     if (busy) {
       // 同步要开写连接（会短暂关掉只读连接），别在回答进行中动库
@@ -2017,6 +2171,7 @@ api?.onOpenSettings(() => {
 })
 
 void (async () => {
+  setupCollapsibleSettings()
   questionInput.focus()
   renderThread()
   if (!api) {

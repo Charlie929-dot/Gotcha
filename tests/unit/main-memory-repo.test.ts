@@ -230,3 +230,41 @@ describe('记忆仓节点（分支）操作', { timeout: 60_000 }, () => {
     expect(await repo.branchLog('nope')).toEqual([])
   })
 })
+
+describe('远端绑定（D90）', { timeout: 60_000 }, () => {
+  it('setRemote 写进仓配置（第二次走 set-url，不是 add）；不合法地址直接拒', async () => {
+    const repo = createMemoryRepo({ root: tempRoot(), log: () => undefined })
+    await repo.ensure()
+    expect(await repo.remoteUrl()).toBeNull()
+
+    expect(await repo.setRemote('http://example.com/a/b.git')).toMatchObject({
+      ok: false,
+      reason: 'invalid'
+    })
+    expect(await repo.setRemote('')).toMatchObject({ ok: false, reason: 'empty' })
+
+    expect((await repo.setRemote('https://github.com/someone/gotcha-memory.git')).ok).toBe(true)
+    expect(await repo.remoteUrl()).toBe('https://github.com/someone/gotcha-memory.git')
+
+    // 改地址要能覆盖（走 set-url；用 add 会报 already exists）
+    expect((await repo.setRemote('git@github.com:someone/other.git')).ok).toBe(true)
+    expect(await repo.remoteUrl()).toBe('git@github.com:someone/other.git')
+  })
+
+  it('pushState：没配远端 remote=null；绑了但没推过 ahead=null；脏工作区看得出来', async () => {
+    const repo = createMemoryRepo({ root: tempRoot(), log: () => undefined })
+    await repo.ensure()
+
+    expect(await repo.pushState()).toMatchObject({ ok: true, remote: null, ahead: null })
+
+    await repo.setRemote('https://github.com/someone/gotcha-memory.git')
+    await repo.writeFile('notes/todo.md', '# 待办\n')
+    expect(await repo.pushState()).toMatchObject({
+      ok: true,
+      remote: 'https://github.com/someone/gotcha-memory.git',
+      dirty: true,
+      ahead: null,
+      lastPush: null
+    })
+  })
+})

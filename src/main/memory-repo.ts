@@ -70,6 +70,59 @@ export interface MemoryPushResult {
   detail?: string
 }
 
+/** 远端地址上限（防手滑贴进来一整段文本） */
+export const MEMORY_REMOTE_MAX_CHARS = 400
+
+/**
+ * 远端地址校验（D90）：只认 `https://` 与 ssh 两种形状。
+ *
+ * 三条硬规矩：① 空 / 带空白与控制字符的一律不认（换行能注入别的 git 参数）；
+ * ② 不认 `http://`（明文）；③ **不认带凭据的 https**（`https://user:token@host/…`）——
+ * 令牌不进设置、不进仓配置，推送用本机 git 凭据。
+ */
+export function validateRemoteUrl(
+  raw: string
+): { ok: true; url: string } | { ok: false; reason: 'empty' | 'invalid' } {
+  const url = typeof raw === 'string' ? raw.trim() : ''
+  if (url === '') return { ok: false, reason: 'empty' }
+  if (url.length > MEMORY_REMOTE_MAX_CHARS) return { ok: false, reason: 'invalid' }
+  if (/[\s\u0000-\u001f\u007f]/u.test(url)) return { ok: false, reason: 'invalid' }
+  if (url.startsWith('-')) return { ok: false, reason: 'invalid' }
+  const https = /^https:\/\/[^\s/@]+\/.+$/u.test(url)
+  const ssh = /^(?:git@[^\s/:]+:.+|ssh:\/\/[^\s/]+\/.+)$/u.test(url)
+  if (!https && !ssh) return { ok: false, reason: 'invalid' }
+  return { ok: true, url }
+}
+
+export interface MemoryRemoteResult {
+  ok: boolean
+  reason?: 'empty' | 'invalid' | 'unavailable' | 'failed'
+  url?: string
+  detail?: string
+}
+
+/** 最近一次推送的结果（只活在进程里，不落盘） */
+export interface MemoryPushAttempt {
+  ok: boolean
+  reason: string | null
+  at: number
+}
+
+/** 设置抽屉「记忆仓」要的状态（D90） */
+export type MemoryPushState =
+  | {
+      ok: true
+      /** 没配 origin = null */
+      remote: string | null
+      branch: string
+      /** 工作区有未提交改动 */
+      dirty: boolean
+      /** 还没推上去的提交数；没配上游（从没推过）为 null */
+      ahead: number | null
+      lastPush: MemoryPushAttempt | null
+    }
+  | { ok: false; reason: 'unavailable' }
+
 /** 当前 HEAD（M2）：分支名 / 是否 detached / 短 sha；空仓时 sha 为 null */
 export interface MemoryHead {
   branch: string | null
@@ -121,6 +174,12 @@ export interface MemoryRepo {
   commitDay(day: string): Promise<MemoryCommitResult>
   /** 配了 origin 才推；没配 / 失败都只返回原因，不抛错 */
   push(): Promise<MemoryPushResult>
+  /** 当前 origin（没配 = null）；git 是唯一事实源，不另存设置 */
+  remoteUrl(): Promise<string | null>
+  /** 绑定 / 替换 origin（D90）：只认 https 与 ssh 形状，地址里不许带令牌 */
+  setRemote(url: string): Promise<MemoryRemoteResult>
+  /** 设置抽屉要的推送状态：远端 / 分支 / 未推送条数 / 是否脏 / 上次推送结果 */
+  pushState(): Promise<MemoryPushState>
   lastCommit(): Promise<{ hash: string; subject: string } | null>
   /** 仓内写文件（自动建目录；拒绝跳出仓根的路径）；返回是否写成功 */
   writeFile(relativePath: string, content: string): Promise<boolean>
@@ -595,6 +654,8 @@ export function createMemoryRepo(options: {
   }
 
   let ensured: Promise<MemoryRepoStatus> | null = null
+  /** 最近一次推送结果（D90：设置抽屉要显示「上次失败原因」，只活在进程里） */
+  let lastPush: MemoryPushAttempt | null = null
   const ensure = (): Promise<MemoryRepoStatus> => {
     ensured ??= ensureInner()
     return ensured
@@ -658,14 +719,69 @@ export function createMemoryRepo(options: {
     push: () =>
       exclusive(async () => {
         const status = await ensure()
-        if (!status.ok) return { ok: false, reason: 'unavailable' }
+        if (!status.ok) {
+          lastPush = { ok: false, reason: 'unavailable', at: Date.now() }
+          return { ok: false, reason: 'unavailable' }
+        }
         const remote = await run(['remote', 'get-url', 'origin'])
-        if (!remote.ok || remote.stdout.trim() === '') return { ok: false, reason: 'no-remote' }
+        if (!remote.ok || remote.stdout.trim() === '') {
+          lastPush = { ok: false, reason: 'no-remote', at: Date.now() }
+          return { ok: false, reason: 'no-remote' }
+        }
         const pushed = await run(['push', 'origin', 'HEAD'], { timeoutMs: PUSH_TIMEOUT_MS })
         if (!pushed.ok) {
+          lastPush = { ok: false, reason: 'failed', at: Date.now() }
           return { ok: false, reason: 'failed', detail: firstLine(pushed.stderr) }
         }
+        lastPush = { ok: true, reason: null, at: Date.now() }
         return { ok: true }
+      }),
+    remoteUrl: () =>
+      exclusive(async () => {
+        const status = await ensure()
+        if (!status.ok) return null
+        const remote = await run(['remote', 'get-url', 'origin'])
+        return remote.ok && remote.stdout.trim() !== '' ? remote.stdout.trim() : null
+      }),
+    setRemote: (raw) =>
+      exclusive(async () => {
+        const checked = validateRemoteUrl(raw)
+        if (!checked.ok) return { ok: false, reason: checked.reason }
+        const status = await ensure()
+        if (!status.ok) return { ok: false, reason: 'unavailable' }
+        const existing = await run(['remote', 'get-url', 'origin'])
+        const saved =
+          existing.ok && existing.stdout.trim() !== ''
+            ? await run(['remote', 'set-url', 'origin', checked.url])
+            : await run(['remote', 'add', 'origin', checked.url])
+        if (!saved.ok) return { ok: false, reason: 'failed', detail: firstLine(saved.stderr) }
+        return { ok: true, url: checked.url }
+      }),
+    pushState: () =>
+      exclusive(async () => {
+        const ensured = await ensure()
+        if (!ensured.ok) return { ok: false, reason: 'unavailable' }
+        const status = await readStatus()
+        if (!status.ok) return { ok: false, reason: 'unavailable' }
+        const remote = await run(['remote', 'get-url', 'origin'])
+        const remoteUrlValue = remote.ok && remote.stdout.trim() !== '' ? remote.stdout.trim() : null
+        let ahead: number | null = null
+        // detached / 还没推过（没有上游）时 ahead 只能是 null：别猜
+        if (remoteUrlValue !== null && !status.branch.includes('HEAD')) {
+          const count = await run(['rev-list', '--count', '@{u}..HEAD'])
+          if (count.ok) {
+            const parsed = Number.parseInt(count.stdout.trim(), 10)
+            if (Number.isFinite(parsed) && parsed >= 0) ahead = parsed
+          }
+        }
+        return {
+          ok: true,
+          remote: remoteUrlValue,
+          branch: status.branch,
+          dirty: status.dirty,
+          ahead,
+          lastPush
+        }
       }),
     lastCommit: () => exclusive(lastCommitInner),
     writeFile: (relativePath, content) => exclusive(() => writeInner(relativePath, content)),

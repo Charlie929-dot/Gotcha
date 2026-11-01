@@ -7,8 +7,8 @@
  * M1：`/help` / `/backup`。
  * M2：`/log` `/new` `/use` `/del`——节点（git 分支）的看 / 开 / 切 / 删，
  * 外加历史提交只读查看（detached；第一次提问时由组合根自动分叉）。
- * D75：`/log` 是家谱树（`[0]` / `[0-1]` 父子编号，按代排序），`/log <编号|名字>` 看该节点的
- * 记忆历史；切换前保存 / `/backup` 的提交主题默认 `memory: 2026-10-30 18:05`（回执可起名）。
+ * D75 / D91：`/log` 是家谱树（编号递增 `[0]` `[1]` `[2]`，靠缩进表示父子），
+ * `/log <编号|名字>` 看该节点的记忆历史（提交 `[0-1]`、分出去的支线缩进另起编号）；切换前保存 / `/backup` 的提交主题默认 `memory: 2026-10-30 18:05`（回执可起名）。
  * M5（D72）：`/mode ask|chat` 切分支（分支即模式）、`/tool set|ele|add|rm` 改分支的工具白名单。
  *
  * 三条纪律：
@@ -281,20 +281,28 @@ async function saveBefore(deps: CommandDeps, at: number, name?: string): Promise
 }
 
 /* ------------------------------------------------------------------ */
-/* 家谱树（D75）：编号 `0` / `0-1` / `0-1-0`，父子关系来自家谱 parent   */
+/* 家谱树（D75 / D91）：编号递增 `0` / `1` / `2`，靠缩进表示父子          */
 /* ------------------------------------------------------------------ */
 
-/** 家谱树节点：编号（根 `0`，第 n 个子节点 `<父>-<n>`，从 0 起）、分支名、子节点 */
+/**
+ * 家谱树节点：编号（根 `0`，之后**递增**：`1`、`2`…）、分支名、子节点、缩进层级。
+ *
+ * 2026-11-01 改口径（D91）：原先用 `0-1`、`0-1-0` 这种路径编号，
+ * 和历史页里「`0-1` 是提交、`0-1-0` 是分支」撞车——同一串方括号在两张页面里指不同东西。
+ * 现在分支一律是**一个递增整数**，父子关系只看缩进；提交挂在分支编号下（`1-0`、`1-1`…）。
+ */
 export interface GenealogyNode {
   id: string
   branch: string
   children: GenealogyNode[]
+  /** 缩进层级（根 0）；渲染时按它加两个空格 */
+  depth: number
 }
 
 /**
  * 同一层里的顺序（D75）：代 → 种类 → 创建时间。
  * 「原始代」= assistant 分支（无 persona / 无生命），它跟第一代同属 `gen-1`，
- * 但用 kind 排在前面：`[0-0] ask · 纯模型` 在 `[0-1] default` 之前。
+ * 但用 kind 排在前面：`[1] ask · 纯模型` 排在 `[2] default` 之前。
  */
 function compareGenealogy(lineage: Lineage, a: LineageBranch, b: LineageBranch): number {
   const rank = (node: LineageBranch): [number, number, number, string] => {
@@ -326,7 +334,7 @@ export function genealogyTree(
   if (lineage === null || nodes.length === 0) {
     return [...names]
       .sort((a, b) => a.localeCompare(b))
-      .map((branch, index) => ({ id: String(index), branch, children: [] }))
+      .map((branch, index) => ({ id: String(index), branch, children: [], depth: 0 }))
   }
 
   const known = new Set(nodes.map((node) => node.branch))
@@ -351,13 +359,20 @@ export function genealogyTree(
       : (nodes[0]?.branch ?? '')
 
   const seen = new Set<string>()
-  const build = (list: readonly LineageBranch[], prefix: string): GenealogyNode[] => {
+  /** 递增编号（D91）：根是 0，其余按先序遍历依次 1、2、3…；父子关系只看 depth */
+  let nextId = 1
+  const build = (list: readonly LineageBranch[], depth: number): GenealogyNode[] => {
     const out: GenealogyNode[] = []
     for (const node of [...list].sort((a, b) => compareGenealogy(lineage, a, b))) {
       if (seen.has(node.branch)) continue
       seen.add(node.branch)
-      const id = `${prefix}-${out.length}`
-      out.push({ id, branch: node.branch, children: build(childrenOf.get(node.branch) ?? [], id) })
+      const id = String(nextId++)
+      out.push({
+        id,
+        branch: node.branch,
+        depth,
+        children: build(childrenOf.get(node.branch) ?? [], depth + 1)
+      })
     }
     return out
   }
@@ -369,14 +384,14 @@ export function genealogyTree(
       : [...(childrenOf.get(rootBranch) ?? []), ...roots.filter((node) => node.branch !== rootBranch)]
   seen.add(rootBranch)
   const out: GenealogyNode[] = [
-    { id: '0', branch: rootBranch, children: build(rootChildren, '0') }
+    { id: '0', branch: rootBranch, children: build(rootChildren, 1), depth: 0 }
   ]
 
   const extra = names
     .filter((name) => !known.has(name) && name !== rootBranch)
     .sort((a, b) => a.localeCompare(b))
-  extra.forEach((branch, index) => {
-    out.push({ id: String(index + 1), branch, children: [] })
+  extra.forEach((branch) => {
+    out.push({ id: String(nextId++), branch, children: [], depth: 0 })
   })
   return out
 }
@@ -438,7 +453,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '',
     '可用命令：',
     '  /help            看这一页',
-    '  /log [节点]      看家谱；给编号（0 / 0-1）看那个节点的记忆（/log n|l 翻页）',
+    '  /log [节点]      看家谱；给编号（0 / 1 / 2）看那个节点的记忆（/log n|l 翻页）',
     '  /new <名字>      从当前节点开新分支（ask 分支 = 从它分叉并清空会话）',
     '  /use <编号|名字|提交> [-d]  切节点；切历史提交 = 只读查看',
     '  /del <名字>      删节点（要回 confirm）',
@@ -485,7 +500,7 @@ function labelCommitSubject(line: string): string {
 }
 
 /**
- * 家谱树的一行：`[0-1] 鱼苗 (yumiao) · 7 个工具  ← 当前`。
+ * 家谱树的一行：`  [3] 鱼苗 (yumiao) · 7 个工具  ← 当前`（缩进 = 层级，编号递增）。
  * 名字（D82）：有真名就 `真名 (分支)`，没起过名只写分支；`life` 不显示工具数（D75 的样例口径）。
  * 停在历史提交时，家谱 `active` 那个节点标 `← 正在看`（表明这一问会从它分叉）。
  */
@@ -515,7 +530,9 @@ function genealogyLine(
       : viewedBranch === node.branch
         ? '  ← 正在看'
         : ''
-  return `[${node.id}] ${label}${suffix}${marker}`
+  // D91：父子关系只靠缩进（编号是递增整数，不再是 `0-1` 路径）
+  const indent = '  '.repeat(Math.max(0, node.depth))
+  return `${indent}[${node.id}] ${label}${suffix}${marker}`
 }
 
 /** 短 sha 比较：`%h` 与 `rev-parse --short` 的位数可能不同，按前缀认同一个提交 */
@@ -527,24 +544,14 @@ function sameCommit(a: string, b: string | null): boolean {
 /** `/log <节点>` 一页多少条记忆 */
 const HISTORY_PAGE = 20
 
-/** 从 child 沿家谱 parent 往上走，能否走到 root（只看真正的后代） */
-function descendsFrom(lineage: Lineage, child: string, root: string): boolean {
-  let current = findBranch(lineage, child)
-  for (let guard = 0; current !== null && current.parent !== null && guard < 64; guard += 1) {
-    if (current.parent === root) return true
-    current = findBranch(lineage, current.parent)
-  }
-  return false
-}
-
 /** 短 sha（`%h`）与完整 sha（`merge-base`）是不是同一个提交 */
 function sameFullCommit(short: string, full: string): boolean {
   return short.length >= 7 && full.startsWith(short)
 }
 
 /**
- * `/log`（D75）：家谱树——父子关系来自家谱 `parent`，编号是 `[父]-[在兄弟里的第几个]`。
- * 树只到分支级；具体记忆用 `/log <节点>`（D77 的提交级页）。
+ * `/log`（D75 / D91）：家谱树——父子关系来自家谱 `parent`，编号**递增**、父子只看缩进。
+ * 树只到分支级；具体记忆用 `/log <节点>`（D77 / D91 的提交级页，支线也在那里展开）。
  */
 async function treeText(deps: CommandDeps): Promise<string> {
   const status = await deps.repo.status()
@@ -576,9 +583,75 @@ async function resolveLogNode(deps: CommandDeps, target: string): Promise<string
   )
 }
 
+/** 子分支一次展开几条提交（再多就 `/log <分支>` 去看，各分支自己分页） */
+const CHILD_HISTORY_SHOWN = 5
+/** 递归深度上限：分支套分支再套分支就到头，别把一次 `/log` 刷爆 */
+const HISTORY_DEPTH_LIMIT = 3
+
+/** 缩进（D91）：一层两个空格，父子关系只靠它 */
+function indentOf(depth: number): string {
+  return '  '.repeat(Math.max(0, depth))
+}
+
+/** 分支的直接子分支（家谱 parent 指过来、git 里还在） */
+function childBranchesOf(lineage: Lineage | null, branch: string, names: ReadonlySet<string>): string[] {
+  if (lineage === null) return []
+  return lineage.branches
+    .filter((node) => node.parent === branch && node.branch !== branch && names.has(node.branch))
+    .map((node) => node.branch)
+}
+
+/** 分叉点落在这些提交里的子分支：commitHash → [子分支] */
+async function forksWithin(
+  deps: CommandDeps,
+  lineage: Lineage | null,
+  branch: string,
+  names: ReadonlySet<string>,
+  commits: readonly { hash: string }[]
+): Promise<Map<string, string[]>> {
+  const forks = new Map<string, string[]>()
+  for (const child of childBranchesOf(lineage, branch, names)) {
+    const base = await deps.repo.mergeBase(child, branch)
+    if (base === null) continue
+    const hit = commits.find((commit) => sameFullCommit(commit.hash, base))
+    if (hit === undefined) continue
+    const list = forks.get(hit.hash) ?? []
+    list.push(child)
+    forks.set(hit.hash, list)
+  }
+  return forks
+}
+
+/** 某个分叉点之后的最多 `limit` 条提交（旧 → 新） */
+async function commitsAfter(
+  deps: CommandDeps,
+  branch: string,
+  forkSha: string,
+  limit: number
+): Promise<{ hash: string; subject: string }[]> {
+  const result = await deps.repo.git([
+    'log',
+    '--format=%h%x09%s',
+    '--reverse',
+    '-n',
+    String(limit),
+    `${forkSha}..${branch}`
+  ])
+  if (!result.ok) return []
+  const out: { hash: string; subject: string }[] = []
+  for (const line of result.stdout.split('\n')) {
+    if (line.trim() === '') continue
+    const tab = line.indexOf('\t')
+    if (tab <= 0) continue
+    out.push({ hash: line.slice(0, tab), subject: line.slice(tab + 1) })
+  }
+  return out
+}
+
 /**
- * `/log <节点>`（D77）：这个节点的记忆页——提交**旧 → 新**；从某条提交分出去的分支
- * 挂在那条提交下面（只到分支名，它的记忆再 `/log <分支>` 看）。
+ * `/log <节点>`（D77 / D91）：这个节点的记忆页——提交**旧 → 新**；
+ * 从某条提交分出去的分支**缩进一段**列在下面，带自己的递增编号和最多 5 条提交，
+ * 它的子分支再往里缩一层（到 `HISTORY_DEPTH_LIMIT` 层为止）。
  * `offset` 从最旧一条数起；`/log n` 下一页（更新）、`/log l` 上一页（更旧）。
  */
 async function historyPage(
@@ -596,37 +669,52 @@ async function historyPage(
   const read = await readLineage(deps.lineageFile)
   const lineage = read.status === 'ok' ? read.lineage : null
   const names = new Set((await deps.repo.listBranches()).map((item) => item.branch))
-  const forks = new Map<string, string[]>()
-  if (lineage !== null) {
-    for (const child of lineage.branches) {
-      if (child.branch === branch || !names.has(child.branch)) continue
-      if (!descendsFrom(lineage, child.branch, branch)) continue
-      const base = await deps.repo.mergeBase(child.branch, branch)
-      if (base === null) continue
-      const hit = window.find((commit) => sameFullCommit(commit.hash, base))
-      if (hit === undefined) continue
-      const list = forks.get(hit.hash) ?? []
-      list.push(child.branch)
-      forks.set(hit.hash, list)
-    }
-  }
 
   const lines = [`[0] ${branch}${head.branch === branch ? '  ← 当前' : ''}`]
   if (window.length === 0) lines.push('（还没有提交）')
-  window.forEach((commit, index) => {
+
+  /** 分支编号递增（D91）：根 0，子分支按出现顺序 1、2、3… */
+  let nextId = 1
+  const markerOf = (name: string): string =>
+    head.branch === name
+      ? '  ← 当前'
+      : head.detached && lineage?.active === name
+        ? '  ← 正在看'
+        : ''
+
+  /** 把子分支（含它的提交、以及再往下的子分支）缩进列出来 */
+  const appendBranch = async (
+    name: string,
+    forkSha: string,
+    depth: number,
+    seen: Set<string>
+  ): Promise<void> => {
+    if (seen.has(name) || depth > HISTORY_DEPTH_LIMIT) return
+    seen.add(name)
+    const id = String(nextId++)
+    lines.push(`${indentOf(depth)}[${id}] ${name}${markerOf(name)}`)
+    const shown = await commitsAfter(deps, name, forkSha, CHILD_HISTORY_SHOWN)
+    const forks = await forksWithin(deps, lineage, name, names, shown)
+    for (const [index, commit] of shown.entries()) {
+      lines.push(`${indentOf(depth + 1)}[${id}-${index}] ${labelCommitSubject(commit.subject)} · ${commit.hash}`)
+      for (const child of forks.get(commit.hash) ?? []) {
+        await appendBranch(child, commit.hash, depth + 2, seen)
+      }
+    }
+    if (shown.length === CHILD_HISTORY_SHOWN) {
+      lines.push(`${indentOf(depth + 1)}…（还有更早的，/log ${name} 看）`)
+    }
+  }
+
+  const forks = await forksWithin(deps, lineage, branch, names, window)
+  const seen = new Set<string>([branch])
+  for (const [index, commit] of window.entries()) {
     const inUse = head.branch === branch && sameCommit(commit.hash, head.sha) ? '  ← 正在用' : ''
     lines.push(`[0-${index}] ${labelCommitSubject(commit.subject)} · ${commit.hash}${inUse}`)
-    const children = forks.get(commit.hash) ?? []
-    children.forEach((child, childIndex) => {
-      const marker =
-        head.branch === child
-          ? '  ← 当前'
-          : head.detached && lineage?.active === child
-            ? '  ← 正在看'
-            : ''
-      lines.push(`[0-${index}-${childIndex}] ${child}${marker}`)
-    })
-  })
+    for (const child of forks.get(commit.hash) ?? []) {
+      await appendBranch(child, commit.hash, 1, seen)
+    }
+  }
 
   const hasOlder = start > 0
   const hasNewer = start + HISTORY_PAGE < total

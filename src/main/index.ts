@@ -156,6 +156,12 @@ import {
   usageAfterCompact
 } from './lineage'
 import { createMemoryRepo } from './memory-repo'
+import {
+  applyMemoryRepoPatch,
+  buildMemoryRepoSettingsView,
+  readMemorySchedule
+} from './memory-repo-settings'
+import { createMemoryScheduler } from './memory-schedule'
 import { forkDetachedIfNeeded } from './node-fork'
 import {
   appendAskConversationTurn,
@@ -297,6 +303,8 @@ let momentRuntime: MomentRuntime | null = null
 let themeOnlineRuntime: ThemeOnlineRuntime | null = null
 let disposeGraphIpc: (() => void) | null = null
 let disposeAskIpc: (() => void) | null = null
+/** 记忆仓定时器（D90）：退出时停掉，别留野定时器 */
+let stopMemorySchedule: (() => void) | null = null
 /** QQ 通道（D63）：默认关闭；挂在这里是为了 before-quit 能直接收口端口 */
 let qqChannel: QqChannel | null = null
 /** NapCat 托管（D66）：退出只停轮询，不结束用户正在用的 QQ（拍板：退出不关） */
@@ -1195,6 +1203,8 @@ app.on('before-quit', (event) => {
   tempJanitor = null
   disposeGraphIpc?.()
   disposeAskIpc?.()
+  stopMemorySchedule?.()
+  stopMemorySchedule = null
   // QQ 通道先释放端口（不等回执；在途问答随进程退出一起收口）
   qqNapcat?.dispose()
   qqNapcat = null
@@ -2061,6 +2071,28 @@ if (primaryInstance) {
       }
     }
     void ensureMemoryRepo()
+    /**
+     * 记忆仓定时（D90）：到点自己记一笔 / 推一次。
+     * commit 前先写家谱快照（和「每轮问答之后」同一个口径），消息带时分让人看得出是什么时候插的旗子。
+     */
+    const memoryScheduler = createMemoryScheduler({
+      commit: async () => {
+        const lineage = await readLineage(lineageFile)
+        if (lineage.status === 'ok') {
+          await memoryRepo.writeFile('lineage.snapshot.json', lineageSnapshot(lineage.lineage))
+        }
+        const clock = new Date().toTimeString().slice(0, 5)
+        const result = await memoryRepo.commit(`memory: 定时记一笔 ${clock}`)
+        if (result.committed) captureLog('info', 'memory schedule committed', { hash: result.hash ?? '' })
+      },
+      push: async () => {
+        const result = await memoryRepo.push()
+        if (result.ok) captureLog('info', 'memory schedule pushed', {})
+        else if (result.reason === 'failed') captureLog('warn', 'memory schedule push failed', {})
+      },
+      log: (level, message, data) => captureLog(level, message, data)
+    })
+    stopMemorySchedule = () => memoryScheduler.stop()
     /** 每轮问答之后：一天一个提交（不阻塞回答；失败只记日志） */
     const commitMemoryDay = (): void => {
       void (async () => {
@@ -2778,6 +2810,21 @@ if (primaryInstance) {
       return { ok: true, view: buildQqSettingsView(db, qqChannel?.status()) }
     }
 
+    /**
+     * 按设置表（重新）挂记忆仓定时器（D90）：启动一次、保存设置后再来一次。
+     * 读不出设置就当默认值——定时功能不该因为一次数据库抖动就消失。
+     */
+    const applyMemorySchedule = (): void => {
+      try {
+        const db = connections.queryDb()
+        if (db === null) return
+        memoryScheduler.apply(readMemorySchedule(db))
+      } catch (error) {
+        captureLog('warn', 'memory schedule read failed', { error: String(error) })
+      }
+    }
+    applyMemorySchedule()
+
     disposeAskIpc = registerAskIpc({
       getWindow: () => askWindow,
       ask: async (question, context) => {
@@ -2946,6 +2993,45 @@ if (primaryInstance) {
       // 个人记忆（vibe/free）：日记目录 + 人设；保存后立即同步日记目录
       memorySettings: readMemorySettings,
       saveMemorySettings,
+      // 记忆仓（D90）：远端绑定 + 推送状态 + 定时。地址写进仓的 git 配置，间隔进设置表；
+      // 保存成功后立刻按新间隔重挂定时器（不重启应用）
+      memoryRepo: () => {
+        const db = connections.queryDb()
+        if (db === null) return Promise.resolve({ error: 'db-unavailable' })
+        return buildMemoryRepoSettingsView({ db, pushState: () => memoryRepo.pushState() })
+      },
+      saveMemoryRepo: async (patch) => {
+        const writable = connections.ensureWritable().db
+        if (writable === null) return { ok: false, error: '数据库暂不可用，设置没有保存' }
+        const saved = await applyMemoryRepoPatch(
+          { db: writable, setRemote: (url) => memoryRepo.setRemote(url) },
+          patch
+        )
+        if (!saved.ok) return { ok: false, error: saved.message ?? '保存失败' }
+        applyMemorySchedule()
+        const db = connections.queryDb()
+        if (db === null) return { ok: true }
+        return {
+          ok: true,
+          view: await buildMemoryRepoSettingsView({ db, pushState: () => memoryRepo.pushState() })
+        }
+      },
+      pushMemoryRepo: async () => {
+        const result = await memoryRepo.push()
+        const db = connections.queryDb()
+        const view =
+          db === null
+            ? undefined
+            : await buildMemoryRepoSettingsView({ db, pushState: () => memoryRepo.pushState() })
+        if (result.ok) return view === undefined ? { ok: true } : { ok: true, view }
+        const error =
+          result.reason === 'no-remote'
+            ? '还没绑定仓库地址'
+            : result.reason === 'unavailable'
+              ? '记忆仓不可用'
+              : '推送失败（网络 / 凭据），细节看日志'
+        return view === undefined ? { ok: false, error } : { ok: false, error, view }
+      },
       // 人格卡（D62）：导入即启用；写卡不碰库，启用卡要写 settings（回答中拒绝开写连接）
       savePersonaCard: (name, text) => {
         const root = app.getPath('userData')

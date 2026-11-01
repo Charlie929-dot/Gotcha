@@ -80,15 +80,19 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
     expect(read.lineage.branches.find((node) => node.branch === 'di-er-hui-hua')?.parent).toBe('ask')
   })
 
-  it('/log：画家谱树；/log 0-0 看 ask 的记忆历史', async () => {
+  it('/log：画家谱树（缩进 + 递增编号）；/log 1 看 ask 的记忆历史', async () => {
     const { repo, lineageFile } = await setup()
     const run = createCommandHandler({ repo, lineageFile })
     await run('/mode ask')
     const tree = textOf(await run('/log'))
     expect(tree).toBe(
-      ['[0] life · 主干', '[0-0] ask · 纯模型 · 0 个工具  ← 当前', '[0-1] default · 11 个工具'].join('\n')
+      [
+        '[0] life · 主干',
+        '  [1] ask · 纯模型 · 0 个工具  ← 当前',
+        '  [2] default · 11 个工具'
+      ].join('\n')
     )
-    const history = textOf(await run('/log 0-0'))
+    const history = textOf(await run('/log 1'))
     expect(history.split('\n')[0]).toBe('[0] ask  ← 当前')
     // 旧 → 新；ask 的最新提交就是 HEAD：正在用的那条记忆
     expect(history).toMatch(/\[0-0\] 出生 default · [0-9a-f]{7,}/u)

@@ -418,6 +418,22 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
       if (before === null) {
         return { ok: false, message: `没有 #${input.id} 这条任务（search_tasks 看看有哪些）`, task: null }
       }
+      // 已经结束的任务没有下一次：改时间不会让它再响。
+      // 2026-11-02 事故：ta 把「23:45 收尾」改到一条 23:00 已经跑完的一次性任务上，
+      // 这次 update 只改了 next_due_at、state 还是 completed——那条再也不会响，
+      // 回执却说「改好了 #9：11-01 23:45 …」，ta 就照着回执跟用户说「调好了」。
+      // 停 / 继续那边本来就不许复活（见 setState），这里也一样：如实拒绝，
+      // 让它去 schedule 一条新的，别让一条死行看起来像活的。
+      if (before.state === 'completed' || before.state === 'cancelled') {
+        if (input.when !== undefined && input.state !== 'active') {
+          const done = before.state === 'completed' ? '跑完了' : '取消了'
+          return {
+            ok: false,
+            message: `#${before.id} 已经${done}（${readableTaskTime(before.next_due_at, now)} 那次），改时间不会让它再响；要重新提醒就 schedule 一条新的`,
+            task: viewOf(before, now)
+          }
+        }
+      }
       const anchor = input.when !== undefined ? input.when : before.next_due_at
       let repeatText: string | undefined
       if (input.repeat !== undefined) {

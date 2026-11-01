@@ -622,12 +622,23 @@ export function cancelTask(db: Db, id: number, now = Date.now()): TaskRow | null
 /* 调度：最近到点、到点列表、执行租约                                  */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 「这一次 occurrence 已经被抢走、还没结算」的行。
+ *
+ * 2026-11-02 事故：23:30 那条在跑到一半时应用重启，`run_key` 落在库里、
+ * `next_due_at` 没推进。`claimTask` 看到同一个 key 就永远返回 null，于是这条
+ * 既不再跑也不推进，还一直排在到点队首——调度器只好用 0ms 定时器反复醒来
+ * （主进程烧到 76% CPU）。所以挑队首 / 取到点列表都要跳过它，
+ * 上次进程的陈旧租约由 {@link releaseStaleClaims} 在启动时清掉。
+ */
+const NOT_CLAIMED = `IFNULL(run_key, '') <> (id || ':' || next_due_at)`
+
 /** 最近的到点任务（调度器只睡到这一条；没有就返回 null，不留永久轮询） */
 export function nextDueTask(db: Db): TaskRow | null {
   const row = db
     .prepare(
       `SELECT ${TASK_COLUMNS} FROM mem_tasks
-       WHERE state = 'active' AND next_due_at IS NOT NULL
+       WHERE state = 'active' AND next_due_at IS NOT NULL AND ${NOT_CLAIMED}
        ORDER BY next_due_at ASC, id ASC
        LIMIT 1`
     )
@@ -641,7 +652,7 @@ export function listDueTasks(db: Db, now: number, limit = 20): TaskRow[] {
     .prepare(
       `SELECT ${TASK_COLUMNS} FROM mem_tasks
        WHERE state = 'active' AND next_due_at IS NOT NULL AND next_due_at <= ?
-         AND (valid_until IS NULL OR valid_until >= ?)
+         AND (valid_until IS NULL OR valid_until >= ?) AND ${NOT_CLAIMED}
        ORDER BY next_due_at ASC, id ASC
        LIMIT ?`
     )
@@ -734,6 +745,29 @@ export function claimTask(db: Db, id: number, now = Date.now()): TaskRow | null 
     .run(key, now, id, current.next_due_at ?? 0, key)
   if (result.changes !== 1) return null
   return selectById(db, id)
+}
+
+/**
+ * 释放上一个进程没结算完的租约（启动时调一次）。
+ *
+ * `run_key` 记的是「这一次 occurrence 有人抢过」；**只有结算**才会推进
+ * `next_due_at` 或把一次性任务收成 completed。所以进程刚起来的时候，
+ * 凡是 `run_key` 还等于当前 occurrence 的行，都是被 kill / 重启打断的那一次：
+ * 不清掉它就再也抢不到（`claimTask` 见同一个 key 直接 null），
+ * 那条任务从此不跑、不推进，还堵在到点队首。
+ *
+ * 只清 active 的：已完成 / 已取消的不该被复活。
+ * 返回清掉的条数（主进程会记一条日志）。
+ */
+export function releaseStaleClaims(db: Db, now = Date.now()): number {
+  const result = db
+    .prepare(
+      `UPDATE mem_tasks SET run_key = NULL, updated_at = ?
+       WHERE state = 'active' AND run_key IS NOT NULL AND next_due_at IS NOT NULL
+         AND run_key = (id || ':' || next_due_at)`
+    )
+    .run(now)
+  return result.changes
 }
 
 export interface TaskOutcome {

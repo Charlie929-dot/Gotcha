@@ -26,6 +26,7 @@ import {
   nextDueTask,
   parseRepeat,
   readableTaskTime,
+  releaseStaleClaims,
   settleTask,
   type RepeatKind,
   type TaskOutcome,
@@ -255,6 +256,17 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
       }))
     },
     start: () => {
+      // 上个进程跑一半被打断的那条：租约还在库里，先释放，不然它永远抢不到、
+      // 还堵在到点队首让调度器空转（2026-11-02 事故）。
+      const current = handle()
+      if (current !== null) {
+        try {
+          const released = releaseStaleClaims(current, now())
+          if (released > 0) deps.log('warn', 'task stale claim released', { count: released })
+        } catch (error) {
+          deps.log('warn', 'task stale claim release failed', { error: String(error) })
+        }
+      }
       scheduler.start()
       // 上次没同步上的共建计划再试一遍（比如那天还没有笔记：现在能自动建了）
       try {

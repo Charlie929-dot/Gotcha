@@ -30,6 +30,7 @@ import {
   nextDueTask,
   occurrenceInWindow,
   parseRepeat,
+  releaseStaleClaims,
   resolveRepeat,
   searchTasks,
   settleTask,
@@ -423,6 +424,55 @@ describe('调度：最近到点 / 到点列表 / 租约', () => {
     })
     cancelTask(db, task.id, now)
     expect(claimTask(db, task.id, now)).toBeNull()
+  })
+
+  it('抢了租约还没结算的行不再排队首 / 不再进到点列表（否则调度器 0ms 空转）', () => {
+    const task = createTask(db, {
+      instruction: '跑到一半重启了',
+      nextDueAt: at('2026-11-01', '11:00'),
+      origin: 'agent',
+      now
+    })
+    expect(claimTask(db, task.id, now)?.id).toBe(task.id)
+    // 2026-11-02 事故：这条留在队首 → nextDueAt 永远是「已经过去」→ 定时器 0ms → 主进程烧 CPU
+    expect(nextDueTask(db)).toBeNull()
+    expect(listDueTasks(db, now)).toHaveLength(0)
+  })
+
+  it('releaseStaleClaims：只释放「抢了没结算」的；结算过的重复 / 一次性都不动', () => {
+    const wedged = createTask(db, {
+      instruction: '被重启打断',
+      nextDueAt: at('2026-11-01', '11:00'),
+      origin: 'agent',
+      now
+    })
+    claimTask(db, wedged.id, now)
+
+    const daily = createTask(db, {
+      instruction: '每天写日记',
+      nextDueAt: at('2026-11-01', '11:00'),
+      repeat: 'daily',
+      origin: 'agent',
+      now
+    })
+    claimTask(db, daily.id, now)
+    settleTask(db, daily.id, {}, now) // 正常结算：下一次推到 11-02
+
+    const once = createTask(db, {
+      instruction: '一次性的事',
+      nextDueAt: at('2026-11-01', '11:00'),
+      origin: 'agent',
+      now
+    })
+    claimTask(db, once.id, now)
+    settleTask(db, once.id, {}, now) // 正常结算：completed
+
+    expect(releaseStaleClaims(db, now)).toBe(1)
+    expect(getTaskById(db, wedged.id)?.run_key).toBeNull()
+    // 释放之后这一次能补跑（失败不丢），但不会把已完成 / 已推进的弄回来
+    expect(claimTask(db, wedged.id, now)?.id).toBe(wedged.id)
+    expect(getTaskById(db, daily.id)?.next_due_at).toBe(at('2026-11-02', '11:00'))
+    expect(getTaskById(db, once.id)?.state).toBe('completed')
   })
 })
 

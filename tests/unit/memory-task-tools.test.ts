@@ -431,6 +431,28 @@ describe('查与参数', () => {
     expect(result.task).toBeNull()
   })
 
+  it('已经结束的任务：改时间如实拒绝，不让死行看起来还活着', () => {
+    const p = port()
+    const created = p.schedule({
+      instruction: '喊他收尾睡觉',
+      when: WHEN,
+      repeat: '',
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    const id = created.task!.id
+    // 到点跑过一轮 → 一次性任务收成 completed（ta 再想把提醒挪后半小时）
+    expect(p.update({ id, state: 'completed' }).ok).toBe(true)
+    const moved = p.update({ id, when: WHEN + 60 * 60 * 1000 })
+    expect(moved.ok).toBe(false)
+    expect(moved.message).toContain('跑完了')
+    expect(moved.message).toContain('schedule')
+    // 回执说没改，库里也确实没改：不能留下一条「时间去到 21:30、却永远不会响」的行
+    expect(getTaskById(db, id)?.next_due_at).toBe(WHEN)
+    expect(getTaskById(db, id)?.state).toBe('completed')
+  })
+
   it('没有任务库（db 为 null）时抛错，由工具层转成可读失败', () => {
     const p = createTaskToolPort({ db: () => null })
     expect(() =>

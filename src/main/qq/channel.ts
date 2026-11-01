@@ -12,7 +12,7 @@
  * - 日志只记计数与结果种类，**不记问题正文、不记 token**。
  */
 
-import type { ChainAskResult } from '../../chain/agent/types'
+import type { ChainAskResult, ChainAskResumeDecision } from '../../chain/agent/types'
 import type { QqInbound, QqLog, QqTransportStatus } from './ob11'
 import { QQ_INBOUND_FILE_MAX, QQ_INBOUND_IMAGE_MAX } from './ob11'
 import {
@@ -71,6 +71,12 @@ export interface QqAskInput {
 export interface QqChannelDeps {
   ask: (input: QqAskInput) => Promise<ChainAskResult>
   /**
+   * 「还要继续查吗」的选择（2026-11-01 修）：桌面能点按钮，QQ 只能回字，
+   * 所以这里接上与桌面同一个续查通道——会话里挂着待选时，回「1」继续查 /「2」按现有结果收尾。
+   * 不传 = 这条通道不支持续查（界面文案仍会提示回桌面点）。
+   */
+  resume?: (input: QqResumeInput) => Promise<ChainAskResult>
+  /**
    * 本地命令（M5）：与桌面共用同一个 `createCommandHandler` 实例。
    * 命中就返结果（不调模型、不计生命、不占限流），返 null 照常提问。
    */
@@ -90,6 +96,31 @@ export interface QqChannelDeps {
 export interface QqChannelStatus extends QqTransportStatus {
   running: boolean
   lastError?: string
+}
+
+/** QQ 里的「还要继续查吗」选择：带着当初那一问，续查结果仍记在这条上 */
+export interface QqResumeInput {
+  resumeId: string
+  decision: ChainAskResumeDecision
+  conversationId: string
+  /** 当初问的那句（续查的答案仍算这一问的答案） */
+  question: string
+  /** 本条消息的超时信号（与 `ask` 同一条命） */
+  signal: AbortSignal
+}
+
+/** 只认 `1` / `2`（含全角、带句点 / 顿号 / 括号）：别的字一律当正常提问，别把话吃掉 */
+const RESUME_CHOICE_RE = /^([12１２])[.．、,)）]?$/u
+
+/**
+ * 用户回的是不是「继续查 / 收尾」的选择。
+ * 只在**这个会话正挂着待选**时才算数（见 `pendingChoices`），否则「1」就是普通提问。
+ */
+export function parseResumeChoice(text: string): ChainAskResumeDecision | null {
+  const match = RESUME_CHOICE_RE.exec(text.trim())
+  if (match === null) return null
+  const digit = match[1]
+  return digit === '1' || digit === '１' ? 'continue' : 'stop'
 }
 
 /** 问题长度上限：与 `ask:query` 的 500 字口径一致（超了直接回提示，不截断硬发） */
@@ -182,12 +213,12 @@ function formatAskBody(result: ChainAskResult): string {
       // 本地命令（M5）：命令回执自己就是正文（桌面窗口原样显示，QQ 只剥 Markdown）
       return stripMarkdown(result.text)
     case 'continue-ask':
-      // M1 不通续查（续查要在桌面点选）：把问题与候选原样带回去，并说明入口
+      // 2026-11-01 修：QQ 也能续查了（回 1 / 2），不再让人回桌面点按钮
       return [
         result.question,
         ...result.options.map((option, index) => `${index + 1}. ${option}`),
         '',
-        '这条要接着查得回桌面点一下；QQ 里先按现有结果收尾。'
+        '回「1」继续查，回「2」按现有结果收尾。'
       ].join('\n')
     case 'error':
       return formatAskError(result.reason, result.message)
@@ -299,6 +330,11 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
   const queues = new Map<number, Promise<void>>()
   const windows = new Map<number, { start: number; count: number }>()
   const warnedAt = new Map<number, number>()
+  /**
+   * 每个会话挂着的「要不要接着查」（2026-11-01 修）：上一句是 `continue-ask` 且带 `resumeId`
+   * 时记下来，下一句若是 `1` / `2` 就走续查通道；换成别的问题就清掉（不把话吃掉）。
+   */
+  const pendingChoices = new Map<string, { resumeId: string; question: string }>()
 
   const log = deps.log
 
@@ -452,24 +488,56 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     const conversationId = `qq-${inbound.userId}`
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | null = null
+    // 挂着「要不要接着查」时，回 1 / 2 是选择，不是新问题（没接续查能力就当普通提问）
+    const pendingChoice = pendingChoices.get(conversationId)
+    const decision =
+      pendingChoice !== undefined && deps.resume !== undefined
+        ? parseResumeChoice(inbound.text)
+        : null
+    const resume = decision !== null && pendingChoice !== undefined ? deps.resume : undefined
     try {
-      // 先取图 / 文件（各自超时），再开始算问答超时：下载慢不该把模型请求挤掉
-      const images = await resolveImages(inbound.images)
-      const filesAttached = await resolveFiles(inbound.files)
-      const allImages = [...images, ...filesAttached.images]
-      timer = setTimeout(() => controller.abort(), askTimeoutMs)
-      const result = await deps.ask({
-        text: inbound.text,
-        conversationId,
-        signal: controller.signal,
-        ...(allImages.length > 0 ? { images: allImages } : {}),
-        ...(filesAttached.files.length > 0 ? { files: filesAttached.files } : {})
-      })
+      let result: ChainAskResult
+      if (resume !== undefined && pendingChoice !== undefined && decision !== null) {
+        timer = setTimeout(() => controller.abort(), askTimeoutMs)
+        result = await resume({
+          resumeId: pendingChoice.resumeId,
+          decision,
+          conversationId,
+          question: pendingChoice.question,
+          signal: controller.signal
+        })
+      } else {
+        // 先取图 / 文件（各自超时），再开始算问答超时：下载慢不该把模型请求挤掉
+        const images = await resolveImages(inbound.images)
+        const filesAttached = await resolveFiles(inbound.files)
+        const allImages = [...images, ...filesAttached.images]
+        timer = setTimeout(() => controller.abort(), askTimeoutMs)
+        result = await deps.ask({
+          text: inbound.text,
+          conversationId,
+          signal: controller.signal,
+          ...(allImages.length > 0 ? { images: allImages } : {}),
+          ...(filesAttached.files.length > 0 ? { files: filesAttached.files } : {})
+        })
+      }
+      // 记住 / 清掉「要不要接着查」：续查之后又是 continue-ask 就换成新的 resumeId
+      if (result.kind === 'continue-ask' && result.resumeId !== undefined) {
+        pendingChoices.set(conversationId, {
+          resumeId: result.resumeId,
+          question:
+            resume !== undefined && pendingChoice !== undefined
+              ? pendingChoice.question
+              : inbound.text
+        })
+      } else {
+        pendingChoices.delete(conversationId)
+      }
       const parts = await sendParts(inbound.userId, formatAskResult(result))
       log('info', 'qq answered', {
         userId: inbound.userId,
         kind: result.kind,
-        parts
+        parts,
+        ...(decision !== null ? { resumed: decision } : {})
       })
     } catch (error) {
       log('warn', 'qq answer failed', { userId: inbound.userId, error: String(error) })
@@ -521,6 +589,8 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     async start(next) {
       if (running) await this.stop()
       config = next
+      // 重配 / 重启后，旧的续查检查点已经不可用：待选一并作废，别让「1」接上个世纪的检查点
+      pendingChoices.clear()
       if (!next.enabled) {
         lastError = undefined
         return { ok: true }

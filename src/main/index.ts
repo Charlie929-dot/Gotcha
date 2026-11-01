@@ -2822,6 +2822,53 @@ if (primaryInstance) {
         if (result.conceived !== true) rememberQqTurn(historyKey, text, result)
         commitMemoryDay()
         return birth.receipt !== undefined ? { ...result, receipt: birth.receipt } : result
+      },
+      // 「还要继续查吗」在 QQ 里也能答（2026-11-01 修）：与桌面同一个续查通道，
+      // 问题用检查点里的原话（这边传 `''`），上下文取 QQ 自己的短上下文。
+      resume: async ({ resumeId, decision, conversationId, question, signal }) => {
+        const db = connections.queryDb()
+        if (!db) {
+          return {
+            kind: 'no-evidence',
+            stats: { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
+          }
+        }
+        const state = await askStateNow()
+        const mode = state?.mode ?? fallbackMode
+        const life = state?.life
+        const historyKey = `${mode.branch}\u0000${conversationId}`
+        const context: AskQueryContext = {
+          conversationId,
+          history: qqHistories.get(historyKey) ?? [],
+          signal
+        }
+        const momLetter = await momLetterFor(life)
+        const result = await askChain(
+          {
+            ...askOptionsFor(
+              db,
+              context,
+              mode,
+              await askOpeningFor(
+                db,
+                '',
+                context,
+                mode,
+                qqTalkTimes.get(historyKey) ?? [],
+                life?.bornDay
+              ),
+              life,
+              momLetter,
+              state?.unreadLetters
+            ),
+            resume: { id: resumeId, decision }
+          },
+          ''
+        )
+        // 续查的答案仍算当初那一问的答案：短上下文按原问题记
+        if (result.conceived !== true) rememberQqTurn(historyKey, question, result)
+        commitMemoryDay()
+        return result
       }
     })
     /**

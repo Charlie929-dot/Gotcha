@@ -213,6 +213,7 @@ describe('命令解析', () => {
       '/tasks',
       '/notebook',
       '/growth',
+      '/main',
       '/life',
       '/git',
       '/cancel',
@@ -345,6 +346,74 @@ describe('命令执行', () => {
     expect(shown).toEqual(['2026-11-01', '2026-W44', '2026-11', '2026'])
     // 多余参数不猜
     expect(textOf(await run('/growth 2026-11-01 extra'))).toContain('用法')
+  })
+
+  it('/main：看这一代主线 / 设主线；认不出的分支、assistant、已结束的代都拒', async () => {
+    const lineageFile = tempLineageFile()
+    await ensureLineage(lineageFile, { now: 1 })
+    const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
+
+    // 缺省主线 = 这一代出生那条分支
+    const initial = textOf(await run('/main'))
+    expect(initial).toContain('这一代的主线：default')
+    expect(initial).toContain('你现在就在主线')
+
+    // 同一代里再开一条 persona 分支：可以设成主线（一代只有一条）
+    const base = await readLineage(lineageFile)
+    expect(base.status).toBe('ok')
+    if (base.status !== 'ok') return
+    const withExtra = withBranchAdded(base.lineage, {
+      branch: 'spring',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 2
+    })
+    expect(withExtra).not.toBeNull()
+    if (withExtra === null) return
+    await writeLineage(lineageFile, withExtra)
+
+    expect(textOf(await run('/main spring'))).toContain('主线改成 spring')
+    const after = await readLineage(lineageFile)
+    expect(after.status).toBe('ok')
+    if (after.status !== 'ok') return
+    expect(after.lineage.generations[0]?.main_branch).toBe('spring')
+
+    // 现在检出的 default 不是主线了：/main 与 /growth 都要说清楚
+    expect(textOf(await run('/main'))).toContain('你现在在 default')
+    const grown = createCommandHandler({
+      repo: fakeRepo(),
+      lineageFile,
+      growth: { list: () => '成长档案列表', show: (key) => `# ${key}` }
+    })
+    const list = textOf(await grown('/growth'))
+    expect(list).toContain('只在主线发生')
+    expect(list).toContain('成长档案列表')
+    expect(textOf(await grown('/growth 2026-11-01'))).toContain('只在主线发生')
+
+    // 认不出 / assistant / 已结束的代：都拒绝，且不动家谱
+    expect(textOf(await run('/main ghost'))).toContain('家谱里没有')
+    const withAssistant = withBranchAdded(after.lineage, {
+      branch: 'plain',
+      generation: 'gen-1',
+      parent: 'default',
+      at: 3,
+      kind: 'assistant'
+    })
+    expect(withAssistant).not.toBeNull()
+    if (withAssistant === null) return
+    await writeLineage(lineageFile, withAssistant)
+    expect(textOf(await run('/main plain'))).toContain('不能当主线')
+
+    const dead = {
+      ...withAssistant,
+      generations: withAssistant.generations.map((item) => ({ ...item, died_at: 9 }))
+    }
+    await writeLineage(lineageFile, dead)
+    expect(textOf(await run('/main default'))).toContain('已经结束')
+    const kept = await readLineage(lineageFile)
+    expect(kept.status).toBe('ok')
+    if (kept.status !== 'ok') return
+    expect(kept.lineage.generations[0]?.main_branch).toBe('spring')
   })
 
   it('/help 在仓不可用时如实说，不假装可用', async () => {

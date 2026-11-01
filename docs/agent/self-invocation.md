@@ -593,9 +593,24 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 - **后台交付不开口**：`delivery=background` 的到点轮不写用户问答历史、不通知窗口；
   设置抽屉任务块显示「正在做 #id …」，看得出它在写哪一篇。
 
+### 17.3.1 只有主线写（D92，2026-11-01）
+
+- **一代只有一条主线**：家谱 `generations[].main_branch`，缺省 = 这一代出生那条分支
+  （旧家谱没这字段，按缺省读，不写回盘）；只认活着的代里的 `persona` 分支——
+  assistant（`/mode ask`）与已结束的代不能当主线；
+- **只有主线的 ta 写**日记 / 周记 / 月末 / 年终：到点先比对「检出分支 vs 该代主线」，
+  不一致就**跳过这次**（不切分支、也不把这条的日记写进别人的分支），日志记
+  `growth writing skipped: not mainline`；每天那条顺延到下一周期，一次性那条这次就算了；
+  家谱读不出来按老行为照写（不静默罢工）；
+- **怎么改**：`/main` 看这一代主线 + 你现在在哪，`/main <分支>` 设成它那一代的主线；
+  `/use`、`/new` **不问「要不要迁移主线」**（拍板：默认不迁，要迁就自己发 `/main`）；
+- **看得见**：`/growth` 与设置抽屉「成长档案」都会垫一句「当前不是主线（主线：X），
+  今晚不会写」，`/help` 也显示这一代主线。
+
 ### 17.4 查看
 
 - `/growth`：最近 7 篇日记 + 3 篇周记 + 3 篇月末总结 + 2 篇年终总结（标题 + 字数）；
+  **检出分支不是这一代主线时，列表与全文前面会垫一句「只在主线写，今晚不会写」**（D92）。
 - `/growth 2026-11-01`（日记）/ `2026-W44`（周记）/ `2026-11`（月末总结）/ `2026`（年终总结）
   看某一篇全文；键的形状不猜，`2026-13` 这类直接说不认识；`/help` 已列。
 - **设置抽屉「成长档案」块**（2026-11-01 拍板：四类**各自翻页**，不做固定截断）：
@@ -614,11 +629,12 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 | 运行时 | `src/main/task-runtime.ts` | `seedGrowthTask` / `scheduleNextGrowthWriting({weekly,monthly,yearly})`；`admin().running`（正在做哪条）；`pump` 供手动 / 测试触发 |
 | 组合根 | `src/main/index.ts` | `growthStore` 注入链层；后台交付不开口；任一篇写完后按「写过没」串下一篇；启动播种 |
 | 命令 | `src/main/commands.ts` | `/growth` 列表与四类键全文、`/help` |
+| 主线 | `src/main/lineage.ts` · `src/main/commands.ts` · `src/main/index.ts` · `src/main/ask-ipc.ts` | `mainBranchOf` / `mainBranchForBranch` / `isMainlineBranch` / `withMainBranch`（纯函数：一代一条，缺省 = 代出生分支，只认活着的 `persona` 分支）；`/main` 看 / 改主线；到点交付前比对检出分支，不一致**跳过这次**（`growth writing skipped: not mainline`）；`/growth` 与 `ask:growth:status` 给「不是主线」的提示 |
 | 抽屉 | `src/main/growth.ts` · `src/main/ask-ipc.ts` · `src/main/index.ts` · `src/renderer/ask-preload.ts` · `ask/ask.html` · `ask/ask.ts` · `ask/ask.css` | `page(kind, page)`（四类各自分页、新到旧、越界页夹回、坏文件跳过）/ `entry(key)`（全文，坏键与缺篇给人话）；`ask:growth:page` / `ask:growth:entry` **只读**、只认问记忆窗口的主框架，没接上就如实说「读取失败」而不是当空仓 |
 
 ### 17.6 测试与没做
 
-`npm test` 2044 条 / 177 文件全绿，`typecheck` / `build` 通过。
+`npm test` 2050 条 / 177 文件全绿，`typecheck` / `build` 通过。
 
 - `tests/unit/memory-growth.test.ts`（22）：四种键（含 ISO 跨年 / 第 53 周 / 闰年 2-29 的月末判定不受影响）、
   四层键识别（`2026` / `2026-11` / `2026-11-01` / `2026-W44` 不混、`2026-13` 值不对）、
@@ -627,8 +643,9 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 - `tests/unit/main-growth.test.ts`（10）：记忆仓路径、四种落盘与回执、空 / 超长不写、覆盖、
   列表 / 全文 / 缺篇 / 坏键、`show` 认得四层键（不把 `2026-11` 当日期、不把 `2026` 当月份）、
   `page`（四类各自分页、新到旧、越界页夹回、「看一眼」不建目录）、`entry`（全文 / 缺篇 / 坏键不抛）；
-- `tests/unit/ask-ipc.test.ts` +2：`ask:growth:page` 只认四类、页号夹到 1 与上限 10000、没接上返回
-  null（不冒充空仓）、非主框架一律拒；`ask:growth:entry` 键长与空串边界、只认主框架；
+- `tests/unit/main-lineage.test.ts` +4：主线缺省 = 代出生分支、`withMainBranch` 只认活着的 persona 分支、一代只有一条、显式主线写进快照能读回 / 指向已删分支就回落；
+- `tests/unit/ask-ipc.test.ts` +3：`ask:growth:page` 只认四类、页号夹到 1 与上限 10000、没接上返回
+  null（不冒充空仓）、非主框架一律拒；`ask:growth:entry` 键长与空串边界、只认主框架；`ask:growth:status` 没接上 / 非主框架一律 `ok=false`（界面不编造）
 - `tests/unit/memory-growth-tasks.test.ts`（19）：23:30 顺延、周日判定、月末（28/29/30/31 与闰年）/
   年末判定、播种幂等、取消不复活、任务名是四个短名、旧长说明原地改名不新建、
   接力顺序（普通日子不排 / 周日周记 / 月末 / 12-31 月末→年终 / 周日恰逢月末先周记）、
@@ -637,7 +654,7 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
   认不出的 kind 拒、没接后端如实说、超长拒、回执回灌、失败不改口、成长档案全文不注入；
 - `main-task-runtime.test.ts` +2：播种幂等、周日串周记、12-31 先月末总结且年终总结不插队、
   `running` 在跑时指向那条；
-- `main-commands.test.ts`：`/growth` 没接上 / 列表 / 按日期・周・月・年看全文 / 多余参数不猜；
+- `main-commands.test.ts`：`/growth` 没接上 / 列表 / 按日期・周・月・年看全文 / 多余参数不猜；`/main` 看主线 / 改主线 / 认不出・assistant・已结束的代都拒且不动家谱、`/growth` 在非主线时垫提示；
 - 工具数不变（仍是 17 个：`write_growth` 只在内部多认两个 kind）。
 
 口径变更（2026-11-01 拍板）：§12.3 验收 3 里「没有真实内容时允许少写或不写，不编造经历」
@@ -647,11 +664,14 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 所以 `repeat` 枚举没有扩 `monthly` / `yearly`）。
 同一天又拍板给**设置抽屉**加「成长档案」块（四类各自翻页、点开看全文，只读）——见 §17.4 / §17.5，
 所以下面「明确没做」里原来那条「成长档案的图形入口」已经删掉了。
+同一天再拍板 **D92：一代一条主线，只有主线写成长档案**（`/main` 指定，`/use` / `/new` 不问迁移；
+检出不是主线就跳过这次）——见 §17.3.1 / §17.5。
 
 明确没做：
 
 1. **真机验收**：23:30 是否真的写、周日写完日记后周记是否真的串上（2026-11-01 就是周日）、
-   月末 / 年末接力是否真的按顺序跑，还没在真机跑过（`Unverified`）。
+   月末 / 年末接力是否真的按顺序跑；`/main` 改主线后在非主线分支到点是否真的**跳过**，
+   都还没在真机跑过（`Unverified`）。
 2. **错过就没补写**：如果 23:30 时机器关着，或 ta 把日记挪到隔天，这一周期就不会写总结
    （周日周记本来也是这个缺口）。没有做补写：补写要判断「这次到底错过没」，容易写出两份。
 3. **每轮注入**：按 §8 明确不做；要翻旧日记走检索 / 手动看文件。

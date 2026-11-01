@@ -47,6 +47,8 @@ import {
   TRUNK_BRANCH,
   lineageSnapshot,
   lifeOf,
+  mainBranchForBranch,
+  withMainBranch,
   readLineage,
   toolsOfBranch,
   withActive,
@@ -162,6 +164,7 @@ export const KNOWN_COMMANDS = [
   'tasks',
   'notebook',
   'growth',
+  'main',
   'git'
 ] as const
 
@@ -181,6 +184,7 @@ export const READY_COMMANDS = [
   'tasks',
   'notebook',
   'growth',
+  'main',
   'git'
 ] as const
 
@@ -498,6 +502,14 @@ async function helpText(deps: CommandDeps): Promise<string> {
   }
   const active = read.status === 'ok' ? read.lineage.active : 'default'
   const activeKind = read.status === 'ok' ? branchKindOf(read.lineage, active) : 'persona'
+  // 主线（2026-11-01）：只有主线写成长档案，所以这一页要看得出「你在不在主线」
+  const main = read.status === 'ok' ? mainBranchForBranch(read.lineage, active) : null
+  const mainLine =
+    main === null
+      ? '认不出（这条分支不在家谱里）'
+      : main === active
+        ? `${main}（你就在主线）`
+        : `${main}（你现在在 ${active}，不会写成长档案）`
   return [
     '问记忆 · 记忆仓（M5 节点 + 生命 + 分支即模式）',
     '',
@@ -512,6 +524,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /tasks [cancel <编号>]  看挂着的计划 / 自主任务；cancel 取消一条',
     '  /notebook [rm <编号>]  看 ta 的小本本（当前理解）；rm 删掉一条',
     '  /growth [日期|周|月|年]  看 ta 的成长档案（日记 / 周记 / 月末总结 / 年终总结）；给键看全文',
+    '  /main [分支]     看这一代的主线 / 把某条分支设成主线（只有主线写成长档案）',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
     '  /life            看剩余生命（token；纯模型分支也有，但不冻结）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
@@ -519,6 +532,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /cancel          取消等待中的命名 / 删除',
     '',
     `当前节点：${active}（${activeKind === 'assistant' ? '纯模型' : '聊天'}）`,
+    `这一代的主线：${mainLine}`,
     `记忆仓：${repoLine}`
   ].join('\n')
 }
@@ -1679,13 +1693,18 @@ export function createCommandHandler(
       case 'growth': {
         if (deps.growth === undefined) return commandResult('/growth 还没接上（重启后再试）。')
         const key = parsed.args.join(' ').trim()
-        if (key === '') return commandResult(deps.growth.list())
+        if (key === '') {
+          return commandResult(`${await growthMainlineHint(deps)}${deps.growth.list()}`)
+        }
         if (parsed.args.length > 1) {
           return commandResult(
             '用法：/growth 或 /growth 2026-11-01（周记 2026-W44，月末总结 2026-11，年终总结 2026）'
           )
         }
-        return commandResult(deps.growth.show(key))
+        return commandResult(`${await growthMainlineHint(deps)}${deps.growth.show(key)}`)
+      }
+      case 'main': {
+        return commandResult(await mainText(deps, parsed.args))
       }
       case 'log': {
         const target = parsed.args.join(' ').trim()
@@ -1851,6 +1870,76 @@ export function createCommandHandler(
       default:
         return commandResult(`/${parsed.name} 还没接上。`)
     }
+  }
+}
+
+/**
+ * `/main`（2026-11-01 拍板）：一代只有一条主线，**只有主线写成长档案**。
+ * - `/main`：看这一代的主线 + 你现在在哪；
+ * - `/main <分支>`：把该分支设成它那一代的主线（只认活着的代里的 `persona` 分支）。
+ *
+ * 切分支（`/use` / `/new`）**不再问「要不要迁移主线」**——拍板：默认不迁，要迁就自己发 `/main`。
+ */
+async function mainText(deps: CommandDeps, args: readonly string[]): Promise<string> {
+  const raw = args.join(' ').trim()
+  const read = await readLineage(deps.lineageFile)
+  if (read.status !== 'ok') {
+    return read.status === 'missing'
+      ? '还没有家谱（先聊一句，启动时会建）。'
+      : '家谱读不出来，先别动主线（细节看日志）。'
+  }
+  const lineage = read.lineage
+  const here = lineage.active
+  if (raw === '') {
+    const main = mainBranchForBranch(lineage, here)
+    if (main === null) return `这条分支（${here}）不在家谱里，认不出这一代的主线。`
+    if (main === here) return `这一代的主线：${main}（你现在就在主线）。\n换主线：/main <分支>`
+    return `这一代的主线：${main}（你现在在 ${here}）。\n换主线：/main <分支>；过去看用 /use ${main}`
+  }
+  const target = resolveMainTarget(lineage, raw, deps)
+  if (target === null) return `家谱里没有「${raw}」这条分支（先 /log 看家谱）。`
+  const node = findBranch(lineage, target)
+  if (node === null) return `家谱里没有「${raw}」这条分支（先 /log 看家谱）。`
+  if (node.kind !== 'persona') {
+    return `${target} 不是一条鱼的分支（${node.kind}），不能当主线。`
+  }
+  const generation = generationOf(lineage, target)
+  if (generation === null) return `${target} 不属于任何一代，不能当主线。`
+  if (generation.died_at !== null) {
+    return `${generation.nickname} 这一代已经结束（${target}），不能再当主线。`
+  }
+  if (mainBranchForBranch(lineage, target) === target) {
+    return `这一代的主线本来就是 ${target}。`
+  }
+  const next = withMainBranch(lineage, target)
+  if (next === null) return `没能把 ${target} 设成主线。`
+  await writeLineageQuietly(deps, next)
+  const tail = here === target ? '' : `\n（没切分支，你现在还在 ${here}；要过去用 /use ${target}）`
+  return `这一代的主线改成 ${target} 了。${tail}`
+}
+
+/** 分支名先按原文认，再按拼音 slug 认（`/main 春天` = `/main chun-tian`） */
+function resolveMainTarget(lineage: Lineage, raw: string, deps: CommandDeps): string | null {
+  if (findBranch(lineage, raw) !== null) return raw
+  const slug = (deps.slugify ?? slugifyNodeName)(raw)
+  if (slug === null) return null
+  return findBranch(lineage, slug) === null ? null : slug
+}
+
+/**
+ * 检出分支不是这一代主线时，`/growth` 前面垫一句人话——
+ * 免得看到旧日记以为今晚还会往下写（写作只在主线发生）。
+ */
+async function growthMainlineHint(deps: CommandDeps): Promise<string> {
+  try {
+    const read = await readLineage(deps.lineageFile)
+    if (read.status !== 'ok') return ''
+    const here = read.lineage.active
+    const main = mainBranchForBranch(read.lineage, here)
+    if (main === null || main === here) return ''
+    return `当前在 ${here}，这一代的主线是 ${main}——写日记 / 周记只在主线发生，今晚不会写。\n\n`
+  } catch {
+    return ''
   }
 }
 

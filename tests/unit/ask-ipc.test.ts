@@ -889,4 +889,26 @@ describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () =
       await read({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, { key: '2026-11-01' })
     ).toMatchObject({ ok: false, message: 'forbidden' })
   })
+
+  it('ask:growth:status：主线提示；没接上 / 非主框架一律 ok=false（不编造）', async () => {
+    const unknown = handler(buildDeps(), 'ask:growth:status')
+    expect(await unknown(SENDER_OK as never)).toMatchObject({ ok: false, isMainline: false })
+    expect(await unknown({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never)).toMatchObject({
+      ok: false
+    })
+
+    const growthStatus = vi.fn(async () => ({
+      ok: true,
+      branch: 'default',
+      main: 'spring',
+      isMainline: false
+    }))
+    const read = handler(buildDeps({ growthStatus }), 'ask:growth:status')
+    expect(await read(SENDER_OK as never)).toEqual({
+      ok: true,
+      branch: 'default',
+      main: 'spring',
+      isMainline: false
+    })
+  })
 })

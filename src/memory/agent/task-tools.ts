@@ -29,9 +29,13 @@ import {
   updateTask,
   type TaskRow
 } from './tasks'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import {
   DiaryWriteError,
   appendPlan,
+  ensureDailyNote,
   removePlanLine,
   updatePlanLine
 } from '../write'
@@ -70,6 +74,16 @@ export interface TaskToolDepsOptions {
   backupDir?: () => string | null
   /** 任务行变化后回调（主进程用它重算调度器） */
   onChanged?: () => void
+  /**
+   * 当天笔记在不在；不传就按 `${vaultDir}/${dayKey}.md` 判。
+   * 单独抽出来是为了让「缺笔记 → 自动建」这条路径可测。
+   */
+  noteExists?: (dayKey: string) => boolean
+  /**
+   * 缺当天笔记时要不要自动建（默认要）。主进程按设置 `memory.auto_daily_note` 注入；
+   * 不建的话计划还是会落库，只是 Obsidian 同步标记成失败/待同步。
+   */
+  autoCreateNote?: () => boolean
   /** 计划同步失败时记日志（可选） */
   log?: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
@@ -99,6 +113,11 @@ export interface TaskToolPort {
     state?: 'active' | 'paused' | 'completed' | 'cancelled'
   }): TaskToolMutation
   cancel(id: number): TaskToolMutation
+  /**
+   * 把之前没同步上的共建计划再试一遍（启动时跑一次）。
+   * `synced` 之外的 active 计划都算候选；写之前先看计划区里是不是已经有那一行，避免重复。
+   */
+  resyncPlans(): { attempted: number; synced: number }
 }
 
 /** 共建计划同步状态 */
@@ -137,6 +156,21 @@ function syncLabel(sync: PlanSync): string {
   return `Obsidian 没同步上${sync.note === null ? '' : `（${sync.note}）`}`
 }
 
+function noteFileOf(vaultDir: string, dayKey: string): string {
+  return join(vaultDir, `${dayKey}.md`)
+}
+
+/** 计划区里是不是已经有这一条（重试同步时用来防重复追加） */
+function planLineExists(vaultDir: string, dayKey: string, clock: string, instruction: string): boolean {
+  let text: string
+  try {
+    text = readFileSync(noteFileOf(vaultDir, dayKey), 'utf8')
+  } catch {
+    return false
+  }
+  return text.includes(`${clock} ${instruction}`)
+}
+
 function failureMessage(error: unknown): string {
   if (error instanceof DiaryWriteError) return error.message
   return error instanceof Error ? error.message : String(error)
@@ -156,16 +190,47 @@ function syncPlanCreate(task: TaskRow, options: TaskToolDepsOptions): PlanSync {
   const clock = taskClock(task)
   if (clock === null) return { state: 'pending', path: null, note: '没有具体时间' }
   const dayKey = dayKeyOf(task.next_due_at)
+  const writeContext = {
+    dayKey,
+    vaultDir,
+    ...(options.backupDir?.() ? { backupDir: options.backupDir()! } : {})
+  }
+  const appendOnce = (): void => {
+    // 重试场景：计划区里已经有这一行就不再追加一次
+    if (planLineExists(vaultDir, dayKey, clock, task.instruction)) return
+    appendPlan({ ...writeContext, text: task.instruction, time: clock })
+  }
   try {
-    appendPlan({
-      dayKey,
-      vaultDir,
-      ...(options.backupDir?.() ? { backupDir: options.backupDir()! } : {}),
-      text: task.instruction,
-      time: clock
-    })
-    return { state: 'synced', path: dayKey, note: null }
+    // 缺当天笔记就建一份再写（2026-11-01 拍板）：计划不能因为「今天还没写日记」悬着。
+    // 建笔记只发生在文件不存在时；已有笔记一个字节都不动。
+    let autoCreated = false
+    const exists =
+      options.noteExists !== undefined
+        ? options.noteExists(dayKey)
+        : existsSync(noteFileOf(vaultDir, dayKey))
+    if (!exists && options.autoCreateNote?.() !== false) {
+      const made = ensureDailyNote({ ...writeContext, now: options.now?.() ?? Date.now() })
+      autoCreated = made.created
+    }
+    appendOnce()
+    return {
+      state: 'synced',
+      path: dayKey,
+      note: autoCreated ? '当天笔记是自动建的' : null
+    }
   } catch (error) {
+    // 并发窗口：检查之后才被别人建出来 / 刚删掉——再试一次就够，不必绕回调度器
+    if (error instanceof DiaryWriteError && error.code === 'missing-file' && options.autoCreateNote?.() !== false) {
+      try {
+        ensureDailyNote({ ...writeContext, now: options.now?.() ?? Date.now() })
+        appendOnce()
+        return { state: 'synced', path: dayKey, note: '当天笔记是自动建的' }
+      } catch (retryError) {
+        const note = failureMessage(retryError)
+        options.log?.('warn', 'task plan sync failed', { id: task.id, note })
+        return { state: 'failed', path: dayKey, note }
+      }
+    }
     const note = failureMessage(error)
     options.log?.('warn', 'task plan sync failed', { id: task.id, note })
     return { state: 'failed', path: dayKey, note }
@@ -218,8 +283,11 @@ function syncPlanEdit(
   try {
     removePlanLine({ ...context, match: needle })
   } catch (error) {
-    if (error instanceof DiaryWriteError && error.code === 'line-not-found') {
-      // 用户手动删过那一行：目的已经达到
+    if (
+      error instanceof DiaryWriteError &&
+      (error.code === 'line-not-found' || error.code === 'missing-file')
+    ) {
+      // 用户手动删过那一行 / 当天的笔记都没了：目的已经达到
     } else if (kind === 'remove') {
       const note = failureMessage(error)
       options.log?.('warn', 'task plan remove failed', { id: before.id, note })
@@ -354,6 +422,25 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
         message: `取消了 #${stored.id}：${stored.instruction}${tail}`,
         task: viewOf(stored, now)
       }
+    },
+    resyncPlans() {
+      const now = options.now?.() ?? Date.now()
+      const db = requireDb(options)
+      const rows = db
+        .prepare(
+          `SELECT id FROM mem_tasks
+           WHERE origin = 'user' AND state = 'active' AND obsidian_state <> 'synced'`
+        )
+        .all() as Array<{ id: number }>
+      let synced = 0
+      for (const row of rows) {
+        const task = getTaskById(db, row.id)
+        if (task === null) continue
+        const sync = syncPlanCreate(task, options)
+        if (sync.state === 'synced') synced += 1
+        applySync(db, task, sync, now)
+      }
+      return { attempted: rows.length, synced }
     }
   }
 }

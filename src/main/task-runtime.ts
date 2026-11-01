@@ -37,6 +37,8 @@ export interface TaskRuntimeDeps {
   vaultDir: () => string | null
   /** 写入前备份目录；null = 不备份 */
   backupDir: () => string | null
+  /** 缺当天笔记时要不要自动建（读设置 `memory.auto_daily_note`）；不传 = 建 */
+  autoCreateNote?: () => boolean
   /**
    * 到点执行：跑一轮、真的开口（由组合根注入问记忆通道）。
    * 返回 `TaskOutcome` 决定这一条怎么结算（默认定时规则）。
@@ -120,6 +122,7 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
     now,
     vaultDir: deps.vaultDir,
     backupDir: deps.backupDir,
+    ...(deps.autoCreateNote ? { autoCreateNote: deps.autoCreateNote } : {}),
     onChanged: () => scheduler.reschedule(),
     log: deps.log
   })
@@ -168,7 +171,18 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
         origin: task.origin
       }))
     },
-    start: () => scheduler.start(),
+    start: () => {
+      scheduler.start()
+      // 上次没同步上的共建计划再试一遍（比如那天还没有笔记：现在能自动建了）
+      try {
+        const result = port.resyncPlans()
+        if (result.attempted > 0) {
+          deps.log('warn', 'task plan resync', result)
+        }
+      } catch (error) {
+        deps.log('warn', 'task plan resync failed', { error: String(error) })
+      }
+    },
     stop: () => {
       scheduler.stop()
       closed = true

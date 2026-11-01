@@ -7,7 +7,7 @@
  *    绝不出现「已写进 Obsidian」这种话。
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -138,6 +138,104 @@ describe('共建计划：写库 + 写计划区', () => {
     expect(result.task?.sync).toBeUndefined()
     expect(note()).not.toContain('面试结果')
     expect(result.message).toContain('记下了 #')
+  })
+})
+
+describe('缺当天笔记：自动建再写（2026-11-01 拍板）', () => {
+  it('当天笔记不存在：自动建一份，计划照样写进 # Tracking，回执说明是自动建的', () => {
+    // 只建日记目录，不放当天笔记
+    mkdirSync(vaultDir, { recursive: true })
+    const result = port().schedule({
+      instruction: '后天交小组作业',
+      when: WHEN,
+      repeat: '',
+      origin: 'user',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(result.ok).toBe(true)
+    expect(result.task?.sync).toBe('synced')
+    expect(result.message).toContain('已写进 Obsidian')
+    const text = readFileSync(join(vaultDir, `${DAY}.md`), 'utf8')
+    expect(text).toContain('🌻日期🌻: 2026-11-02')
+    expect(text).toContain('# Tracking')
+    expect(text).toContain('- [ ] 19:30 后天交小组作业 [❤️]()')
+    expect(getTaskById(db, result.task!.id)?.obsidian_note).toBe('当天笔记是自动建的')
+  })
+
+  it('设置关掉自动创建（autoCreateNote=false）：计划落库，但同步如实报失败', () => {
+    mkdirSync(vaultDir, { recursive: true })
+    const p = createTaskToolPort({
+      db: () => db,
+      now: () => WHEN - 60 * 60 * 1000,
+      vaultDir: () => vaultDir,
+      autoCreateNote: () => false
+    })
+    const result = p.schedule({
+      instruction: '不去建笔记的计划',
+      when: WHEN,
+      repeat: '',
+      origin: 'user',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(result.ok).toBe(true)
+    expect(result.task?.sync).toBe('failed')
+    expect(result.message).toContain('没同步上')
+    expect(existsSync(join(vaultDir, `${DAY}.md`))).toBe(false)
+    expect(getTaskById(db, result.task!.id)?.state).toBe('active')
+  })
+
+  it('已经有笔记：不会覆盖用户写的内容', () => {
+    writeNote(DAY)
+    const before = note()
+    port().schedule({
+      instruction: '写周报',
+      when: WHEN,
+      repeat: '',
+      origin: 'user',
+      delivery: 'auto',
+      validUntil: null
+    })
+    const after = note()
+    // 用户自己写的那行原样在，只多了一行计划
+    expect(after.length).toBeGreaterThan(before.length)
+    expect(after).toContain('- 08:40 早。')
+    expect(getTaskById(db, 1)?.obsidian_note).toBeNull()
+  })
+
+  it('resyncPlans：上次没同步上的计划能补上，且不会重复追加', () => {
+    mkdirSync(vaultDir, { recursive: true })
+    const off = createTaskToolPort({
+      db: () => db,
+      now: () => WHEN - 60 * 60 * 1000,
+      vaultDir: () => vaultDir,
+      autoCreateNote: () => false
+    })
+    const created = off.schedule({
+      instruction: '补同步的计划',
+      when: WHEN,
+      repeat: '',
+      origin: 'user',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(created.task?.sync).toBe('failed')
+
+    // 第二次：允许自动建笔记 → 重试一次就同步上了
+    const on = createTaskToolPort({
+      db: () => db,
+      now: () => WHEN - 60 * 60 * 1000,
+      vaultDir: () => vaultDir
+    })
+    expect(on.resyncPlans()).toEqual({ attempted: 1, synced: 1 })
+    const text = readFileSync(join(vaultDir, `${DAY}.md`), 'utf8')
+    expect(text.match(/补同步的计划/gu)).toHaveLength(1)
+    expect(getTaskById(db, created.task!.id)?.obsidian_state).toBe('synced')
+
+    // 再跑一次：已经同步过，不在候选里，不会重复写
+    expect(on.resyncPlans()).toEqual({ attempted: 0, synced: 0 })
+    expect(readFileSync(join(vaultDir, `${DAY}.md`), 'utf8').match(/补同步的计划/gu)).toHaveLength(1)
   })
 })
 

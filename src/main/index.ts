@@ -3196,6 +3196,11 @@ if (primaryInstance) {
       dbPath: join(app.getPath('userData'), DB_FILE_NAME),
       vaultDir: () => resolveVaultDir(connections.queryDb()),
       backupDir: () => join(app.getPath('userData'), 'diary-backups'),
+      // 缺当天笔记就自动建（设置 memory.auto_daily_note，默认开）
+      autoCreateNote: () => {
+        const db = connections.queryDb()
+        return db === null ? true : getSetting(db, 'memory.auto_daily_note') !== '0'
+      },
       log: (level, message, data) => captureLog(level, message, data),
       deliver: async (task) => {
         const at = Date.now()

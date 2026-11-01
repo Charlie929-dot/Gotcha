@@ -44,7 +44,10 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'memory.persona_card': '',
   // 记忆仓定时（D90）：分钟；0 = 关。commit 只在有改动时记一笔，push 需要先绑 origin
   'memory.commit_minutes': '10',
-  'memory.push_minutes': '30'
+  'memory.push_minutes': '30',
+  // 缺当天笔记时自动建一份（2026-11-01 拍板）：1 = 建（按 daily-notes 模板，算不出的行跳过）；
+  // 0 = 只把计划记在任务表里，Obsidian 标记成失败 / 待同步
+  'memory.auto_daily_note': '1'
 }
 
 export function getSetting(db: Db, key: string): string {

@@ -5,8 +5,9 @@
  *
  * 1. **只追加**：`appendDiary` / `appendPlan` 只在段落末尾加行；`insertComment` 只往用户行里插
  *    `[❤️](正文)`，不动用户写的字、不改勾选、不改时间；
- * 2. **永不建骨架**：当天笔记不存在 / 没有对应 `# Diary`、`# Tracking` 段 → 抛结构化错误
- *    （模板交给 Obsidian CLI，失败就跳过今晚，§6.1）；
+ * 2. **缺当天笔记就先建**（`ensureDailyNote`）：按 Obsidian 的 `daily-notes.json` 模板展开；
+ *    模板里有需要 Templater 运行时才能算的东西（天气 / 一言）就跳过那几行，没有模板就写最简骨架。
+ *    **已有的文件永远不动一个字节**——只在文件不存在时创建；
  * 3. **写前备份**：原文件先整份拷进 `backupDir`，每天保留最近 20 份；
  * 4. **原子写**：同目录临时文件 + rename，保留原文件的 BOM 与 CRLF；
  * 5. **冲突重试**：读之前记 `mtime/size`，写之前再比一次 —— 变了（Obsidian 刚存过盘）就重读重试，
@@ -24,6 +25,7 @@
 
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -308,6 +310,219 @@ function splitSentences(text: string): string[] {
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter((line) => line !== '')
+}
+
+/* ------------------------------------------------------------------ */
+/* 缺当天的笔记：自动创建（2026-11-01 拍板：没有就自动建，别让计划悬着） */
+/*                                                                     */
+/* 规矩：                                                              */
+/* 1. **只建不改**：文件已存在就原样返回 created=false，一个字节都不动； */
+/* 2. **优先用用户自己的模板**：读 `<vault>/.obsidian/daily-notes.json`   */
+/*    的 folder / template，展开里面的日期表达式；                     */
+/* 3. **算不出来的就跳过那一行**：天气 / 一言这类要 Templater 运行时 +   */
+/*    联网的东西后端跑不了，宁可少几行，也不把 `<% %>` 原样留在笔记里；  */
+/* 4. 没有模板（或模板不可用）→ 写最简骨架，保证 `# Tracking` / `# Diary` */
+/*    两段在，计划同步与日记写入都能落下去。                            */
+/* ------------------------------------------------------------------ */
+
+export interface EnsureDailyNoteInput extends DiaryWriteContext {
+  /** 模板绝对路径；不传就按 `<vault>/.obsidian/daily-notes.json` 找 */
+  templatePath?: string | null
+}
+
+export interface EnsureDailyNoteResult {
+  file: string
+  /** 这次是不是真的建了（false = 文件本来就在） */
+  created: boolean
+  /** 用到的模板路径（null = 没模板，写的最简骨架） */
+  template: string | null
+  /** 模板里依赖 Templater 运行时、自动创建时被跳过的行数 */
+  skipped: number
+}
+
+/** 一天的骨架：日期进 frontmatter（解析器按它兜底日期），两段齐全 */
+function skeletonLines(dayKey: string): string[] {
+  const [year, month, day] = dayKey.split('-').map(Number)
+  const fmt = (offset: number): string => {
+    const date = new Date(year, month - 1, day + offset)
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+  }
+  return [
+    '---',
+    `🌻日期🌻: ${dayKey}`,
+    '---',
+    '',
+    '# Tracking',
+    '',
+    '# Diary',
+    '',
+    '---',
+    `<< [[${fmt(-1)}]] | [[${fmt(1)}]] >>`,
+    ''
+  ]
+}
+
+/** 按 `daily-notes.json` 找模板（相对仓根 / 可以不带 `.md`） */
+function resolveDailyTemplate(vaultDir: string, explicit?: string | null): string | null {
+  if (explicit !== undefined && explicit !== null && explicit !== '') {
+    return explicit
+  }
+  const vaultRoot = dirname(vaultDir)
+  const configPath = join(vaultRoot, '.obsidian', 'daily-notes.json')
+  let raw: string
+  try {
+    raw = readFileSync(configPath, 'utf8')
+  } catch {
+    return null
+  }
+  let parsed: { template?: unknown; folder?: unknown }
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  const template = typeof parsed.template === 'string' ? parsed.template.trim() : ''
+  if (template === '') return null
+  const file = join(vaultRoot, template.endsWith('.md') ? template : `${template}.md`)
+  return existsSync(file) ? file : null
+}
+
+const WEEKDAY_NAMES = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'] as const
+
+/** 按 Obsidian / moment 的常见记号格式化本地时间（只支持模板里真的会用到的那几个） */
+export function formatDailyStamp(ts: number, format: string): string {
+  const date = new Date(ts)
+  const tokens: Record<string, string> = {
+    YYYY: String(date.getFullYear()),
+    YY: String(date.getFullYear()).slice(-2),
+    dddd: WEEKDAY_NAMES[date.getDay()],
+    MM: pad2(date.getMonth() + 1),
+    M: String(date.getMonth() + 1),
+    DD: pad2(date.getDate()),
+    D: String(date.getDate()),
+    HH: pad2(date.getHours()),
+    mm: pad2(date.getMinutes()),
+    ss: pad2(date.getSeconds())
+  }
+  return format.replace(/YYYY|dddd|YY|MM|DD|HH|mm|ss|M|D/gu, (token) => tokens[token] ?? token)
+}
+
+/** 模板里的一行：展开得了就返回文本，展开不了（要 Templater 运行时）返回 null */
+function expandTemplateLine(line: string, dayKey: string, now: number): string | null {
+  const [year, month, day] = dayKey.split('-').map(Number)
+  const base = new Date(year, month - 1, day, new Date(now).getHours(), new Date(now).getMinutes())
+  const offsetOf = (raw: string | undefined): number => {
+    const value = Number((raw ?? '').trim())
+    return Number.isFinite(value) ? value : 0
+  }
+  const resolveOne = (expression: string): string | null => {
+    const expr = expression.trim()
+    if (expr === '') return ''
+    // tp.file.creation_date("FMT") / tp.file.creation_date()
+    const creation = /^tp\.file\.creation_date\(\s*(?:["']([^"']*)["']\s*)?\)$/u.exec(expr)
+    if (creation !== null) return formatDailyStamp(now, creation[1] ?? 'YYYY-MM-DD')
+    // tp.date.now("FMT", 偏移天数)
+    const nowOffset = /^tp\.date\.now\(\s*(?:["']([^"']*)["']\s*)?(?:,\s*(-?\d+)\s*)?\)$/u.exec(expr)
+    if (nowOffset !== null) {
+      return formatDailyStamp(
+        base.getTime() + offsetOf(nowOffset[2]) * 24 * 60 * 60 * 1000,
+        nowOffset[1] ?? 'YYYY-MM-DD'
+      )
+    }
+    // tp.date.yesterday / tomorrow
+    const relative = /^tp\.date\.(yesterday|tomorrow)\(\s*(?:["']([^"']*)["']\s*)?\)$/u.exec(expr)
+    if (relative !== null) {
+      const offset = relative[1] === 'yesterday' ? -1 : 1
+      return formatDailyStamp(
+        base.getTime() + offset * 24 * 60 * 60 * 1000,
+        relative[2] ?? 'YYYY-MM-DD'
+      )
+    }
+    if (expr === 'tp.file.title') return dayKey
+    return null
+  }
+
+  let unresolved = false
+  const replaced = line.replace(/<%\s*([\s\S]*?)\s*%>/gu, (whole, expression: string) => {
+    const value = resolveOne(expression)
+    if (value === null) {
+      unresolved = true
+      return whole
+    }
+    return value
+  })
+  return unresolved ? null : replaced
+}
+
+/** 展开整份模板：去掉 `<%* … %>` 逻辑块、算不出来的行整行跳过 */
+export function expandDailyTemplate(
+  text: string,
+  dayKey: string,
+  now: number
+): { lines: string[]; skipped: number } {
+  const source = text.startsWith('\uFEFF') ? text.slice(1) : text
+  const raw = source.split(/\r?\n/u)
+  const lines: string[] = []
+  let skipped = 0
+  let inBlock = false
+  for (const line of raw) {
+    // `<%* … %>`（可能跨行）：整个去掉，连内容一起
+    if (inBlock) {
+      if (line.includes('%>')) inBlock = false
+      continue
+    }
+    if (/<%[*_]/u.test(line) && !line.includes('%>')) {
+      inBlock = true
+      continue
+    }
+    const withoutBlocks = line.replace(/<%[*_][\s\S]*?%>/gu, '')
+    if (withoutBlocks !== line && withoutBlocks.trim() === '') {
+      // 整行就是一个逻辑块：丢掉
+      continue
+    }
+    const expanded = expandTemplateLine(withoutBlocks, dayKey, now)
+    if (expanded === null) {
+      skipped += 1
+      // 只剩一个空的 callout 头（`> [!quote] 一言`）而其内容行被跳过了：一起丢掉，
+      // 别在用户的笔记里留一个空提示块
+      const last = lines[lines.length - 1]
+      if (last !== undefined && /^\s*>\s*\[!/u.test(last)) lines.pop()
+      continue
+    }
+    lines.push(expanded.replace(/\s+$/u, ''))
+  }
+  return { lines, skipped }
+}
+
+/**
+ * 缺当天笔记就建一份。**已存在则什么都不做**（`created: false`）。
+ *
+ * 展开模板后如果 `# Tracking` / `# Diary` 两段里缺一个，会补上——计划同步与日记写入
+ * 都靠这两个标题定位；补标题比让整条链路失败更合理（不碰用户已有的内容）。
+ */
+export function ensureDailyNote(input: EnsureDailyNoteInput): EnsureDailyNoteResult {
+  const file = resolveFile(input)
+  if (existsSync(file)) return { file, created: false, template: null, skipped: 0 }
+  const now = input.now ?? Date.now()
+  const templatePath = resolveDailyTemplate(input.vaultDir, input.templatePath)
+  let lines: string[]
+  let skipped = 0
+  if (templatePath !== null) {
+    const expanded = expandDailyTemplate(readFileSync(templatePath, 'utf8'), input.dayKey, now)
+    lines = expanded.lines
+    skipped = expanded.skipped
+  } else {
+    lines = skeletonLines(input.dayKey)
+  }
+  // 模板可能缺段（或被整段跳过）：补标题，保证后续写入有落点
+  for (const heading of ['# Tracking', '# Diary']) {
+    if (!lines.some((line) => line.trim().toLowerCase() === heading.toLowerCase())) {
+      lines.push('', heading, '')
+    }
+  }
+  mkdirSync(dirname(file), { recursive: true })
+  writeDoc(file, { bom: false, eol: '\n', lines })
+  return { file, created: true, template: templatePath, skipped }
 }
 
 /**

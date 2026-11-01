@@ -383,15 +383,17 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 | 调度 | `src/memory/agent/scheduler.ts` | 只睡到最近一条 `next_due_at`；没有活动任务不留定时器；单飞；抢不到租约跳过（不卡队首）；失败推 1 分钟后重试 |
 | 工具 | `src/chain/agent/tools.ts` · `deepseek.ts` · `tool-catalog.ts` · `payload.ts` · `loop.ts` | 四个工具端到端：schema → 参数钳制（`YYYY-MM-DD HH:mm` 本地时间）→ 执行端口 → 送云视图（说明文本过脱敏）→ 过程摘要；`/tool` 多一个「任务」集合 |
 | 计划同步 | `src/memory/agent/task-tools.ts` · `src/memory/write.ts` | 共建计划由代码写 `# Tracking`：新建=追加、改=原地改（保留勾选）、取消=删那一行；同步状态（synced / pending / failed / removed）落库并进回执；模型永远碰不到用户日记正文 |
+| 缺笔记自动建 | `src/memory/write.ts` · `task-tools.ts` · `main/task-runtime.ts` | 2026-11-01 拍板：当天笔记不存在就先建（见 §15.4），再写计划；启动时把上次没同步上的共建计划再试一遍（`resyncPlans`），已有那一行不会重复追加 |
 | 合流 | `src/chain/agent/payload.ts` · `loop.ts` | `<now>` 末尾加「到点的事」：10 分钟内到点的几条（≤5），明确写「说不说由你判断」，不是命令 |
 | 组合根 | `src/main/task-runtime.ts` · `index.ts` · `ask-ipc.ts` · `ask-preload.ts` · `ask/ask.ts` | 任务库独立写连接（避免 `ensureWritable` 关掉正在读的连接）；到点走 `runAskOnce`（与提问同一条通道）；用户正在问 → 让位 2 分钟；说完记进当前会话历史并通知窗口重画 |
 | 视图 | `src/main/commands.ts` | `/tasks` 列挂着的计划 / 自主任务（带来源与同步状态），`/tasks cancel <编号>` 取消 |
 
-### 15.2 测试（`npm test` 1919 条 / 169 文件全绿，`typecheck` / `build` 通过）
+### 15.2 测试（`npm test` 1931 条 / 170 文件全绿，`typecheck` / `build` 通过）
 
 - `tests/unit/memory-tasks.test.ts`（27）：四种视图、重复推进、租约去重、过期不补发、截断标记、`%` 不当通配符。
 - `tests/unit/memory-task-scheduler.test.ts`（12）：睡到最近一条、无任务不留定时器、重配不叠加、单飞、抢不到租约不卡队首、失败重试。
-- `tests/unit/memory-task-tools.test.ts`（11）：共建计划真的写进 `# Tracking`、缺段时「记下了但没同步上」、改时间保留勾选、取消删行、跨天移动、不存在的 id 如实报错。
+- `tests/unit/memory-task-tools.test.ts`（15）：共建计划真的写进 `# Tracking`、缺段时「记下了但没同步上」、改时间保留勾选、取消删行、跨天移动、不存在的 id 如实报错、缺笔记自动建、关掉自动建时如实报失败、`resyncPlans` 补同步且不重复。
+- `tests/unit/memory-daily-note.test.ts`（8）：按 `daily-notes.json` 模板展开（日期/星期/时间 + 导航）、`<%* %>` 逻辑块整段去掉、天气/一言这类算不出来的行跳过、无模板写骨架、已有文件一个字节不动、跨年导航。
 - `tests/unit/chain-agent-tasks.test.ts`（14）：时间解析（含 2-30 这种假日期）、参数钳制、没接库时如实报错、回执回灌、`<now>` 合流、脱敏整条不列。
 - `tests/unit/main-task-runtime.test.ts`（7）：任务库文件不存在**不建库**、还没迁到 v11 时这条链路不可用但进程不崩、到点交给 `deliver` 后结算回库、合流窗口、`stop` 后不再读。
 
@@ -401,3 +403,21 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 2. **任务视图 UI**：现在只有 `/tasks` 命令，设置抽屉里没有任务块（方案 §12.1 的「统一任务视图、暂停 / 取消入口」只做了命令层）。
 3. **perceive / act 两段式、小本本、成长档案**：按 §12 的第二 / 第三阶段继续。
 4. **`origin=system` 的固定写作任务**（日记 / 周记）：表与工具已支持，尚未排任务。
+
+### 15.4 缺当天笔记：自动建（2026-11-01 补）
+
+第一版把「当天笔记不存在」当成失败上报（`缺当天笔记 → 记下了但没同步上`），真机上立刻踩到：计划是晚上 6:20 的，但当天还没写日记——计划没进 Obsidian，回执还得解释一遍。
+
+现在的口径：**没有就建，但只建不改**。
+
+1. **模板优先**：读 `<vault>/.obsidian/daily-notes.json` 的 `folder` / `template`，把模板里的
+   `tp.file.creation_date(...)` / `tp.date.now(...)`（含偏移天数）/ `tp.file.title` 换成本地时间；
+2. **算不出来的整行跳过**：天气、一言这类要 Templater 运行时 + 联网的东西后端跑不了，
+   宁可少几行，也不把 `<% %>` 原样留在用户笔记里（空的 callout 头一起丢掉）；
+3. **没有模板就写骨架**：frontmatter 日期 + `# Tracking` + `# Diary` + 前后一天导航；
+4. **已有文件一个字节都不动**；模板缺段就补标题（计划同步与日记写入都靠它定位）；
+5. 设置 `memory.auto_daily_note`（默认 `1`）可以关掉：关掉时计划照样落库，Obsidian 标成失败；
+6. 启动时 `resyncPlans()` 把 `state='active' AND obsidian_state<>'synced'` 的共建计划再试一遍，
+   写之前先看计划区里有没有那一行，避免重复。
+
+回执会注明「当天笔记是自动建的」，用户想补天气 / 一言可以自己在 Obsidian 里重跑一次模板。

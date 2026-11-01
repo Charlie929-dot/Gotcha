@@ -14,18 +14,23 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { openDatabase, type Db } from '../../src/db'
 import {
   advanceOccurrence,
+  alignFirstOccurrence,
   cancelTask,
   claimTask,
   countActiveTasks,
   createTask,
   dayKeyOf,
   dayWindow,
+  describeRepeat,
   describeTask,
   expireTasks,
+  formatRepeat,
   getTaskById,
   listDueTasks,
   nextDueTask,
   occurrenceInWindow,
+  parseRepeat,
+  resolveRepeat,
   searchTasks,
   settleTask,
   updateTask
@@ -101,6 +106,110 @@ describe('时间换算', () => {
     expect(dayKeyOf(next)).toBe('2026-11-01')
     expect(new Date(next).getHours()).toBe(9)
     expect(new Date(next).getMinutes()).toBe(30)
+  })
+})
+
+describe('重复规则：解析 / 多选 / 短月', () => {
+  it('解析：多选去重升序；认不出的一律当一次性', () => {
+    expect(parseRepeat('weekly:5,1,3,3')).toEqual({
+      kind: 'weekly',
+      weekdays: [1, 3, 5],
+      monthDays: []
+    })
+    expect(parseRepeat('monthly:15,1')).toEqual({
+      kind: 'monthly',
+      weekdays: [],
+      monthDays: [1, 15]
+    })
+    expect(parseRepeat('weekly:0')).toEqual({ kind: '', weekdays: [], monthDays: [] })
+    expect(parseRepeat('monthly:32')).toEqual({ kind: '', weekdays: [], monthDays: [] })
+    expect(parseRepeat('hourly')).toEqual({ kind: '', weekdays: [], monthDays: [] })
+    expect(formatRepeat({ kind: 'weekly', weekdays: [3, 1], monthDays: [] })).toBe('weekly:1,3')
+    expect(formatRepeat({ kind: 'monthly', weekdays: [], monthDays: [15, 1] })).toBe('monthly:1,15')
+  })
+
+  it('没给列表：按第一次到点补出周几 / 日号（新写入不落裸 weekly / monthly）', () => {
+    expect(resolveRepeat({ kind: 'weekly', anchor: at('2026-11-04', '09:30') })).toBe('weekly:3')
+    expect(resolveRepeat({ kind: 'monthly', anchor: at('2026-11-30', '09:30') })).toBe('monthly:30')
+    expect(resolveRepeat({ kind: 'weekly', weekdays: [5, 1] })).toBe('weekly:1,5')
+    expect(resolveRepeat({ kind: 'daily', anchor: at('2026-11-04', '09:30') })).toBe('daily')
+    expect(resolveRepeat({ kind: 'weekly' })).toBe('weekly')
+  })
+
+  it('weekly 多选：周一推到周三、周五推到下周一（钟点不变）', () => {
+    const mon = at('2026-11-02', '09:30')
+    expect(dayKeyOf(advanceOccurrence(mon, 'weekly:1,3,5'))).toBe('2026-11-04')
+    const fri = at('2026-11-06', '09:30')
+    const next = advanceOccurrence(fri, 'weekly:1,3,5')
+    expect(dayKeyOf(next)).toBe('2026-11-09')
+    expect(new Date(next).getHours()).toBe(9)
+    expect(new Date(next).getMinutes()).toBe(30)
+  })
+
+  it('monthly 多选：跳过已经过去的几号，短月钳到当月最后一天且日号不漂', () => {
+    expect(dayKeyOf(advanceOccurrence(at('2026-11-05', '09:30'), 'monthly:15'))).toBe('2026-11-15')
+    expect(dayKeyOf(advanceOccurrence(at('2026-11-16', '09:30'), 'monthly:1,15'))).toBe('2026-12-01')
+    // 1 月 31 号 → 2 月没有 31 号，落到 28 号；下一次仍然是 3 月 31 号
+    expect(dayKeyOf(advanceOccurrence(at('2027-01-31', '09:30'), 'monthly:31'))).toBe('2027-02-28')
+    expect(dayKeyOf(advanceOccurrence(at('2027-02-28', '09:30'), 'monthly:31'))).toBe('2027-03-31')
+    // 闰年 2 月 29 号照常
+    expect(dayKeyOf(advanceOccurrence(at('2028-01-31', '09:30'), 'monthly:31'))).toBe('2028-02-29')
+  })
+
+  it('首次到点归一：when 对不上规则就顺延到下一个所选日（钟点不变）', () => {
+    const tue = at('2026-11-03', '09:30')
+    const aligned = alignFirstOccurrence(tue, 'weekly:1,3,5') ?? 0
+    expect(dayKeyOf(aligned)).toBe('2026-11-04')
+    expect(new Date(aligned).getHours()).toBe(9)
+    // 已经落在所选日就不动
+    expect(alignFirstOccurrence(tue, 'weekly:2')).toBe(tue)
+    expect(dayKeyOf(alignFirstOccurrence(at('2026-11-05', '07:00'), 'monthly:15') ?? 0)).toBe(
+      '2026-11-15'
+    )
+    expect(dayKeyOf(alignFirstOccurrence(at('2027-02-10', '07:00'), 'monthly:31') ?? 0)).toBe(
+      '2027-02-28'
+    )
+  })
+
+  it('新建 monthly 任务：落库前就把第一次到点归一到所选日 / 短月最后一天', () => {
+    const task = createTask(db, {
+      instruction: '每月最后一天对账',
+      nextDueAt: at('2027-02-10', '07:00'),
+      repeat: 'monthly:31',
+      origin: 'agent',
+      now: at('2027-02-01', '12:00')
+    })
+    expect(task.repeat).toBe('monthly:31')
+    expect(dayKeyOf(task.next_due_at ?? 0)).toBe('2027-02-28')
+  })
+
+  it('结算 weekly 多选：周三跑完推到周五，仍是 active', () => {
+    const now = at('2026-11-04', '10:00')
+    const task = createTask(db, {
+      instruction: '一三五提醒他喝水',
+      nextDueAt: at('2026-11-04', '09:30'),
+      repeat: 'weekly:1,3,5',
+      origin: 'agent',
+      now
+    })
+    const settled = settleTask(db, task.id, {}, now)
+    expect(settled?.state).toBe('active')
+    expect(dayKeyOf(settled?.next_due_at ?? 0)).toBe('2026-11-06')
+  })
+
+  it('day 视图：monthly 任务在 12-15 那天算一次，前一天不算', () => {
+    const now = at('2026-11-01', '12:00')
+    createTask(db, {
+      instruction: '每月 15 号交房租',
+      nextDueAt: at('2026-11-15', '20:00'),
+      repeat: 'monthly:15',
+      origin: 'agent',
+      now
+    })
+    expect(
+      searchTasks(db, { view: 'day', day: '2026-12-15', now }).tasks.map((task) => task.instruction)
+    ).toContain('每月 15 号交房租')
+    expect(searchTasks(db, { view: 'day', day: '2026-12-14', now }).total).toBe(0)
   })
 })
 
@@ -346,6 +455,15 @@ describe('人话描述', () => {
     expect(line).toContain('每周')
     expect(line).toContain('共建')
     expect(line).toContain('Obsidian 未同步')
+  })
+
+  it('describeRepeat：多选周几 / 每月几号；旧裸 weekly 按下一次的星期几说', () => {
+    expect(describeRepeat('weekly:1,3,5')).toBe('每周一、三、五')
+    expect(describeRepeat('monthly:1,15')).toBe('每月 1、15 号')
+    expect(describeRepeat('weekly', at('2026-11-04', '09:30'))).toBe('每周三')
+    expect(describeRepeat('monthly', at('2026-11-15', '09:30'))).toBe('每月 15 号')
+    expect(describeRepeat('daily')).toBe('每天')
+    expect(describeRepeat('')).toBe('')
   })
 })
 

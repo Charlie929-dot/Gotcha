@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 问记忆循环里的任务工具（自调用 v0.2 §6）
  *
  * 守的纪律：
@@ -207,6 +207,84 @@ describe('search_task / update / cancel', () => {
       const outcome = await tool.execute({ name, arguments: { id: 3 } })
       expect(outcome.result.kind).toBe('error')
     }
+  })
+})
+
+describe('重复多选参数', () => {
+  it('weekly + weekdays：去重升序后交给任务库', async () => {
+    const tasks = fakeTasks()
+    const { tool } = executor(tasks)
+    await tool.execute({
+      name: 'schedule_task',
+      arguments: {
+        instruction: '提醒他喝水',
+        when: '2026-11-02 19:30',
+        repeat: 'weekly',
+        weekdays: [5, 1, 3, 3],
+        origin: 'agent'
+      }
+    })
+    const call = (tasks.schedule as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0] as {
+      repeat: string
+      weekdays: number[]
+    }
+    expect(call.repeat).toBe('weekly')
+    expect(call.weekdays).toEqual([1, 3, 5])
+  })
+
+  it('monthly + month_days：多选传给任务库', async () => {
+    const tasks = fakeTasks()
+    const { tool } = executor(tasks)
+    await tool.execute({
+      name: 'schedule_task',
+      arguments: {
+        instruction: '每月交房租',
+        when: '2026-11-15 20:00',
+        repeat: 'monthly',
+        month_days: [15, 1],
+        origin: 'agent'
+      }
+    })
+    const call = (tasks.schedule as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0] as {
+      repeat: string
+      monthDays: number[]
+    }
+    expect(call.repeat).toBe('monthly')
+    expect(call.monthDays).toEqual([1, 15])
+  })
+
+  it('weekdays 越界 / 不是数组：直接拒，不落库', async () => {
+    for (const weekdays of [[8], [0], ['1'], 1]) {
+      const tasks = fakeTasks()
+      const { tool } = executor(tasks)
+      const outcome = await tool.execute({
+        name: 'schedule_task',
+        arguments: { instruction: '提醒他喝水', when: '2026-11-02 19:30', repeat: 'weekly', weekdays, origin: 'agent' }
+      })
+      expect(outcome.result.kind).toBe('error')
+      expect(JSON.stringify(outcome.result)).toContain('1–7')
+      expect(tasks.schedule).not.toHaveBeenCalled()
+    }
+  })
+
+  it('month_days 越界：直接拒', async () => {
+    const tasks = fakeTasks()
+    const { tool } = executor(tasks)
+    const outcome = await tool.execute({
+      name: 'schedule_task',
+      arguments: { instruction: '每月交房租', when: '2026-11-15 20:00', repeat: 'monthly', month_days: [32], origin: 'agent' }
+    })
+    expect(outcome.result.kind).toBe('error')
+    expect(JSON.stringify(outcome.result)).toContain('1–31')
+    expect(tasks.schedule).not.toHaveBeenCalled()
+  })
+
+  it('update_task 只改 weekdays 时把 weekdays 传下去', async () => {
+    const tasks = fakeTasks()
+    const { tool } = executor(tasks)
+    await tool.execute({ name: 'update_task', arguments: { id: 3, weekdays: [3] } })
+    const call = (tasks.update as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0]
+    expect(call).toEqual({ id: 3, weekdays: [3] })
   })
 })
 

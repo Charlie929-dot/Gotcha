@@ -20,13 +20,18 @@
 import type { Db } from '../../db'
 import {
   cancelTask,
+  cleanMonthDays,
+  cleanWeekdays,
   createTask,
   dayKeyOf,
   describeRepeat,
   getTaskById,
+  parseRepeat,
   readableTaskTime,
+  resolveRepeat,
   searchTasks,
   updateTask,
+  type RepeatKind,
   type TaskRow
 } from './tasks'
 import { existsSync, readFileSync } from 'node:fs'
@@ -92,7 +97,11 @@ export interface TaskToolPort {
   schedule(input: {
     instruction: string
     when: number | null
-    repeat: '' | 'daily' | 'weekly'
+    repeat: RepeatKind
+    /** repeat=weekly 时生效：1=周一 … 7=周日，可多选 */
+    weekdays?: number[]
+    /** repeat=monthly 时生效：每月几号，1–31，可多选 */
+    monthDays?: number[]
     origin: 'user' | 'agent' | 'system'
     delivery: 'foreground' | 'background' | 'auto'
     validUntil: number | null
@@ -107,7 +116,9 @@ export interface TaskToolPort {
     id: number
     instruction?: string
     when?: number | null
-    repeat?: '' | 'daily' | 'weekly'
+    repeat?: RepeatKind
+    weekdays?: number[]
+    monthDays?: number[]
     delivery?: 'foreground' | 'background' | 'auto'
     validUntil?: number | null
     state?: 'active' | 'paused' | 'completed' | 'cancelled'
@@ -144,7 +155,7 @@ function viewOf(task: TaskRow, now: number): TaskToolView {
   return {
     id: task.id,
     when: readableTaskTime(task.next_due_at, now),
-    repeat: describeRepeat(task.repeat),
+    repeat: describeRepeat(task.repeat, task.next_due_at),
     origin: task.origin,
     delivery: task.delivery,
     state: task.state,
@@ -332,10 +343,24 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
     schedule(input) {
       const now = options.now?.() ?? Date.now()
       const db = requireDb(options)
+      // 反复任务没有第一次到点就永远不会醒：不落一条「看起来记下了、其实不会跑」的行
+      if (input.repeat !== '' && input.when === null) {
+        return {
+          ok: false,
+          message: '重复任务要先给一个到点时间（when）；只在对话里记着、不用叫醒的那种不用设重复',
+          task: null
+        }
+      }
+      const repeatText = resolveRepeat({
+        kind: input.repeat,
+        weekdays: cleanWeekdays(input.weekdays),
+        monthDays: cleanMonthDays(input.monthDays),
+        anchor: input.when
+      })
       const task = createTask(db, {
         instruction: input.instruction,
         nextDueAt: input.when,
-        repeat: input.repeat,
+        repeat: repeatText,
         origin: input.origin,
         delivery: input.delivery,
         validUntil: input.validUntil,
@@ -345,7 +370,7 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
       const stored = sync === null ? task : applySync(db, task, sync, now)
       options.onChanged?.()
       const when = readableTaskTime(stored.next_due_at, now)
-      const repeat = describeRepeat(stored.repeat)
+      const repeat = describeRepeat(stored.repeat, stored.next_due_at)
       const tail = sync === null ? '' : ` · ${syncLabel(sync)}`
       const headline =
         input.origin === 'user'
@@ -385,11 +410,54 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
       if (before === null) {
         return { ok: false, message: `没有 #${input.id} 这条任务（search_tasks 看看有哪些）`, task: null }
       }
+      const anchor = input.when !== undefined ? input.when : before.next_due_at
+      let repeatText: string | undefined
+      if (input.repeat !== undefined) {
+        repeatText = resolveRepeat({
+          kind: input.repeat,
+          weekdays: cleanWeekdays(input.weekdays),
+          monthDays: cleanMonthDays(input.monthDays),
+          anchor
+        })
+      } else if (input.weekdays !== undefined || input.monthDays !== undefined) {
+        // 只给周几 / 几号（不给 repeat）：按这条任务现有的重复种类改
+        const currentRule = parseRepeat(before.repeat)
+        if (currentRule.kind !== 'weekly' && currentRule.kind !== 'monthly') {
+          return {
+            ok: false,
+            message: `#${input.id} 现在不是重复任务：先用 repeat=weekly / monthly 设重复，再给 weekdays / month_days`,
+            task: viewOf(before, now)
+          }
+        }
+        repeatText = resolveRepeat({
+          kind: currentRule.kind,
+          weekdays:
+            input.weekdays !== undefined ? cleanWeekdays(input.weekdays) : currentRule.weekdays,
+          monthDays:
+            input.monthDays !== undefined ? cleanMonthDays(input.monthDays) : currentRule.monthDays,
+          anchor
+        })
+      }
+      if (repeatText !== undefined && repeatText !== '' && anchor === null) {
+        return {
+          ok: false,
+          message: `#${input.id} 还没有到点时间：先给 when，再设重复`,
+          task: viewOf(before, now)
+        }
+      }
+      // 重复任务不能把到点时间清成空——那样它永远不会醒（要停就 pause / cancel）
+      if (input.when === null && (repeatText ?? before.repeat) !== '') {
+        return {
+          ok: false,
+          message: `#${input.id} 是重复任务，不能把到点时间清掉；要停就暂停或取消`,
+          task: viewOf(before, now)
+        }
+      }
       const after = updateTask(db, {
         id: input.id,
         ...(input.instruction === undefined ? {} : { instruction: input.instruction }),
         ...(input.when === undefined ? {} : { nextDueAt: input.when }),
-        ...(input.repeat === undefined ? {} : { repeat: input.repeat }),
+        ...(repeatText === undefined ? {} : { repeat: repeatText }),
         ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
         ...(input.validUntil === undefined ? {} : { validUntil: input.validUntil }),
         ...(input.state === undefined ? {} : { state: input.state }),
@@ -402,9 +470,11 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
       const stored = sync === null ? after : applySync(db, after, sync, now)
       options.onChanged?.()
       const tail = sync === null ? '' : ` · ${syncLabel(sync)}`
+      const repeat = describeRepeat(stored.repeat, stored.next_due_at)
+      const repeatTail = repeat === '' ? '' : `（${repeat}）`
       return {
         ok: true,
-        message: `改好了 #${stored.id}：${readableTaskTime(stored.next_due_at, now)} ${stored.instruction}${tail}`,
+        message: `改好了 #${stored.id}：${readableTaskTime(stored.next_due_at, now)}${repeatTail} ${stored.instruction}${tail}`,
         task: viewOf(stored, now)
       }
     },

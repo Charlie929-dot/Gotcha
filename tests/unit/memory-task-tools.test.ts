@@ -445,3 +445,132 @@ describe('查与参数', () => {
     ).toThrow()
   })
 })
+
+describe('重复规则：每周多选 / 每月多选', () => {
+  it('每周一三五：落库是 weekly:1,3,5，回执说人话', () => {
+    const result = port().schedule({
+      instruction: '提醒他喝水',
+      when: WHEN,
+      repeat: 'weekly',
+      weekdays: [5, 1, 3],
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(result.ok).toBe(true)
+    expect(result.message).toContain('每周一、三、五')
+    expect(result.task?.repeat).toBe('每周一、三、五')
+    expect(getTaskById(db, result.task!.id)?.repeat).toBe('weekly:1,3,5')
+  })
+
+  it('每月 1、15 号：落库是 monthly:1,15；第一次到点归一到最近的所选日', () => {
+    const result = port().schedule({
+      instruction: '每月交房租',
+      when: WHEN,
+      repeat: 'monthly',
+      monthDays: [15, 1],
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(result.ok).toBe(true)
+    expect(result.message).toContain('每月 1、15 号')
+    const stored = getTaskById(db, result.task!.id)
+    expect(stored?.repeat).toBe('monthly:1,15')
+    expect(stored?.next_due_at).toBe(new Date(2026, 10, 15, 19, 30, 0, 0).getTime())
+  })
+
+  it('不给列表：按第一次到点补出周几（周一 → weekly:1）', () => {
+    const result = port().schedule({
+      instruction: '每周提醒',
+      when: WHEN,
+      repeat: 'weekly',
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(result.message).toContain('每周一')
+    expect(getTaskById(db, result.task!.id)?.repeat).toBe('weekly:1')
+  })
+
+  it('重复任务没有到点时间：如实拒绝，不落一条永远不响的行', () => {
+    const result = port().schedule({
+      instruction: '每天提醒',
+      when: null,
+      repeat: 'daily',
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(result.ok).toBe(false)
+    expect(result.message).toContain('到点时间')
+    expect(result.task).toBeNull()
+    expect(db.prepare('SELECT COUNT(*) AS n FROM mem_tasks').get()).toEqual({ n: 0 })
+  })
+
+  it('只改周几（不给 repeat）：按现有 weekly 规则改；回执带新人话', () => {
+    const p = port()
+    const created = p.schedule({
+      instruction: '提醒他喝水',
+      when: WHEN,
+      repeat: 'weekly',
+      weekdays: [1, 3, 5],
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    const updated = p.update({ id: created.task!.id, weekdays: [2, 4] })
+    expect(updated.ok).toBe(true)
+    expect(updated.message).toContain('每周二、四')
+    expect(getTaskById(db, created.task!.id)?.repeat).toBe('weekly:2,4')
+  })
+
+  it('只改几号（不给 repeat）：按现有 monthly 规则改', () => {
+    const p = port()
+    const created = p.schedule({
+      instruction: '每月交房租',
+      when: WHEN,
+      repeat: 'monthly',
+      monthDays: [15],
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    const updated = p.update({ id: created.task!.id, monthDays: [1, 20] })
+    expect(updated.ok).toBe(true)
+    expect(updated.message).toContain('每月 1、20 号')
+    expect(getTaskById(db, created.task!.id)?.repeat).toBe('monthly:1,20')
+  })
+
+  it('非重复任务只给 weekdays：如实拒绝，不改行', () => {
+    const p = port()
+    const created = p.schedule({
+      instruction: '一次性',
+      when: WHEN,
+      repeat: '',
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    const updated = p.update({ id: created.task!.id, weekdays: [1] })
+    expect(updated.ok).toBe(false)
+    expect(updated.message).toContain('不是重复任务')
+    expect(getTaskById(db, created.task!.id)?.repeat).toBe('')
+  })
+
+  it('重复任务不能把到点时间清空：如实拒绝', () => {
+    const p = port()
+    const created = p.schedule({
+      instruction: '每天提醒',
+      when: WHEN,
+      repeat: 'daily',
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    const cleared = p.update({ id: created.task!.id, when: null })
+    expect(cleared.ok).toBe(false)
+    expect(cleared.message).toContain('不能把到点时间清掉')
+    expect(getTaskById(db, created.task!.id)?.next_due_at).not.toBeNull()
+  })
+})

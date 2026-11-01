@@ -271,7 +271,7 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
         tasks: rows.map((task) => ({
           id: task.id,
           when: readableTaskTime(task.next_due_at, at),
-          repeat: describeRepeat(task.repeat),
+          repeat: describeRepeat(task.repeat, task.next_due_at),
           origin: task.origin,
           delivery: task.delivery,
           state: task.state === 'paused' ? 'paused' : 'active',

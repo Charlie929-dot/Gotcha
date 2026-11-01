@@ -19,16 +19,31 @@ import type { Db } from '../../db'
 export type TaskOrigin = 'user' | 'agent' | 'system'
 /** 交付：foreground 可开口；background 不打断当前回答；auto 由本轮结合上下文决定 */
 export type TaskDelivery = 'foreground' | 'background' | 'auto'
-/** 重复：空 = 一次性；daily / weekly 执行后只推下一次 */
-export type TaskRepeat = '' | 'daily' | 'weekly'
+/** 重复种类：空 = 一次性 */
+export type RepeatKind = '' | 'daily' | 'weekly' | 'monthly'
+/**
+ * 重复的持久化文本：`''` / `daily` / `weekly` / `weekly:1,3,5` / `monthly:1,15`。
+ * - weekly 的周几用 ISO 口径（1=周一 … 7=周日），monthly 的几号用 1–31；都升序去重；
+ * - 裸 `weekly` / `monthly`（没有列表）=「沿用当前 occurrence 的星期几 / 日号」，只为兼容旧行；
+ *   新写入的都会由 `resolveRepeat` 补成显式列表，避免短月钳制后日号漂移。
+ */
+export type TaskRepeat = string
 /** 业务状态：`due` 是派生状态，「正在跑」是进程内租约，都不写进这里 */
 export type TaskState = 'active' | 'paused' | 'completed' | 'cancelled'
 /** 共建计划在用户 Obsidian 计划区的同步状态；空 = 不需要同步（自主任务 / 系统任务） */
 export type TaskSyncState = '' | 'synced' | 'pending' | 'failed' | 'removed'
 
+/** 解析后的重复规则（空 kind = 一次性） */
+export interface RepeatRule {
+  kind: RepeatKind
+  /** weekly 的周几（1–7，升序去重）；空 = 沿用当前 occurrence 的星期几 */
+  weekdays: number[]
+  /** monthly 的几号（1–31，升序去重）；空 = 沿用当前 occurrence 的日号 */
+  monthDays: number[]
+}
+
 export const TASK_ORIGINS: readonly TaskOrigin[] = ['user', 'agent', 'system']
 export const TASK_DELIVERIES: readonly TaskDelivery[] = ['foreground', 'background', 'auto']
-export const TASK_REPEATS: readonly TaskRepeat[] = ['', 'daily', 'weekly']
 
 /** 库内行（列名即 snake_case，不做二次映射，避免字段漂移） */
 export interface TaskRow {
@@ -141,13 +156,172 @@ export function dayWindow(dayKey: string): { from: number; to: number } | null {
   return { from, to: new Date(year, month - 1, day + 1).getTime() }
 }
 
-/** 按日历推下一次（不用 +86400000：跨月 / 跨年 / 夏令时都要分开算） */
+/* ------------------------------------------------------------------ */
+/* 重复规则：解析 / 规范化 / 推进                                       */
+/* ------------------------------------------------------------------ */
+
+/** ISO 周几：1=周一 … 7=周日（JS 的 0=周日 不直接外露） */
+export function isoWeekdayOf(ts: number): number {
+  const day = new Date(ts).getDay()
+  return day === 0 ? 7 : day
+}
+
+/** 去重、升序，只留 [min, max] 内的整数；怪值直接丢（不猜） */
+function cleanDays(values: readonly number[] | undefined, min: number, max: number): number[] {
+  if (values === undefined) return []
+  const unique = new Set<number>()
+  for (const value of values) {
+    if (typeof value !== 'number' || !Number.isInteger(value)) continue
+    if (value < min || value > max) continue
+    unique.add(value)
+  }
+  return [...unique].sort((a, b) => a - b)
+}
+
+/** weekly 的周几（1–7） */
+export function cleanWeekdays(values: readonly number[] | undefined): number[] {
+  return cleanDays(values, 1, 7)
+}
+
+/** monthly 的几号（1–31） */
+export function cleanMonthDays(values: readonly number[] | undefined): number[] {
+  return cleanDays(values, 1, 31)
+}
+
+/** 解析持久化文本；认不出的一律当一次性（不写坏枚举，与旧版口径一致） */
+export function parseRepeat(value: string | null | undefined): RepeatRule {
+  const empty: RepeatRule = { kind: '', weekdays: [], monthDays: [] }
+  if (typeof value !== 'string') return empty
+  const text = value.trim().toLowerCase()
+  if (text === '') return empty
+  if (text === 'daily') return { kind: 'daily', weekdays: [], monthDays: [] }
+  const match = /^(weekly|monthly)(?::(.+))?$/u.exec(text)
+  if (match === null) return empty
+  const kind: RepeatKind = match[1] === 'weekly' ? 'weekly' : 'monthly'
+  const max = kind === 'weekly' ? 7 : 31
+  const parsed: number[] = []
+  if (match[2] !== undefined) {
+    for (const part of match[2].split(',')) {
+      if (!/^\d{1,2}$/u.test(part.trim())) return empty
+      const day = Number(part)
+      if (day < 1 || day > max) return empty
+      parsed.push(day)
+    }
+  }
+  const days = cleanDays(parsed, 1, max)
+  return {
+    kind,
+    weekdays: kind === 'weekly' ? days : [],
+    monthDays: kind === 'monthly' ? days : []
+  }
+}
+
+/** 规则 → 持久化文本（空 = 一次性；列表会去重升序，调用方不用先清洗） */
+export function formatRepeat(rule: RepeatRule): string {
+  if (rule.kind === 'daily') return 'daily'
+  if (rule.kind === 'weekly') {
+    const days = cleanDays(rule.weekdays, 1, 7)
+    return days.length === 0 ? 'weekly' : `weekly:${days.join(',')}`
+  }
+  if (rule.kind === 'monthly') {
+    const days = cleanDays(rule.monthDays, 1, 31)
+    return days.length === 0 ? 'monthly' : `monthly:${days.join(',')}`
+  }
+  return ''
+}
+
+/**
+ * 把「种类 + 可选的周几 / 几号」落成持久化文本。
+ * 没给列表时用 `anchor`（第一次到点）补出来——这样短月钳制之后日号不会漂
+ * （1 月 31 号 → 2 月 28 号，下一次仍是 3 月 31 号，而不是 3 月 28 号）。
+ */
+export function resolveRepeat(input: {
+  kind: RepeatKind
+  weekdays?: readonly number[] | undefined
+  monthDays?: readonly number[] | undefined
+  anchor?: number | null | undefined
+}): string {
+  if (input.kind === '' || input.kind === 'daily') return input.kind
+  const weekdays = cleanWeekdays(input.weekdays)
+  const monthDays = cleanMonthDays(input.monthDays)
+  if (input.kind === 'weekly' && weekdays.length === 0 && input.anchor != null) {
+    weekdays.push(isoWeekdayOf(input.anchor))
+  }
+  if (input.kind === 'monthly' && monthDays.length === 0 && input.anchor != null) {
+    monthDays.push(new Date(input.anchor).getDate())
+  }
+  return formatRepeat({ kind: input.kind, weekdays, monthDays })
+}
+
+/** 不早于 / 晚于 `ts` 的下一次 weekly occurrence（同一天同一钟点；跨周用日历加天） */
+function nextWeeklyAt(ts: number, rule: RepeatRule, inclusive: boolean): number | null {
+  const source = new Date(ts)
+  const days = rule.weekdays.length > 0 ? rule.weekdays : [isoWeekdayOf(ts)]
+  for (let step = 0; step <= 7; step += 1) {
+    if (step === 0 && !inclusive) continue
+    const candidate = new Date(source)
+    candidate.setDate(source.getDate() + step)
+    if (days.includes(isoWeekdayOf(candidate.getTime()))) return candidate.getTime()
+  }
+  return null
+}
+
+/**
+ * 下一次 monthly occurrence：在当月 / 后面 24 个月里找所选日号。
+ * 短月没有这一号就钳到当月最后一天（如 31 号 → 2 月 28 号）；多个日号钳到同一天只算一次。
+ */
+function nextMonthlyAt(ts: number, rule: RepeatRule, inclusive: boolean): number | null {
+  const source = new Date(ts)
+  const days = rule.monthDays.length > 0 ? rule.monthDays : [source.getDate()]
+  const hour = source.getHours()
+  const minute = source.getMinutes()
+  const second = source.getSeconds()
+  const millisecond = source.getMilliseconds()
+  for (let offset = 0; offset <= 24; offset += 1) {
+    const monthStart = new Date(source.getFullYear(), source.getMonth() + offset, 1)
+    const year = monthStart.getFullYear()
+    const month = monthStart.getMonth()
+    const lastDay = new Date(year, month + 1, 0).getDate()
+    const effective = [...new Set(days.map((day) => Math.min(day, lastDay)))].sort((a, b) => a - b)
+    for (const day of effective) {
+      const candidate = new Date(year, month, day, hour, minute, second, millisecond).getTime()
+      if (candidate > ts || (inclusive && candidate === ts)) return candidate
+    }
+  }
+  return null
+}
+
+function nextOccurrenceAt(ts: number, rule: RepeatRule, inclusive: boolean): number | null {
+  if (rule.kind === 'weekly') return nextWeeklyAt(ts, rule, inclusive)
+  if (rule.kind === 'monthly') return nextMonthlyAt(ts, rule, inclusive)
+  return null
+}
+
+/**
+ * 把「第一次到点」归一到规则上：weekly / monthly 时返回不小于 `at` 的第一次 occurrence
+ * （规则是每周一三五、when 落在周二 → 顺延到周三；当天的钟点不变）。
+ * 一次性 / 每天 / `at` 为空时原样返回。
+ */
+export function alignFirstOccurrence(at: number | null, repeat: TaskRepeat): number | null {
+  if (at === null) return null
+  const rule = parseRepeat(repeat)
+  if (rule.kind === '' || rule.kind === 'daily') return at
+  return nextOccurrenceAt(at, rule, true) ?? at
+}
+
+/**
+ * 按日历推下一次（不用 +86400000：跨月 / 跨年 / 月长都要分开算）；
+ * weekly 落在所选周几里，monthly 落在所选日号（短月钳到月末）。
+ */
 export function advanceOccurrence(ts: number, repeat: TaskRepeat): number {
-  if (repeat === '') return ts
-  const date = new Date(ts)
-  if (repeat === 'daily') date.setDate(date.getDate() + 1)
-  else date.setDate(date.getDate() + 7)
-  return date.getTime()
+  const rule = parseRepeat(repeat)
+  if (rule.kind === '') return ts
+  if (rule.kind === 'daily') {
+    const date = new Date(ts)
+    date.setDate(date.getDate() + 1)
+    return date.getTime()
+  }
+  return nextOccurrenceAt(ts, rule, false) ?? ts
 }
 
 /** 毫秒 → 人话时间（`10-31 09:30`；跨年补年份），供回执与工具结果使用 */
@@ -159,10 +333,33 @@ export function readableTaskTime(ts: number | null, now: number): string {
   return sameYear ? stamp : `${date.getFullYear()}-${stamp}`
 }
 
-/** 重复规则的人话（空字符串 = 一次性） */
-export function describeRepeat(repeat: TaskRepeat): string {
-  if (repeat === 'daily') return '每天'
-  if (repeat === 'weekly') return '每周'
+const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'] as const
+
+/**
+ * 重复规则的人话（空字符串 = 一次性）。
+ * 裸 `weekly` / `monthly`（旧行）没有列表时按 `nextDueAt` 的星期几 / 日号来说。
+ */
+export function describeRepeat(repeat: TaskRepeat, nextDueAt?: number | null): string {
+  const rule = parseRepeat(repeat)
+  if (rule.kind === 'daily') return '每天'
+  if (rule.kind === 'weekly') {
+    const days =
+      rule.weekdays.length > 0
+        ? rule.weekdays
+        : nextDueAt != null
+          ? [isoWeekdayOf(nextDueAt)]
+          : []
+    return days.length === 0 ? '每周' : `每周${days.map((day) => WEEKDAY_LABELS[day - 1]).join('、')}`
+  }
+  if (rule.kind === 'monthly') {
+    const days =
+      rule.monthDays.length > 0
+        ? rule.monthDays
+        : nextDueAt != null
+          ? [new Date(nextDueAt).getDate()]
+          : []
+    return days.length === 0 ? '每月' : `每月 ${days.join('、')} 号`
+  }
   return ''
 }
 
@@ -214,9 +411,17 @@ export function createTask(db: Db, input: NewTaskInput): TaskRow {
   const instruction = cleanText(input.instruction, TASK_INSTRUCTION_MAX)
   if (instruction === '') throw new Error('任务说明是空的：没有记下任何计划')
   const origin = pick<TaskOrigin>(input.origin, TASK_ORIGINS, 'agent')
-  const repeat = pick<TaskRepeat>(input.repeat ?? '', TASK_REPEATS, '')
   const delivery = pick<TaskDelivery>(input.delivery ?? 'auto', TASK_DELIVERIES, 'auto')
   const now = input.now ?? Date.now()
+  const due = optionalStamp(input.nextDueAt)
+  const parsedRepeat = parseRepeat(input.repeat ?? '')
+  const repeat = resolveRepeat({
+    kind: parsedRepeat.kind,
+    weekdays: parsedRepeat.weekdays,
+    monthDays: parsedRepeat.monthDays,
+    anchor: due
+  })
+  const firstDue = alignFirstOccurrence(due, repeat)
   const result = db
     .prepare(
       `INSERT INTO mem_tasks
@@ -226,7 +431,7 @@ export function createTask(db: Db, input: NewTaskInput): TaskRow {
     )
     .run(
       instruction,
-      optionalStamp(input.nextDueAt),
+      firstDue,
       repeat,
       origin,
       delivery,
@@ -261,8 +466,24 @@ export function updateTask(db: Db, input: TaskUpdateInput): TaskRow | null {
     if (instruction === '') throw new Error('任务说明不能改成空的')
     push('instruction', instruction)
   }
-  if (input.nextDueAt !== undefined) push('next_due_at', optionalStamp(input.nextDueAt))
-  if (input.repeat !== undefined) push('repeat', pick<TaskRepeat>(input.repeat, TASK_REPEATS, ''))
+  // 重复与到点是一对：改了任一项就把「下一次」归一到规则上，避免出现
+  // 「每周一三五」这条任务的下一次却排在周二这种自相矛盾的行。
+  const hasRepeat = input.repeat !== undefined
+  const hasDue = input.nextDueAt !== undefined
+  let repeatText = current.repeat
+  if (hasRepeat) {
+    const parsed = parseRepeat(input.repeat)
+    repeatText = resolveRepeat({
+      kind: parsed.kind,
+      weekdays: parsed.weekdays,
+      monthDays: parsed.monthDays,
+      anchor: hasDue ? optionalStamp(input.nextDueAt) : current.next_due_at
+    })
+  }
+  let due = hasDue ? optionalStamp(input.nextDueAt) : current.next_due_at
+  if ((hasRepeat || hasDue) && repeatText !== '') due = alignFirstOccurrence(due, repeatText)
+  if (hasRepeat) push('repeat', repeatText)
+  if (hasDue || due !== current.next_due_at) push('next_due_at', due)
   if (input.delivery !== undefined) {
     push('delivery', pick<TaskDelivery>(input.delivery, TASK_DELIVERIES, 'auto'))
   }
@@ -585,7 +806,7 @@ export function msUntilNextDue(db: Db, now: number): number | null {
 /** 给状态行 / 工具结果用的一句话 */
 export function describeTask(task: TaskRow, now: number): string {
   const when = readableTaskTime(task.next_due_at, now)
-  const repeat = describeRepeat(task.repeat)
+  const repeat = describeRepeat(task.repeat, task.next_due_at)
   const origin = task.origin === 'user' ? '共建' : task.origin === 'agent' ? '自主' : '例行'
   const state =
     task.state === 'completed'

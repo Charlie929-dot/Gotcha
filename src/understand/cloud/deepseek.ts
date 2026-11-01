@@ -566,8 +566,21 @@ const ASK_LOOP_TOOLS = [
           },
           repeat: {
             type: 'string',
-            enum: ['', 'daily', 'weekly'],
-            description: '重复：空 = 一次性；daily = 每天同一时刻；weekly = 每周同一时刻'
+            enum: ['', 'daily', 'weekly', 'monthly'],
+            description:
+              '重复：空 = 一次性；daily = 每天同一时刻；weekly = 每周（周几见 weekdays）；monthly = 每月（几号见 month_days）。weekly / monthly 不传列表就沿用第一次到点的星期几 / 日号。'
+          },
+          weekdays: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 7 },
+            description:
+              'repeat=weekly 时生效：每周哪几天，1=周一 … 7=周日，可多选（如 [1,3,5] 表示每周一三五）'
+          },
+          month_days: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 31 },
+            description:
+              'repeat=monthly 时生效：每月哪几号，可多选（如 [1,15]）；短月没有这一号时落到当月最后一天'
           },
           origin: {
             type: 'string',
@@ -624,8 +637,18 @@ const ASK_LOOP_TOOLS = [
           when: { type: 'string', description: '新的到点时间（`YYYY-MM-DD HH:mm`）' },
           repeat: {
             type: 'string',
-            enum: ['', 'daily', 'weekly'],
-            description: '新的重复规则'
+            enum: ['', 'daily', 'weekly', 'monthly'],
+            description: '新的重复规则：空 = 一次性；daily / weekly / monthly（周几与几号见 weekdays / month_days）'
+          },
+          weekdays: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 7 },
+            description: 'repeat=weekly 时生效：每周哪几天，1=周一 … 7=周日，可多选'
+          },
+          month_days: {
+            type: 'array',
+            items: { type: 'integer', minimum: 1, maximum: 31 },
+            description: 'repeat=monthly 时生效：每月哪几号，可多选；短月没有这一号时落到当月最后一天'
           },
           delivery: {
             type: 'string',

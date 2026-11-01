@@ -156,7 +156,7 @@ export interface LetterToolDeps {
 /** 任务来源 / 交付（与 `memory/agent/tasks.ts` 同口径，类型在这里重复一份避免链层依赖记忆层） */
 export type TaskOriginArg = 'user' | 'agent' | 'system'
 export type TaskDeliveryArg = 'foreground' | 'background' | 'auto'
-export type TaskRepeatArg = '' | 'daily' | 'weekly'
+export type TaskRepeatArg = '' | 'daily' | 'weekly' | 'monthly'
 export type TaskStateArg = 'active' | 'paused' | 'completed' | 'cancelled'
 
 /** 新建请求：时间已经被工具层解析成本地毫秒时间戳（模型只给 `YYYY-MM-DD HH:mm`） */
@@ -164,6 +164,10 @@ export interface TaskScheduleRequest {
   instruction: string
   when: number | null
   repeat: TaskRepeatArg
+  /** repeat=weekly 时生效：1=周一 … 7=周日，可多选 */
+  weekdays?: number[]
+  /** repeat=monthly 时生效：每月几号，1–31，可多选 */
+  monthDays?: number[]
   origin: TaskOriginArg
   delivery: TaskDeliveryArg
   validUntil: number | null
@@ -175,6 +179,8 @@ export interface TaskUpdateRequest {
   /** 给了 = 改到点时间；不给 = 不动 */
   when?: number | null
   repeat?: TaskRepeatArg
+  weekdays?: number[]
+  monthDays?: number[]
   delivery?: TaskDeliveryArg
   validUntil?: number | null
   state?: TaskStateArg
@@ -443,6 +449,29 @@ function taskIdOf(value: unknown): number | undefined {
   const raw = optionalNumber(value)
   if (raw === undefined || !Number.isInteger(raw) || raw <= 0) return undefined
   return raw
+}
+
+/**
+ * 重复列表参数（weekdays 1–7 / month_days 1–31）：
+ * `undefined` = 没给；`null` = 给了但非法（由调用方报错，不静默吞掉模型的错参数）。
+ */
+function parseRepeatDays(
+  value: unknown,
+  min: number,
+  max: number
+): number[] | null | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) return null
+  // 空数组 = 没选（不当作非法）；让任务层按第一次到点补默认
+  if (value.length === 0) return undefined
+  const days = new Set<number>()
+  for (const item of value) {
+    if (typeof item !== 'number' || !Number.isInteger(item) || item < min || item > max) {
+      return null
+    }
+    days.add(item)
+  }
+  return [...days].sort((a, b) => a - b)
 }
 
 function pad2(value: number): string {
@@ -1201,7 +1230,29 @@ export function createAskToolExecutor(deps: AskToolDeps): {
           }
           const rawRepeat = call.arguments['repeat']
           const repeat: TaskRepeatArg =
-            rawRepeat === 'daily' || rawRepeat === 'weekly' ? rawRepeat : ''
+            rawRepeat === 'daily' || rawRepeat === 'weekly' || rawRepeat === 'monthly'
+              ? rawRepeat
+              : ''
+          const weekdays = parseRepeatDays(call.arguments['weekdays'], 1, 7)
+          if (weekdays === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'weekdays 要用 1–7 的整数数组（1=周一 … 7=周日），可多选，例如 [1,3,5]'
+              },
+              segments: []
+            }
+          }
+          const monthDays = parseRepeatDays(call.arguments['month_days'], 1, 31)
+          if (monthDays === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'month_days 要用 1–31 的整数数组，可多选，例如 [1,15]'
+              },
+              segments: []
+            }
+          }
           const rawOrigin = call.arguments['origin']
           const origin: TaskOriginArg =
             rawOrigin === 'user' || rawOrigin === 'system' ? rawOrigin : 'agent'
@@ -1212,6 +1263,8 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             instruction,
             when,
             repeat,
+            ...(weekdays === undefined ? {} : { weekdays }),
+            ...(monthDays === undefined ? {} : { monthDays }),
             origin,
             delivery,
             validUntil
@@ -1299,7 +1352,32 @@ export function createAskToolExecutor(deps: AskToolDeps): {
           }
           const rawRepeat = call.arguments['repeat']
           const repeat: TaskRepeatArg | undefined =
-            rawRepeat === 'daily' || rawRepeat === 'weekly' || rawRepeat === '' ? rawRepeat : undefined
+            rawRepeat === 'daily' ||
+            rawRepeat === 'weekly' ||
+            rawRepeat === 'monthly' ||
+            rawRepeat === ''
+              ? rawRepeat
+              : undefined
+          const weekdays = parseRepeatDays(call.arguments['weekdays'], 1, 7)
+          if (weekdays === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'weekdays 要用 1–7 的整数数组（1=周一 … 7=周日），可多选，例如 [1,3,5]'
+              },
+              segments: []
+            }
+          }
+          const monthDays = parseRepeatDays(call.arguments['month_days'], 1, 31)
+          if (monthDays === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'month_days 要用 1–31 的整数数组，可多选，例如 [1,15]'
+              },
+              segments: []
+            }
+          }
           const rawDelivery = call.arguments['delivery']
           const delivery: TaskDeliveryArg | undefined =
             rawDelivery === 'foreground' || rawDelivery === 'background' || rawDelivery === 'auto'
@@ -1318,6 +1396,8 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             ...(instruction === undefined ? {} : { instruction }),
             ...(when === undefined ? {} : { when }),
             ...(repeat === undefined ? {} : { repeat }),
+            ...(weekdays === undefined ? {} : { weekdays }),
+            ...(monthDays === undefined ? {} : { monthDays }),
             ...(delivery === undefined ? {} : { delivery }),
             ...(validUntil === undefined ? {} : { validUntil }),
             ...(state === undefined ? {} : { state })

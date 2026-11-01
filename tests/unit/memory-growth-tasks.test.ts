@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { openDatabase, type Db } from '../../src/db'
 import {
   GROWTH_DAILY_INSTRUCTION,
+  GROWTH_LEGACY_INSTRUCTIONS,
   GROWTH_WEEKLY_DELAY_MS,
   GROWTH_WEEKLY_INSTRUCTION,
   ensureGrowthDailyTask,
@@ -21,7 +22,7 @@ import {
   isWeeklyReviewDay,
   nextDailyWritingAt
 } from '../../src/memory/agent/growth-tasks'
-import { cancelTask, getTaskById, updateTask } from '../../src/memory/agent/tasks'
+import { cancelTask, createTask, getTaskById, updateTask } from '../../src/memory/agent/tasks'
 
 let db: Db
 
@@ -88,6 +89,29 @@ describe('日记任务播种', () => {
     expect(again.created).toBe(false)
     expect(getTaskById(db, seed.task.id)?.state).toBe('cancelled')
   })
+
+  it('任务名就是「写日记」，不长篇说明', () => {
+    const seed = ensureGrowthDailyTask(db, MONDAY)
+    expect(seed.task.instruction).toBe('写日记')
+    expect(GROWTH_DAILY_INSTRUCTION).toBe('写日记')
+    expect(GROWTH_WEEKLY_INSTRUCTION).toBe('写周记')
+  })
+
+  it('旧版长说明原地改名，不新建第二条', () => {
+    const legacy = createTask(db, {
+      instruction: GROWTH_LEGACY_INSTRUCTIONS[0] as string,
+      nextDueAt: MONDAY,
+      repeat: 'daily',
+      origin: 'agent',
+      delivery: 'background',
+      now: MONDAY
+    })
+    const seed = ensureGrowthDailyTask(db, MONDAY + 1000)
+    expect(seed.created).toBe(false)
+    expect(seed.task.id).toBe(legacy.id)
+    expect(seed.task.instruction).toBe('写日记')
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM mem_tasks`).get()).toEqual({ n: 1 })
+  })
 })
 
 describe('周记串在日记之后', () => {
@@ -128,5 +152,19 @@ describe('周记串在日记之后', () => {
     // 换一天（下周日）但上一条还挂着：不重复建
     const nextSunday = at('2026-11-08', '23:35')
     expect(ensureWeeklyWritingTask(db, nextSunday, { weeklyWritten: false })).toBeNull()
+  })
+
+  it('旧版周记长说明也会改名；改完那条还活着，就不再排新的', () => {
+    const legacy = createTask(db, {
+      instruction: GROWTH_LEGACY_INSTRUCTIONS[1] as string,
+      nextDueAt: SUNDAY + GROWTH_WEEKLY_DELAY_MS,
+      repeat: '',
+      origin: 'agent',
+      delivery: 'background',
+      now: SUNDAY
+    })
+    expect(ensureWeeklyWritingTask(db, SUNDAY, { weeklyWritten: false })).toBeNull()
+    expect(getTaskById(db, legacy.id)?.instruction).toBe('写周记')
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM mem_tasks`).get()).toEqual({ n: 1 })
   })
 })

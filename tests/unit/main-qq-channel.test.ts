@@ -11,7 +11,9 @@ import type { ChainAskResult } from '../../src/chain/agent/types'
 import {
   createQqChannel,
   formatAskResult,
+  parseResumeChoice,
   type QqChannelConfig,
+  type QqResumeInput,
   type QqTransport
 } from '../../src/main/qq/channel'
 import type { QqInbound } from '../../src/main/qq/ob11'
@@ -563,5 +565,163 @@ describe('本地命令（M5）', () => {
 
   it('命令回执走 formatAskResult：剥 Markdown，保留换行', () => {
     expect(formatAskResult(receipt('**粗体** 与 `代码`\n\n第二段'))).toBe('粗体 与 代码\n\n第二段')
+  })
+})
+
+/**
+ * 2026-11-01 修（真机截图）：ta 在 QQ 里问「已经查了 8 轮，还要接着查吗？1. 继续查 / 2. 先按现在的结果回答」，
+ * 用户回「1」却被当成新问题（ta 回「这是发错啦，还是在试我？」），因为它自己写着「得回桌面点一下」。
+ * 通道层要做的：记着这一问挂着待选，下一句是 1 / 2 就走续查通道，别的字照常当提问。
+ */
+describe('「还要继续查吗」在 QQ 里也能答', () => {
+  function paused(resumeId = 'r-20261101'): ChainAskResult {
+    return {
+      kind: 'continue-ask',
+      question: '已经查了 8 轮，还要接着查吗？',
+      options: ['继续查（再给 8 轮）', '先按现在的结果回答'],
+      stats: stats(),
+      resumeId
+    }
+  }
+
+  it('给出 1 / 2 的用法，不再让人回桌面点', () => {
+    const text = formatAskResult(paused())
+    expect(text).toContain('已经查了 8 轮')
+    expect(text).toContain('1. 继续查（再给 8 轮）')
+    expect(text).toContain('回「1」继续查')
+    expect(text).toContain('回「2」按现有结果收尾')
+    expect(text).not.toContain('回桌面点一下')
+  })
+
+  it('只认 1 / 2（含全角与标点）；别的话不吞', () => {
+    expect(parseResumeChoice('1')).toBe('continue')
+    expect(parseResumeChoice(' 1 ')).toBe('continue')
+    expect(parseResumeChoice('1.')).toBe('continue')
+    expect(parseResumeChoice('1、')).toBe('continue')
+    expect(parseResumeChoice('１')).toBe('continue')
+    expect(parseResumeChoice('2')).toBe('stop')
+    expect(parseResumeChoice('２）')).toBe('stop')
+    expect(parseResumeChoice('继续')).toBeNull()
+    expect(parseResumeChoice('1 2')).toBeNull()
+    expect(parseResumeChoice('1 条任务')).toBeNull()
+    expect(parseResumeChoice('')).toBeNull()
+  })
+
+  it('回「1」走续查（continue），答案发回同一会话，不当成新问题', async () => {
+    const transport = new FakeTransport()
+    const resumed: QqResumeInput[] = []
+    let asked = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        asked += 1
+        return paused()
+      },
+      resume: async (input) => {
+        resumed.push(input)
+        return answer('接着查完了：日记里确实有两条没做完的任务。')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+
+    await channel.handleMessage(inbound('对了，之前我日记里面好像也有一些任务没完成唉'))
+    expect(transport.sent.at(-1)?.text).toContain('回「1」继续查')
+
+    await channel.handleMessage(inbound('1'))
+    expect(asked).toBe(1)
+    expect(resumed).toHaveLength(1)
+    expect(resumed[0]).toMatchObject({
+      resumeId: 'r-20261101',
+      decision: 'continue',
+      conversationId: 'qq-20002',
+      question: '对了，之前我日记里面好像也有一些任务没完成唉'
+    })
+    // 长答会分条（正文 + 参考），拼起来看
+    expect(transport.sent.map((item) => item.text).join('\n')).toContain('接着查完了')
+
+    // 收尾之后这条待选就没了：再来个「1」是普通提问
+    await channel.handleMessage(inbound('1'))
+    expect(asked).toBe(2)
+    expect(resumed).toHaveLength(1)
+  })
+
+  it('回「2」走 stop；续查之后又是 continue-ask 就换成新的 resumeId', async () => {
+    const transport = new FakeTransport()
+    const decisions: string[] = []
+    const ids: string[] = []
+    let round = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => paused('r-first'),
+      resume: async ({ resumeId, decision }) => {
+        ids.push(resumeId)
+        decisions.push(decision)
+        round += 1
+        // 前两次续查后还想再查：每次给一个新检查点；第三次收尾
+        return round <= 2 ? paused(`r-round-${round}`) : answer('收尾了。')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+
+    await channel.handleMessage(inbound('这条要查很久'))
+    await channel.handleMessage(inbound('1'))
+    expect(ids).toEqual(['r-first'])
+    expect(decisions).toEqual(['continue'])
+    expect(transport.sent.at(-1)?.text).toContain('回「1」继续查')
+
+    // 上一轮又给了新检查点：再来「1」应该续新的那个
+    await channel.handleMessage(inbound('1'))
+    expect(ids).toEqual(['r-first', 'r-round-1'])
+
+    await channel.handleMessage(inbound('2'))
+    expect(ids).toEqual(['r-first', 'r-round-1', 'r-round-2'])
+    expect(decisions).toEqual(['continue', 'continue', 'stop'])
+    expect(transport.sent.map((item) => item.text).join('\n')).toContain('收尾了')
+  })
+
+  it('换成别的问题就清掉待选（别把「1」当很久以前那次的答案）', async () => {
+    const transport = new FakeTransport()
+    let asked = 0
+    let resumedCount = 0
+    const channel = createQqChannel(transport, {
+      ask: async () => {
+        asked += 1
+        return asked === 1 ? paused() : answer('另一个问题答完了。')
+      },
+      resume: async () => {
+        resumedCount += 1
+        return answer('不该走到这里。')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+
+    await channel.handleMessage(inbound('先问那个要查很久的'))
+    await channel.handleMessage(inbound('算了，先问个别的'))
+    expect(transport.sent.map((item) => item.text).join('\n')).toContain('另一个问题答完了')
+
+    await channel.handleMessage(inbound('1'))
+    expect(resumedCount).toBe(0)
+    expect(asked).toBe(3)
+  })
+
+  it('没接续查能力：「1」照常当提问，不崩', async () => {
+    const transport = new FakeTransport()
+    const asked: string[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ text }) => {
+        asked.push(text)
+        return paused()
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('这条要查很久'))
+    await channel.handleMessage(inbound('1'))
+    expect(asked).toEqual(['这条要查很久', '1'])
   })
 })

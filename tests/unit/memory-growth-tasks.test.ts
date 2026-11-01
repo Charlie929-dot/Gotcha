@@ -4,8 +4,8 @@
  * 守的纪律（自调用 v0.2 §8 / §12.3）：
  * 1. 日记是 ta 自己的自主任务（origin=agent / background / daily），默认 23:30，可被改；
  * 2. 播种幂等：同一条说明出现过（哪怕已取消）就不再建，重启不复活；
- * 3. 周记只在周日、这周还没写、今天还没排过时串一条，排在日记之后 2 分钟；
- * 4. 一次只做一件事：周记是一条一次性任务，不会和日记抢同一刻。
+ * 3. 一层写完串下一篇（周日周记 / 月末总结 / 年终总结），排在上一层之后 2 分钟；
+ * 4. 一次只做一件事：接力出来的都是各自的一条一次性任务，不会抢同一刻、也不会堆。
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -14,12 +14,17 @@ import { openDatabase, type Db } from '../../src/db'
 import {
   GROWTH_DAILY_INSTRUCTION,
   GROWTH_LEGACY_INSTRUCTIONS,
+  GROWTH_MONTHLY_INSTRUCTION,
   GROWTH_WEEKLY_DELAY_MS,
   GROWTH_WEEKLY_INSTRUCTION,
+  GROWTH_YEARLY_INSTRUCTION,
   ensureGrowthDailyTask,
-  ensureWeeklyWritingTask,
+  ensureNextGrowthWriting,
   isGrowthDailyTask,
+  isGrowthWritingTask,
+  isMonthEndDay,
   isWeeklyReviewDay,
+  isYearEndDay,
   nextDailyWritingAt
 } from '../../src/memory/agent/growth-tasks'
 import { cancelTask, createTask, getTaskById, updateTask } from '../../src/memory/agent/tasks'
@@ -114,17 +119,35 @@ describe('日记任务播种', () => {
   })
 })
 
-describe('周记串在日记之后', () => {
-  it('非周日不排', () => {
-    expect(ensureWeeklyWritingTask(db, MONDAY, { weeklyWritten: false })).toBeNull()
+describe('收尾日', () => {
+  it('月末：28 / 29 / 30 / 31 天都认（闰年 2-29）', () => {
+    expect(isMonthEndDay(at('2026-11-30', '23:35'))).toBe(true)
+    expect(isMonthEndDay(at('2026-11-29', '23:35'))).toBe(false)
+    expect(isMonthEndDay(at('2026-02-28', '23:35'))).toBe(true)
+    expect(isMonthEndDay(at('2028-02-29', '23:35'))).toBe(true)
+    expect(isMonthEndDay(at('2028-02-28', '23:35'))).toBe(false)
+    expect(isMonthEndDay(at('2026-04-30', '23:35'))).toBe(true)
+    expect(isMonthEndDay(at('2026-04-29', '23:35'))).toBe(false)
+    expect(isMonthEndDay(at('2026-12-31', '23:35'))).toBe(true)
   })
 
-  it('这周已经写过周记就不排', () => {
-    expect(ensureWeeklyWritingTask(db, SUNDAY, { weeklyWritten: true })).toBeNull()
+  it('年末只有 12-31', () => {
+    expect(isYearEndDay(at('2026-12-31', '23:35'))).toBe(true)
+    expect(isYearEndDay(at('2026-12-30', '23:35'))).toBe(false)
+    expect(isYearEndDay(at('2026-11-30', '23:35'))).toBe(false)
+  })
+})
+
+/** 一层都还没写 */
+const NOTHING = { weekly: false, monthly: false, yearly: false }
+
+describe('接力：一层写完串下一篇', () => {
+  it('普通日子（非周日 / 非月末）：一层都不排', () => {
+    expect(ensureNextGrowthWriting(db, MONDAY, NOTHING)).toBeNull()
   })
 
-  it('周日 + 没写过：排一条一次性周记，2 分钟后到点', () => {
-    const seed = ensureWeeklyWritingTask(db, SUNDAY, { weeklyWritten: false })
+  it('周日 + 这周没写：排一条一次性周记，2 分钟后到点', () => {
+    const seed = ensureNextGrowthWriting(db, SUNDAY, NOTHING)
     expect(seed).not.toBeNull()
     expect(seed?.task).toMatchObject({
       origin: 'agent',
@@ -135,23 +158,82 @@ describe('周记串在日记之后', () => {
     expect(seed?.task.next_due_at).toBe(SUNDAY + GROWTH_WEEKLY_DELAY_MS)
   })
 
-  it('同一天重复触发不建第二条；上周那条做完后下周还能再排', () => {
-    const first = ensureWeeklyWritingTask(db, SUNDAY, { weeklyWritten: false })
+  it('这周已经写过周记就不排', () => {
+    expect(ensureNextGrowthWriting(db, SUNDAY, { ...NOTHING, weekly: true })).toBeNull()
+  })
+
+  it('月末 + 没写过：排月末总结；已经写过就不排', () => {
+    const monthEnd = at('2026-11-30', '23:35')
+    const seed = ensureNextGrowthWriting(db, monthEnd, NOTHING)
+    expect(seed?.task).toMatchObject({
+      instruction: GROWTH_MONTHLY_INSTRUCTION,
+      repeat: '',
+      delivery: 'background'
+    })
+    expect(seed?.task.next_due_at).toBe(monthEnd + GROWTH_WEEKLY_DELAY_MS)
+    expect(ensureNextGrowthWriting(db, monthEnd, { ...NOTHING, monthly: true })).toBeNull()
+  })
+
+  it('12-31（非周日）：月末总结在前，写完了才排年终总结', () => {
+    const yearEnd = at('2026-12-31', '23:35')
+    const monthly = ensureNextGrowthWriting(db, yearEnd, NOTHING)
+    expect(monthly?.task.instruction).toBe(GROWTH_MONTHLY_INSTRUCTION)
+    // 月末总结还挂着：年终总结不插队
+    expect(ensureNextGrowthWriting(db, yearEnd, NOTHING)).toBeNull()
+    // 月末总结写完了：轮到年终总结
+    if (monthly === null) return
+    updateTask(db, { id: monthly.task.id, state: 'completed', now: yearEnd + 60_000 })
+    const yearly = ensureNextGrowthWriting(db, yearEnd + 120_000, {
+      ...NOTHING,
+      monthly: true
+    })
+    expect(yearly?.task.instruction).toBe(GROWTH_YEARLY_INSTRUCTION)
+    // 都写完了：不排
+    expect(
+      ensureNextGrowthWriting(db, yearEnd + 180_000, { weekly: true, monthly: true, yearly: true })
+    ).toBeNull()
+  })
+
+  it('周日恰好是月末（2026-05-31）：周记在前，再月末总结，最后年终不掺和', () => {
+    const sundayMonthEnd = at('2026-05-31', '23:35')
+    expect(isWeeklyReviewDay(sundayMonthEnd)).toBe(true)
+    expect(isMonthEndDay(sundayMonthEnd)).toBe(true)
+    expect(isYearEndDay(sundayMonthEnd)).toBe(false)
+    const weekly = ensureNextGrowthWriting(db, sundayMonthEnd, NOTHING)
+    expect(weekly?.task.instruction).toBe(GROWTH_WEEKLY_INSTRUCTION)
+    if (weekly === null) return
+    updateTask(db, { id: weekly.task.id, state: 'completed', now: sundayMonthEnd + 60_000 })
+    const monthly = ensureNextGrowthWriting(db, sundayMonthEnd + 120_000, {
+      ...NOTHING,
+      weekly: true
+    })
+    expect(monthly?.task.instruction).toBe(GROWTH_MONTHLY_INSTRUCTION)
+  })
+
+  it('这一层今天试过（写失败也算）：跳过它，不把后面的层堵死', () => {
+    const yearEnd = at('2026-12-31', '23:35')
+    // 月末总结今天排过、已经跑完（没写成）
+    const monthly = createTask(db, {
+      instruction: GROWTH_MONTHLY_INSTRUCTION,
+      nextDueAt: yearEnd,
+      repeat: '',
+      origin: 'agent',
+      delivery: 'background',
+      now: yearEnd
+    })
+    updateTask(db, { id: monthly.id, state: 'completed', now: yearEnd + 1000 })
+    const yearly = ensureNextGrowthWriting(db, yearEnd + 60_000, NOTHING)
+    expect(yearly?.task.instruction).toBe(GROWTH_YEARLY_INSTRUCTION)
+  })
+
+  it('同一天重复触发不建第二条；下个周期还能再排', () => {
+    const first = ensureNextGrowthWriting(db, SUNDAY, NOTHING)
     expect(first).not.toBeNull()
-    expect(ensureWeeklyWritingTask(db, SUNDAY + 60_000, { weeklyWritten: false })).toBeNull()
-    // 这一条做完（一次性任务）之后，下个周日（2026-11-08）还能再排
+    expect(ensureNextGrowthWriting(db, SUNDAY + 60_000, NOTHING)).toBeNull()
     if (first === null) return
     updateTask(db, { id: first.task.id, state: 'completed', now: SUNDAY + 120_000 })
     const nextSunday = at('2026-11-08', '23:35')
-    expect(ensureWeeklyWritingTask(db, nextSunday, { weeklyWritten: false })).not.toBeNull()
-  })
-
-  it('已有一条活着的周记任务就不再建', () => {
-    const first = ensureWeeklyWritingTask(db, SUNDAY, { weeklyWritten: false })
-    expect(first).not.toBeNull()
-    // 换一天（下周日）但上一条还挂着：不重复建
-    const nextSunday = at('2026-11-08', '23:35')
-    expect(ensureWeeklyWritingTask(db, nextSunday, { weeklyWritten: false })).toBeNull()
+    expect(ensureNextGrowthWriting(db, nextSunday, NOTHING)).not.toBeNull()
   })
 
   it('旧版周记长说明也会改名；改完那条还活着，就不再排新的', () => {
@@ -163,8 +245,25 @@ describe('周记串在日记之后', () => {
       delivery: 'background',
       now: SUNDAY
     })
-    expect(ensureWeeklyWritingTask(db, SUNDAY, { weeklyWritten: false })).toBeNull()
+    expect(ensureNextGrowthWriting(db, SUNDAY, NOTHING)).toBeNull()
     expect(getTaskById(db, legacy.id)?.instruction).toBe('写周记')
     expect(db.prepare(`SELECT COUNT(*) AS n FROM mem_tasks`).get()).toEqual({ n: 1 })
+  })
+})
+
+describe('哪些任务算写作任务', () => {
+  it('四种名字都算（交付回来要接力）；不相干的不算', () => {
+    const task = (instruction: string): Parameters<typeof isGrowthWritingTask>[0] =>
+      ({ instruction }) as Parameters<typeof isGrowthWritingTask>[0]
+    for (const name of [
+      GROWTH_DAILY_INSTRUCTION,
+      GROWTH_WEEKLY_INSTRUCTION,
+      GROWTH_MONTHLY_INSTRUCTION,
+      GROWTH_YEARLY_INSTRUCTION
+    ]) {
+      expect(isGrowthWritingTask(task(name))).toBe(true)
+    }
+    expect(isGrowthWritingTask(task('提醒他去晚点名'))).toBe(false)
+    expect(isGrowthDailyTask(task(GROWTH_MONTHLY_INSTRUCTION))).toBe(false)
   })
 })

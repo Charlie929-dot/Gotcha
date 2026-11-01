@@ -85,7 +85,7 @@ export const ASK_TOOL_LABELS: Readonly<Record<AskToolName, string>> = {
   update_task: '改一条任务的时间 / 说明 / 重复 / 交付方式',
   cancel_task: '取消一条任务',
   update_notebook: '改自己的小本本：补一条 / 修正 / 放下（编号在小本本里）',
-  write_growth: '写日记 / 周记（写进自己的成长档案）'
+  write_growth: '写日记 / 周记 / 月末总结 / 年终总结（写进自己的成长档案）'
 }
 
 export function isAskToolName(value: string): value is AskToolName {

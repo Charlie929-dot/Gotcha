@@ -246,10 +246,18 @@ export interface NotebookToolDeps {
 }
 
 /* ------------------------------------------------------------------ */
-/* 成长档案（自调用 v0.2 §8 / §12.3）：一个工具写日记 / 周记            */
+/* 成长档案（自调用 v0.2 §8 / §12.3）：一个工具写日记 / 周记 / 月末总结 / 年终总结 */
 /* ------------------------------------------------------------------ */
 
-export type GrowthKindArg = 'daily' | 'weekly'
+export type GrowthKindArg = 'daily' | 'weekly' | 'monthly' | 'yearly'
+
+/** 模型给的 kind 只认这四个（不猜：认不出来就让 ta 重说） */
+export function growthKindArgOf(value: unknown): GrowthKindArg | null {
+  if (value === 'daily' || value === 'weekly' || value === 'monthly' || value === 'yearly') {
+    return value
+  }
+  return null
+}
 
 export interface GrowthWriteRequest {
   kind: GrowthKindArg
@@ -261,7 +269,7 @@ export interface GrowthWriteResult {
   ok: boolean
   message: string
   kind: GrowthKindArg | ''
-  /** 写到哪一篇：`2026-11-01` / `2026-W44` */
+  /** 写到哪一篇：`2026-11-01` / `2026-W44` / `2026-11` / `2026` */
   period: string
   chars: number
 }
@@ -1412,9 +1420,14 @@ export function createAskToolExecutor(deps: AskToolDeps): {
         }
         if (call.name === 'write_growth') {
           const rawKind = call.arguments['kind']
-          if (rawKind !== 'daily' && rawKind !== 'weekly') {
+          const kind = growthKindArgOf(rawKind)
+          if (kind === null) {
             return {
-              result: { kind: 'error', message: 'write_growth 需要 kind：daily（今天的日记）/ weekly（这一周的周记）' },
+              result: {
+                kind: 'error',
+                message:
+                  'write_growth 需要 kind：daily（今天的日记）/ weekly（这一周的周记）/ monthly（这个月的月末总结）/ yearly（这一年的年终总结）'
+              },
               segments: []
             }
           }
@@ -1439,7 +1452,7 @@ export function createAskToolExecutor(deps: AskToolDeps): {
               segments: []
             }
           }
-          const outcome = deps.growth.write({ kind: rawKind, content })
+          const outcome = deps.growth.write({ kind, content })
           return {
             result: {
               kind: 'write_growth',

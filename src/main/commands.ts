@@ -104,8 +104,9 @@ export interface CommandDeps {
     remove: (id: string) => string
   }
   /**
-   * `/growth`（自调用 v0.2 §8 / §12.3）：看 ta 自己的成长档案（日记 / 周记）。
-   * `show` 按日期（`2026-11-01`）或周（`2026-W44`）看全文。没注入就回「还没接上」。
+   * `/growth`（自调用 v0.2 §8 / §12.3）：看 ta 自己的成长档案（日记 / 周记 / 月末总结 / 年终总结）。
+   * `show` 按日期（`2026-11-01`）、周（`2026-W44`）、月（`2026-11`）或年（`2026`）看全文。
+   * 没注入就回「还没接上」。
    */
   growth?: {
     list: () => string
@@ -504,7 +505,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /tool            看当前分支的工具；set / ele / add / rm',
     '  /tasks [cancel <编号>]  看挂着的计划 / 自主任务；cancel 取消一条',
     '  /notebook [rm <编号>]  看 ta 的小本本（当前理解）；rm 删掉一条',
-    '  /growth [日期|周]  看 ta 的成长档案（日记 / 周记）；给键看全文',
+    '  /growth [日期|周|月|年]  看 ta 的成长档案（日记 / 周记 / 月末总结 / 年终总结）；给键看全文',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
     '  /life            看剩余生命（token；纯模型分支也有，但不冻结）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
@@ -1674,7 +1675,9 @@ export function createCommandHandler(
         const key = parsed.args.join(' ').trim()
         if (key === '') return commandResult(deps.growth.list())
         if (parsed.args.length > 1) {
-          return commandResult('用法：/growth 或 /growth 2026-11-01（周记写 2026-W44）')
+          return commandResult(
+            '用法：/growth 或 /growth 2026-11-01（周记 2026-W44，月末总结 2026-11，年终总结 2026）'
+          )
         }
         return commandResult(deps.growth.show(key))
       }

@@ -16,18 +16,24 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
   GROWTH_DAILY_MAX_CHARS,
+  GROWTH_MONTHLY_MAX_CHARS,
   checkGrowthBody,
   emptyGrowthText,
   growthEntryText,
   growthFilePath,
   growthKeyOf,
+  growthKindLabel,
+  growthKindOfKey,
   growthListText,
   growthTitle,
+  isGrowthKey,
   isoWeekKey,
   isoWeekOf,
   isoWeekRange,
   listGrowthKeys,
   localDayKey,
+  localMonthKey,
+  localYearKey,
   normalizeGrowthBody,
   parseGrowthFile,
   readGrowthEntry,
@@ -73,10 +79,46 @@ describe('时间键', () => {
     expect(growthKeyOf('weekly', at)).toMatch(/^2026-W\d{2}$/u)
   })
 
+  it('月末总结按本地月、年终总结按本地年（不跟着 ISO 周走）', () => {
+    const at = new Date(2026, 11, 31, 23, 30).getTime()
+    expect(localMonthKey(at)).toBe('2026-12')
+    expect(localYearKey(at)).toBe('2026')
+    expect(growthKeyOf('monthly', at)).toBe('2026-12')
+    expect(growthKeyOf('yearly', at)).toBe('2026')
+    // 12-31 在 ISO 里属于下一年的第 1 周，但月末 / 年终仍按本地日历
+    expect(growthKeyOf('weekly', at)).toMatch(/^20\d{2}-W\d{2}$/u)
+  })
+
   it('标题是人话', () => {
     expect(growthTitle('daily', '2026-11-01')).toBe('2026-11-01（周日）')
     expect(growthTitle('weekly', '2026-W44')).toContain('2026 第 44 周')
     expect(growthTitle('weekly', '2026-W44')).toContain('~')
+    expect(growthTitle('monthly', '2026-11')).toBe('2026 年 11 月')
+    expect(growthTitle('yearly', '2026')).toBe('2026 年')
+  })
+
+  it('键的形状认得出来（四层不混）：不认识的键不猜', () => {
+    expect(growthKindOfKey('2026-11-01')).toBe('daily')
+    expect(growthKindOfKey('2026-W44')).toBe('weekly')
+    expect(growthKindOfKey('2026-11')).toBe('monthly')
+    expect(growthKindOfKey('2026')).toBe('yearly')
+    expect(growthKindOfKey('2026-13')).toBe('monthly')
+    expect(growthKindOfKey('不是键')).toBeNull()
+    expect(growthKindOfKey('2026-11-01-01')).toBeNull()
+    // 月份越界 / 年份太早：形状对但值不对
+    expect(isGrowthKey('monthly', '2026-11')).toBe(true)
+    expect(isGrowthKey('monthly', '2026-13')).toBe(false)
+    expect(isGrowthKey('monthly', '2026-00')).toBe(false)
+    expect(isGrowthKey('yearly', '2026')).toBe(true)
+    expect(isGrowthKey('yearly', '1969')).toBe(false)
+    expect(isGrowthKey('yearly', '2026-11')).toBe(false)
+  })
+
+  it('四种档案各有自己的人话', () => {
+    expect(growthKindLabel('daily')).toBe('日记')
+    expect(growthKindLabel('weekly')).toBe('周记')
+    expect(growthKindLabel('monthly')).toBe('月末总结')
+    expect(growthKindLabel('yearly')).toBe('年终总结')
   })
 })
 
@@ -92,6 +134,17 @@ describe('正文归一与有界', () => {
     const tooLong = checkGrowthBody('daily', 'a'.repeat(GROWTH_DAILY_MAX_CHARS + 1))
     expect(tooLong.ok).toBe(false)
     if (!tooLong.ok) expect(tooLong.message).toContain('最多')
+    if (!tooLong.ok) expect(tooLong.message).toContain('日记')
+  })
+
+  it('月末总结 / 年终总结也有界（2000 字，拒的时候说清是哪一种）', () => {
+    expect(checkGrowthBody('monthly', 'a'.repeat(GROWTH_MONTHLY_MAX_CHARS)).ok).toBe(true)
+    const monthlyTooLong = checkGrowthBody('monthly', 'a'.repeat(GROWTH_MONTHLY_MAX_CHARS + 1))
+    expect(monthlyTooLong.ok).toBe(false)
+    if (!monthlyTooLong.ok) expect(monthlyTooLong.message).toContain('月末总结')
+    const yearlyTooLong = checkGrowthBody('yearly', 'a'.repeat(GROWTH_MONTHLY_MAX_CHARS + 1))
+    expect(yearlyTooLong.ok).toBe(false)
+    if (!yearlyTooLong.ok) expect(yearlyTooLong.message).toContain('年终总结')
   })
 })
 
@@ -142,8 +195,30 @@ describe('写 / 读 / 列', () => {
   it('不认识的键 / 不存在的篇', () => {
     expect(writeGrowthEntry(root, 'daily', '2026-13-40', 'x').ok).toBe(false)
     expect(writeGrowthEntry(root, 'weekly', '2026-44', 'x').ok).toBe(false)
+    expect(writeGrowthEntry(root, 'monthly', '2026-13', 'x').ok).toBe(false)
+    expect(writeGrowthEntry(root, 'yearly', '26', 'x').ok).toBe(false)
     expect(readGrowthEntry(root, 'daily', '2026-11-01')).toBeNull()
     expect(readGrowthEntry(root, 'daily', '不是日期')).toBeNull()
+  })
+
+  it('月末总结 / 年终总结各落各的目录；重写同样覆盖', () => {
+    const monthly = writeGrowthEntry(root, 'monthly', '2026-11', '这个月……')
+    expect(monthly.ok).toBe(true)
+    if (!monthly.ok) return
+    expect(monthly.entry.path).toBe(join('growth', 'monthly', '2026-11.md'))
+    expect(readGrowthEntry(root, 'monthly', '2026-11')?.title).toBe('2026 年 11 月')
+
+    const yearly = writeGrowthEntry(root, 'yearly', '2026', '这一年……')
+    expect(yearly.ok).toBe(true)
+    if (!yearly.ok) return
+    expect(yearly.entry.path).toBe(join('growth', 'yearly', '2026.md'))
+    expect(readGrowthEntry(root, 'yearly', '2026')?.title).toBe('2026 年')
+
+    const again = writeGrowthEntry(root, 'yearly', '2026', '这一年（改过）……')
+    expect(again.ok).toBe(true)
+    if (!again.ok) return
+    expect(again.replaced).toBe(true)
+    expect(listGrowthKeys(root, 'yearly')).toEqual(['2026'])
   })
 
   it('列键：新到旧，忽略不认识的文件；目录不存在 = 空', () => {
@@ -166,11 +241,19 @@ describe('/growth 文本', () => {
   it('列出最近几篇（标题 + 字数），并给看全文的用法', () => {
     writeGrowthEntry(root, 'daily', '2026-11-01', '今天的日记')
     writeGrowthEntry(root, 'weekly', '2026-W44', '这一周')
+    writeGrowthEntry(root, 'monthly', '2026-11', '这个月')
+    writeGrowthEntry(root, 'yearly', '2026', '这一年')
     const text = growthListText(root)
     expect(text).toContain('2026-11-01（周日）')
     expect(text).toContain('5 字')
     expect(text).toContain('2026 第 44 周')
+    expect(text).toContain('月末总结')
+    expect(text).toContain('2026 年 11 月')
+    expect(text).toContain('年终总结')
+    expect(text).toContain('2026 年 ·')
     expect(text).toContain('/growth 2026-11-01')
+    expect(text).toContain('2026-11（月末）')
+    expect(text).toContain('2026（年终）')
   })
 
   it('全文带路径', () => {

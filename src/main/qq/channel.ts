@@ -13,7 +13,7 @@
  */
 
 import type { ChainAskResult, ChainAskResumeDecision } from '../../chain/agent/types'
-import type { QqInbound, QqLog, QqTransportStatus } from './ob11'
+import type { QqImageRef, QqInbound, QqLog, QqQuotedMessage, QqTransportStatus } from './ob11'
 import { QQ_INBOUND_FILE_MAX, QQ_INBOUND_IMAGE_MAX } from './ob11'
 import {
   downloadFileBytes,
@@ -25,6 +25,54 @@ import {
   textFromBytes
 } from './media'
 
+/** 通道看到的台账记录（真实实现是 `ChatLog`；测试给内存假实现） */
+export interface QqChatRecordView {
+  readonly seq: number
+  readonly qqId: number
+  readonly role: 'user' | 'ta'
+  readonly text: string
+  readonly at: number
+  readonly imageCount: number
+  /** 这条引用了哪条（短号） */
+  readonly quoteSeq?: number
+}
+
+/** 通道要用的台账能力（D96）：记 / 按 QQ id 回查 / 按短号回查 / 最近几条 */
+export interface QqChatLog {
+  append(
+    conversationId: string,
+    input: {
+      qqId: number
+      role: 'user' | 'ta'
+      text: string
+      at: number
+      imageCount?: number
+      quoteSeq?: number
+    }
+  ): QqChatRecordView
+  byQqId(conversationId: string, qqId: number): QqChatRecordView | null
+  bySeq(conversationId: string, seq: number): QqChatRecordView | null
+  recent(conversationId: string, limit?: number): readonly QqChatRecordView[]
+}
+
+/** 引用块里的一句话（给模型的 `quoted`）：短号 / 来源 / 时刻 / 原话 / 图数 */
+export interface QqQuoteView {
+  readonly id: number
+  readonly from: 'user' | 'ta'
+  readonly at: number
+  readonly text: string
+  readonly images: number
+  readonly missing?: true
+}
+
+/** 最近几条聊天（给模型的 `recent`） */
+export interface QqRecentView {
+  readonly id: number
+  readonly from: 'user' | 'ta'
+  readonly at: number
+  readonly text: string
+}
+
 /** 传输层的最小契约（真实实现是 `QqOb11Server`；测试里换成假实现） */
 export interface QqTransport {
   start(options: {
@@ -35,9 +83,15 @@ export interface QqTransport {
     log: QqLog
   }): Promise<{ port: number }>
   stop(): Promise<void>
-  sendPrivate(userId: number, text: string): Promise<void>
+  /**
+   * 发一条消息；`replyTo` 是真实 QQ message_id（D96：`reply` 段放第一位）。
+   * 返回发出去的 message_id（拿不到就 null）：通道要把它记进台账。
+   */
+  sendPrivate(userId: number, text: string, options?: { replyTo?: number }): Promise<number | null>
   /** NapCat `get_image`：拿 base64（优先）或 url（兜底） */
   getImage(file: string): Promise<{ base64?: string; url?: string }>
+  /** NapCat `get_msg`（D96）：台账没命中时兜底解引用；可选，假实现不接就当取不到 */
+  getMsg?(messageId: number): Promise<QqQuotedMessage | null>
   /** 私聊文件的下载地址（D88）：可选，假实现不接就当拿不到 */
   getFileUrl?(fileId: string): Promise<string | null>
   /** 改 QQ 昵称（M4 传承）：可选，老测试假实现不用接 */
@@ -66,6 +120,10 @@ export interface QqAskInput {
   images?: readonly string[]
   /** 本条消息里的文本文件（D88：QQ 以「文件」发的 .md/.txt 等） */
   files?: readonly { readonly name: string; readonly text: string }[]
+  /** 本条消息引用了哪条（D96）：通道已解出原话；取不到就 `missing` */
+  quoted?: QqQuoteView
+  /** 最近几条聊天（含本轮这条）：让 ta 知道能引用谁 */
+  recent?: readonly QqRecentView[]
 }
 
 export interface QqChannelDeps {
@@ -83,6 +141,11 @@ export interface QqChannelDeps {
   command?: (text: string, context: { conversationId: string }) => Promise<ChainAskResult | null>
   log: QqLog
   now?: () => number
+  /**
+   * 聊天台账（D96）：记短号与原话、解引用、给 `quote_message` 查。
+   * 不传 = 没有台账：引用只能靠 `getMsg` 兜底，重启后引用不了旧消息。
+   */
+  chatLog?: QqChatLog
   /** 每用户每分钟最多几条（默认 6） */
   perMinute?: number
   /** 全局排队上限（默认 8）：超了回一句「排队中」 */
@@ -350,6 +413,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
   const pendingChoices = new Map<string, { resumeId: string; question: string }>()
 
   const log = deps.log
+  const chatLog = deps.chatLog
 
   /**
    * 图片引用 → data URL。优先 `get_image` 的 base64（不下载），没有才走 url；
@@ -456,23 +520,131 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     if (at - last < 60_000) return
     warnedAt.set(userId, at)
     try {
-      await transport.sendPrivate(userId, text)
+      // 提醒也算 ta 说的话：记进台账，用户引用它时能解出原话
+      await sendOne(userId, `qq-${userId}`, text)
     } catch (error) {
       log('warn', 'qq reply failed', { error: String(error) })
     }
   }
 
-  /** 一段回复 → 按上限分条发出去（段间留一口气，测试传 partGapMs: 0） */
-  const sendParts = async (userId: number, text: string): Promise<number> => {
+  /**
+   * 发一条并记进台账（role=ta）。`sentId` 拿不到（个别实现不回 message_id）就不记：
+   * 没有真实 QQ id 的映射没有意义，宁可少一条也不编。
+   */
+  const sendOne = async (
+    userId: number,
+    conversationId: string,
+    text: string,
+    replyTo?: number
+  ): Promise<number | null> => {
+    const sentId = await transport.sendPrivate(
+      userId,
+      text,
+      replyTo !== undefined ? { replyTo } : undefined
+    )
+    if (chatLog !== undefined && sentId !== null) {
+      chatLog.append(conversationId, {
+        qqId: sentId,
+        role: 'ta',
+        text,
+        at: now(),
+        imageCount: 0
+      })
+    }
+    return sentId
+  }
+
+  /**
+   * 一段回复 → 按上限分条发出去（段间留一口气，测试传 partGapMs: 0）。
+   * D96：只有第一段带引用；引用被拒（目标撤回 / 过期 / 风控）时重试一次纯文本，
+   * 保证回答仍然送达——两次都失败才记 warn。
+   */
+  const sendParts = async (userId: number, text: string, replyTo?: number): Promise<number> => {
     const parts = splitForQq(text, config?.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
-    for (const part of parts) {
-      await transport.sendPrivate(userId, part)
+    const conversationId = `qq-${userId}`
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index] ?? ''
+      const target = index === 0 ? replyTo : undefined
+      try {
+        await sendOne(userId, conversationId, part, target)
+      } catch (error) {
+        if (target === undefined) throw error
+        log('warn', 'qq reply quote rejected, retrying plain text', { error: String(error) })
+        await sendOne(userId, conversationId, part)
+      }
       // 连发太快时 QQ 侧偶发乱序 / 折叠（默认 200ms）
       if (parts.length > 1 && partGapMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, partGapMs))
       }
     }
     return parts.length
+  }
+
+  /** `get_msg` 兜底拿到图（最多 1 张）：引用是一张图时也让 ta 看见 */
+  const quotedImagesOf = async (refs: readonly QqImageRef[] | undefined): Promise<string[]> => {
+    if (refs === undefined || refs.length === 0) return []
+    return resolveImages(refs.slice(0, 1))
+  }
+
+  /**
+   * 解引用（D96 §5.5）：台账 → `get_msg` → missing，三档都如实。
+   * 返回给模型的 `quoted`，以及能附上的被引用图（最多 1 张）。
+   */
+  const resolveQuote = async (
+    inbound: QqInbound,
+    conversationId: string
+  ): Promise<{ quoted?: QqQuoteView; images: string[] }> => {
+    const quoteId = inbound.quoteId
+    if (quoteId === undefined) return { images: [] }
+    const ledger = chatLog?.byQqId(conversationId, quoteId) ?? null
+    if (ledger !== null) {
+      const pureImage = ledger.text === '' && ledger.imageCount > 0
+      // 纯图引用：台账只存张数，图还得回 QQ 取一次（拿不到就只留 [图片]）
+      const fallback = pureImage && transport.getMsg !== undefined ? await transport.getMsg(quoteId) : null
+      const images = await quotedImagesOf(fallback?.images)
+      return {
+        quoted: {
+          id: ledger.seq,
+          from: ledger.role,
+          at: ledger.at,
+          text: ledger.text !== '' ? ledger.text : ledger.imageCount > 0 ? '[图片]' : '',
+          images: ledger.imageCount
+        },
+        images
+      }
+    }
+    const got = transport.getMsg !== undefined ? await transport.getMsg(quoteId) : null
+    if (got === null || (got.text === '' && (got.images?.length ?? 0) === 0)) {
+      // 台账没命中、get_msg 也取不到：如实标 missing，不编内容
+      log('warn', 'qq quote unresolved', { reason: got === null ? 'no-get-msg' : 'empty' })
+      return {
+        quoted: { id: 0, from: 'user', at: 0, text: '', images: 0, missing: true },
+        images: []
+      }
+    }
+    const images = await quotedImagesOf(got.images)
+    const messageId = got.fromSelf ? 'ta' : 'user'
+    // 兜底取到的消息也补进台账：它有了短号，之后能再被引用
+    const seq =
+      chatLog !== undefined
+        ? chatLog.append(conversationId, {
+            qqId: quoteId,
+            role: messageId,
+            text: got.text,
+            at: got.at,
+            imageCount: got.images?.length ?? 0
+          }).seq
+        : 0
+    return {
+      quoted: {
+        id: seq,
+        from: messageId,
+        at: got.at,
+        text: got.text !== '' ? got.text : '[图片]',
+        images: got.images?.length ?? 0
+      },
+      images
+    }
   }
 
   /**
@@ -549,14 +721,47 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
         // 先取图 / 文件（各自超时），再开始算问答超时：下载慢不该把模型请求挤掉
         const images = await resolveImages(inbound.images)
         const filesAttached = await resolveFiles(inbound.files)
+        // D96：解引用放在台账记账之前，记下的那条才带得上 quoteSeq
+        const quote = await resolveQuote(inbound, conversationId)
+        chatLog?.append(conversationId, {
+          qqId: inbound.messageId,
+          role: 'user',
+          text: inbound.text,
+          at: inbound.at,
+          imageCount: inbound.images?.length ?? 0,
+          ...(quote.quoted !== undefined && quote.quoted.missing !== true
+            ? { quoteSeq: quote.quoted.id }
+            : {})
+        })
+        const recent = chatLog
+          ?.recent(conversationId, 6)
+          .map((record) => ({
+            id: record.seq,
+            from: record.role,
+            at: record.at,
+            text:
+              record.text !== '' ? record.text : record.imageCount > 0 ? '[图片]' : ''
+          }))
         const allImages = [...images, ...filesAttached.images]
+        // 被引用图最多 1 张；本轮已经有 4 张用户图时不再追加
+        const room = Math.max(0, QQ_INBOUND_IMAGE_MAX - allImages.length)
+        allImages.push(...quote.images.slice(0, room))
+        // 只有引用 / 只有图、没打字：给一句中性的「问题」，让这一轮有东西可答
+        const question =
+          inbound.text.trim() !== ''
+            ? inbound.text
+            : quote.quoted !== undefined
+              ? '（引用了这条消息，没有另外打字）'
+              : '（发来附件，没有另外打字）'
         timer = setTimeout(() => controller.abort(), askTimeoutMs)
         result = await deps.ask({
-          text: inbound.text,
+          text: question,
           conversationId,
           signal: controller.signal,
           ...(allImages.length > 0 ? { images: allImages } : {}),
-          ...(filesAttached.files.length > 0 ? { files: filesAttached.files } : {})
+          ...(filesAttached.files.length > 0 ? { files: filesAttached.files } : {}),
+          ...(quote.quoted !== undefined ? { quoted: quote.quoted } : {}),
+          ...(recent !== undefined && recent.length > 0 ? { recent } : {})
         })
       }
       // 记住 / 清掉「要不要接着查」：续查之后又是 continue-ask 就换成新的 resumeId
@@ -571,7 +776,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       } else {
         pendingChoices.delete(conversationId)
       }
-      const parts = await sendParts(inbound.userId, formatAskResult(result))
+      const parts = await sendParts(inbound.userId, formatAskResult(result), result.replyTo)
       log('info', 'qq answered', {
         userId: inbound.userId,
         kind: result.kind,

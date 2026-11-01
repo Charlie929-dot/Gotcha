@@ -17,6 +17,7 @@
 
 import type { CloudAskConversationTurn } from './conversation'
 import { ASK_TOOL_NAMES, hasScreenTools } from './tool-catalog'
+import type { ChainAskChatRecent, ChainAskQuotedMessage } from './types'
 
 /** 出云文本的剥离结果（策略实现返回；核心只消费，不认识具体规则） */
 export interface AskTextRedaction {
@@ -470,6 +471,18 @@ export type RedactableAskLoopToolResult =
       chars: number
       message: string
     }
+  /**
+   * QQ 引用（D96 / PR1）：模型选中了要引用哪条消息。
+   * 只回短号 / 来源 / 原话（让 ta 确认引对了），**真实 QQ id 只在执行器 outcome 里**。
+   */
+  | {
+      kind: 'quote_message'
+      /** 本地短号（`#12` 里的 12） */
+      id: number
+      from: 'user' | 'ta'
+      text: string
+      ok: boolean
+    }
 
 /** 一条小本本条目在送云视图里的样子（正文是 ta 从经历里写的，照样过脱敏） */
 export interface RedactableNotebookEntryView {
@@ -553,6 +566,13 @@ export interface ChainAskLoopPayload {
   readonly life?: AskLifeState
   /** 用户随本轮问题上传的附件（图片 / 文本文件；没有就不出现） */
   readonly attachments?: CloudAskAttachments
+  /**
+   * QQ 引用回复（D96）：被引用那条消息（已过策略、已截断）。
+   * 它是**用户消息内容**，不是提示词；取不到时只有 id + missing。
+   */
+  readonly quoted?: ChainAskQuotedMessage
+  /** 最近几条 QQ 聊天（让模型知道能引用谁；已过策略、已截断） */
+  readonly chatRecent?: readonly ChainAskChatRecent[]
   readonly [chainAskLoopBrand]: true
 }
 
@@ -612,6 +632,9 @@ export interface ChainAskLoopBuildInput {
   }[]
   /** 用户随本轮问题上传的附件（用户主动提供，不过脱敏墙） */
   attachments?: RedactableAskAttachments
+  /** QQ 引用回复（D96）：被引用原话与最近几条聊天；送云前逐条过策略 */
+  quoted?: ChainAskQuotedMessage
+  chatRecent?: readonly ChainAskChatRecent[]
 }
 
 export interface ChainAskLoopBuildResult {
@@ -690,6 +713,11 @@ export const ASK_LOOP_DIARY_QUOTE_MAX_CHARS = 160
 export const ASK_LOOP_TASK_INSTRUCTION_MAX_CHARS = 200
 /** `<now>` 里最多列几条到点的事（多了就只给最近的几条，其余走 search_tasks） */
 export const ASK_LOOP_DUE_TASKS_MAX = 5
+/** QQ 引用：被引用原话最多给多少字（D96），超出加省略号 */
+export const ASK_QUOTED_TEXT_MAX_CHARS = 300
+/** QQ 最近聊天：给几条（含本轮这条）/ 每条片段多少字（D96） */
+export const ASK_CHAT_RECENT_MAX = 6
+export const ASK_CHAT_RECENT_TEXT_MAX_CHARS = 80
 
 /* ------------------------------------------------------------------ */
 /* 组装辅助                                                            */
@@ -711,6 +739,56 @@ function guardText(
     redacted: result.redacted,
     blocked: result.blocked
   }
+}
+
+/** 截断并标省略号（只用于「给人看的一句话」，不用于证据正文） */
+function clipText(text: string, maxChars: number): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text
+}
+
+/**
+ * QQ 引用（D96）：原话过策略；命中阻断就只留 id + missing（不把被挡的内容送出去）。
+ * 纯图引用保留 `images` 张数与 `[图片]` 占位，不许静默消失。
+ */
+function guardQuoted(
+  policy: AskTextPolicy,
+  quoted: ChainAskQuotedMessage | undefined
+): ChainAskQuotedMessage | undefined {
+  if (quoted === undefined) return undefined
+  if (quoted.missing === true) return { id: quoted.id, from: quoted.from, at: quoted.at, text: '', missing: true }
+  // 多取 1 个字，交给 clipText 判断要不要加省略号
+  const text = guardText(policy, quoted.text, ASK_QUOTED_TEXT_MAX_CHARS + 1)
+  if (text.blocked) {
+    return { id: quoted.id, from: quoted.from, at: quoted.at, text: '', missing: true }
+  }
+  const images = Number.isFinite(quoted.images ?? 0) ? Math.max(0, Math.trunc(quoted.images ?? 0)) : 0
+  return {
+    id: quoted.id,
+    from: quoted.from,
+    at: quoted.at,
+    text: clipText(text.text, ASK_QUOTED_TEXT_MAX_CHARS),
+    ...(images > 0 ? { images } : {})
+  }
+}
+
+/** QQ 最近聊天（D96）：单条被策略挡下就丢这条，不连坐整块 */
+function guardChatRecent(
+  policy: AskTextPolicy,
+  recent: readonly ChainAskChatRecent[] | undefined
+): ChainAskChatRecent[] {
+  if (recent === undefined || recent.length === 0) return []
+  const out: ChainAskChatRecent[] = []
+  for (const item of recent.slice(-ASK_CHAT_RECENT_MAX)) {
+    const text = guardText(policy, item.text, ASK_CHAT_RECENT_TEXT_MAX_CHARS + 1)
+    if (text.blocked) continue
+    out.push({
+      id: item.id,
+      from: item.from,
+      at: item.at,
+      text: clipText(text.text, ASK_CHAT_RECENT_TEXT_MAX_CHARS)
+    })
+  }
+  return out
 }
 
 /* ------------------------------------------------------------------ */
@@ -1142,6 +1220,8 @@ export function buildAskLoopPayload(
   const asked = guardText(policy, input.question, ASK_QUESTION_MAX_CHARS)
   const attachments = guardAttachments(input.attachments)
   const opening = guardOpening(policy, input.opening)
+  const quoted = guardQuoted(policy, input.quoted)
+  const chatRecent = guardChatRecent(policy, input.chatRecent)
 
   // 历史轮：问题与答复都是上一轮的屏幕文本（再送一次要再过策略）；阻断就整轮丢掉
   const history: Array<{ question: string; answer: string }> = []
@@ -1487,6 +1567,18 @@ export function buildAskLoopPayload(
         }
         break
       }
+      case 'quote_message': {
+        // QQ 引用（D96）：原话照样过策略；被挡就说「引不了」，不把内容送出去
+        const text = guardText(policy, result.text, ASK_QUOTED_TEXT_MAX_CHARS)
+        view = {
+          kind: 'quote_message',
+          id: result.id,
+          from: result.from,
+          text: text.blocked ? '' : clipText(text.text, ASK_QUOTED_TEXT_MAX_CHARS),
+          ok: !text.blocked
+        }
+        break
+      }
       default: {
         const message = policy.redact(normalizeText(result.message))
         view = { kind: 'error', message: message.blocked ? '工具执行失败' : message.text.slice(0, 120) }
@@ -1521,7 +1613,9 @@ export function buildAskLoopPayload(
       ...(recent ? { recent } : {}),
       ...(opening ? { opening } : {}),
       ...(input.life !== undefined ? { life: input.life } : {}),
-      ...(attachments ? { attachments } : {})
+      ...(attachments ? { attachments } : {}),
+      ...(quoted ? { quoted } : {}),
+      ...(chatRecent.length > 0 ? { chatRecent } : {})
     } as unknown as ChainAskLoopPayload,
     questionBlocked: asked.blocked,
     blockedSegmentIds

@@ -58,12 +58,35 @@ describe('入站解析', () => {
     expect(parsePrivateMessageEvent('x')).toBeNull()
   })
 
-  it('CQ 字符串回退：图片留占位并带引用、@ 与回复丢掉、转义还原', () => {
+  it('CQ 字符串回退：图片留占位并带引用、@ 丢掉、reply 记成引用目标、转义还原', () => {
     const inbound = parsePrivateMessageEvent(
       event({ message: '[CQ:reply,id=1]看这个[CQ:image,file=a.png,url=http://x/a.png] &amp; [CQ:face,id=1]' })
     )
     expect(inbound?.text).toBe('看这个[图片] & [表情]')
     expect(inbound?.images).toEqual([{ file: 'a.png', url: 'http://x/a.png' }])
+    expect(inbound?.quoteId).toBe(1)
+  })
+
+  it('段数组里的 reply 段 → quoteId；只有引用、没有正文也放行（D96）', () => {
+    const quoted = parsePrivateMessageEvent(
+      event({
+        message: [
+          { type: 'reply', data: { id: '88' } },
+          { type: 'text', data: { text: '这是啥意思' } }
+        ]
+      })
+    )
+    expect(quoted?.quoteId).toBe(88)
+    expect(quoted?.text).toBe('这是啥意思')
+
+    const quoteOnly = parsePrivateMessageEvent(
+      event({ message: [{ type: 'reply', data: { id: 99 } }] })
+    )
+    expect(quoteOnly?.text).toBe('')
+    expect(quoteOnly?.quoteId).toBe(99)
+
+    // 只有图片 / 只有文件也不该被当成空消息丢掉
+    expect(parsePrivateMessageEvent(event({ message: [{ type: 'image', data: { file: 'a.png' } }] }))).not.toBeNull()
   })
 
   it('段数组：非文字段只留占位符，at 不参与文本', () => {
@@ -271,6 +294,90 @@ describe('反向 WS 服务端', () => {
     socket.send(JSON.stringify(event({ user_id: 10001, message_id: 778 })))
     await new Promise((resolve) => setTimeout(resolve, 60))
     expect(received).toEqual(['我下午在干嘛'])
+    socket.close()
+  })
+
+  it('sendPrivate 带 replyTo 时 reply 段放第一位；返回发出去的 message_id（D96）', async () => {
+    server = new QqOb11Server()
+    const { port } = await server.start({ port: 0, accessToken: TOKEN, onMessage: () => {} })
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    const actions: Record<string, unknown>[] = []
+    socket.on('message', (data) => {
+      const frame = JSON.parse(data.toString()) as Record<string, unknown>
+      actions.push(frame)
+      socket.send(
+        JSON.stringify({
+          status: 'ok',
+          retcode: 0,
+          data: { message_id: 555 },
+          echo: frame['echo']
+        })
+      )
+    })
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+
+    const sentId = await server.sendPrivate(20002, '这是回答', { replyTo: 88 })
+    expect(sentId).toBe(555)
+    expect(actions[0]).toMatchObject({
+      action: 'send_private_msg',
+      params: {
+        user_id: 20002,
+        message: [
+          { type: 'reply', data: { id: '88' } },
+          { type: 'text', data: { text: '这是回答' } }
+        ]
+      }
+    })
+    socket.close()
+  })
+
+  it('getMsg 兜底：解出原话 / 图片 / 是不是 ta 自己发的；失败返回 null（D96）', async () => {
+    server = new QqOb11Server()
+    const { port } = await server.start({ port: 0, accessToken: TOKEN, onMessage: () => {} })
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    socket.on('message', (data) => {
+      const frame = JSON.parse(data.toString()) as Record<string, unknown>
+      const params = frame['params'] as Record<string, unknown>
+      const messageId = params['message_id']
+      if (messageId === 42) {
+        socket.send(
+          JSON.stringify({
+            status: 'ok',
+            retcode: 0,
+            data: {
+              time: 1_700_000_000,
+              message: [
+                { type: 'text', data: { text: '被引用的话' } },
+                { type: 'image', data: { file: 'q.png' } }
+              ],
+              sender: { user_id: 10001, nickname: 'ta' }
+            },
+            echo: frame['echo']
+          })
+        )
+        return
+      }
+      socket.send(JSON.stringify({ status: 'failed', retcode: 1404, echo: frame['echo'] }))
+    })
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+    // 先收到一条事件，传输层才知道登录号
+    socket.send(JSON.stringify(event()))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+
+    const got = await server.getMsg(42)
+    expect(got?.text).toBe('被引用的话[图片]')
+    expect(got?.images).toEqual([{ file: 'q.png' }])
+    expect(got?.fromSelf).toBe(true)
+    expect(got?.at).toBe(1_700_000_000_000)
+    await expect(server.getMsg(43)).resolves.toBeNull()
     socket.close()
   })
 })

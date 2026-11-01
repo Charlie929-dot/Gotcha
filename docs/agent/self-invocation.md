@@ -387,12 +387,13 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 | 组合根 | `src/main/task-runtime.ts` · `index.ts` · `ask-ipc.ts` · `ask-preload.ts` · `ask/ask.ts` | 任务库独立写连接（避免 `ensureWritable` 关掉正在读的连接）；到点走 `runAskOnce`（与提问同一条通道）；用户正在问 → 让位 2 分钟；说完记进当前会话历史并通知窗口重画 |
 | 视图 | `src/main/commands.ts` | `/tasks` 列挂着的计划 / 自主任务（带来源与同步状态），`/tasks cancel <编号>` 取消 |
 
-### 15.2 测试（`npm test` 1912 条 / 168 文件全绿，`typecheck` / `build` 通过）
+### 15.2 测试（`npm test` 1919 条 / 169 文件全绿，`typecheck` / `build` 通过）
 
 - `tests/unit/memory-tasks.test.ts`（27）：四种视图、重复推进、租约去重、过期不补发、截断标记、`%` 不当通配符。
 - `tests/unit/memory-task-scheduler.test.ts`（12）：睡到最近一条、无任务不留定时器、重配不叠加、单飞、抢不到租约不卡队首、失败重试。
 - `tests/unit/memory-task-tools.test.ts`（11）：共建计划真的写进 `# Tracking`、缺段时「记下了但没同步上」、改时间保留勾选、取消删行、跨天移动、不存在的 id 如实报错。
 - `tests/unit/chain-agent-tasks.test.ts`（14）：时间解析（含 2-30 这种假日期）、参数钳制、没接库时如实报错、回执回灌、`<now>` 合流、脱敏整条不列。
+- `tests/unit/main-task-runtime.test.ts`（7）：任务库文件不存在**不建库**、还没迁到 v11 时这条链路不可用但进程不崩、到点交给 `deliver` 后结算回库、合流窗口、`stop` 后不再读。
 
 ### 15.3 明确没做（下一阶段）
 

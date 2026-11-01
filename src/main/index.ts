@@ -189,7 +189,7 @@ import {
   readAskHistory,
   toHistoryEntry
 } from './ask-history'
-import { createQqChannel, QQ_REPLY_DEFAULT_CHARS, type QqChannel, type QqChannelConfig } from './qq/channel'
+import { createQqChannel, formatAskResult, QQ_REPLY_DEFAULT_CHARS, type QqChannel, type QqChannelConfig } from './qq/channel'
 import { QqOb11Server } from './qq/ob11'
 import { NapcatManager } from './qq/napcat'
 import {
@@ -3404,6 +3404,23 @@ if (primaryInstance) {
           if (askWindow !== null && !askWindow.isDestroyed()) {
             askWindow.webContents.send('ask:task-said', { conversationId })
           }
+        }
+        // 前台任务同时推一份到 QQ（2026-11-01 拍板 D93）：窗口没开时手机上也能看到。
+        // 后台任务（写日记 / 周记那类）绝不推；通道没开 / 白名单空只记日志，不重试（重试会重复提醒）。
+        if (!quiet && qqChannel !== null) {
+          void qqChannel
+            .push(formatAskResult(result))
+            .then((pushed) => {
+              if (!pushed.sent) {
+                captureLog('warn', 'qq push skipped', {
+                  id: task.id,
+                  reason: pushed.reason ?? ''
+                })
+              }
+            })
+            .catch((error) => {
+              captureLog('warn', 'qq push failed', { id: task.id, error: String(error) })
+            })
         }
         // 成长档案（自调用 v0.2 §8）：一层写完串下一篇——
         // 日记 →（周日）周记 →（月末）月末总结 →（年末）年终总结；一次只做一件，每步 +2 分钟。

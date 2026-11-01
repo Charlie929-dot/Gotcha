@@ -725,3 +725,58 @@ describe('「还要继续查吗」在 QQ 里也能答', () => {
     expect(asked).toEqual(['这条要查很久', '1'])
   })
 })
+describe('主动推送（D93：前台任务到点也发一份到 QQ）', () => {
+  it('通道没起：不发，回 not-running', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, { ask: async () => answer('x'), log: () => {} })
+    expect(await channel.push('到点啦')).toMatchObject({ sent: false, parts: 0, reason: 'not-running' })
+    expect(transport.sent).toHaveLength(0)
+  })
+
+  it('在线：只发给白名单第一个人；长文本按分段规则发完', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, {
+      ask: async () => answer('x'),
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config({ allowUsers: ['20002', '30003'], replyMaxChars: 200 }))
+
+    expect(await channel.push('到点啦——晚点名！')).toMatchObject({ sent: true, parts: 1 })
+    expect(transport.sent).toEqual([{ userId: 20002, text: '到点啦——晚点名！' }])
+
+    transport.sent.length = 0
+    const long = await channel.push('段'.repeat(900))
+    expect(long.sent).toBe(true)
+    expect(long.parts).toBeGreaterThan(1)
+    // 白名单里第二个号不该收到
+    expect(transport.sent.every((item) => item.userId === 20002)).toBe(true)
+  })
+
+  it('主人号不是数字：不发也不抛（no-owner）', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, { ask: async () => answer('x'), log: () => {} })
+    await channel.start(config({ allowUsers: ['not-a-number'] }))
+    expect(await channel.push('到点啦')).toMatchObject({ sent: false, parts: 0, reason: 'no-owner' })
+    expect(transport.sent).toHaveLength(0)
+  })
+
+  it('发送失败：不抛，回 send-failed（调用方只记日志、不重试）', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, { ask: async () => answer('x'), log: () => {} })
+    await channel.start(config())
+    transport.sendPrivate = async () => {
+      throw new Error('boom')
+    }
+    expect(await channel.push('到点啦')).toMatchObject({ sent: false, reason: 'send-failed' })
+  })
+
+  it('停掉通道之后不再推', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, { ask: async () => answer('x'), log: () => {} })
+    await channel.start(config())
+    await channel.stop()
+    expect(await channel.push('到点啦')).toMatchObject({ sent: false, reason: 'not-running' })
+    expect(transport.sent).toHaveLength(0)
+  })
+})

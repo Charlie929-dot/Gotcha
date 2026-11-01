@@ -31,6 +31,7 @@ import type { MemoryRepoSettingsView } from '../../main/memory-repo-settings'
 import type { MemoryListItemView } from '../../main/memory-admin'
 import type { QqSettingsView } from '../../main/qq/qq-settings'
 import type { NapcatView } from '../../main/qq/napcat'
+import type { QqStickerListView } from '../../main/qq/stickers'
 import type {
   TaskAdminItem,
   TaskAdminSaveInput,
@@ -164,6 +165,12 @@ const qqNapcatStartButton = must<HTMLButtonElement>('qq-napcat-start')
 const qqNapcatStopButton = must<HTMLButtonElement>('qq-napcat-stop')
 const qqNapcatProgressEl = must<HTMLProgressElement>('qq-napcat-progress')
 const qqNapcatAutoInput = must<HTMLInputElement>('set-qq-napcat-auto')
+/* QQ 表情包（D96 / PR2）：列表 / 导入 / 回收站 / 清空聊天索引 */
+const qqStickersStatusEl = must<HTMLElement>('qq-stickers-status')
+const qqStickersMsg = must<HTMLElement>('qq-stickers-msg')
+const qqStickersListEl = must<HTMLElement>('qq-stickers-list')
+const qqStickersImportButton = must<HTMLButtonElement>('qq-stickers-import')
+const qqStickersClearLogButton = must<HTMLButtonElement>('qq-stickers-clear-log')
 
 /** 列表一次最多画多少条会话（永久保留，记录可能很多；搜索用来缩小范围） */
 const HISTORY_RENDER_LIMIT = 200
@@ -2280,6 +2287,7 @@ function openSettingsDrawer(): void {
   void refreshMemorySettings()
   void refreshMemoryRepo()
   void refreshQqSettings()
+  void refreshQqStickers()
   void refreshNotebook()
   void refreshGrowth()
   void refreshTasks()
@@ -2510,6 +2518,285 @@ if (api) {
       qqMsg.style.color = 'var(--error)'
     } finally {
       qqSaveButton.disabled = false
+    }
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/* 设置抽屉 · QQ 表情包（D96 / PR2）                                   */
+/* ------------------------------------------------------------------ */
+
+const QQ_STICKER_LAYER_TEXT: Readonly<Record<string, string>> = {
+  library: '收藏',
+  candidate: '候选',
+  trash: '回收站'
+}
+
+/** 列表里最多画几行（池子上限 200；多出来的在日志里，不在界面上刷屏） */
+const QQ_STICKER_ROWS_MAX = 60
+
+function formatStickerBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`
+  return `${bytes}B`
+}
+
+type QqStickerOpResult = QqStickerListView | { ok: false; error: string } | { error: string }
+
+function stickerViewOf(result: QqStickerOpResult): QqStickerListView | null {
+  return 'items' in result ? result : null
+}
+
+function stickerErrorOf(result: QqStickerOpResult): string {
+  if ('items' in result) return ''
+  return result.error ?? '出错了'
+}
+
+function renderQqStickers(view: QqStickerListView): void {
+  const stats = view.stats
+  qqStickersStatusEl.textContent =
+    `表情包：收藏 ${stats.library} 张 · 候选 ${stats.candidate} · 回收站 ${stats.trash}` +
+    ` · 共 ${formatStickerBytes(stats.bytes)}（单张 ≤2MB，池子 ≤50MB）`
+  qqStickersListEl.replaceChildren()
+  if (view.items.length === 0) {
+    const empty = element('p', 'hint')
+    empty.textContent = '还没有表情：点「导入图片…」传几张，或者让 ta 把收到的图收进来。'
+    qqStickersListEl.append(empty)
+    return
+  }
+  for (const item of view.items.slice(0, QQ_STICKER_ROWS_MAX)) {
+    const row = element('div', 'qq-sticker-row')
+    row.dataset['id'] = item.id
+
+    if (item.thumb !== undefined) {
+      const thumb = element('img', 'qq-sticker-thumb')
+      thumb.src = item.thumb
+      thumb.alt = item.label
+      row.append(thumb)
+    } else {
+      const blank = element('span', 'qq-sticker-thumb qq-sticker-thumb-empty')
+      blank.textContent = '图'
+      row.append(blank)
+    }
+
+    const main = element('div', 'qq-sticker-main')
+    const title = element('div', 'qq-sticker-title')
+    title.textContent = item.label
+    const meta = element('span', 'hint')
+    meta.textContent =
+      ` · ${QQ_STICKER_LAYER_TEXT[item.layer] ?? item.layer} · #${item.id}` +
+      ` · ${formatStickerBytes(item.bytes)} · 用过 ${item.useCount} 次`
+    title.append(meta)
+    main.append(title)
+    const desc = element('div', 'hint qq-sticker-desc')
+    desc.textContent = item.desc === '' ? '（没写什么时候用）' : item.desc
+    main.append(desc)
+    row.append(main)
+
+    const actions = element('div', 'memory-actions')
+    const edit = element('button')
+    edit.type = 'button'
+    edit.dataset['act'] = 'edit'
+    edit.textContent = '改标签'
+    actions.append(edit)
+    const move = element('button')
+    move.type = 'button'
+    move.dataset['act'] = item.layer === 'trash' ? 'restore' : 'trash'
+    move.textContent = item.layer === 'trash' ? '还原' : '移入回收站'
+    actions.append(move)
+    if (item.layer === 'trash') {
+      const remove = element('button')
+      remove.type = 'button'
+      remove.dataset['act'] = 'remove'
+      remove.textContent = '彻底删'
+      actions.append(remove)
+    }
+    row.append(actions)
+    qqStickersListEl.append(row)
+  }
+}
+
+/** 读一次表情包并重画（开抽屉 / 每次操作后都走这里） */
+async function refreshQqStickers(note = ''): Promise<void> {
+  if (!api) return
+  qqStickersMsg.textContent = note
+  qqStickersMsg.style.color = ''
+  try {
+    const view = await api.qqStickers()
+    const list = stickerViewOf(view)
+    if (list !== null) {
+      renderQqStickers(list)
+      return
+    }
+    qqStickersStatusEl.textContent =
+      stickerErrorOf(view) === 'stickers-unavailable'
+        ? '表情包要等 QQ 通道初始化之后才能用（重启应用再来）'
+        : '读取表情包失败'
+  } catch (error) {
+    qqStickersStatusEl.textContent = `读取表情包失败：${String(error)}`
+  }
+}
+
+/** 一行进入「改标签」：标签 + 描述两个输入，保存 / 取消 */
+function beginStickerEdit(row: HTMLElement, label: string, desc: string): void {
+  const main = row.querySelector('.qq-sticker-main')
+  if (main === null) return
+  main.replaceChildren()
+  const labelInput = element('input')
+  labelInput.type = 'text'
+  labelInput.maxLength = 20
+  labelInput.value = label
+  labelInput.placeholder = '标签（≤20 字）'
+  labelInput.className = 'qq-sticker-label-input'
+  const descInput = element('input')
+  descInput.type = 'text'
+  descInput.maxLength = 100
+  descInput.value = desc
+  descInput.placeholder = '什么时候用（≤100 字）'
+  descInput.className = 'qq-sticker-desc-input'
+  const actions = element('div', 'memory-actions')
+  const save = element('button')
+  save.type = 'button'
+  save.dataset['act'] = 'save-edit'
+  save.textContent = '保存'
+  actions.append(save)
+  const cancel = element('button')
+  cancel.type = 'button'
+  cancel.dataset['act'] = 'cancel-edit'
+  cancel.textContent = '取消'
+  actions.append(cancel)
+  main.append(labelInput, descInput, actions)
+  labelInput.focus()
+  labelInput.select()
+  // 保存时直接从这一行里取值（避免闭包里的输入框被重画后失联）
+  save.addEventListener('click', () => {
+    const id = row.dataset['id'] ?? ''
+    if (id === '') return
+    void applyStickerOp(
+      () =>
+        api!.qqStickerUpdate({
+          id,
+          label: labelInput.value,
+          desc: descInput.value
+        }),
+      '改好了'
+    )
+  })
+}
+
+async function applyStickerOp(
+  run: () => Promise<QqStickerOpResult>,
+  note: string
+): Promise<void> {
+  try {
+    const result = await run()
+    const view = stickerViewOf(result)
+    if (view !== null) {
+      renderQqStickers(view)
+      qqStickersMsg.textContent = note
+      qqStickersMsg.style.color = ''
+      return
+    }
+    qqStickersMsg.textContent = stickerErrorOf(result)
+    qqStickersMsg.style.color = 'var(--error)'
+  } catch (error) {
+    qqStickersMsg.textContent = `操作失败：${String(error)}`
+    qqStickersMsg.style.color = 'var(--error)'
+  }
+}
+
+if (api) {
+  qqStickersImportButton.addEventListener('click', async () => {
+    qqStickersImportButton.disabled = true
+    qqStickersMsg.textContent = '导入中…'
+    qqStickersMsg.style.color = ''
+    try {
+      const result = await api!.qqStickerImport()
+      const view = stickerViewOf(result)
+      if (view !== null) {
+        renderQqStickers(view)
+        qqStickersMsg.textContent = '导入完成（同一张图只存一份）'
+      } else {
+        qqStickersMsg.textContent = stickerErrorOf(result)
+        qqStickersMsg.style.color = 'var(--error)'
+      }
+    } catch (error) {
+      qqStickersMsg.textContent = `导入失败：${String(error)}`
+      qqStickersMsg.style.color = 'var(--error)'
+    } finally {
+      qqStickersImportButton.disabled = false
+    }
+  })
+
+  qqStickersClearLogButton.addEventListener('click', () => {
+    // 二次确认（不用 window.confirm：Electron 里会卡住渲染层）
+    if (qqStickersClearLogButton.dataset['armed'] !== '1') {
+      qqStickersClearLogButton.dataset['armed'] = '1'
+      qqStickersClearLogButton.textContent = '确认清空索引'
+      qqStickersClearLogButton.style.color = 'var(--error)'
+      window.setTimeout(() => {
+        qqStickersClearLogButton.dataset['armed'] = ''
+        qqStickersClearLogButton.textContent = '清空聊天索引'
+        qqStickersClearLogButton.style.color = ''
+      }, 3_000)
+      return
+    }
+    qqStickersClearLogButton.dataset['armed'] = ''
+    qqStickersClearLogButton.textContent = '清空聊天索引'
+    qqStickersClearLogButton.style.color = ''
+    void (async () => {
+      try {
+        const result = await api!.qqChatLogClear()
+        qqStickersMsg.textContent = result.ok ? '聊天索引已清空' : (result.error ?? '清空失败')
+        qqStickersMsg.style.color = result.ok ? '' : 'var(--error)'
+      } catch (error) {
+        qqStickersMsg.textContent = `清空失败：${String(error)}`
+        qqStickersMsg.style.color = 'var(--error)'
+      }
+    })()
+  })
+
+  qqStickersListEl.addEventListener('click', (event) => {
+    const button = (event.target as HTMLElement | null)?.closest('button[data-act]')
+    if (!(button instanceof HTMLButtonElement)) return
+    const row = button.closest('.qq-sticker-row')
+    if (!(row instanceof HTMLElement)) return
+    const id = row.dataset['id'] ?? ''
+    if (id === '') return
+    const act = button.dataset['act'] ?? ''
+    if (act === 'edit') {
+      const title = row.querySelector('.qq-sticker-title')?.firstChild?.textContent ?? ''
+      const desc = row.querySelector('.qq-sticker-desc')?.textContent ?? ''
+      beginStickerEdit(row, title, desc === '（没写什么时候用）' ? '' : desc)
+      return
+    }
+    if (act === 'cancel-edit') {
+      void refreshQqStickers()
+      return
+    }
+    if (act === 'trash') {
+      void applyStickerOp(() => api!.qqStickerTrash({ id }), '已移入回收站（还能还原）')
+      return
+    }
+    if (act === 'restore') {
+      void applyStickerOp(() => api!.qqStickerRestore({ id }), '已还原到收藏')
+      return
+    }
+    if (act === 'remove') {
+      // 二次点击确认：第一次把按钮改成「确认彻底删」，3 秒内再点才真删
+      if (button.dataset['armed'] !== '1') {
+        button.dataset['armed'] = '1'
+        button.textContent = '确认彻底删'
+        button.style.color = 'var(--error)'
+        window.setTimeout(() => {
+          if (!button.isConnected) return
+          button.dataset['armed'] = ''
+          button.textContent = '彻底删'
+          button.style.color = ''
+        }, 3_000)
+        return
+      }
+      void applyStickerOp(() => api!.qqStickerRemove({ id }), '已彻底删除')
     }
   })
 }

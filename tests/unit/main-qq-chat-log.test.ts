@@ -147,3 +147,22 @@ describe('坏文件降级', () => {
     log.dispose()
   })
 })
+
+describe('清空索引（D96 §5.4）', () => {
+  it('清空后短号从 #1 重来，磁盘也是空的；重开还是空的', () => {
+    const file = tempFile()
+    const log = new ChatLog({ file, flushDelayMs: 0 })
+    log.append('qq-1', { qqId: 10, role: 'user', text: '第一句', at: 1 })
+    log.append('qq-1', { qqId: 11, role: 'ta', text: '第二句', at: 2 })
+    expect(log.recent('qq-1', 6)).toHaveLength(2)
+
+    log.clear()
+    expect(log.recent('qq-1', 6)).toEqual([])
+    expect(log.byQqId('qq-1', 10)).toBeNull()
+    expect(log.append('qq-1', { qqId: 12, role: 'user', text: '清空后的第一句', at: 3 }).seq).toBe(1)
+
+    const reopened = new ChatLog({ file, flushDelayMs: 0 })
+    expect(reopened.recent('qq-1', 6).map((record) => record.text)).toEqual(['清空后的第一句'])
+    reopened.dispose()
+  })
+})

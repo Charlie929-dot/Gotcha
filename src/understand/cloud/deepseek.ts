@@ -775,6 +775,56 @@ const ASK_LOOP_TOOLS = [
         required: ['id']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'send_sticker',
+      description:
+        '发一张你自己的表情包。不带 id：只把图鉴（最多 40 条：id / 标签 / 什么时候用 / 用过几次）列给你看，什么都不发；想发就带 id 再调一次。id 是图鉴里的 12 位编号，不是消息短号。一条回答最多带一张表情；同一张 24 小时内不会连发两次（被挡住不是你的错，换一张或者不发）。表情池是空的就如实说，别硬凑。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: {
+            type: 'string',
+            description: '图鉴里的表情 id（例如 "a1b2c3d4e5f6"）；不传 = 只看图鉴不发'
+          }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'save_sticker',
+      description:
+        '把一张图收进自己的表情包（以后想发就能发）。image_id 用图片占位符里的 #id（这次会话里真实收到 / 看到过的那张）；label 必填（≤20 字，以后挑图就看它），desc 可选（≤100 字，写清楚什么场合用）。同一张图只存一份，再存就是更新标签。只能收这次会话里出现过的图，太早的取不到，如实说。',
+      parameters: {
+        type: 'object',
+        properties: {
+          image_id: { type: 'string', description: '图片占位符里的 #id，例如 "9f8e7d6c"' },
+          label: { type: 'string', description: '标签（≤20 字）' },
+          desc: { type: 'string', description: '什么时候用（≤100 字，可选）' }
+        },
+        required: ['image_id', 'label']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'send_image',
+      description:
+        '把这次会话里的一张图发给对方（回答之后单独发一条图）。archive_id 用图片占位符里的 #id：只发你这一轮收到 / 看到过、或者我刚才用 read_segment 打开过的截图；不许发任意本地文件，发不了的如实说。一条回答最多带一张图。',
+      parameters: {
+        type: 'object',
+        properties: {
+          archive_id: { type: 'string', description: '图片占位符里的 #id，例如 "9f8e7d6c"' }
+        },
+        required: ['archive_id']
+      }
+    }
   }
 ] as const
 
@@ -849,7 +899,13 @@ function buildAskLoopSystemPrompt(
           ? '生命快用完时生一个女儿，把之后的日子交给她'
           : tool.function.name === 'quote_message'
             ? '引用这次聊天里的一条消息再回答（id 是消息短号 #N）'
-            : ASK_LOOP_TOOL_BRIEFS[tool.function.name]
+            : tool.function.name === 'send_sticker'
+              ? '发你自己表情包里的一张（不带 id 只看图鉴；回答之后才发出去）'
+              : tool.function.name === 'save_sticker'
+                ? '把这次收到 / 看到的图收进表情包（image_id + 标签）'
+                : tool.function.name === 'send_image'
+                  ? '把这次会话里的一张图发给对方（回答之后发）'
+                  : ASK_LOOP_TOOL_BRIEFS[tool.function.name]
       lines.push(`- ${tool.function.name}：${brief}`)
     }
     lines.push('</tools>', '')
@@ -885,18 +941,37 @@ function userMessageContent(
   now: string,
   prefix?: string,
   quoted?: ChainAskQuotedMessage,
-  chatRecent?: readonly ChainAskChatRecent[]
+  chatRecent?: readonly ChainAskChatRecent[],
+  images?: readonly { readonly id: string }[]
 ): string {
   const body = JSON.stringify({
     question,
     ...(files !== undefined && files.length > 0 ? { files } : {}),
     // QQ 引用（D96）：被引用原话（取不到就 id + missing）与最近几条聊天
     ...(quoted !== undefined ? { quoted } : {}),
-    ...(chatRecent !== undefined && chatRecent.length > 0 ? { recent: chatRecent } : {})
+    ...(chatRecent !== undefined && chatRecent.length > 0 ? { recent: chatRecent } : {}),
+    // 图片 id（D96 / PR2）：让 ta 这一轮就能收表情 / 发图，不用等下一轮
+    ...(images !== undefined && images.length > 0 ? { images } : {})
   })
   const text = now.trim()
   const nowPart = text === '' ? '' : `<now>\n${text}\n</now>`
   return [prefix ?? '', body, nowPart].filter((part) => part !== '').join('\n\n')
+}
+
+/**
+ * 图片 data URL → 用户消息里给模型看的 `images: [{ id }]`。
+ * id 与 `recall` / `save_sticker` / `send_image` 同一套（内容哈希前 8 位），
+ * 所以「这一轮的图」和「历史轮次的图」用的是同一个编号。
+ */
+function imageRefsOf(
+  dataUrls: readonly string[] | undefined
+): { id: string }[] {
+  const out: { id: string }[] = []
+  for (const url of dataUrls ?? []) {
+    const id = archiveIdOfImage(url)
+    if (id !== null && !out.some((item) => item.id === id)) out.push({ id })
+  }
+  return out
 }
 
 /**
@@ -1050,7 +1125,8 @@ export function buildChainAskLoopMessages(
       turn.now,
       firstPrior ? digest : '',
       turn.quoted,
-      turn.chatRecent
+      turn.chatRecent,
+      imageRefsOf(attachments?.images)
     )
     messages.push({
       role: 'user',
@@ -1071,7 +1147,8 @@ export function buildChainAskLoopMessages(
       payload.now,
       firstPrior ? digest : '',
       payload.quoted,
-      payload.chatRecent
+      payload.chatRecent,
+      imageRefsOf(images)
     ),
     ...(images.length > 0 ? { images } : {})
   })

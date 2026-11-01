@@ -29,6 +29,7 @@ import type { GrowthKind } from '../memory/growth'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from '../main/qq/qq-settings'
 import type { NapcatView } from '../main/qq/napcat'
+import type { QqStickerListView } from '../main/qq/stickers'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -122,6 +123,17 @@ export interface AskApi {
   qqNapcatStop(): Promise<{ ok: boolean; error?: string }>
   qqNapcatInstall(): Promise<{ ok: boolean; error?: string }>
   qqNapcatChooseDir(): Promise<{ ok: boolean; error?: string; view?: NapcatView }>
+  /* ---- QQ 表情包（D96 / PR2）：列表 / 导入 / 改标签 / 回收站 ---- */
+  qqStickers(): Promise<QqStickerListView | { error: string }>
+  qqStickerImport(): Promise<QqStickerListView | { ok: false; error: string }>
+  qqStickerUpdate(input: { id: string; label?: string; desc?: string }): Promise<
+    QqStickerListView | { ok: false; error: string }
+  >
+  qqStickerTrash(input: { id: string }): Promise<QqStickerListView | { ok: false; error: string }>
+  qqStickerRestore(input: { id: string }): Promise<QqStickerListView | { ok: false; error: string }>
+  qqStickerRemove(input: { id: string }): Promise<QqStickerListView | { ok: false; error: string }>
+  /** 清空本机聊天索引（引用用的短号台账；不动 QQ 服务器上的聊天） */
+  qqChatLogClear(): Promise<{ ok: boolean; error?: string }>
   /** 托盘 / 球右键的「设置」：打开窗口就展开抽屉 */
   /**
    * 任务到点、ta 自己说了一句（自调用 v0.2 §9）：主进程已经把这轮记进当前会话历史，
@@ -222,6 +234,30 @@ const api: AskApi = {
       error?: string
       view?: NapcatView
     }>,
+  qqStickers: () =>
+    ipcRenderer.invoke('ask:qq:stickers:get') as Promise<QqStickerListView | { error: string }>,
+  qqStickerImport: () =>
+    ipcRenderer.invoke('ask:qq:stickers:import') as Promise<
+      QqStickerListView | { ok: false; error: string }
+    >,
+  qqStickerUpdate: (input) =>
+    ipcRenderer.invoke('ask:qq:stickers:update', input) as Promise<
+      QqStickerListView | { ok: false; error: string }
+    >,
+  qqStickerTrash: (input) =>
+    ipcRenderer.invoke('ask:qq:stickers:trash', input) as Promise<
+      QqStickerListView | { ok: false; error: string }
+    >,
+  qqStickerRestore: (input) =>
+    ipcRenderer.invoke('ask:qq:stickers:restore', input) as Promise<
+      QqStickerListView | { ok: false; error: string }
+    >,
+  qqStickerRemove: (input) =>
+    ipcRenderer.invoke('ask:qq:stickers:remove', input) as Promise<
+      QqStickerListView | { ok: false; error: string }
+    >,
+  qqChatLogClear: () =>
+    ipcRenderer.invoke('ask:qq:chatlog:clear') as Promise<{ ok: boolean; error?: string }>,
   onTaskSaid: (handler) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
       if (typeof payload !== 'object' || payload === null) return

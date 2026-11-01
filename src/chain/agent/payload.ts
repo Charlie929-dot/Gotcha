@@ -483,6 +483,48 @@ export type RedactableAskLoopToolResult =
       text: string
       ok: boolean
     }
+  /**
+   * QQ 表情（D96 / PR2）：不带 id = 图鉴，带 id = 排好一张。
+   * `stickerId` 是池子里的 12 位 id（不是消息短号）；`ok` 只代表挑到了。
+   */
+  | {
+      kind: 'send_sticker'
+      ok: boolean
+      stickerId: string | null
+      label: string
+      /** 图鉴（不带 id 时给；带 id 时为空） */
+      catalog: readonly RedactableStickerView[]
+      message: string
+    }
+  /**
+   * 把一张图收进表情包（D96 / PR2）：只回 id / 标签 / 是不是本来就有。
+   */
+  | {
+      kind: 'save_sticker'
+      ok: boolean
+      stickerId: string | null
+      label: string
+      duplicate: boolean
+      message: string
+    }
+  /**
+   * 把本会话里的一张图发出去（D96 / PR2）：只回「排好了没有」。
+   */
+  | {
+      kind: 'send_image'
+      ok: boolean
+      imageId: string | null
+      message: string
+    }
+
+/** 表情图鉴里的一条（标签 / 描述是 ta 或用户自己写的，照样过脱敏） */
+export interface RedactableStickerView {
+  id: string
+  label: string
+  desc: string
+  tags: readonly string[]
+  useCount: number
+}
 
 /** 一条小本本条目在送云视图里的样子（正文是 ta 从经历里写的，照样过脱敏） */
 export interface RedactableNotebookEntryView {
@@ -718,6 +760,8 @@ export const ASK_QUOTED_TEXT_MAX_CHARS = 300
 /** QQ 最近聊天：给几条（含本轮这条）/ 每条片段多少字（D96） */
 export const ASK_CHAT_RECENT_MAX = 6
 export const ASK_CHAT_RECENT_TEXT_MAX_CHARS = 80
+/** QQ 表情图鉴：一次最多列几条（D96 / PR2，与工具层同口径） */
+export const ASK_STICKER_CATALOG_MAX = 40
 
 /* ------------------------------------------------------------------ */
 /* 组装辅助                                                            */
@@ -1576,6 +1620,62 @@ export function buildAskLoopPayload(
           from: result.from,
           text: text.blocked ? '' : clipText(text.text, ASK_QUOTED_TEXT_MAX_CHARS),
           ok: !text.blocked
+        }
+        break
+      }
+      case 'send_sticker': {
+        // QQ 表情图鉴（D96 / PR2）：标签 / 描述是 ta 或用户写的，照样过策略；
+        // 被挡的那一条不列给模型（宁少一张，也不把敏感字送出去）
+        const catalog: RedactableStickerView[] = []
+        for (const entry of result.catalog.slice(0, ASK_STICKER_CATALOG_MAX)) {
+          const label = guardText(policy, entry.label, 20)
+          if (label.blocked) continue
+          const desc = guardText(policy, entry.desc, 100)
+          const tags: string[] = []
+          for (const tag of entry.tags.slice(0, 8)) {
+            const redacted = policy.redact(tag)
+            if (!redacted.blocked && redacted.text !== '') tags.push(redacted.text.slice(0, 12))
+          }
+          catalog.push({
+            id: entry.id.slice(0, 16),
+            label: label.text,
+            desc: desc.blocked ? '' : desc.text,
+            tags,
+            useCount: entry.useCount
+          })
+        }
+        const stickerLabel = guardText(policy, result.label, 20)
+        const message = guardText(policy, result.message, 120)
+        view = {
+          kind: 'send_sticker',
+          ok: result.ok,
+          stickerId: result.stickerId === null ? null : result.stickerId.slice(0, 16),
+          label: stickerLabel.blocked ? '' : stickerLabel.text,
+          catalog: stickerLabel.blocked ? [] : catalog,
+          message: message.blocked ? '表情包暂时用不了' : message.text
+        }
+        break
+      }
+      case 'save_sticker': {
+        const label = guardText(policy, result.label, 20)
+        const message = guardText(policy, result.message, 120)
+        view = {
+          kind: 'save_sticker',
+          ok: result.ok,
+          stickerId: result.stickerId === null ? null : result.stickerId.slice(0, 16),
+          label: label.blocked ? '' : label.text,
+          duplicate: result.duplicate,
+          message: message.blocked ? '这张收不了' : message.text
+        }
+        break
+      }
+      case 'send_image': {
+        const message = guardText(policy, result.message, 120)
+        view = {
+          kind: 'send_image',
+          ok: result.ok,
+          imageId: result.imageId === null ? null : result.imageId.slice(0, 16),
+          message: message.blocked ? '这张图发不了' : message.text
         }
         break
       }

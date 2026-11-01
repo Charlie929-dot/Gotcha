@@ -1,6 +1,6 @@
-# QQ 富消息与说说 / 空间设计（v0.1）
+# QQ 富消息与说说 / 空间设计（v0.2）
 
-> **状态**：设计已拍板；**PR1 已实现**（2026-11-01，`feat/qq-quote`：短号 / 引用 / 台账落盘 / `quote_message`），**PR2 / PR3 未开工**。
+> **状态**：设计已拍板；**PR1 已实现**（2026-11-01，`feat/qq-quote`：短号 / 引用 / 台账落盘 / `quote_message`）、**PR2 已实现**（2026-11-01，`feat/qq-stickers`：表情包池 / ta 自收藏 / 发图 / 设置抽屉 / 清空聊天索引），**PR3 未开工**。
 > **权威**：拍板结论见 `docs/agent/decisions.md` **D96**；本文件是详细设计、边界与验收口径。代码与本文冲突时，**先改本文再改代码**。
 > **关联**：D63（QQ 通道 M1）、D65（入站图片）、D87（QQ 命令）、D88 / D89（归档与 `recall`）、D93（QQ 推送）。
 > **一句话**：给 ta 补上 QQ 的引用、表情包、发图、说说与空间浏览；分三支落地，引用先行；只走白名单私聊，不碰群聊，不改提示词。
@@ -84,7 +84,7 @@
 | 支 | 范围 | 依赖 | 估算 |
 | - | - | - | - |
 | **PR1** | 消息短号 + 引用（入站自动、出站回复、落盘） | 无 | 2 天 |
-| **PR2** | 表情包池 + ta 自收藏 + 发图（含本轮图片 id） | PR1 的短号 / 归档 id | 2.5–3 天 |
+| **PR2** ✅ | 表情包池 + ta 自收藏 + 发图（含本轮图片 id） | PR1 的短号 / 归档 id | 2.5–3 天 |
 | **PR3** | 说说 + 空间只读 + `/说说` | PR2 的图片发送管线 | 1.5–2 天 |
 
 每支独立分支、独立 PR、独立真机验收；不要合成一个巨型 PR。
@@ -230,6 +230,9 @@ QQ 私聊每条消息有短号；用户引用任意消息时，ta 在当轮就�
 
 ## 6. PR2：表情包池与发图
 
+> **实现状态（2026-11-01，`feat/qq-stickers`）**：§6.1–§6.6 已落地；**§6.2 的「从 QQ 收藏表情导入」v1 未做**（原文写的就是「可选按钮」，
+> 且 NapCat 的 `fetch_custom_face` 要先真机确认版本；用户导入 + ta 自收藏两条来源已覆盖拍板原话）。落地时对设计的两处微调写在本节末尾「实现备注」。
+
 ### 6.1 池结构
 
 `<userData>/qq/stickers/`：
@@ -266,7 +269,7 @@ trash/      # 回收站（软删）
 ### 6.2 来源
 
 1. **用户导入**：设置抽屉「表情包」块，多选文件 → 复制进 `library/`；可改 label / desc / tags、移到回收站、还原、彻底删。
-2. **从 QQ 收藏表情导入**（可选按钮）：NapCat `fetch_custom_face` 返回 URL → 只下载 `https`、≤2MB、15s 超时 → 进 `candidate/`，等用户或 ta 贴标签。
+2. **从 QQ 收藏表情导入**（可选按钮，**PR2 v1 未做**）：NapCat `fetch_custom_face` 返回 URL → 只下载 `https`、≤2MB、15s 超时 → 进 `candidate/`，等用户或 ta 贴标签。
 3. **ta 自己收藏**：`save_sticker({ image_id, label, desc? })`。
    - `image_id`：本轮用户发的图（载荷里带 id）或本会话归档图 / 段截图。
    - `label` 必填（≤20 字）；`desc` 可选（≤100 字）——这是 ta 以后挑图的依据。
@@ -277,29 +280,31 @@ trash/      # 回收站（软删）
 ### 6.3 工具
 
 - `send_sticker({ id? })`
-  - 不带 `id`：返回图鉴（最多 40 条：`#id 标签 —— 描述`），**不发**。
-  - 带 `id`：排队发这张；返回 `{ ok: true, id, label }`。
-- `send_image({ segment_id? , archive_id? })`
-  - 只允许本会话 `read_segment` 打开过的段截图，或本会话归档图；不许任意路径 / URL。
-  - 排队发；返回 `{ ok: true }`。
-- 两者都只在本轮标记「待发媒体」，真正的发送在回答文字之后（见 6.4）。
+  - 不带 `id`：返回图鉴（最多 40 条：`id / 标签 / 描述 / 用过几次`），**不发**。
+  - 带 `id`：排队发这张；返回 `{ ok: true, stickerId, label }`。
+  - 一轮最多一张：第二次调用回错误（`这一轮已经挑过表情 #x 了`）。
+- `send_image({ archive_id })`
+  - 只认本会话里出现过的图片 id（本轮收到 / 看到的图、`read_segment` 打开过的段截图、历史归档图）；不许任意路径 / URL。
+  - 一轮最多一张；取不到如实说「这次会话里没有这张图」。
+- 两者都只在本轮标记「待发媒体」（`AskToolOutcome.media` → `ChainAskResult.outboundMedia`），真正的发送在回答文字之后（见 6.4）。
 
 ### 6.4 发送顺序与闸门
 
-- `ChainAskResult` 新增可选 `outboundMedia?: readonly { kind: 'sticker' | 'image'; dataUrl: string; label?: string }[]`。
-- 通道收到后：先发文字（可带引用），再发图；最多 **1 张表情 + 1 张图 / 轮**；段间隔 200ms。
-- 图发出前重编码（复用 `nativeImage` 口径）：长边 ≤1600、JPEG 85、≤3MB；GIF 且 ≤3MB 原样发；不放大。
-- 闸门：同一张表情 24h 内不连发；表情每日 ≤20、图片每日 ≤20；只发白名单第一个人的私聊。
+- `ChainAskResult` 新增可选 `outboundMedia?: readonly { kind: 'sticker' | 'image'; dataUrl: string; label?: string; ref?: string }[]`
+  （`ref` = 表情 id / 图片归档 id，通道用它做「同一张 24h 不连发」）。
+- 通道收到后：先发文字（可带引用），再发图；最多 **1 张表情 + 1 张图 / 轮**；段间隔沿用 `partGapMs`（默认 200ms）。
+- 图发出前重编码（复用 `nativeImage` 口径）：长边 ≤1600、JPEG 85、≤3MB；GIF 且 ≤3MB 原样发；不放大。转码失败而原图 ≤3MB 时照发原图（不吞图）。
+- 闸门：同一张表情 24h 内不连发；表情每日 ≤20、图片每日 ≤20；只发白名单第一个人的私聊。计数落 `<userData>/qq/media-usage.json`（重启不清零）。
 - **不加新开关**（拍板人选 B）：QQ 通道开着 + 白名单本人私聊＝允许。设置里只加一句说明「ta 可能把记忆里的图发到这里」。
-- 发送失败：文字照常送达，图失败只记 `warn` + 计数；不要把整条回答吞掉。
+- 发送失败：文字照常送达，图失败只记 `warn`，不重试；不要把整条回答吞掉。
 - 日志只记张数 / 类型，不记图片内容、文件名、URL。
 
 ### 6.5 安全
 
-- 图片来源限本会话，杜绝「按 id 扫库」和任意路径读取。
+- 图片来源限本会话，杜绝「按 id 扫库」和任意路径读取；`store.read` 只按池子里的 12 位 id 拼文件名。
 - 段截图仍受既有黑名单约束（密码管理器等窗口不拍）；发送前不再二次识别。
 - 这是一条**新的出网路径**（图经腾讯到白名单本人），拍板人已知情并选 B；不经模型、不进 git、不存 URL。
-- 表情池只在本地；`fetch_custom_face` 的 URL 会过期，必须下载成文件，不存 URL 当池子。
+- 表情池只在本地；`fetch_custom_face` 的 URL 会过期，将来做导入也必须下载成文件，不存 URL 当池子。
 
 ### 6.6 验收
 
@@ -307,11 +312,27 @@ trash/      # 回收站（软删）
 - 用户发一张图 → 「存成表情包，叫翻白眼」→ ta 调 `save_sticker` → 图鉴里出现。
 - 「把刚才那张截图发我」→ 收到图；黑名单窗口里没拍到的段（或已过期）→ 如实说取不到。
 - 重启后图鉴仍在（index.json）。
-- 单测：哈希去重、分层移动、上限淘汰、闸门计数、图片重编码、发送失败降级。
+- 单测（已做，`npm test` 全绿）：哈希去重、分层移动、上限淘汰、总容量拒绝、坏索引降级、闸门计数与 24h 去重、
+  出站图重编码口径、发送失败降级、三个工具的参数 / 一轮一张 / 挂载口径、图片 id 进用户消息、清空聊天索引。
 
-### 6.7 预计改动
+### 6.7 实际改动（2026-11-01）
 
-`src/main/qq/stickers.ts`（新）、`src/main/qq/{media,ob11,channel,qq-settings}.ts`、`src/main/index.ts`、`src/renderer/ask/{ask.html,ask.ts,ask.css}`、`src/renderer/ask-preload.ts`、`src/chain/agent/{tool-catalog,tools,ask,loop,payload}.ts`、`src/understand/cloud/deepseek.ts`；测试 4–5 个。约 2.5–3 天。
+`src/main/qq/stickers.ts`（新，池子 + 抽屉视图）、`src/main/qq/media.ts`（出站图口径 + 发图闸门）、
+`src/main/qq/ob11.ts`（`sendPrivateImage`）、`src/main/qq/channel.ts`（文字之后发媒体）、`src/main/qq/chat-log.ts`（`clear()`）、
+`src/main/qq/qq-settings.ts`（未改，设置键够用）、`src/main/{index,ask-ipc}.ts`、`src/renderer/ask-preload.ts`、
+`src/renderer/ask/{ask.html,ask.ts,ask.css}`、`src/chain/agent/{tool-catalog,tools,ask,loop,payload,types}.ts`、
+`src/understand/cloud/deepseek.ts`；测试 4 个新文件 + 2 个扩写（`main-qq-stickers` / `main-qq-media` /
+`chain-agent-stickers` / `main-qq-channel-media`、`main-qq-ob11` / `main-qq-chat-log`）。
+
+### 6.8 实现备注（与上面设计的差异，写清楚免得后人再猜）
+
+1. **`send_image` 只有 `archive_id`，没有 `segment_id`**：`read_segment` 打开过的截图现在会当场进本会话归档表，
+   所以「把刚才那张截图发我」走的是同一个图片 id；再单独给 `segment_id` 会让模型多一条「按段号要图」的路，
+   与「只认本会话见过的图」冲突。
+2. **QQ 收藏表情导入未做**（见 §6.2 第 2 条）：`fetch_custom_face` 是 NapCat 扩展，要先真机确认版本；两条来源已覆盖拍板原话。
+3. **`candidate` 层 v1 没有入口**：池子与工具都支持这一层（导入时可指定），但设置抽屉只显示与操作收藏 / 回收站；
+   等真有「批量收候选」的需求再开界面。
+4. **`save_sticker` 的 `desc` 只给模型**：界面里能改（`qq:stickers:update`），ta 没有改描述的独立工具——同一个工具再存一次同图就会更新标签 / 描述。
 
 ---
 
@@ -455,8 +476,9 @@ trash/      # 回收站（软删）
 | - | - |
 | `src/main/qq/ob11.ts` | OneBot 11 报文解析 / 反向 WS / action 调用（含 `reply` 段与 `get_msg`） |
 | `src/main/qq/chat-log.ts` | 聊天台账：短号 ↔ QQ id + 原话；落盘 `<userData>/qq/chat-log.json` |
-| `src/main/qq/channel.ts` | 白名单、限流、排队、分条、`formatAskResult` |
-| `src/main/qq/media.ts` | 入站图片 / 文件 → data URL；大小与超时 |
+| `src/main/qq/channel.ts` | 白名单、限流、排队、分条、`formatAskResult`、文字后发媒体 |
+| `src/main/qq/media.ts` | 入站图片 / 文件 → data URL；出站图口径（≤1600 / ≤3MB）与发图闸门（`QqMediaGate`） |
+| `src/main/qq/stickers.ts` | 表情包池：哈希去重 / 分层 / 上限 / `index.json` / 抽屉视图 |
 | `src/main/qq/qq-settings.ts` | QQ 设置键与视图（settings 表） |
 | `src/main/qq/napcat.ts` | NapCat 托管（找 / 装 / 拉起 / 二维码） |
 | `src/main/index.ts` | 组合根：`askChain`、QQ 短上下文、命令、任务推送 |

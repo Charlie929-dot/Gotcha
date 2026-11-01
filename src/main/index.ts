@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { extname, join } from 'node:path'
+import { extname, basename, join } from 'node:path'
 import Database from 'better-sqlite3'
 import log from 'electron-log/main'
 import { DB_FILE_NAME, openDatabase, queryTimeline, type Db } from '../db'
@@ -29,7 +29,13 @@ import {
   type MemorySettingsSaveResult
 } from './memory-settings'
 import { buildMemoryListView, deleteMemoryView, parseMemoryListQuery, restoreMemoryView } from './memory-admin'
-import type { GiveBirthResult, DiaryToolDeps, LetterAt, QuoteMessageLookup } from '../chain/agent/tools'
+import type {
+  GiveBirthResult,
+  DiaryToolDeps,
+  LetterAt,
+  QqStickerToolDeps,
+  QuoteMessageLookup
+} from '../chain/agent/tools'
 import { askModeKindOfBranch, asksMemoryContext, type AskModeState } from '../chain/agent/mode'
 import {
   defaultToolsForBranchKind,
@@ -197,6 +203,13 @@ import {
 import { createQqChannel, formatAskResult, QQ_REPLY_DEFAULT_CHARS, type QqChannel, type QqChannelConfig } from './qq/channel'
 import { ChatLog } from './qq/chat-log'
 import { QqOb11Server } from './qq/ob11'
+import { QqMediaGate, prepareOutboundImage } from './qq/media'
+import {
+  buildQqStickerListView,
+  QqStickerStore,
+  type QqStickerEntry,
+  type QqStickerListView
+} from './qq/stickers'
 import { NapcatManager } from './qq/napcat'
 import {
   applyQqPatch,
@@ -332,6 +345,10 @@ let growthDailyTaskId: number | null = null
 let qqChannel: QqChannel | null = null
 /** QQ 聊天台账（D96）：短号 ↔ QQ id + 原话；退出前 flush 一次 */
 let qqChatLog: ChatLog | null = null
+/** QQ 表情包池（D96 / PR2）：`<userData>/qq/stickers`；退出前 flush 一次 */
+let qqStickers: QqStickerStore | null = null
+/** QQ 发图闸门（D96 / PR2）：同一张表情 24h 内不连发、每日上限；落 `media-usage.json` */
+let qqMediaGate: QqMediaGate | null = null
 /** NapCat 托管（D66）：退出只停轮询，不结束用户正在用的 QQ（拍板：退出不关） */
 let qqNapcat: NapcatManager | null = null
 /**
@@ -1242,6 +1259,11 @@ app.on('before-quit', (event) => {
   // 聊天台账：把合并窗口里没写盘的几条落下去
   qqChatLog?.dispose()
   qqChatLog = null
+  // 表情包池 / 发图计数：索引都是即时写的，这里只是收口
+  qqStickers?.dispose()
+  qqStickers = null
+  qqMediaGate?.dispose()
+  qqMediaGate = null
   ballMenuShell?.dispose()
   ballMenuShell = null
   inductionRuntime?.dispose()
@@ -1420,6 +1442,84 @@ function encodeRetentionImage(input: Buffer, encoding: RetentionEncoding): Encod
       : image
   const finalSize = scaled.getSize()
   return { bytes: scaled.toJPEG(encoding.quality), width: finalSize.width, height: finalSize.height }
+}
+
+/**
+ * QQ 发图的编码器（D96 / PR2）：与保留期同一套 `nativeImage` 口径。
+ * 长边 ≤1600、JPEG 85；**不放大**；空图 / 解码失败返回 null（调用方按原图走或如实拒绝）。
+ */
+function encodeQqOutboundImage(input: {
+  bytes: Buffer
+  mime: string
+  maxSide: number
+}): { bytes: Buffer; mime: string } | null {
+  const image = nativeImage.createFromBuffer(input.bytes)
+  if (image.isEmpty()) return null
+  const size = image.getSize()
+  const longSide = Math.max(size.width, size.height)
+  const scaled =
+    longSide > input.maxSide
+      ? image.resize({
+          width:
+            size.width >= size.height ? input.maxSide : Math.round((size.width * input.maxSide) / longSide),
+          quality: 'good'
+        })
+      : image
+  const bytes = scaled.toJPEG(85)
+  return bytes.length > 0 ? { bytes, mime: 'image/jpeg' } : null
+}
+
+/** 表情 / 图片条目 → 工具视图（只带标签类信息，不带字节 / 路径） */
+function stickerViewOf(entry: QqStickerEntry): {
+  id: string
+  label: string
+  desc: string
+  tags: readonly string[]
+  useCount: number
+} {
+  return {
+    id: entry.id,
+    label: entry.label,
+    desc: entry.desc,
+    tags: [...entry.tags],
+    useCount: entry.useCount
+  }
+}
+
+/** data URL → 字节（`save_sticker` 收图用；不是合法图片 data URL 返回 null） */
+function bytesOfImageDataUrl(dataUrl: string): Buffer | null {
+  const matched = /^data:image\/[a-z0-9.+-]+;base64,([A-Za-z0-9+/=]+)$/iu.exec(dataUrl.trim())
+  if (matched === null) return null
+  try {
+    const bytes = Buffer.from(matched[1], 'base64')
+    return bytes.length > 0 ? bytes : null
+  } catch {
+    return null
+  }
+}
+
+/** 表情 id：池子里的 12 位 hex（不是消息短号） */
+function stickerIdOf(input: unknown): string | null {
+  if (typeof input !== 'object' || input === null) return null
+  const raw = (input as Record<string, unknown>)['id']
+  if (typeof raw !== 'string') return null
+  const id = raw.trim().toLowerCase()
+  return /^[a-f0-9]{12}$/u.test(id) ? id : null
+}
+
+/** 设置抽屉「改标签 / 描述」的参数（只认这两个;为空 = 不改） */
+function parseStickerEdit(
+  input: unknown
+): { id: string; patch: { label?: string; desc?: string } } | null {
+  if (typeof input !== 'object' || input === null) return null
+  const id = stickerIdOf(input)
+  if (id === null) return null
+  const row = input as Record<string, unknown>
+  const patch: { label?: string; desc?: string } = {}
+  if (typeof row['label'] === 'string') patch.label = row['label']
+  if (typeof row['desc'] === 'string') patch.desc = row['desc']
+  if (patch.label === undefined && patch.desc === undefined) return null
+  return { id, patch }
 }
 
 /**
@@ -2777,9 +2877,53 @@ if (primaryInstance) {
       file: join(app.getPath('userData'), 'qq', 'chat-log.json'),
       log: (level, message, data) => captureLog(level, message, data)
     })
+    qqStickers = new QqStickerStore({
+      root: join(app.getPath('userData'), 'qq', 'stickers'),
+      log: (level, message, data) => captureLog(level, message, data)
+    })
+    qqMediaGate = new QqMediaGate({
+      file: join(app.getPath('userData'), 'qq', 'media-usage.json'),
+      log: (level, message, data) => captureLog(level, message, data)
+    })
+    /**
+     * 表情包工具端口（D96 / PR2）：只在 QQ 路径挂。
+     * - `pick` 在挑中时就记一次 useCount（图鉴按常用度排）；发送失败不影响这次记账；
+     * - 发出去前统一过 `prepareOutboundImage`（长边 ≤1600 / ≤3MB，GIF 原样），
+     *   压不动就如实返回 null（工具回「发不了」，而不是发一张糊的）。
+     */
+    const stickerPort: QqStickerToolDeps = {
+      list: () => qqStickers?.catalog().map(stickerViewOf) ?? [],
+      pick: (id) => {
+        const found = qqStickers?.read(id) ?? null
+        if (found === null) return null
+        const prepared = prepareOutboundImage(found.bytes, encodeQqOutboundImage)
+        if (!prepared.ok) return null
+        const touched = qqStickers?.touch(found.entry.id) ?? found.entry
+        return { view: stickerViewOf(touched), dataUrl: prepared.dataUrl }
+      },
+      save: ({ dataUrl, label, desc }) => {
+        const bytes = bytesOfImageDataUrl(dataUrl)
+        if (bytes === null) return { ok: false, error: '这张图取不到字节，收不了' }
+        const store = qqStickers
+        if (store === null) return { ok: false, error: '表情包还没准备好，稍后再试' }
+        const added = store.add({
+          bytes,
+          label,
+          ...(desc !== undefined && desc !== '' ? { desc } : {})
+        })
+        if (!added.ok) return added
+        return {
+          ok: true,
+          id: added.entry.id,
+          label: added.entry.label,
+          duplicate: added.duplicate
+        }
+      }
+    }
     qqChannel = createQqChannel(new QqOb11Server(), {
       log: (level, message, data) => captureLog(level, message, data),
       chatLog: qqChatLog,
+      mediaGate: qqMediaGate,
       // 命令（M5）：与桌面同一个 handler；命中就不进模型，也不占限流 / 排队
       command,
       ask: async ({ text, conversationId, signal, images, files, quoted, recent }) => {
@@ -2862,7 +3006,9 @@ if (primaryInstance) {
           tools: [...mode.tools, ...QQ_TOOL_NAMES],
           ...(quoted !== undefined ? { quoted } : {}),
           ...(recent !== undefined && recent.length > 0 ? { chatRecent: recent } : {}),
-          ...(quotePort !== undefined ? { quoteMessage: quotePort } : {})
+          ...(quotePort !== undefined ? { quoteMessage: quotePort } : {}),
+          // 表情 / 发图（D96 / PR2）：与引用一样只在 QQ 路径挂
+          stickers: stickerPort
         }
         // QQ 发来的图片 / 文本文件（D88）：与桌面附件同口径（用户主动提供，不过脱敏墙；出网门照旧）
         const hasImages = images !== undefined && images.length > 0
@@ -2944,6 +3090,7 @@ if (primaryInstance) {
             ),
             tools: [...mode.tools, ...QQ_TOOL_NAMES],
             ...(quotePort !== undefined ? { quoteMessage: quotePort } : {}),
+            stickers: stickerPort,
             resume: { id: resumeId, decision }
           },
           ''
@@ -3024,6 +3171,81 @@ if (primaryInstance) {
       // 端口 / token 变了：NapCat 已在跑就热写 OneBot 配置，不用重启 QQ
       void qqNapcat?.syncConfig()
       return { ok: true, view: buildQqSettingsView(db, qqChannel?.status()) }
+    }
+
+    /* ---------------- 表情包 / 聊天索引（D96 / PR2） ---------------- */
+
+    /**
+     * 导入表情：系统文件选择器多选 → 复制进 library。
+     * 单张上限 2MB、只认 png/jpg/gif/webp（池子自己判），失败的计数只回数量，
+     * 不把文件名 / 路径写进日志（D96 §6.5）。
+     */
+    const qqStickerImport = async (): Promise<QqStickerListView | { ok: false; error: string }> => {
+      const store = qqStickers
+      if (store === null) return { ok: false, error: '表情包还没准备好，稍后再试' }
+      const picked = await dialog.showOpenDialog({
+        title: '导入表情包',
+        buttonLabel: '导入',
+        properties: ['openFile', 'multiSelections'],
+        filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }]
+      })
+      if (picked.canceled || picked.filePaths.length === 0) return buildQqStickerListView(store)
+      let failed = 0
+      for (const file of picked.filePaths.slice(0, 30)) {
+        try {
+          const bytes = readFileSync(file)
+          const label = basename(file).replace(/\.[^.]+$/u, '').slice(0, 20).trim()
+          const added = store.add({ bytes, label: label === '' ? '表情' : label })
+          if (!added.ok) failed += 1
+        } catch (error) {
+          failed += 1
+          captureLog('warn', 'qq sticker import failed', { error: String(error) })
+        }
+      }
+      if (failed > 0) captureLog('warn', 'qq sticker import skipped', { failed })
+      return buildQqStickerListView(store)
+    }
+    const qqStickerUpdate = (
+      input: unknown
+    ): QqStickerListView | { ok: false; error: string } => {
+      const store = qqStickers
+      if (store === null) return { ok: false, error: '表情包还没准备好' }
+      const parsed = parseStickerEdit(input)
+      if (parsed === null) return { ok: false, error: '改表情的参数不对' }
+      const done = store.update(parsed.id, parsed.patch)
+      if (!done.ok) return { ok: false, error: done.error }
+      return buildQqStickerListView(store)
+    }
+    const qqStickerMove = (
+      input: unknown,
+      layer: 'trash' | 'library'
+    ): QqStickerListView | { ok: false; error: string } => {
+      const store = qqStickers
+      if (store === null) return { ok: false, error: '表情包还没准备好' }
+      const id = stickerIdOf(input)
+      if (id === null) return { ok: false, error: '参数不对' }
+      const done = store.move(id, layer)
+      if (!done.ok) return { ok: false, error: done.error }
+      return buildQqStickerListView(store)
+    }
+    const qqStickerRemove = (
+      input: unknown
+    ): QqStickerListView | { ok: false; error: string } => {
+      const store = qqStickers
+      if (store === null) return { ok: false, error: '表情包还没准备好' }
+      const id = stickerIdOf(input)
+      if (id === null) return { ok: false, error: '参数不对' }
+      if (!store.remove(id)) return { ok: false, error: '没有这张表情' }
+      return buildQqStickerListView(store)
+    }
+    const qqChatLogClear = (): { ok: boolean; error?: string } => {
+      try {
+        qqChatLog?.clear()
+        return { ok: true }
+      } catch (error) {
+        captureLog('warn', 'qq chat log clear failed', { error: String(error) })
+        return { ok: false, error: '清空失败' }
+      }
     }
 
     /**
@@ -3414,6 +3636,21 @@ if (primaryInstance) {
       },
       qqSettings: readQqSettings,
       saveQqSettings,
+      qqStickers: () => {
+        if (qqStickers === null) return { error: 'stickers-unavailable' }
+        try {
+          return buildQqStickerListView(qqStickers)
+        } catch (error) {
+          captureLog('warn', 'qq stickers read failed', { error: String(error) })
+          return { error: 'stickers-read-failed' }
+        }
+      },
+      qqStickerImport,
+      qqStickerUpdate,
+      qqStickerTrash: (input) => qqStickerMove(input, 'trash'),
+      qqStickerRestore: (input) => qqStickerMove(input, 'library'),
+      qqStickerRemove,
+      qqChatLogClear,
       qqNapcatStatus: () =>
         qqNapcat?.status() ?? { phase: 'idle', installed: false, autoStart: true, loggedIn: false },
       qqNapcatStart: () => qqNapcat?.start() ?? Promise.resolve({ ok: false, error: 'NapCat 未初始化' }),

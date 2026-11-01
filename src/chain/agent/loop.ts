@@ -65,6 +65,7 @@ import {
   type ChainAskChatRecent,
   type ChainAskCitation,
   type ChainAskMemoryCitation,
+  type ChainAskOutboundMedia,
   type ChainAskQuotedMessage,
   type ChainAskResult,
   type ChainAskRelatedSegment,
@@ -83,6 +84,7 @@ import {
   type MemoryCitationMeta,
   type NotebookToolDeps,
   type GrowthToolDeps,
+  type QqStickerToolDeps,
   type QuoteMessageLookup,
   type TaskToolDeps
 } from './tools'
@@ -121,6 +123,8 @@ export interface AskLoopResumeState {
   readMemories?: ReadonlyMap<number, MemoryCitationMeta>
   /** 暂停前已经传承过（M4）：恢复后仍不能把这一问写进女儿的分支 */
   conceived?: boolean
+  /** 暂停前已经挑好、还没发出去的媒体（D96 / PR2）：恢复后接着发，不丢 */
+  media?: readonly ChainAskOutboundMedia[]
 }
 
 export interface AskLoopContext {
@@ -218,6 +222,11 @@ export interface AskLoopContext {
   chatRecent?: readonly ChainAskChatRecent[]
   /** `quote_message` 的短号查询端口（QQ 通道注入；不传 = 没这个工具可调） */
   quoteMessage?: (id: number) => QuoteMessageLookup
+  /**
+   * QQ 表情包 / 发图端口（D96 / PR2）：只在 QQ 路径注入；
+   * 不传 = 三个媒体工具会如实回「这边发不了图」。
+   */
+  stickers?: QqStickerToolDeps
   /** 记账：整次循环结束后一次（含失败路径已消耗的量） */
   onUsage?: (usage: LlmUsage, meta: AskUsageMeta) => void
   /** 从暂停点恢复（`ask.ts` 按检查点回填）；暂停轮的 turns / 白名单 / 计数都在里面 */
@@ -350,6 +359,14 @@ function summarizeToolOutcome(
         : '成长档案没写成'
     case 'quote_message':
       return result.ok ? `引用 #${result.id}` : '引用没成'
+    case 'send_sticker':
+      return result.stickerId === null
+        ? `给了表情图鉴 ${result.catalog.length} 条`
+        : `挑好了表情「${result.label}」`
+    case 'save_sticker':
+      return result.ok ? `收了表情 #${result.stickerId ?? '?'}` : '没收成表情'
+    case 'send_image':
+      return result.ok ? `挑好了图片 #${result.imageId ?? '?'}` : '没挑到图'
     default:
       return `失败：${result.message}`
   }
@@ -383,13 +400,19 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
    * 只挂在「有正文的回答」上；报错 / 澄清不带（引用一句报错很奇怪）。
    */
   let replyToTarget: number | undefined
+  /**
+   * 这一轮挑好的出站媒体（D96 / PR2）：`send_sticker` / `send_image` 选中的图。
+   * 和引用一样只挂在「有正文的回答」上；最多 1 张表情 + 1 张图。
+   */
+  const outboundMedia: ChainAskOutboundMedia[] = resume?.media !== undefined ? [...resume.media] : []
   const withTrace = (result: ChainAskResult): ChainAskResult => {
-    const quoted =
-      replyToTarget !== undefined &&
-      (result.kind === 'answer' || result.kind === 'insufficient' || result.kind === 'no-evidence')
+    // 只有「有正文的回答」才挂引用 / 媒体；报错 / 澄清都不挂（引用一句报错、跟一张图都很怪）
+    const hasBody =
+      result.kind === 'answer' || result.kind === 'insufficient' || result.kind === 'no-evidence'
     return {
       ...result,
-      ...(quoted ? { replyTo: replyToTarget } : {}),
+      ...(replyToTarget !== undefined && hasBody ? { replyTo: replyToTarget } : {}),
+      ...(hasBody && outboundMedia.length > 0 ? { outboundMedia: [...outboundMedia] } : {}),
       ...(conceived ? { conceived: true as const } : {}),
       ...(steps.length > 0 ? { trace: { steps } } : {})
     }
@@ -397,6 +420,13 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
 
   /** 归档表（D88）：本会话出现过的图 / 文本附件 → 可按 id 取回（数据只从会话历史来，不碰磁盘） */
   const recallArchive = new Map<string, RecalledAttachment>()
+
+  /** 图片 id → data URL：`save_sticker` / `send_image` 只能拿这里有的图（不许按 id 扫盘） */
+  const imageById = (id: string): string | null => {
+    const found = recallArchive.get(id)
+    if (found === undefined || found.media !== 'image') return null
+    return found.images?.[0] ?? null
+  }
 
   const executor = createAskToolExecutor({
     db: ctx.db,
@@ -412,6 +442,20 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.notebook ? { notebook: ctx.notebook } : {}),
     ...(ctx.growth ? { growth: ctx.growth } : {}),
     ...(ctx.quoteMessage ? { quoteMessage: ctx.quoteMessage } : {}),
+    ...(ctx.stickers ? { stickers: ctx.stickers } : {}),
+    imageById,
+    ...(outboundMedia.length > 0
+      ? {
+          pickedMedia: {
+            ...(outboundMedia.find((item) => item.kind === 'sticker')?.ref !== undefined
+              ? { sticker: outboundMedia.find((item) => item.kind === 'sticker')?.ref as string }
+              : {}),
+            ...(outboundMedia.find((item) => item.kind === 'image')?.ref !== undefined
+              ? { image: outboundMedia.find((item) => item.kind === 'image')?.ref as string }
+              : {})
+          }
+        }
+      : {}),
     ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId),
@@ -470,6 +514,18 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       }
     }
     // QQ 引用 / 最近聊天不在归档表里：它们只跟着对应的 user 消息走
+  }
+
+  // 本轮附件 / 选区截图也进归档（D96 / PR2）：这样同一轮的 `save_sticker` / `send_image`
+  // 就取得到这一轮刚发来的图（否则得等下一轮，模型会以为「这轮收不了」）。
+  for (const url of [
+    ...(ctx.image !== undefined ? [ctx.image.dataUrl] : []),
+    ...(ctx.attachments?.images ?? [])
+  ]) {
+    const id = archiveIdOfImage(url)
+    if (id !== null && !recallArchive.has(id)) {
+      recallArchive.set(id, { id, media: 'image', images: [url] })
+    }
   }
 
   // 问题敏感：循环开始前一次判定（与单发路径同口径——宁可答「没找到」，不发敏感问题）
@@ -719,6 +775,25 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         if (outcome.result.kind === 'give_birth') conceived = true
         // QQ 引用（D96）：记下这一问要回复的那条（真实 QQ id），最后挂到结果上
         if (outcome.replyTo !== undefined) replyToTarget = outcome.replyTo
+        // QQ 出站媒体（D96 / PR2）：表情、图片各最多一张，重复挑的第二个不再加
+        if (outcome.media !== undefined) {
+          const item = outcome.media
+          if (!outboundMedia.some((existing) => existing.kind === item.kind)) {
+            outboundMedia.push({
+              kind: item.kind,
+              dataUrl: item.dataUrl,
+              ...(item.label !== undefined ? { label: item.label } : {}),
+              ...(item.ref !== undefined ? { ref: item.ref } : {})
+            })
+          }
+        }
+        // read_segment 的截图也进归档：同一轮就能「把刚才那张截图发我」
+        for (const url of outcome.images ?? []) {
+          const id = archiveIdOfImage(url)
+          if (id !== null && !recallArchive.has(id)) {
+            recallArchive.set(id, { id, media: 'image', images: [url] })
+          }
+        }
         const toolMs = Date.now() - toolStartedAt
         turns.push({
           toolCall: { name: call.name, arguments: call.arguments },
@@ -788,7 +863,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
           memoryWhitelist: new Map(memoryWhitelist),
           readSegments: new Map(readSegments),
           readMemories: new Map(readMemories),
-          ...(conceived ? { conceived: true } : {})
+          ...(conceived ? { conceived: true } : {}),
+          ...(outboundMedia.length > 0 ? { media: [...outboundMedia] } : {})
         })
         log('info', 'chain ask loop: 轮数用尽，等用户决定是否继续', {
           turns: globalTurn,

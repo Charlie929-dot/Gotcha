@@ -221,6 +221,9 @@
 | `/git` 翻页必须翻缓存，不能重跑命令 | 2026-10-31 D78：分页时若重新执行 git，`git log` 每次结果可能不同（新提交）、`push` 之类的写命令会重复执行 | 第一次跑完整命令、把 `{command, lines, code}` 存进 handler 状态；`/git n|l` 只切页；`maxOutput` 在 runner 层截断（200k），命令层只做行级裁剪 |
 | NapCat 不会自己换登录二维码 | 2026-10-31 真机：抽屉里的码扫出来永远「已过期」；`cache/qrcode.png` 还停在早上 10:45（票只有 ~2 分钟），`CheckLoginStatus.loginPhase` 一直是 `waiting_qrcode`——NapCat 只在启动 / 收到刷新请求时写这张 PNG | 轮询里判 `qrExpired(qrAt, now)`（`NAPCAT_QR_MAX_AGE_MS = 110s`）：过期就先清掉旧图，再 POST `/api/QQLogin/RefreshQRcode`（要 WebUI 凭据、15s 节流），NapCat 会重写 `cache/qrcode.png`，随后按普通路径读回来；`readQr()` 也拒绝比 110s 还旧的图（接管老进程别照收旧码）。实测 `RefreshQRcode` 返回 `{ qrcodeurl }`、文件 mtime 立刻更新 |
 
+| 任务 `run_key` 抢了没结算就重启 = 永久卡死 + 定时器 0ms 空转 | 2026-11-02 真机：`mem_tasks#2`（每天 23:30 写日记）23:30:00 抢到租约、23:30:11 写完文件、23:30:15 应用重启，`settleTask` 没跑到。`claimTask` 见 `run_key` 已等于当前 occurrence 就永远返回 null：这条既不跑也不推进，`nextDueAt` 永远停在过去 → 调度器 `setTimeout(0)` 反复醒来，主进程单核 76% CPU | 启动时 `releaseStaleClaims()`（`task-runtime.start()` 里调，清 `run_key = id:next_due_at` 的 active 行）；`nextDueTask` / `listDueTasks` 用 `NOT_CLAIMED` 跳过「已抢未结算」的行，别让死行堵在队首 |
+| 已完成的一次性任务还能 update 时间，但永远不会再响 | 2026-11-02 真机：ta 把「23:45 收尾」改到 `#9`（23:00 已跑完，state=completed），`updateTask` 只改 `next_due_at`、state 不动；`/tasks` 只列 active/paused → 那条整个消失，回执却说「改好了 #9：11-01 23:45 …」 | `task-tools.update` 对 completed/cancelled 且给了 `when` 的请求如实拒绝（让它 `schedule` 新的），只改说明 / 显式 `state=active` 不受影响；一次性提醒一条任务只装一件事，改时间不会把已经跑掉的那次还回来 |
+
 ## 规则
 
 - 同一个坑第二次出现，说明这里没记住——先补本文件，再修代码。

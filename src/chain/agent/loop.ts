@@ -326,6 +326,10 @@ function summarizeToolOutcome(
       return result.ok ? `改了任务 #${result.task?.id ?? '?'}` : '没改成'
     case 'cancel_task':
       return result.ok ? `取消任务 #${result.task?.id ?? '?'}` : '没取消成'
+    case 'update_notebook':
+      return result.ok
+        ? `小本本 ${result.entry !== null ? `${result.entry.id} ` : ''}已改（${result.total} 条）`
+        : '小本本没改成'
     default:
       return `失败：${result.message}`
   }

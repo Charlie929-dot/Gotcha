@@ -211,6 +211,10 @@ describe('循环里的回执', () => {
     const text = JSON.stringify(client.askLoopRequests.at(-1))
     expect(text).toContain('记下了 n1（关于你）')
     expect(text).toContain('喜欢周深')
+    // 过程摘要给人看的一句（不是「失败：…」）
+    if (result.kind === 'answer') {
+      expect(result.trace?.steps[0]?.tools[0]?.summary).toContain('小本本 n1')
+    }
   })
 
   it('存储层说没写成：回执 ok=false，模型不能改口成成功', async () => {

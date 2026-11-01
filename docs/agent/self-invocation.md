@@ -471,6 +471,7 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 - 空本子不写这一节（不出现空标题）；纯模型（assistant 分支）不注入；
 - 工具 `update_notebook`：`add`（补一条，要 `section` / `text`）、`revise`（按 `id` 改写）、
   `remove`（按 `id` 放下）。回执由存储层给：真的写成了才 `ok=true`，失败 / 栏满如实说；
+  过程摘要里也有一句「小本本 nX 已改（N 条）」，不是「失败：…」；
 - 小本本不生成定时任务：明确后续意图仍进 `mem_tasks`（`schedule_task`）。
 
 ### 16.4 查看与纠正入口

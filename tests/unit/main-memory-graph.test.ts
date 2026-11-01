@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 记忆仓 · 图与纯模型分支（D74）
  *
  * 真 git 仓（临时目录），验证三件事：
@@ -89,7 +89,7 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
       [
         '[0] life · 主干',
         '  [1] ask · 纯模型 · 0 个工具  ← 当前',
-        '  [2] default · 11 个工具'
+        '  [2] default · 15 个工具'
       ].join('\n')
     )
     const history = textOf(await run('/log 1'))
@@ -99,3 +99,4 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
     expect(history).toMatch(/\[0-1\] 提问会话 ask · [0-9a-f]{7,}  ← 正在用/u)
   })
 })
+

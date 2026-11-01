@@ -50,12 +50,17 @@
 | - | - | - |
 | 定时 commit / push 记忆仓 | ✅ 已实现 | `src/main/memory-schedule.ts` |
 | 问记忆 / 对话循环 | ✅ 已实现 | `src/chain/agent/loop.ts` |
-| `mem_tasks` 表、调度器、任务工具 | ❌ 未实现 | `src/memory/schema.ts` 仍为 v10 |
+| `mem_tasks` 表（v11） | ✅ 已实现 | `src/memory/schema.ts` + `migrations.ts` v11 |
+| 任务读写 / 四种视图 / 执行租约 | ✅ 已实现 | `src/memory/agent/tasks.ts` |
+| 到点调度器（睡到最近一条，无任务不留定时器） | ✅ 已实现 | `src/memory/agent/scheduler.ts` |
+| 四个任务工具（schedule / search / update / cancel） | ✅ 已实现 | `tool-catalog.ts` / `deepseek.ts` / `tools.ts` |
+| 共建计划 Obsidian 同步与真实回执 | ✅ 已实现 | `src/memory/agent/task-tools.ts` + `memory/write.ts` |
+| 到点合流 / 主动开口 | ✅ 已接线（真机未验收） | `src/main/task-runtime.ts` + `src/main/index.ts` |
 | perceive / act 两段式 | ❌ 未实现 | `llm-call.md` §12 第 4 步，仍压着体验关口 |
-| `self.md` / `routine.md` | ❌ 未实现 | `src` 无对应装配路径 |
-| 小本本核心页与更新工具 | ❌ 未实现 | 本草案新增 |
+| `self.md` / `routine.md` | ❌ 不单独建文件 | 本版改为「任务镜像」逻辑视图 + 小本本（见 §3.2） |
+| 小本本核心页与更新工具 | ❌ 未实现 | 第二阶段 |
 
-当前「自我」只有 `src/memory/persona.ts` 的人设段与 `payload.ts` 的 `<now>`，没有小本本、任务记忆或自调用装配路径。
+第一阶段（任务记忆与自调用）已落地，细节与验收口径见 §15；小本本与成长档案仍未开始。
 
 ### 3.2 本版替换的旧口径
 
@@ -366,3 +371,32 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 第三阶段新增：ta 记忆仓库中的成长档案、日记 / 周记 / 月度回顾写作任务、结论回流与所有权边界测试。
 
 主要风险：① 共建确认、数据库写入与 Obsidian 同步回执的时序；② 到点重读上下文后「静默 / 延后」的体验稳定性；③ 小本本长期膨胀与旧印象固化；④ 成长档案变成重复摘要或编造经历；⑤ 与 D57 的衔接。旧 v0.1 的工程量估计失效，待 §13 实现细节拍板后按阶段重估。
+
+## 15. 第一阶段落地（2026-11-01，`vibe/free`）
+
+### 15.1 代码
+
+| 层 | 文件 | 做了什么 |
+| - | - | - |
+| 表 | `src/memory/schema.ts` · `src/db/migrations.ts` | v11 `mem_tasks`（instruction / next_due_at / repeat / origin / delivery / valid_until / state / last_run_at / run_key / obsidian_*）+ 到点索引、来源索引 |
+| 读写 | `src/memory/agent/tasks.ts` | 新建 / 更新 / 取消、四种视图（pending · day · upcoming · about，带 `total` / `truncated`）、`claimTask` 租约（`run_key`）、`settleTask`（重复推进 / 延后 / 完成）、`expireTasks`（过期不补发） |
+| 调度 | `src/memory/agent/scheduler.ts` | 只睡到最近一条 `next_due_at`；没有活动任务不留定时器；单飞；抢不到租约跳过（不卡队首）；失败推 1 分钟后重试 |
+| 工具 | `src/chain/agent/tools.ts` · `deepseek.ts` · `tool-catalog.ts` · `payload.ts` · `loop.ts` | 四个工具端到端：schema → 参数钳制（`YYYY-MM-DD HH:mm` 本地时间）→ 执行端口 → 送云视图（说明文本过脱敏）→ 过程摘要；`/tool` 多一个「任务」集合 |
+| 计划同步 | `src/memory/agent/task-tools.ts` · `src/memory/write.ts` | 共建计划由代码写 `# Tracking`：新建=追加、改=原地改（保留勾选）、取消=删那一行；同步状态（synced / pending / failed / removed）落库并进回执；模型永远碰不到用户日记正文 |
+| 合流 | `src/chain/agent/payload.ts` · `loop.ts` | `<now>` 末尾加「到点的事」：10 分钟内到点的几条（≤5），明确写「说不说由你判断」，不是命令 |
+| 组合根 | `src/main/task-runtime.ts` · `index.ts` · `ask-ipc.ts` · `ask-preload.ts` · `ask/ask.ts` | 任务库独立写连接（避免 `ensureWritable` 关掉正在读的连接）；到点走 `runAskOnce`（与提问同一条通道）；用户正在问 → 让位 2 分钟；说完记进当前会话历史并通知窗口重画 |
+| 视图 | `src/main/commands.ts` | `/tasks` 列挂着的计划 / 自主任务（带来源与同步状态），`/tasks cancel <编号>` 取消 |
+
+### 15.2 测试（`npm test` 1912 条 / 168 文件全绿，`typecheck` / `build` 通过）
+
+- `tests/unit/memory-tasks.test.ts`（27）：四种视图、重复推进、租约去重、过期不补发、截断标记、`%` 不当通配符。
+- `tests/unit/memory-task-scheduler.test.ts`（12）：睡到最近一条、无任务不留定时器、重配不叠加、单飞、抢不到租约不卡队首、失败重试。
+- `tests/unit/memory-task-tools.test.ts`（11）：共建计划真的写进 `# Tracking`、缺段时「记下了但没同步上」、改时间保留勾选、取消删行、跨天移动、不存在的 id 如实报错。
+- `tests/unit/chain-agent-tasks.test.ts`（14）：时间解析（含 2-30 这种假日期）、参数钳制、没接库时如实报错、回执回灌、`<now>` 合流、脱敏整条不列。
+
+### 15.3 明确没做（下一阶段）
+
+1. **真机验收**：任务到点是否真的「开口」、窗口刷新是否顺眼，还没在真机跑过（`Unverified`）。
+2. **任务视图 UI**：现在只有 `/tasks` 命令，设置抽屉里没有任务块（方案 §12.1 的「统一任务视图、暂停 / 取消入口」只做了命令层）。
+3. **perceive / act 两段式、小本本、成长档案**：按 §12 的第二 / 第三阶段继续。
+4. **`origin=system` 的固定写作任务**（日记 / 周记）：表与工具已支持，尚未排任务。

@@ -411,6 +411,54 @@ export type RedactableAskLoopToolResult =
       /** 这条记忆在历史里的样子（`#id 用 read_segment 查看了…`；D89 回显用，防模型再查一遍） */
       label?: string
     }
+  /**
+   * 任务记忆（自调用 v0.2 §6）：记下 / 查 / 改 / 取消。
+   * 回执里的 `message` 由**数据库记录 + Obsidian 同步结果**拼出来，不是模型编的；
+   * `task` 为 null 表示没写成 / 没找到，绝不假装成功。
+   */
+  | {
+      kind: 'schedule_task'
+      freshness: AskLoopFreshness
+      ok: boolean
+      task: RedactableTaskView | null
+      message: string
+    }
+  | {
+      kind: 'search_tasks'
+      freshness: AskLoopFreshness
+      view: string
+      tasks: readonly RedactableTaskView[]
+      total: number
+      truncated: boolean
+    }
+  | {
+      kind: 'update_task'
+      freshness: AskLoopFreshness
+      ok: boolean
+      task: RedactableTaskView | null
+      message: string
+    }
+  | {
+      kind: 'cancel_task'
+      freshness: AskLoopFreshness
+      ok: boolean
+      task: RedactableTaskView | null
+      message: string
+    }
+
+/** 一条任务在送云视图里的样子（说明文字是屏幕 / 用户文本，照样过脱敏） */
+export interface RedactableTaskView {
+  id: number
+  /** 到点时间（本地 `MM-DD HH:mm`，工具层算好，模型不用自己换算） */
+  when: string
+  repeat: string
+  origin: string
+  delivery: string
+  state: string
+  instruction: string
+  /** 共建计划的 Obsidian 同步状态：synced / pending / failed；空 = 不需要同步 */
+  sync?: string
+}
 
 /** 循环里的一次往返：模型发起的调用 + 执行器给出的摘要 */
 export interface RedactableAskLoopTurn {
@@ -504,6 +552,19 @@ export interface ChainAskLoopBuildInput {
   life?: AskLifeState
   /** 当前节点的未读信数（D81；`<now>` 只报数量，正文走 read_letter） */
   letters?: { readonly unread: number }
+  /**
+   * 到点 / 临近的任务（自调用 v0.2 §9 合流）：只给几条摘要，正文走 search_tasks。
+   * 它不是「必须说的话」，而是一个事实：这几件事到点了，说不说由 ta 结合当前上下文定。
+   */
+  tasks?: {
+    readonly due: readonly {
+      id: number
+      /** 人话时间（工具层算好） */
+      when: string
+      instruction: string
+      origin: string
+    }[]
+  }
   /** 用户随本轮问题上传的附件（用户主动提供，不过脱敏墙） */
   attachments?: RedactableAskAttachments
 }
@@ -580,6 +641,10 @@ export const ASK_LOOP_READ_MAX_CHARS = 6000
 export const ASK_LOOP_DIARY_SNIPPET_MAX_CHARS = 120
 /** 日记引用里原文片段的上限（最终答复的 memories[].snippet） */
 export const ASK_LOOP_DIARY_QUOTE_MAX_CHARS = 160
+/** 任务说明一次给多少字：足够模型判断「这是什么」，又不把整段计划塞进上下文 */
+export const ASK_LOOP_TASK_INSTRUCTION_MAX_CHARS = 200
+/** `<now>` 里最多列几条到点的事（多了就只给最近的几条，其余走 search_tasks） */
+export const ASK_LOOP_DUE_TASKS_MAX = 5
 
 /* ------------------------------------------------------------------ */
 /* 组装辅助                                                            */
@@ -719,6 +784,34 @@ function guardLoopArgs(policy: AskTextPolicy, args: Record<string, unknown>): Re
 function guardToolName(policy: AskTextPolicy, name: string): string {
   const result = policy.redact(normalizeText(name))
   return result.blocked ? 'unknown' : result.text.slice(0, 40)
+}
+
+/**
+ * 任务视图过策略：说明是用户 / 自己写的文本，可能是「去医院拿报告」这种敏感事；
+ * 整条命中阻断就整条不给（返回 null），别把它拆成半句话送出去。
+ */
+function guardTaskView(
+  policy: AskTextPolicy,
+  task: RedactableTaskView
+): RedactableTaskView | null {
+  const instruction = guardText(policy, task.instruction, ASK_LOOP_TASK_INSTRUCTION_MAX_CHARS)
+  if (instruction.blocked) return null
+  return {
+    id: task.id,
+    when: task.when.slice(0, 40),
+    repeat: task.repeat.slice(0, 20),
+    origin: task.origin.slice(0, 20),
+    delivery: task.delivery.slice(0, 20),
+    state: task.state.slice(0, 20),
+    instruction: instruction.text,
+    ...(task.sync === undefined || task.sync === '' ? {} : { sync: task.sync.slice(0, 20) })
+  }
+}
+
+/** 任务回执的一句话：命中阻断就换成固定文案（不能把敏感说明原样带出去） */
+function guardTaskMessage(policy: AskTextPolicy, message: string, fallback: string): string {
+  const result = policy.redact(normalizeText(message))
+  return result.blocked ? fallback : result.text.slice(0, 300)
 }
 
 /** tags / links：逐条过策略，阻断的单条丢弃（不连坐整段），再按条数与长度截断 */
@@ -929,6 +1022,31 @@ function renderNowText(
 }
 
 /**
+ * 到点的事（v0.2 §9 合流）：`<now>` 末尾几行事实，不是「必须说」的指令。
+ *
+ * 为什么放进 `<now>` 而不是单独一轮：到点时用户可能正在说话——先把他接住，
+ * 再由 ta 结合此刻上下文决定开口 / 延后 / 不说话。说明文本过策略，
+ * 整条命中阻断就不列这一条（不拆成半句话送出去）。
+ */
+function renderDueTasks(
+  policy: AskTextPolicy,
+  tasks: ChainAskLoopBuildInput['tasks']
+): string {
+  if (tasks === undefined || tasks.due.length === 0) return ''
+  const lines: string[] = ['到点的事（你自己记下的；现在说、晚点说，还是已经不必说，由你判断）：']
+  for (const task of tasks.due.slice(0, ASK_LOOP_DUE_TASKS_MAX)) {
+    const instruction = policy.redact(normalizeText(task.instruction))
+    if (instruction.blocked) continue
+    const origin =
+      task.origin === 'user' ? '跟他约好的' : task.origin === 'agent' ? '你自己的' : '系统例行'
+    lines.push(
+      `- #${task.id} ${task.when.slice(0, 40)} ${instruction.text.slice(0, ASK_LOOP_TASK_INSTRUCTION_MAX_CHARS)}（${origin}）`
+    )
+  }
+  return lines.length === 1 ? '' : lines.join('\n')
+}
+
+/**
  * 循环载荷的组装。问题与单发口径完全一致（先剥后截、阻断整次不出云）；
  * 每一轮的 toolResult 按 kind 过策略——search_info 的命中被阻断就整条剔掉
  * 并上报 `blockedSegmentIds`（诊断字段；驱动层按载荷里实际可见的命中集合收缩白名单）。
@@ -975,7 +1093,9 @@ export function buildAskLoopPayload(
   }
 
   // <now>：本轮处境事实（时间 / 此刻 / 想到的 / 数据边界 / 最近段），追加在 user 之后
-  const now = renderNowText(input, opening, recent)
+  const nowText = renderNowText(input, opening, recent)
+  const dueTasks = renderDueTasks(policy, input.tasks)
+  const now = dueTasks === '' ? nowText : `${nowText}\n${dueTasks}`
 
   const turns: CloudAskLoopTurn[] = []
   const blockedSegmentIds: number[] = []
@@ -1185,6 +1305,37 @@ export function buildAskLoopPayload(
           ...(text !== null ? { text: text.text } : {}),
           // 回显的是「这段记忆长什么样」，只做长度收口：它本来就是上一轮已经发出去的占位符
           ...(label !== null && !label.blocked ? { label: label.text.slice(0, 200) } : {})
+        }
+        break
+      }
+      case 'schedule_task':
+      case 'update_task':
+      case 'cancel_task': {
+        const message = guardTaskMessage(policy, result.message, '任务已处理（说明含敏感内容，不展开）')
+        const task = result.task === null ? null : guardTaskView(policy, result.task)
+        // 说明被挡掉 = 这条任务不能给模型看；但「写没写成」要老实说
+        view = {
+          kind: result.kind,
+          freshness: result.freshness,
+          ok: result.ok === true && (result.task === null || task !== null),
+          task,
+          message
+        }
+        break
+      }
+      case 'search_tasks': {
+        const tasks: RedactableTaskView[] = []
+        for (const item of result.tasks) {
+          const guarded = guardTaskView(policy, item)
+          if (guarded !== null) tasks.push(guarded)
+        }
+        view = {
+          kind: 'search_tasks',
+          freshness: result.freshness,
+          view: result.view.slice(0, 20),
+          tasks,
+          total: result.total,
+          truncated: result.truncated === true
         }
         break
       }

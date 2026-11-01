@@ -40,6 +40,9 @@ import {
 import {
   MEM_DELETED_DDL,
   MEM_DELETED_DAY_INDEX_DDL,
+  MEM_TASKS_DDL,
+  MEM_TASKS_DUE_INDEX_DDL,
+  MEM_TASKS_ORIGIN_INDEX_DDL,
   MEM_VECTORS_DDL,
   MEM_ITEMS_DDL,
   MEM_ITEMS_DAY_INDEX_DDL,
@@ -281,6 +284,29 @@ export const migrations: Migration[] = [
     },
     down(db) {
       db.exec('DROP TABLE IF EXISTS mem_vectors')
+    }
+  },
+  {
+    /**
+     * v11：任务记忆（`mem_tasks`，自调用方案 v0.2 §5）。
+     *
+     * 计划表与自主任务共用一张表，`origin` 区分（user / agent / system）；
+     * 调度器只按 (state, next_due_at) 找最近到点的一条来睡，不轮询。
+     * `origin='user'` 的任务还会被计划同步器写进用户 Obsidian 的计划区，
+     * 同步状态落在 `obsidian_state`（synced / pending / failed）。
+     *
+     * down 会丢用户计划（任务）数据，只用于测试回滚。
+     */
+    version: 11,
+    up(db) {
+      db.exec(MEM_TASKS_DDL)
+      db.exec(MEM_TASKS_DUE_INDEX_DDL)
+      db.exec(MEM_TASKS_ORIGIN_INDEX_DDL)
+    },
+    down(db) {
+      db.exec('DROP INDEX IF EXISTS idx_mem_tasks_origin')
+      db.exec('DROP INDEX IF EXISTS idx_mem_tasks_due')
+      db.exec('DROP TABLE IF EXISTS mem_tasks')
     }
   }
 ]

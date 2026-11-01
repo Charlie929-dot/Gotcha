@@ -33,16 +33,25 @@ export const ASK_TOOL_SCREEN_NAMES = [
 ] as const
 export const ASK_TOOL_DIARY_NAMES = ['recall_diary', 'read_diary', 'memory_profile'] as const
 export const ASK_TOOL_LETTER_NAMES = ['write_letter', 'list_letter', 'read_letter'] as const
+/** 任务记忆（自调用 v0.2 §6）：共建计划与自主任务共用一张表，`origin` 区分 */
+export const ASK_TOOL_TASK_NAMES = [
+  'schedule_task',
+  'search_tasks',
+  'update_task',
+  'cancel_task'
+] as const
 
 export type AskToolName =
   | (typeof ASK_TOOL_SCREEN_NAMES)[number]
   | (typeof ASK_TOOL_DIARY_NAMES)[number]
   | (typeof ASK_TOOL_LETTER_NAMES)[number]
+  | (typeof ASK_TOOL_TASK_NAMES)[number]
 
 export const ASK_TOOL_SETS: readonly AskToolSet[] = [
   { id: 'screen', label: '屏幕记忆', tools: [...ASK_TOOL_SCREEN_NAMES] },
   { id: 'diary', label: '日记', tools: [...ASK_TOOL_DIARY_NAMES] },
-  { id: 'letter', label: '信', tools: [...ASK_TOOL_LETTER_NAMES] }
+  { id: 'letter', label: '信', tools: [...ASK_TOOL_LETTER_NAMES] },
+  { id: 'task', label: '任务', tools: [...ASK_TOOL_TASK_NAMES] }
 ]
 
 /** 全部工具元素（顺序：先屏幕后日记，与 `ASK_TOOL_SETS` 一致） */
@@ -62,7 +71,11 @@ export const ASK_TOOL_LABELS: Readonly<Record<AskToolName, string>> = {
   memory_profile: '看「关于我」的统计画像',
   write_letter: '写一封信（写给谁 / 写什么 / 写到哪）',
   list_letter: '看有哪些信（草稿 / 待寄 / 未读）',
-  read_letter: '读一封信（不传 id = 最新未读）'
+  read_letter: '读一封信（不传 id = 最新未读）',
+  schedule_task: '记下一个计划或自己想做的事（到点会被叫醒）',
+  search_tasks: '查任务：未完成 / 某一天 / 往后 / 按事项关键词',
+  update_task: '改一条任务的时间 / 说明 / 重复 / 交付方式',
+  cancel_task: '取消一条任务'
 }
 
 export function isAskToolName(value: string): value is AskToolName {
@@ -87,6 +100,11 @@ export function hasDiaryTools(tools: readonly string[]): boolean {
 /** 这组工具里有没有信（决定 `<now>` 要不要报未读数、要不要接 letters 后端） */
 export function hasLetterTools(tools: readonly string[]): boolean {
   return tools.some((name) => (ASK_TOOL_LETTER_NAMES as readonly string[]).includes(name))
+}
+
+/** 这组工具里有没有任务工具（决定要不要接任务后端） */
+export function hasTaskTools(tools: readonly string[]): boolean {
+  return tools.some((name) => (ASK_TOOL_TASK_NAMES as readonly string[]).includes(name))
 }
 
 /**

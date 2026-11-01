@@ -1,5 +1,5 @@
 /**
- * 个人记忆 · SQLite 表结构（v9）
+ * 个人记忆 · SQLite 表结构（v11）
  *
  * 与 `events`（屏幕记忆）并列的第二本账：**日记记忆**。
  * 表名统一 `mem_` 前缀，和采集/图谱的表互不干扰；`mem_items` 是事实源，
@@ -106,6 +106,50 @@ CREATE TABLE IF NOT EXISTS mem_deleted (
 
 export const MEM_DELETED_DAY_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_mem_deleted_day ON mem_deleted(day_key);
+`
+
+/**
+ * 任务记忆（v11）：`mem_tasks` 是**持久化意图队列**（自调用方案 v0.2 §5）。
+ *
+ * 与 `mem_items` 的区别：条目记「我记得什么」，任务记「我想稍后做什么」。
+ * 计划（与用户共建）与自主任务共用这张表，靠 `origin` 区分；两者都靠
+ * `next_due_at` 被调度器叫醒，靠 `run_key` 保证同一次 occurrence 不重复执行。
+ *
+ * 约定（不进这张表的东西）：
+ * - `due` 是 `next_due_at <= now` 的派生状态，不写进 `state`；
+ * - `running` 是执行租约（进程内），也不是业务状态；
+ * - 重复任务执行后仍是 `active`，只把 `next_due_at` 推到下一次；
+ * - `obsidian_*` 是**共建计划**的同步状态：只有 `origin='user'` 才会去写用户 Obsidian，
+ *   写失败时宁可显示「待同步 / 失败」，也不假装整条计划都保存成功。
+ */
+export const MEM_TASKS_DDL = `
+CREATE TABLE IF NOT EXISTS mem_tasks (
+  id             INTEGER PRIMARY KEY,
+  instruction    TEXT NOT NULL,
+  next_due_at    INTEGER,
+  repeat         TEXT NOT NULL DEFAULT '',
+  origin         TEXT NOT NULL,
+  delivery       TEXT NOT NULL DEFAULT 'auto',
+  valid_until    INTEGER,
+  state          TEXT NOT NULL DEFAULT 'active',
+  last_run_at    INTEGER,
+  run_key        TEXT,
+  obsidian_state TEXT NOT NULL DEFAULT '',
+  obsidian_path  TEXT,
+  obsidian_note  TEXT,
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+`
+
+/** 调度器只关心「谁先到点」：state 必须一起进索引，扫的永远是活动任务 */
+export const MEM_TASKS_DUE_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_mem_tasks_due ON mem_tasks(state, next_due_at);
+`
+
+/** 任务视图按来源分栏（共建 / 自主 / 系统例行） */
+export const MEM_TASKS_ORIGIN_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_mem_tasks_origin ON mem_tasks(origin, state);
 `
 
 /**

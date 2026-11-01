@@ -237,6 +237,11 @@ export interface AskIpcDeps {
     error?: string
     view?: MemoryRepoSettingsView
   }>
+  /**
+   * 在途提问状态变化（自调用 v0.2 §9 合流）：任务到点要「先接用户」，
+   * 组合根靠这个信号知道现在有没有一轮用户问答在跑。
+   */
+  onActiveChange?: (active: boolean) => void
   log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
 }
 
@@ -376,6 +381,7 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         active?.abort()
         const controller = new AbortController()
         active = controller
+        deps.onActiveChange?.(true)
 
         let history: readonly ChainAskTurnContext[] = []
         try {
@@ -397,7 +403,10 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           deps.log('error', 'ask:query failed', { error: String(error) })
           return failure('问记忆出错，看日志')
         } finally {
-          if (active === controller) active = null
+          if (active === controller) {
+            active = null
+            deps.onActiveChange?.(false)
+          }
         }
       }
     ],
@@ -420,6 +429,7 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         active?.abort()
         const controller = new AbortController()
         active = controller
+        deps.onActiveChange?.(true)
 
         let history: readonly ChainAskTurnContext[] = []
         try {
@@ -449,7 +459,10 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           deps.log('error', 'ask:resume failed', { error: String(error) })
           return failure('续查出错，看日志')
         } finally {
-          if (active === controller) active = null
+          if (active === controller) {
+            active = null
+            deps.onActiveChange?.(false)
+          }
         }
       }
     ],

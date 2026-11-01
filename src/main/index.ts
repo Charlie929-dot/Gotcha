@@ -15,6 +15,8 @@ import {
   recallDiaryByVector
 } from '../memory/vectors'
 import { buildPersonaPrompt, personaCardDir, readPersona, readPersonaCard, resolveVaultDir, savePersonaCard } from '../memory/persona'
+import type { TaskOutcome, TaskRow } from '../memory/agent/tasks'
+import { createTaskRuntime, type TaskRuntime } from './task-runtime'
 import {
   applyMemoryPatch,
   buildMemorySettingsView,
@@ -24,7 +26,7 @@ import {
 import { buildMemoryListView, deleteMemoryView, parseMemoryListQuery, restoreMemoryView } from './memory-admin'
 import type { GiveBirthResult, DiaryToolDeps, LetterAt } from '../chain/agent/tools'
 import { askModeKindOfBranch, asksMemoryContext, type AskModeState } from '../chain/agent/mode'
-import { defaultToolsForBranchKind, hasDiaryTools, hasLetterTools, hasScreenTools } from '../chain/agent/tool-catalog'
+import { defaultToolsForBranchKind, hasDiaryTools, hasLetterTools, hasScreenTools, hasTaskTools } from '../chain/agent/tool-catalog'
 import { readUsage, recordUsage } from '../understand/induction'
 import { WinrtOcrBridge } from '../capture/ocr/winrt-bridge'
 import { ScreenCapture } from '../capture/screen-stream'
@@ -305,6 +307,8 @@ let disposeGraphIpc: (() => void) | null = null
 let disposeAskIpc: (() => void) | null = null
 /** 记忆仓定时器（D90）：退出时停掉，别留野定时器 */
 let stopMemorySchedule: (() => void) | null = null
+/** 任务运行时（自调用 v0.2）：任务库连接 + 到点调度器；退出时停掉 */
+let taskRuntime: TaskRuntime | null = null
 /** QQ 通道（D63）：默认关闭；挂在这里是为了 before-quit 能直接收口端口 */
 let qqChannel: QqChannel | null = null
 /** NapCat 托管（D66）：退出只停轮询，不结束用户正在用的 QQ（拍板：退出不关） */
@@ -1205,6 +1209,9 @@ app.on('before-quit', (event) => {
   disposeAskIpc?.()
   stopMemorySchedule?.()
   stopMemorySchedule = null
+  // 任务调度器：停掉定时器并关掉任务库那条独立写连接
+  taskRuntime?.stop()
+  taskRuntime = null
   // QQ 通道先释放端口（不等回执；在途问答随进程退出一起收口）
   qqNapcat?.dispose()
   qqNapcat = null
@@ -2478,6 +2485,14 @@ if (primaryInstance) {
               }
             }
           : {}),
+        // 任务记忆（自调用 v0.2 §6）：共建计划 / 自主任务的四个工具 + 到点合流。
+        // 只在分支挂了任务工具时接；没接的话模型调 schedule_task 会如实回「记不下」。
+        ...(hasTaskTools(tools) && taskRuntime !== null
+          ? {
+              tasks: taskRuntime.port,
+              dueTasks: () => taskRuntime?.dueHints() ?? []
+            }
+          : {}),
         ...(personaPrompt !== undefined ? { personaPrompt } : {}),
         // 这次给哪些工具（D72：当前分支的 /tool 白名单）：链层据此决定单轮 / 工具循环
         tools,
@@ -2573,7 +2588,33 @@ if (primaryInstance) {
         repo: memoryRepo,
         lineageFile,
         reloadConversations: () => askConversations.reload(),
-        compact: compactConversation
+        compact: compactConversation,
+        // /tasks：挂在 /help 上的任务视图（共建计划 + 自主任务），取消也走这里
+        tasks: {
+          list: () => {
+            if (taskRuntime === null) return '任务库还没起来（重启后再看）。'
+            const result = taskRuntime.port.search({ view: 'pending', limit: 20 })
+            if (result.total === 0) return '现在没有挂着的计划或自主任务。'
+            const lines = [
+              `挂着的任务（${result.total} 条${result.truncated ? '，只显示前 20 条' : ''}）：`
+            ]
+            for (const item of result.tasks) {
+              const origin =
+                item.origin === 'user' ? '共建' : item.origin === 'agent' ? '自主' : '例行'
+              const repeat = item.repeat === '' ? '' : `（${item.repeat}）`
+              const sync =
+                item.sync === 'failed'
+                  ? ' · Obsidian 未同步'
+                  : item.sync === 'pending'
+                    ? ' · Obsidian 待同步'
+                    : ''
+              lines.push(`  #${item.id} ${item.when}${repeat} ${item.instruction} · ${origin}${sync}`)
+            }
+            lines.push('', '取消一条：/tasks cancel <编号>')
+            return lines.join('\n')
+          },
+          cancel: (id) => taskRuntime?.port.cancel(id).message ?? '任务库还没起来（重启后再试）。'
+        }
       })
     )
 
@@ -2825,9 +2866,44 @@ if (primaryInstance) {
     }
     applyMemorySchedule()
 
-    disposeAskIpc = registerAskIpc({
-      getWindow: () => askWindow,
-      ask: async (question, context) => {
+    /** 会话历史（同一分支、最近 6 轮）：桌面提问与到点任务共用同一份口径 */
+    const conversationHistoryFor = async (
+      conversationId: string
+    ): Promise<readonly ChainAskTurnContext[]> => {
+      // 由新到旧取出该会话（**同一分支**）最近的几轮，翻成「问题 + 上一轮的答复」当上下文。
+      // 只给最近 6 轮（载荷层还会再截到 4 轮并重新脱敏），旧记录没有 conversationId 时按单条会话计。
+      // 分支（D72）：切到 /mode ask 后不带 chat 的问答，反过来也一样。
+      const branch = await activeBranchNow()
+      return readAskHistory(askHistoryPath)
+        .filter((entry) => entry.conceived !== true)
+        .filter((entry) => (entry.conversationId ?? entry.id) === conversationId)
+        .filter((entry) => (entry.branch ?? 'default') === branch)
+        .slice(0, 6)
+        .reverse()
+        .map((entry) => ({
+          question: entry.question,
+          answer:
+            entry.answer ??
+            entry.clarify?.question ??
+            (entry.kind === 'no-evidence' ? '信息链里没找到' : '')
+        }))
+        .filter((turn) => turn.answer !== '')
+    }
+
+    /** 最近一次提问用的会话（到点任务往这里说，没人说过就现开一个） */
+    let lastAskConversationId: string | null = null
+    /** 有没有一轮用户问答在跑（任务到点先让位；由 ask-ipc 的在途状态回调维护） */
+    let askBusy = false
+
+    /**
+     * 一次问答：桌面 / QQ / 任务到点共用同一条通道。
+     * 任务到点也走这里（而不是另起一套），这样「先接用户、再提任务」只有一处口径。
+     */
+    const runAskOnce = async (
+      question: string,
+      context: AskQueryContext
+    ): Promise<ChainAskResult> => {
+      lastAskConversationId = context.conversationId
         // 历史提交只读查看中：第一句话先从这里分叉成自己的节点（M2）；失败不阻塞提问
         await forkDetachedIfNeeded({
           repo: memoryRepo,
@@ -2885,6 +2961,14 @@ if (primaryInstance) {
             commitMemoryDay()
             return birth.receipt !== undefined ? { ...result, receipt: birth.receipt } : result
           })
+    }
+
+    disposeAskIpc = registerAskIpc({
+      getWindow: () => askWindow,
+      ask: runAskOnce,
+      // 在途提问信号：任务到点靠它让位（先接用户、再提任务）
+      onActiveChange: (active) => {
+        askBusy = active
       },
       // 本地命令（M1/M2/M3/M5）：/help /log /new /use /del /backup /compact /mode /tool
       // 桌面与 QQ 共用同一个 command（M5），所以 /use 在 QQ 里切了，桌面这条鱼也跟着切
@@ -2950,26 +3034,7 @@ if (primaryInstance) {
         const root = app.getPath('userData')
         return isAskShotPath(root, path) ? readAskShotDataUrl(path) : null
       },
-      conversationHistory: async (conversationId) => {
-        // 由新到旧取出该会话（**同一分支**）最近的几轮，翻成「问题 + 上一轮的答复」当上下文。
-        // 只给最近 6 轮（载荷层还会再截到 4 轮并重新脱敏），旧记录没有 conversationId 时按单条会话计。
-        // 分支（D72）：切到 /mode ask 后不带 chat 的问答，反过来也一样。
-        const branch = await activeBranchNow()
-        return readAskHistory(askHistoryPath)
-          .filter((entry) => entry.conceived !== true)
-          .filter((entry) => (entry.conversationId ?? entry.id) === conversationId)
-          .filter((entry) => (entry.branch ?? 'default') === branch)
-          .slice(0, 6)
-          .reverse()
-          .map((entry) => ({
-            question: entry.question,
-            answer:
-              entry.answer ??
-              entry.clarify?.question ??
-              (entry.kind === 'no-evidence' ? '信息链里没找到' : '')
-          }))
-          .filter((turn) => turn.answer !== '')
-      },
+      conversationHistory: conversationHistoryFor,
       history: () => readAskHistory(askHistoryPath),
       clearHistory: async () => {
         // 清空是破坏性操作：先从 git 留一份（失败也照清，只是少了这层保险）
@@ -3118,6 +3183,59 @@ if (primaryInstance) {
 
     // QQ 通道（D63）：启动时按设置起停（默认关闭 → 不占端口，不产生任何网络行为）
     void refreshQqChannel()
+
+    /**
+     * 任务运行时（自调用 v0.2 §9）：任务库独立写连接 + 到点调度器。
+     *
+     * 到点走 `runAskOnce`（与桌面提问同一条通道）：
+     * - 用户正在问 → 让位，2 分钟后再看（先接用户、再提任务）；
+     * - 否则跑一轮，结果记进当前会话历史，并通知问记忆窗口刷新（窗口开着就能看到）。
+     * 模型自己决定开口 / 延后 / 静默：它拿到的是「到点的事」那条事实，不是逐字文案。
+     */
+    taskRuntime = createTaskRuntime({
+      dbPath: join(app.getPath('userData'), DB_FILE_NAME),
+      vaultDir: () => resolveVaultDir(connections.queryDb()),
+      backupDir: () => join(app.getPath('userData'), 'diary-backups'),
+      log: (level, message, data) => captureLog(level, message, data),
+      deliver: async (task) => {
+        const at = Date.now()
+        // 用户优先：他正在说话，这一条等两分钟再来（合流，不并发说两份）
+        if (askBusy) return { nextDueAt: at + 2 * 60 * 1000 }
+        const conversationId = lastAskConversationId ?? `c${at.toString(36)}`
+        const history = await conversationHistoryFor(conversationId)
+        const controller = new AbortController()
+        const result = await runAskOnce(task.instruction, {
+          conversationId,
+          history,
+          signal: controller.signal
+        })
+        if (result.kind === 'error') {
+          captureLog('warn', 'task deliver failed', { id: task.id, reason: result.reason })
+          return { nextDueAt: at + 10 * 60 * 1000 }
+        }
+        try {
+          appendAskHistory(
+            askHistoryPath,
+            toHistoryEntry(
+              task.instruction,
+              result,
+              Date.now(),
+              conversationId,
+              undefined,
+              undefined,
+              await activeBranchNow()
+            )
+          )
+        } catch (error) {
+          captureLog('warn', 'task history record failed', { error: String(error) })
+        }
+        if (askWindow !== null && !askWindow.isDestroyed()) {
+          askWindow.webContents.send('ask:task-said', { conversationId })
+        }
+        return {}
+      }
+    })
+    taskRuntime.start()
 
     // 启动后在后台同步一遍日记（不阻塞窗口；第一次问记忆时通常已经就绪）
     setTimeout(syncMemoryIfDue, 2_000)

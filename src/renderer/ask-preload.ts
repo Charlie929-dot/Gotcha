@@ -100,6 +100,11 @@ export interface AskApi {
   qqNapcatInstall(): Promise<{ ok: boolean; error?: string }>
   qqNapcatChooseDir(): Promise<{ ok: boolean; error?: string; view?: NapcatView }>
   /** 托盘 / 球右键的「设置」：打开窗口就展开抽屉 */
+  /**
+   * 任务到点、ta 自己说了一句（自调用 v0.2 §9）：主进程已经把这轮记进当前会话历史，
+   * 这里只负责让窗口刷新一下，把新气泡画出来。
+   */
+  onTaskSaid(handler: (payload: { conversationId: string }) => void): () => void
   onOpenSettings(handler: () => void): () => void
 }
 
@@ -179,6 +184,16 @@ const api: AskApi = {
       error?: string
       view?: NapcatView
     }>,
+  onTaskSaid: (handler) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
+      if (typeof payload !== 'object' || payload === null) return
+      const value = payload as Record<string, unknown>
+      if (typeof value.conversationId !== 'string') return
+      handler({ conversationId: value.conversationId })
+    }
+    ipcRenderer.on('ask:task-said', listener)
+    return () => ipcRenderer.removeListener('ask:task-said', listener)
+  },
   onOpenSettings: (handler) => {
     const listener = (): void => handler()
     ipcRenderer.on('ask:open-settings', listener)

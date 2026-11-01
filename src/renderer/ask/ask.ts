@@ -1148,6 +1148,21 @@ async function refreshHistory(): Promise<void> {
   }
 }
 
+/**
+ * 到点的那句话说完了（主进程已经记进历史）：只在用户正看着这个会话时重画，
+ * 别的会话不动——免得把用户正在读的那一屏换掉。
+ */
+async function refreshThreadFromMain(conversationId: string): Promise<void> {
+  if (!api || conversationId !== activeConversationId) return
+  try {
+    entries = await api.history()
+    renderHistoryList()
+    renderThread()
+  } catch (error) {
+    setStatus('error', `读记录失败：${String(error)}`)
+  }
+}
+
 function setBusy(next: boolean): void {
   busy = next
   submitButton.disabled = next
@@ -2168,6 +2183,11 @@ window.addEventListener('keydown', (event) => {
 // 托盘 / 球右键的「设置」：窗口打开即展开抽屉
 api?.onOpenSettings(() => {
   openSettingsDrawer()
+})
+
+// 任务到点：ta 自己开口说了句话。主进程已经落历史，这里把窗口刷新出来。
+api?.onTaskSaid((payload) => {
+  void refreshThreadFromMain(payload.conversationId)
 })
 
 void (async () => {

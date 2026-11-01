@@ -87,6 +87,14 @@ export interface CommandDeps {
    * 没注入就回「还没接上」。
    */
   compact?: (conversationId: string | undefined) => Promise<CompactOutcome>
+  /**
+   * `/tasks`（自调用 v0.2 §6）:看挂着的计划 / 自主任务，取消一条。
+   * 没注入就回「还没接上」。列表文本由组合根拼（它拿得到任务库与人话时间）。
+   */
+  tasks?: {
+    list: () => string
+    cancel: (id: number) => string
+  }
   now?: () => number
   /** 名字 → slug；测试可注入固定实现（默认 pinyin-pro） */
   slugify?: (name: string) => string | null
@@ -134,6 +142,7 @@ export const KNOWN_COMMANDS = [
   'life',
   'mode',
   'tool',
+  'tasks',
   'git'
 ] as const
 
@@ -150,6 +159,7 @@ export const READY_COMMANDS = [
   'life',
   'mode',
   'tool',
+  'tasks',
   'git'
 ] as const
 
@@ -459,6 +469,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /del <名字>      删节点（要回 confirm）',
     '  /mode ask|chat   切模式（ask = 纯模型，chat = 带 persona；切分支）',
     '  /tool            看当前分支的工具；set / ele / add / rm',
+    '  /tasks [cancel <编号>]  看挂着的计划 / 自主任务；cancel 取消一条',
     '  /compact         压旧段、保留最近几轮（过一次模型）',
     '  /life            看剩余生命（token；纯模型分支也有，但不冻结）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
@@ -1586,6 +1597,19 @@ export function createCommandHandler(
     switch (parsed.name) {
       case 'help':
         return commandResult(await helpText(deps))
+      case 'tasks': {
+        if (deps.tasks === undefined) return commandResult('/tasks 还没接上（重启后再试）。')
+        const sub = (parsed.args[0] ?? '').toLowerCase()
+        if (sub === 'cancel' || sub === 'rm' || sub === 'del') {
+          const id = Number(parsed.args[1] ?? '')
+          if (!Number.isInteger(id) || id <= 0) {
+            return commandResult('用法：/tasks cancel <编号>\n编号在 /tasks 列表里。')
+          }
+          return commandResult(deps.tasks.cancel(id))
+        }
+        if (sub !== '') return commandResult('用法：/tasks 或 /tasks cancel <编号>')
+        return commandResult(deps.tasks.list())
+      }
       case 'log': {
         const target = parsed.args.join(' ').trim()
         if ((target === 'n' || target === 'l') && history !== null) {

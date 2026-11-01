@@ -78,7 +78,8 @@ import {
   type GiveBirthResult,
   type DiaryToolDeps,
   type LetterToolDeps,
-  type MemoryCitationMeta
+  type MemoryCitationMeta,
+  type TaskToolDeps
 } from './tools'
 import type { ChainDb } from '../store'
 import type { ChainSearchBatchQuery, ChainSearchBatchResult } from '../query'
@@ -142,6 +143,18 @@ export interface AskLoopContext {
   giveBirth?: (nickname: string) => Promise<GiveBirthResult>
   /** 信（D81）：写 / 列 / 读；不传 = 这个分支没挂写信工具 */
   letters?: LetterToolDeps
+  /** 任务记忆（自调用 v0.2 §6）：四个任务工具的端口；不传 = 这台机器没有任务库 */
+  tasks?: TaskToolDeps
+  /**
+   * 到点 / 临近的任务（v0.2 §9 合流）：每一轮现取，拼进 `<now>` 末尾。
+   * 不传 = 没有任务（或这个分支不给任务），`<now>` 里就不会出现这一节。
+   */
+  dueTasks?: () => readonly {
+    id: number
+    when: string
+    instruction: string
+    origin: string
+  }[]
   /** 未读信数（D81）：只进 `<now>` 的一行，正文走 read_letter */
   unreadLetters?: number
   /** 母亲留下的信（`<mom_letter>`，M4）：只有女儿代才有；不传 = 不写这一段 */
@@ -297,6 +310,14 @@ function summarizeToolOutcome(
       return `读了信 ${result.id}`
     case 'recall':
       return result.media === 'image' ? `回想图片 #${result.id}` : `回想文件 #${result.id}`
+    case 'schedule_task':
+      return result.ok ? `记下任务 #${result.task?.id ?? '?'}` : '没记下任务'
+    case 'search_tasks':
+      return `查到 ${result.total} 条任务${result.truncated ? '（截断）' : ''}`
+    case 'update_task':
+      return result.ok ? `改了任务 #${result.task?.id ?? '?'}` : '没改成'
+    case 'cancel_task':
+      return result.ok ? `取消任务 #${result.task?.id ?? '?'}` : '没取消成'
     default:
       return `失败：${result.message}`
   }
@@ -344,6 +365,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.diary ? { diary: ctx.diary } : {}),
     ...(ctx.giveBirth ? { giveBirth: ctx.giveBirth } : {}),
     ...(ctx.letters ? { letters: ctx.letters } : {}),
+    ...(ctx.tasks ? { tasks: ctx.tasks } : {}),
     ...(ctx.readShot ? { readShot: ctx.readShot } : {}),
     // 只能展开本轮已经给模型看过的段（引用白名单）；模型不能按段号扫库
     canReadSegment: (segmentId) => whitelist.has(segmentId),
@@ -547,6 +569,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       ...(ctx.opening ? { opening: ctx.opening } : {}),
       ...(ctx.life ? { life: ctx.life } : {}),
       ...(ctx.unreadLetters !== undefined ? { letters: { unread: ctx.unreadLetters } } : {}),
+      ...(ctx.dueTasks ? { tasks: { due: ctx.dueTasks() } } : {}),
       ...(ctx.attachments ? { attachments: ctx.attachments } : {})
     })
     // 白名单收缩到「本轮载荷里模型实际能看到的段」：脱敏整条挡下的段自然不在里面；

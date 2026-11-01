@@ -418,3 +418,106 @@ export function insertComment(input: InsertCommentInput): DiaryWriteResult {
     return { lines: 1, section: sectionAt(doc.lines, target.index) }
   })
 }
+
+/* ------------------------------------------------------------------ */
+/* 计划区（共建计划的代码同步，自调用 v0.2 §4.1）                      */
+/*                                                                     */
+/* 只有计划同步器会改用户 Obsidian 的 `# Tracking` 段：                 */
+/* - 新建计划 → `appendPlan`（只追加）；                                 */
+/* - 改时间 / 改事项 → `updatePlanLine`（原地改那一行，保留勾选状态）；   */
+/* - 取消计划 → `removePlanLine`（只删那一行）。                         */
+/* 用户日记正文永远不会被模型或同步器改写。                             */
+/* ------------------------------------------------------------------ */
+
+export interface PlanLineInput extends DiaryWriteContext {
+  /** 计划行里的唯一子串（拿旧事项文本或旧时间戳都能定位；多命中就报错，不猜） */
+  match: string
+}
+
+export interface UpdatePlanLineInput extends PlanLineInput {
+  /** 新的事项（不传 = 只改时间） */
+  text?: string
+  /** 新的 `HH:mm` / `HH:mm-HH:mm`（不传 = 只改事项） */
+  time?: string
+}
+
+const PLAN_LINE_RE = /^(\s*-\s*\[[ xX]\]\s*)(\d{1,2}:\d{2}(?:\s*[-–~]\s*\d{1,2}:\d{2})?)?\s*(.*?)(\s*\[(?:❤️|💬)\].*)?$/u
+
+/** 在 `# Tracking` 段里找唯一一条计划行（标题 / 导航 / 分隔线不算） */
+function locatePlanLine(
+  lines: string[],
+  range: { heading: number; end: number },
+  needle: string
+): { index: number; text: string } {
+  const matches: Array<{ index: number; text: string }> = []
+  for (let index = range.heading + 1; index < range.end; index += 1) {
+    const line = lines[index]
+    if (HEADING_RE.test(line) || NAV_RE.test(line) || RULE_RE.test(line)) continue
+    if (line.includes(needle)) matches.push({ index, text: line })
+  }
+  if (matches.length === 0) {
+    throw new DiaryWriteError('line-not-found', `计划区里找不到这一条：${needle}`)
+  }
+  if (matches.length > 1) {
+    throw new DiaryWriteError('line-ambiguous', `计划区里命中 ${matches.length} 行，需要更长的片段`)
+  }
+  return matches[0]
+}
+
+/** 拆一条计划行：勾选状态 / 时间 / 事项（保留用户勾过的 `[x]`） */
+function parsePlanLine(line: string): { prefix: string; stamp: string; text: string; suffix: string } | null {
+  const match = PLAN_LINE_RE.exec(line)
+  if (match === null) return null
+  return {
+    prefix: match[1],
+    stamp: (match[2] ?? '').trim(),
+    text: (match[3] ?? '').trim(),
+    suffix: match[4] ?? ''
+  }
+}
+
+/**
+ * 改计划区里的那一行：时间 / 事项谁给了改谁，勾选状态与 ta 的标记原样保留。
+ * 找不到（用户自己删了）报 `line-not-found`，调用方据此只把同步状态记成失败，不动任务本身。
+ */
+export function updatePlanLine(input: UpdatePlanLineInput): DiaryWriteResult {
+  const needle = input.match.trim()
+  if (needle === '') throw new DiaryWriteError('empty-text', '要定位的计划行不能为空')
+  return commit(input, (doc) => {
+    const range = findSection(doc.lines, 'tracking')
+    if (range === null) throw new DiaryWriteError('no-section', '当天笔记里没有 # Tracking 段')
+    const target = locatePlanLine(doc.lines, range, needle)
+    const parsed = parsePlanLine(target.text)
+    if (parsed === null) throw new DiaryWriteError('line-not-found', `这一行不是计划行：${needle}`)
+    const stamp =
+      input.time === undefined ? parsed.stamp : (normalizePlanStamp(input.time) ?? parsed.stamp)
+    const text = input.text === undefined ? parsed.text : splitSentences(input.text).join(' ')
+    if (text === '') throw new DiaryWriteError('empty-text', '计划事项是空的')
+    doc.lines[target.index] = `${parsed.prefix}${stamp === '' ? '' : `${stamp} `}${text}${parsed.suffix}`
+    return { lines: 1, section: 'tracking' }
+  })
+}
+
+/** 取消计划：只删掉那一行（勾过的也删：任务已取消，留着会误导） */
+export function removePlanLine(input: PlanLineInput): DiaryWriteResult {
+  const needle = input.match.trim()
+  if (needle === '') throw new DiaryWriteError('empty-text', '要定位的计划行不能为空')
+  return commit(input, (doc) => {
+    const range = findSection(doc.lines, 'tracking')
+    if (range === null) throw new DiaryWriteError('no-section', '当天笔记里没有 # Tracking 段')
+    const target = locatePlanLine(doc.lines, range, needle)
+    doc.lines.splice(target.index, 1)
+    return { lines: 1, section: 'tracking' }
+  })
+}
+
+/** `HH:mm` / `HH:mm-HH:mm` 规范化（改计划时间用）；不合法返回 null */
+function normalizePlanStamp(value: string): string | null {
+  const range = TIME_RANGE_RE.exec(value.trim())
+  if (range !== null) {
+    const start = normalizeClock(`${range[1]}:${range[2]}`)
+    const end = normalizeClock(`${range[3]}:${range[4]}`)
+    return start === null || end === null ? null : `${start}-${end}`
+  }
+  return normalizeClock(value)
+}

@@ -1,0 +1,174 @@
+/**
+ * 任务运行时（主进程）：库连接 + 工具端口 + 调度器（自调用 v0.2 §9）
+ *
+ * 为什么要一条**独立连接**：主进程的只读连接是共享的，`ensureWritable()` 会把它关掉再开写
+ * （capture-controller 的既有纪律）。任务工具是在问答循环里被调用的，那时只读连接正被
+ * 那次问答用着——从它身上开写会把正在读的句柄关掉。所以任务库自己开一条写连接
+ * （SQLite WAL 允许多连接），问答中途记任务也不会打断正在读的那条。
+ *
+ * 这一层只负责「接起来」：
+ * - `port`：四个任务工具的执行体（含 Obsidian 计划区同步）；
+ * - `dueHints`：本轮 `<now>` 里要列出的到点任务（合流）；
+ * - `scheduler`：睡到最近一条 `next_due_at`，到点交给 `deliver`。
+ */
+
+import Database from 'better-sqlite3'
+
+import type { Db } from '../db'
+import {
+  claimTask,
+  expireTasks,
+  listDueTasks,
+  nextDueTask,
+  readableTaskTime,
+  settleTask,
+  type TaskOutcome,
+  type TaskRow
+} from '../memory/agent/tasks'
+import { createTaskToolPort, type TaskToolPort } from '../memory/agent/task-tools'
+import { createTaskScheduler, type TaskScheduler } from '../memory/agent/scheduler'
+
+export interface TaskRuntimeDeps {
+  /** 库文件路径（`userData/memory.db`）；文件不存在 = 还没采集过，运行时不建库 */
+  dbPath: string
+  now?: () => number
+  /** 用户 Obsidian 日记目录（共建计划往 `# Tracking` 写）；null = 没配 */
+  vaultDir: () => string | null
+  /** 写入前备份目录；null = 不备份 */
+  backupDir: () => string | null
+  /**
+   * 到点执行：跑一轮、真的开口（由组合根注入问记忆通道）。
+   * 返回 `TaskOutcome` 决定这一条怎么结算（默认定时规则）。
+   */
+  deliver: (task: TaskRow) => Promise<TaskOutcome | undefined> | TaskOutcome | undefined
+  log: (level: 'warn' | 'error', message: string, data?: Record<string, unknown>) => void
+  /** 一秒级的定时器（测试注入）；默认 setTimeout */
+  setTimer?: (fn: () => void, ms: number) => unknown
+  clearTimer?: (handle: unknown) => void
+}
+
+export interface TaskRuntime {
+  /** 四个任务工具的执行端口（注入问记忆循环） */
+  port: TaskToolPort
+  /** 本轮 `<now>` 里要列出的到点 / 临近任务 */
+  dueHints: () => readonly {
+    id: number
+    when: string
+    instruction: string
+    origin: string
+  }[]
+  start: () => void
+  stop: () => void
+  reschedule: () => void
+  busy: () => boolean
+  /** 库里还有几条活着的任务（设置 / 状态行用） */
+  count: () => number
+}
+
+/** 合流窗口：到点前多久就把它列进 `<now>`（与既有 10 分钟窗口同口径） */
+export const TASK_MERGE_WINDOW_MS = 10 * 60 * 1000
+
+/**
+ * 打开任务库的独立写连接。打不开（文件不存在 / 被占用）就返回 null：
+ * 运行时不建库，也不影响提问。
+ */
+export function openTaskDb(dbPath: string): Db | null {
+  try {
+    const db = new Database(dbPath)
+    db.pragma('journal_mode = WAL')
+    db.pragma('busy_timeout = 5000')
+    return db
+  } catch {
+    return null
+  }
+}
+
+export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
+  const now = deps.now ?? ((): number => Date.now())
+  let db: Db | null = null
+  let closed = false
+
+  const handle = (): Db | null => {
+    if (closed) return null
+    if (db === null) db = openTaskDb(deps.dbPath)
+    return db
+  }
+
+  const port = createTaskToolPort({
+    db: handle,
+    now,
+    vaultDir: deps.vaultDir,
+    backupDir: deps.backupDir,
+    onChanged: () => scheduler.reschedule(),
+    log: deps.log
+  })
+
+  const scheduler: TaskScheduler = createTaskScheduler({
+    now,
+    nextDueAt: () => {
+      const current = handle()
+      if (current === null) return null
+      const next = nextDueTask(current)
+      return next?.next_due_at ?? null
+    },
+    dueTasks: (at) => {
+      const current = handle()
+      return current === null ? [] : listDueTasks(current, at)
+    },
+    claim: (id, at) => {
+      const current = handle()
+      return current === null ? null : claimTask(current, id, at)
+    },
+    run: (task) => deps.deliver(task),
+    settle: (id, outcome, at) => {
+      const current = handle()
+      if (current === null) return
+      settleTask(current, id, outcome, at)
+    },
+    expire: (at) => {
+      const current = handle()
+      if (current !== null) expireTasks(current, at)
+    },
+    onError: (error) => deps.log('error', 'task run failed', { error: String(error) }),
+    ...(deps.setTimer ? { setTimer: deps.setTimer } : {}),
+    ...(deps.clearTimer ? { clearTimer: deps.clearTimer } : {})
+  })
+
+  return {
+    port,
+    dueHints: () => {
+      const current = handle()
+      if (current === null) return []
+      const at = now()
+      return listDueTasks(current, at + TASK_MERGE_WINDOW_MS, 5).map((task) => ({
+        id: task.id,
+        when: readableTaskTime(task.next_due_at, at),
+        instruction: task.instruction,
+        origin: task.origin
+      }))
+    },
+    start: () => scheduler.start(),
+    stop: () => {
+      scheduler.stop()
+      closed = true
+      if (db !== null) {
+        try {
+          db.close()
+        } catch {
+          // 关不掉就算了：进程要退出了
+        }
+        db = null
+      }
+    },
+    reschedule: () => scheduler.reschedule(),
+    busy: () => scheduler.busy(),
+    count: () => {
+      const current = handle()
+      if (current === null) return 0
+      const row = current
+        .prepare(`SELECT COUNT(*) AS n FROM mem_tasks WHERE state = 'active'`)
+        .get() as { n: number }
+      return row.n
+    }
+  }
+}

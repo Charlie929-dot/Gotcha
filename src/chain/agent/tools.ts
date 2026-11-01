@@ -38,7 +38,8 @@ import { collectUrls } from '../content/urls'
 import type {
   AskLoopFreshness,
   RedactableAskLoopHit,
-  RedactableAskLoopToolResult
+  RedactableAskLoopToolResult,
+  RedactableTaskView
 } from './payload'
 import { ASK_LOOP_READ_MAX_CHARS, ASK_LOOP_READ_MIN_CHARS } from './payload'
 import { readChainFreshness } from './freshness'
@@ -148,6 +149,65 @@ export interface LetterToolDeps {
   read(id: string | undefined): Promise<LetterView | null>
 }
 
+/* ------------------------------------------------------------------ */
+/* 任务记忆（自调用 v0.2 §6）：四个工具的端口                          */
+/* ------------------------------------------------------------------ */
+
+/** 任务来源 / 交付（与 `memory/agent/tasks.ts` 同口径，类型在这里重复一份避免链层依赖记忆层） */
+export type TaskOriginArg = 'user' | 'agent' | 'system'
+export type TaskDeliveryArg = 'foreground' | 'background' | 'auto'
+export type TaskRepeatArg = '' | 'daily' | 'weekly'
+export type TaskStateArg = 'active' | 'paused' | 'completed' | 'cancelled'
+
+/** 新建请求：时间已经被工具层解析成本地毫秒时间戳（模型只给 `YYYY-MM-DD HH:mm`） */
+export interface TaskScheduleRequest {
+  instruction: string
+  when: number | null
+  repeat: TaskRepeatArg
+  origin: TaskOriginArg
+  delivery: TaskDeliveryArg
+  validUntil: number | null
+}
+
+export interface TaskUpdateRequest {
+  id: number
+  instruction?: string
+  /** 给了 = 改到点时间；不给 = 不动 */
+  when?: number | null
+  repeat?: TaskRepeatArg
+  delivery?: TaskDeliveryArg
+  validUntil?: number | null
+  state?: TaskStateArg
+}
+
+export interface TaskSearchRequest {
+  view: 'pending' | 'day' | 'upcoming' | 'about'
+  day?: string
+  query?: string
+  limit?: number
+}
+
+/** 回执类结果：`ok=false` 时 message 说明为什么没成（模型不得改口成成功） */
+export interface TaskMutationResult {
+  ok: boolean
+  message: string
+  task: RedactableTaskView | null
+}
+
+export interface TaskSearchResultView {
+  tasks: readonly RedactableTaskView[]
+  total: number
+  truncated: boolean
+}
+
+/** 主进程注入的任务实现（mem_tasks + 共建计划的 Obsidian 同步）；不传 = 这台机器没有任务库 */
+export interface TaskToolDeps {
+  schedule(input: TaskScheduleRequest): TaskMutationResult
+  search(input: TaskSearchRequest): TaskSearchResultView
+  update(input: TaskUpdateRequest): TaskMutationResult
+  cancel(id: number): TaskMutationResult
+}
+
 /** 日记引用的白名单元数据（模型最终给的 itemId 必须落在这里面） */
 export interface MemoryCitationMeta {
   itemId: number
@@ -207,6 +267,11 @@ export interface AskToolDeps {
    * 只认本会话出现过的 id；不传 = 这个会话没有归档，工具会如实回「没有这个归档」。
    */
   recall?: (id: string) => RecalledAttachment | null
+  /**
+   * 任务记忆（自调用 v0.2 §6）：四个任务工具的执行端口。
+   * 不传 = 这台机器没有任务库：工具会如实回「现在记不下」，而不是假装记下。
+   */
+  tasks?: TaskToolDeps
 }
 
 export interface AskToolOutcome {
@@ -258,6 +323,45 @@ function clampLimit(value: unknown, fallback: number, max: number): number {
   const raw = optionalNumber(value)
   if (raw === undefined) return fallback
   return Math.min(max, Math.max(1, Math.round(raw)))
+}
+
+/**
+ * `YYYY-MM-DD HH:mm`（也收 `T` 分隔、只给日期 = 当天 00:00）→ 本地毫秒时间戳。
+ *
+ * 为什么不让模型直接给毫秒：它算时区 / 跨月必错；这里只认人能读的写法，
+ * 解不出来就让它重给，绝不替它猜「明天九点」是哪一天。
+ */
+const LOCAL_STAMP_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?$/u
+
+function parseLocalStamp(value: unknown): number | null {
+  if (typeof value !== 'string') return null
+  const match = LOCAL_STAMP_RE.exec(value.trim())
+  if (match === null) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = match[4] === undefined ? 0 : Number(match[4])
+  const minute = match[5] === undefined ? 0 : Number(match[5])
+  if (hour > 23 || minute > 59) return null
+  const probe = new Date(year, month - 1, day, hour, minute, 0, 0)
+  // 2026-02-30 / 25:00 这类「滚过去」的写法不算合法
+  if (
+    probe.getFullYear() !== year ||
+    probe.getMonth() !== month - 1 ||
+    probe.getDate() !== day ||
+    probe.getHours() !== hour ||
+    probe.getMinutes() !== minute
+  ) {
+    return null
+  }
+  return probe.getTime()
+}
+
+/** 任务 id：正整数；其余一律当没给 */
+function taskIdOf(value: unknown): number | undefined {
+  const raw = optionalNumber(value)
+  if (raw === undefined || !Number.isInteger(raw) || raw <= 0) return undefined
+  return raw
 }
 
 function pad2(value: number): string {
@@ -975,6 +1079,196 @@ export function createAskToolExecutor(deps: AskToolDeps): {
           }
           return {
             result: { kind: 'read_letter', freshness: currentFreshness(deps), ...letter },
+            segments: []
+          }
+        }
+        if (call.name === 'schedule_task') {
+          const instruction = optionalText(call.arguments['instruction'], 500)
+          if (instruction === undefined) {
+            return {
+              result: { kind: 'error', message: 'schedule_task 需要 instruction（到点想做什么）' },
+              segments: []
+            }
+          }
+          if (deps.tasks === undefined) {
+            return {
+              result: { kind: 'error', message: '现在记不下（这台机器没有任务库，或这个分支没挂任务工具）' },
+              segments: []
+            }
+          }
+          const rawWhen = call.arguments['when']
+          const when = rawWhen === undefined ? null : parseLocalStamp(rawWhen)
+          if (rawWhen !== undefined && when === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'when 要写成 `YYYY-MM-DD HH:mm`（本地时间），例如 2026-11-02 09:30'
+              },
+              segments: []
+            }
+          }
+          const rawValid = call.arguments['valid_until']
+          const validUntil = rawValid === undefined ? null : parseLocalStamp(rawValid)
+          if (rawValid !== undefined && validUntil === null) {
+            return {
+              result: {
+                kind: 'error',
+                message: 'valid_until 要写成 `YYYY-MM-DD HH:mm`（本地时间）'
+              },
+              segments: []
+            }
+          }
+          const rawRepeat = call.arguments['repeat']
+          const repeat: TaskRepeatArg =
+            rawRepeat === 'daily' || rawRepeat === 'weekly' ? rawRepeat : ''
+          const rawOrigin = call.arguments['origin']
+          const origin: TaskOriginArg =
+            rawOrigin === 'user' || rawOrigin === 'system' ? rawOrigin : 'agent'
+          const rawDelivery = call.arguments['delivery']
+          const delivery: TaskDeliveryArg =
+            rawDelivery === 'foreground' || rawDelivery === 'background' ? rawDelivery : 'auto'
+          const outcome = deps.tasks.schedule({
+            instruction,
+            when,
+            repeat,
+            origin,
+            delivery,
+            validUntil
+          })
+          return {
+            result: {
+              kind: 'schedule_task',
+              freshness: currentFreshness(deps),
+              ok: outcome.ok,
+              task: outcome.task,
+              message: outcome.message
+            },
+            segments: []
+          }
+        }
+        if (call.name === 'search_tasks') {
+          if (deps.tasks === undefined) {
+            return {
+              result: { kind: 'error', message: '现在查不了任务（这台机器没有任务库）' },
+              segments: []
+            }
+          }
+          const rawView = call.arguments['view']
+          const view =
+            rawView === 'pending' || rawView === 'day' || rawView === 'upcoming' || rawView === 'about'
+              ? rawView
+              : undefined
+          if (view === undefined) {
+            return {
+              result: { kind: 'error', message: 'search_tasks 需要 view: pending / day / upcoming / about' },
+              segments: []
+            }
+          }
+          const day = optionalText(call.arguments['day'], 10)
+          const query = optionalText(call.arguments['query'], 60)
+          if (view === 'day' && day === undefined) {
+            return { result: { kind: 'error', message: 'view=day 时要给 day（`YYYY-MM-DD`）' }, segments: [] }
+          }
+          if (view === 'about' && query === undefined) {
+            return { result: { kind: 'error', message: 'view=about 时要给 query（事项关键词）' }, segments: [] }
+          }
+          const limit = clampLimit(call.arguments['limit'], 20, 50)
+          const outcome = deps.tasks.search({
+            view,
+            ...(day === undefined ? {} : { day }),
+            ...(query === undefined ? {} : { query }),
+            limit
+          })
+          return {
+            result: {
+              kind: 'search_tasks',
+              freshness: currentFreshness(deps),
+              view,
+              tasks: outcome.tasks,
+              total: outcome.total,
+              truncated: outcome.truncated
+            },
+            segments: []
+          }
+        }
+        if (call.name === 'update_task') {
+          const id = taskIdOf(call.arguments['id'])
+          if (id === undefined) {
+            return { result: { kind: 'error', message: 'update_task 需要 id（search_tasks 里有）' }, segments: [] }
+          }
+          if (deps.tasks === undefined) {
+            return { result: { kind: 'error', message: '现在改不了任务（这台机器没有任务库）' }, segments: [] }
+          }
+          const instruction = optionalText(call.arguments['instruction'], 500)
+          const rawWhen = call.arguments['when']
+          const when = rawWhen === undefined ? undefined : parseLocalStamp(rawWhen)
+          if (rawWhen !== undefined && when === null) {
+            return {
+              result: { kind: 'error', message: 'when 要写成 `YYYY-MM-DD HH:mm`（本地时间）' },
+              segments: []
+            }
+          }
+          const rawValid = call.arguments['valid_until']
+          const validUntil = rawValid === undefined ? undefined : parseLocalStamp(rawValid)
+          if (rawValid !== undefined && validUntil === null) {
+            return {
+              result: { kind: 'error', message: 'valid_until 要写成 `YYYY-MM-DD HH:mm`（本地时间）' },
+              segments: []
+            }
+          }
+          const rawRepeat = call.arguments['repeat']
+          const repeat: TaskRepeatArg | undefined =
+            rawRepeat === 'daily' || rawRepeat === 'weekly' || rawRepeat === '' ? rawRepeat : undefined
+          const rawDelivery = call.arguments['delivery']
+          const delivery: TaskDeliveryArg | undefined =
+            rawDelivery === 'foreground' || rawDelivery === 'background' || rawDelivery === 'auto'
+              ? rawDelivery
+              : undefined
+          const rawState = call.arguments['state']
+          const state: TaskStateArg | undefined =
+            rawState === 'active' ||
+            rawState === 'paused' ||
+            rawState === 'completed' ||
+            rawState === 'cancelled'
+              ? rawState
+              : undefined
+          const outcome = deps.tasks.update({
+            id,
+            ...(instruction === undefined ? {} : { instruction }),
+            ...(when === undefined ? {} : { when }),
+            ...(repeat === undefined ? {} : { repeat }),
+            ...(delivery === undefined ? {} : { delivery }),
+            ...(validUntil === undefined ? {} : { validUntil }),
+            ...(state === undefined ? {} : { state })
+          })
+          return {
+            result: {
+              kind: 'update_task',
+              freshness: currentFreshness(deps),
+              ok: outcome.ok,
+              task: outcome.task,
+              message: outcome.message
+            },
+            segments: []
+          }
+        }
+        if (call.name === 'cancel_task') {
+          const id = taskIdOf(call.arguments['id'])
+          if (id === undefined) {
+            return { result: { kind: 'error', message: 'cancel_task 需要 id（search_tasks 里有）' }, segments: [] }
+          }
+          if (deps.tasks === undefined) {
+            return { result: { kind: 'error', message: '现在取消不了任务（这台机器没有任务库）' }, segments: [] }
+          }
+          const outcome = deps.tasks.cancel(id)
+          return {
+            result: {
+              kind: 'cancel_task',
+              freshness: currentFreshness(deps),
+              ok: outcome.ok,
+              task: outcome.task,
+              message: outcome.message
+            },
             segments: []
           }
         }

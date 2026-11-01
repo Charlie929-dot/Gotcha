@@ -22,6 +22,7 @@ import {
   ASK_TOOL_LABELS,
   ASK_TOOL_LETTER_NAMES,
   ASK_TOOL_NAMES,
+  ASK_TOOL_TASK_NAMES,
   ASK_TOOL_SCREEN_NAMES,
   ASK_TOOL_SETS,
   askToolSetOf,
@@ -29,6 +30,7 @@ import {
   hasDiaryTools,
   hasLetterTools,
   hasScreenTools,
+  hasTaskTools,
   isAskToolName,
   normalizeAskTools
 } from '../../src/chain/agent/tool-catalog'
@@ -73,8 +75,8 @@ describe('分支 kind ↔ 模式', () => {
 
 describe('工具目录', () => {
   it('三个集合：屏幕记忆 5 个 / 日记 3 个 / 信 3 个，编号顺序固定', () => {
-    expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual(['screen', 'diary', 'letter'])
-    expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual(['屏幕记忆', '日记', '信'])
+    expect(ASK_TOOL_SETS.map((set) => set.id)).toEqual(['screen', 'diary', 'letter', 'task'])
+    expect(ASK_TOOL_SETS.map((set) => set.label)).toEqual(['屏幕记忆', '日记', '信', '任务'])
     expect(ASK_TOOL_SCREEN_NAMES).toEqual([
       'search_info',
       'get_freshness',
@@ -84,7 +86,13 @@ describe('工具目录', () => {
     ])
     expect(ASK_TOOL_DIARY_NAMES).toEqual(['recall_diary', 'read_diary', 'memory_profile'])
     expect(ASK_TOOL_LETTER_NAMES).toEqual(['write_letter', 'list_letter', 'read_letter'])
-    expect(ASK_TOOL_NAMES).toHaveLength(11)
+    expect(ASK_TOOL_TASK_NAMES).toEqual([
+      'schedule_task',
+      'search_tasks',
+      'update_task',
+      'cancel_task'
+    ])
+    expect(ASK_TOOL_NAMES).toHaveLength(15)
   })
 
   it('每个元素都有说明，且只属于一个集合', () => {
@@ -112,6 +120,8 @@ describe('工具目录', () => {
     expect(hasDiaryTools(['search_info'])).toBe(false)
     expect(hasLetterTools(['read_letter'])).toBe(true)
     expect(hasLetterTools(['search_info'])).toBe(false)
+    expect(hasTaskTools(['search_tasks'])).toBe(true)
+    expect(hasTaskTools(['read_letter'])).toBe(false)
   })
 
   it('默认值：persona / life 全开，assistant 全关', () => {

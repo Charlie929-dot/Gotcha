@@ -545,6 +545,118 @@ const ASK_LOOP_TOOLS = [
         }
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'schedule_task',
+      description:
+        '记下一件之后要做的事。两种来源：origin=user 是他和你一起定下的计划（要跟他确认过时间与内容再记）；origin=agent 是你自己形成的后续意图（关心、查班、接着问某件事），不用问他。记下后到点会被叫醒，那时重新看最新上下文，再决定开口、延后、静默还是后台做完。保存失败就是没记下——不要在失败后说「记下了」。',
+      parameters: {
+        type: 'object',
+        properties: {
+          instruction: {
+            type: 'string',
+            description: '到点想做什么，以及必要的来源背景（不要写成要逐字发送的话）'
+          },
+          when: {
+            type: 'string',
+            description:
+              '第一次到点的本地时间，格式 `YYYY-MM-DD HH:mm`（例：2026-11-02 09:30）。不传 = 只记着，不到点叫醒'
+          },
+          repeat: {
+            type: 'string',
+            enum: ['', 'daily', 'weekly'],
+            description: '重复：空 = 一次性；daily = 每天同一时刻；weekly = 每周同一时刻'
+          },
+          origin: {
+            type: 'string',
+            enum: ['user', 'agent', 'system'],
+            description: '来源：user = 跟他共建的计划；agent = 你自己的意图；system = 系统例行'
+          },
+          delivery: {
+            type: 'string',
+            enum: ['foreground', 'background', 'auto'],
+            description: '交付：foreground 到点可以开口；background 不打断；auto 到点看情况决定'
+          },
+          valid_until: {
+            type: 'string',
+            description: '超过这个本地时间（`YYYY-MM-DD HH:mm`）就不再补做；不传 = 一直有效'
+          }
+        },
+        required: ['instruction', 'origin']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_tasks',
+      description:
+        '查任务。view=pending 未完成的活动任务（含已过期还没处理的）；day 看某一天会发生的（重复任务也会算当天那次）；upcoming 看从现在往后的；about 按事项关键词找。结果有 total 与 truncated：truncated 为真时不能说成全部。',
+      parameters: {
+        type: 'object',
+        properties: {
+          view: {
+            type: 'string',
+            enum: ['pending', 'day', 'upcoming', 'about'],
+            description: '查询视图'
+          },
+          day: { type: 'string', description: 'view=day 时的本地日期，`YYYY-MM-DD`' },
+          query: { type: 'string', description: 'view=about 时的事项关键词（如「周报」「睡觉」）' },
+          limit: { type: 'number', description: '最多返回几条（默认 20，最多 50）' }
+        },
+        required: ['view']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_task',
+      description:
+        '按 id 改一条任务：时间（when）、说明（instruction）、重复（repeat）、交付方式（delivery）、有效期（valid_until）、状态（state）。他改了计划就走这里，不要另记一条新的。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'number', description: '任务 id（search_tasks 里有）' },
+          instruction: { type: 'string', description: '新的说明' },
+          when: { type: 'string', description: '新的到点时间（`YYYY-MM-DD HH:mm`）' },
+          repeat: {
+            type: 'string',
+            enum: ['', 'daily', 'weekly'],
+            description: '新的重复规则'
+          },
+          delivery: {
+            type: 'string',
+            enum: ['foreground', 'background', 'auto'],
+            description: '新的交付方式'
+          },
+          valid_until: { type: 'string', description: '新的有效期（`YYYY-MM-DD HH:mm`）' },
+          state: {
+            type: 'string',
+            enum: ['active', 'paused', 'completed', 'cancelled'],
+            description: '新的状态；取消用 cancel_task 更清楚'
+          }
+        },
+        required: ['id']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'cancel_task',
+      description:
+        '按 id 取消一条任务（共建计划也走这里：会同步到他的 Obsidian 计划区，并给取消回执）。不确定是哪条就先 search_tasks。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'number', description: '任务 id（search_tasks 里有）' }
+        },
+        required: ['id']
+      }
+    }
   }
 ] as const
 
@@ -579,7 +691,11 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   memory_profile: '看「关于我」的统计画像（条数 / 天数 / 标签 / 待办）',
   write_letter: '写一封信（写给谁 / 写什么 / 写到哪，你自己定）',
   list_letter: '看有哪些信（草稿 / 待寄 / 未读）',
-  read_letter: '读一封信（不传 id = 最新未读）'
+  read_letter: '读一封信（不传 id = 最新未读）',
+  schedule_task: '记下一个计划或后续意图（到点会被叫醒；user = 共建，agent = 自己的）',
+  search_tasks: '查任务（未完成 / 某一天 / 往后 / 按事项关键词）',
+  update_task: '按 id 改任务的时间 / 说明 / 重复 / 交付方式',
+  cancel_task: '按 id 取消任务（共享计划会同步到他的 Obsidian 计划区）'
 }
 
 /**

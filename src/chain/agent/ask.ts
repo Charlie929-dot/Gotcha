@@ -35,7 +35,13 @@ import type {
 import { isNoEvidenceAnswer, parseChainReply, type CitationMeta } from './parse'
 import { resolveLoopClient, runAskLoop, type AskLoopResumeState, type AskUsageMeta } from './loop'
 import type { AskConversationPort } from './conversation'
-import type { AskHistorySummary, DiaryToolDeps, GiveBirthResult, LetterToolDeps } from './tools'
+import type {
+  AskHistorySummary,
+  DiaryToolDeps,
+  GiveBirthResult,
+  LetterToolDeps,
+  TaskToolDeps
+} from './tools'
 import {
   EVIDENCE_TEXT_CHARS,
   type ChainAskRelatedSegment,
@@ -104,6 +110,15 @@ export interface ChainAskOptions {
   giveBirth?: (nickname: string) => Promise<GiveBirthResult>
   /** 信（D81）：写 / 列 / 读；不传 = 这个分支没挂写信工具 */
   letters?: LetterToolDeps
+  /** 任务记忆（自调用 v0.2 §6）：四个任务工具的端口；不传 = 这台机器没有任务库 */
+  tasks?: TaskToolDeps
+  /** 到点 / 临近的任务（v0.2 §9 合流）：拼进 `<now>` 末尾，说不说由 ta 定 */
+  dueTasks?: () => readonly {
+    id: number
+    when: string
+    instruction: string
+    origin: string
+  }[]
   /** 未读信数（D81）：只进 `<now>` 的一行 */
   unreadLetters?: number
   /** 母亲留下的信（`<mom_letter>`，M4）：只有女儿代才有 */
@@ -306,6 +321,8 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.diary ? { diary: options.diary } : {}),
         ...(options.giveBirth ? { giveBirth: options.giveBirth } : {}),
         ...(options.letters ? { letters: options.letters } : {}),
+        ...(options.tasks ? { tasks: options.tasks } : {}),
+        ...(options.dueTasks ? { dueTasks: options.dueTasks } : {}),
         ...(options.unreadLetters !== undefined ? { unreadLetters: options.unreadLetters } : {}),
         ...(options.momLetter ? { momLetter: options.momLetter } : {}),
         ...(options.readShot ? { readShot: options.readShot } : {}),

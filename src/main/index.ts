@@ -3114,6 +3114,35 @@ if (primaryInstance) {
               : '推送失败（网络 / 凭据），细节看日志'
         return view === undefined ? { ok: false, error } : { ok: false, error, view }
       },
+      // 设置抽屉「任务」（自调用 v0.2 §12.1）：只读视图 + 暂停 / 继续 / 取消。
+      // 运行时还没起来（没采集过 / 没迁到 v11）就如实报不可用，不建库。
+      tasksAdmin: () => taskRuntime?.admin() ?? { available: false, total: 0, tasks: [] },
+      taskAction: ({ id, action }) => {
+        if (taskRuntime === null) {
+          return { ok: false, message: '任务库还没起来（重启后再试）。' }
+        }
+        try {
+          const result =
+            action === 'cancel'
+              ? taskRuntime.port.cancel(id)
+              : taskRuntime.port.setState(id, action === 'pause' ? 'paused' : 'active')
+          return { ok: result.ok, message: result.message, view: taskRuntime.admin() }
+        } catch (error) {
+          captureLog('warn', 'task admin action failed', { id, action, error: String(error) })
+          return { ok: false, message: '任务库暂时不可用（重启后再试）。' }
+        }
+      },
+      // 设置抽屉「小本本」（自调用 v0.2 §7）：四分区查看 / 按编号删除。
+      // 只动记忆仓里的 notebook.md，不碰用户 Obsidian 日记。
+      notebookAdmin: () => notebookStore.view(),
+      notebookRemove: (id) => {
+        const result = notebookStore.update({ action: 'remove', id })
+        return { ok: result.ok, message: result.message, view: notebookStore.view() }
+      },
+      notebookUpdate: ({ id, text }) => {
+        const result = notebookStore.update({ action: 'revise', id, text })
+        return { ok: result.ok, message: result.message, view: notebookStore.view() }
+      },
       // 人格卡（D62）：导入即启用；写卡不碰库，启用卡要写 settings（回答中拒绝开写连接）
       savePersonaCard: (name, text) => {
         const root = app.getPath('userData')

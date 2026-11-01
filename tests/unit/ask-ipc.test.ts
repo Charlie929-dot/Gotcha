@@ -720,3 +720,113 @@ describe('ask IPC：模式与分支（D72）', () => {
     expect(Object.keys(resume.mock.calls[0]![2])).not.toContain('mode')
   })
 })
+
+describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () => {
+  const emptyTasks = { available: false, total: 0, tasks: [] }
+  const emptyNotebook = { path: '', total: 0, groups: [] }
+
+  it('ask:tasks:get：越权 / 没接时回不可用，不抛错', async () => {
+    const handlers = createAskIpcHandlers(buildDeps())
+    expect(await handlers.get('ask:tasks:get')!(SENDER_OK as never)).toEqual(emptyTasks)
+    expect(
+      await handlers.get('ask:tasks:get')!({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never)
+    ).toEqual(emptyTasks)
+
+    const tasksAdmin = vi.fn(() => ({
+      available: true,
+      total: 1,
+      tasks: [
+        {
+          id: 3,
+          when: '11-02 09:30',
+          repeat: '',
+          origin: 'user' as const,
+          delivery: 'auto' as const,
+          state: 'active' as const,
+          instruction: '写周报',
+          sync: 'synced'
+        }
+      ]
+    }))
+    const view = await createAskIpcHandlers(buildDeps({ tasksAdmin }))
+      .get('ask:tasks:get')!(SENDER_OK as never)
+    expect(view).toMatchObject({ available: true, total: 1 })
+  })
+
+  it('ask:tasks:action：参数在边界上钳住；合法动作交给注入的实现', async () => {
+    const taskAction = vi.fn(() => ({ ok: true, message: '暂停了 #3' }))
+    const action = handler(buildDeps({ taskAction }), 'ask:tasks:action')
+    expect(await action(SENDER_OK as never, { id: 0, action: 'pause' })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining('编号')
+    })
+    expect(await action(SENDER_OK as never, { id: 3, action: '删掉' })).toMatchObject({
+      ok: false,
+      message: expect.stringContaining('动作')
+    })
+    expect(await action(SENDER_OK as never, null)).toMatchObject({ ok: false })
+    expect(taskAction).not.toHaveBeenCalled()
+
+    expect(await action(SENDER_OK as never, { id: 3, action: 'pause' })).toMatchObject({
+      ok: true,
+      message: '暂停了 #3'
+    })
+    expect(taskAction).toHaveBeenCalledWith({ id: 3, action: 'pause' })
+    expect(
+      await action({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, { id: 3, action: 'cancel' })
+    ).toMatchObject({ ok: false, message: 'forbidden' })
+  })
+
+  it('ask:notebook:get / remove：四分区视图与编号校验', async () => {
+    const handlers = createAskIpcHandlers(buildDeps())
+    expect(await handlers.get('ask:notebook:get')!(SENDER_OK as never)).toEqual(emptyNotebook)
+
+    const view = {
+      path: 'C:/tmp/memory-repo/notebook.md',
+      total: 1,
+      groups: [{ section: '关于你', entries: [{ id: 'n1', text: '喜欢周深', at: '2026-11-01' }] }]
+    }
+    const notebookAdmin = vi.fn(() => view)
+    const get = createAskIpcHandlers(buildDeps({ notebookAdmin })).get('ask:notebook:get')!
+    expect(await get(SENDER_OK as never)).toEqual(view)
+
+    const notebookRemove = vi.fn(() => ({ ok: true, message: '放下了 n1。', view }))
+    const remove = handler(buildDeps({ notebookRemove }), 'ask:notebook:remove')
+    for (const bad of [{}, { id: '3' }, { id: 'n' }, { id: 'n-1' }, null]) {
+      expect(await remove(SENDER_OK as never, bad)).toMatchObject({ ok: false })
+    }
+    expect(notebookRemove).not.toHaveBeenCalled()
+    expect(await remove(SENDER_OK as never, { id: 'n1' })).toMatchObject({ ok: true })
+    expect(notebookRemove).toHaveBeenCalledWith('n1')
+    expect(
+      await remove({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, { id: 'n1' })
+    ).toMatchObject({ ok: false, message: 'forbidden' })
+  })
+
+  it('ask:notebook:update：编号与内容在边界校验，合法改写交给注入的实现', async () => {
+    const notebookUpdate = vi.fn(() => ({ ok: true, message: '改好了 n1。' }))
+    const update = handler(buildDeps({ notebookUpdate }), 'ask:notebook:update')
+    for (const bad of [
+      {},
+      { id: 'x1', text: '改' },
+      { id: 'n1', text: '   ' },
+      { id: 'n1', text: 'x'.repeat(501) },
+      null
+    ]) {
+      expect(await update(SENDER_OK as never, bad)).toMatchObject({ ok: false })
+    }
+    expect(notebookUpdate).not.toHaveBeenCalled()
+
+    expect(await update(SENDER_OK as never, { id: 'n1', text: ' 最近常听周深 ' })).toMatchObject({
+      ok: true,
+      message: '改好了 n1。'
+    })
+    expect(notebookUpdate).toHaveBeenCalledWith({ id: 'n1', text: ' 最近常听周深 ' })
+    expect(
+      await update({ sender: { id: 99 }, senderFrame: MAIN_FRAME } as never, {
+        id: 'n1',
+        text: '改'
+      })
+    ).toMatchObject({ ok: false, message: 'forbidden' })
+  })
+})

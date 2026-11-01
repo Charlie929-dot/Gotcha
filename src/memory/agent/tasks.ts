@@ -355,10 +355,35 @@ export function expireTasks(db: Db, now: number): number {
 }
 
 /** 任务里有几个还活着的（设置抽屉 / 状态行用） */
-export function countActiveTasks(db: Db): number {  const row = db.prepare(`SELECT COUNT(*) AS n FROM mem_tasks WHERE state = 'active'`).get() as {
+export function countActiveTasks(db: Db): number {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM mem_tasks WHERE state = 'active'`).get() as {
     n: number
   }
   return row.n
+}
+
+/** 活着（active / paused）的条数：设置抽屉「任务」块的总数 */
+export function countLiveTasks(db: Db): number {
+  const row = db
+    .prepare(`SELECT COUNT(*) AS n FROM mem_tasks WHERE state IN ('active', 'paused')`)
+    .get() as { n: number }
+  return row.n
+}
+
+/**
+ * 设置抽屉用：还活着的任务（active / paused），active 在前、按到点时间排。
+ * 取消 / 完成的不列（与 `/tasks` 的 pending 视图不同：这里要把暂停的也显示出来，
+ * 才能点「继续」）。
+ */
+export function listLiveTasks(db: Db, limit = 50): TaskRow[] {
+  return db
+    .prepare(
+      `SELECT ${TASK_COLUMNS} FROM mem_tasks
+       WHERE state IN ('active', 'paused')
+       ORDER BY (state = 'paused') ASC, (next_due_at IS NULL) ASC, next_due_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(limit) as TaskRow[]
 }
 
 /** 一次执行计划的固定键：同一个 id + 同一个 next_due_at 就是同一次 occurrence */

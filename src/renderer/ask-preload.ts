@@ -10,12 +10,14 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { ChainAskResult, ChainAskResumeDecision } from '../chain/agent/types'
 import type { AskModeState } from '../chain/agent/mode'
 import type { SegmentEvidence } from '../chain/agent/evidence'
-import type { AskConsentView, AskAttachmentInput } from '../main/ask-ipc'
+import type { AskConsentView, AskAttachmentInput, TaskAdminActionResult, NotebookAdminActionResult } from '../main/ask-ipc'
 import type { AskHistoryEntry } from '../main/ask-history'
 import type { GraphSettingsSaveResult, GraphSettingsView } from '../main/graph-settings'
 import type { MemorySettingsSaveResult, MemorySettingsView } from '../main/memory-settings'
 import type { MemoryDeleteView, MemoryListView, MemoryRestoreView } from '../main/memory-admin'
 import type { MemoryRepoSettingsView } from '../main/memory-repo-settings'
+import type { TaskAdminView } from '../main/task-runtime'
+import type { NotebookAdminView } from '../main/notebook'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from '../main/qq/qq-settings'
 import type { NapcatView } from '../main/qq/napcat'
@@ -90,6 +92,13 @@ export interface AskApi {
     view?: MemoryRepoSettingsView
   }>
   pushMemoryRepo(): Promise<{ ok: boolean; error?: string; view?: MemoryRepoSettingsView }>
+  /* ---- 任务（自调用 v0.2 §12.1）：列表 / 暂停 / 继续 / 取消 ---- */
+  tasksView(): Promise<TaskAdminView>
+  taskAction(id: number, action: 'pause' | 'resume' | 'cancel'): Promise<TaskAdminActionResult>
+  /* ---- 小本本（自调用 v0.2 §7）：四分区查看 / 按编号删除 ---- */
+  notebookView(): Promise<NotebookAdminView>
+  notebookRemove(id: string): Promise<NotebookAdminActionResult>
+  notebookUpdate(id: string, text: string): Promise<NotebookAdminActionResult>
   /* ---- QQ 通道（D63）：NapCat 反向 WS 拨入本机；默认关闭 ---- */
   qqSettings(): Promise<QqSettingsView | { error: string }>
   saveQqSettings(patch: unknown): Promise<QqSettingsSaveResult>
@@ -167,6 +176,14 @@ const api: AskApi = {
       error?: string
       view?: MemoryRepoSettingsView
     }>,
+  tasksView: () => ipcRenderer.invoke('ask:tasks:get') as Promise<TaskAdminView>,
+  taskAction: (id, action) =>
+    ipcRenderer.invoke('ask:tasks:action', { id, action }) as Promise<TaskAdminActionResult>,
+  notebookView: () => ipcRenderer.invoke('ask:notebook:get') as Promise<NotebookAdminView>,
+  notebookRemove: (id) =>
+    ipcRenderer.invoke('ask:notebook:remove', { id }) as Promise<NotebookAdminActionResult>,
+  notebookUpdate: (id, text) =>
+    ipcRenderer.invoke('ask:notebook:update', { id, text }) as Promise<NotebookAdminActionResult>,
   qqSettings: () => ipcRenderer.invoke('ask:qq:get') as Promise<QqSettingsView | { error: string }>,
   saveQqSettings: (patch) =>
     ipcRenderer.invoke('ask:qq:save', patch) as Promise<QqSettingsSaveResult>,

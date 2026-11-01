@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { openDatabase } from '../../src/db'
-import { createTask, listDueTasks, settleTask } from '../../src/memory/agent/tasks'
+import { createTask, listDueTasks, settleTask, updateTask } from '../../src/memory/agent/tasks'
 import { createTaskRuntime, openTaskDb, TASK_MERGE_WINDOW_MS } from '../../src/main/task-runtime'
 
 let root = ''
@@ -122,6 +122,69 @@ describe('运行时', () => {
     expect(row?.state).toBe('completed')
     expect(row?.last_run_at).toBe(due)
     after?.close()
+    runtime.stop()
+  })
+
+  it('停止后库连接关掉：admin 报不可用', () => {
+    openDatabase(dbPath).close()
+    const runtime = createTaskRuntime({
+      dbPath,
+      now: () => at('2026-11-01', '12:00'),
+      vaultDir: () => null,
+      backupDir: () => null,
+      deliver: () => undefined,
+      log: () => {},
+      setTimer: () => null,
+      clearTimer: () => undefined
+    })
+    expect(runtime.admin().available).toBe(true)
+    runtime.stop()
+    expect(runtime.admin()).toEqual({ available: false, total: 0, tasks: [] })
+  })
+
+  it('admin：列出 active + paused（active 在前），取消 / 完成的不列', () => {
+    const nowAt = at('2026-11-01', '12:00')
+    const db = openDatabase(dbPath)
+    const active = createTask(db, {
+      instruction: '写周报',
+      nextDueAt: at('2026-11-01', '13:00'),
+      origin: 'user',
+      now: nowAt
+    })
+    const paused = createTask(db, {
+      instruction: '问他吃没吃饭',
+      nextDueAt: at('2026-11-01', '12:30'),
+      origin: 'agent',
+      now: nowAt
+    })
+    updateTask(db, { id: paused.id, state: 'paused', now: nowAt })
+    const done = createTask(db, {
+      instruction: '已经做完的',
+      nextDueAt: at('2026-11-01', '12:10'),
+      origin: 'agent',
+      now: nowAt
+    })
+    updateTask(db, { id: done.id, state: 'completed', now: nowAt })
+    db.close()
+
+    const runtime = createTaskRuntime({
+      dbPath,
+      now: () => nowAt,
+      vaultDir: () => null,
+      backupDir: () => null,
+      deliver: () => undefined,
+      log: () => {},
+      setTimer: () => null,
+      clearTimer: () => undefined
+    })
+    const view = runtime.admin()
+    expect(view.available).toBe(true)
+    expect(view.total).toBe(2)
+    expect(view.tasks.map((task) => task.id)).toEqual([active.id, paused.id])
+    expect(view.tasks.map((task) => task.state)).toEqual(['active', 'paused'])
+    expect(view.tasks[0].when).toContain('13:00')
+    expect(view.tasks[0].origin).toBe('user')
+    expect(view.tasks[1].instruction).toBe('问他吃没吃饭')
     runtime.stop()
   })
 

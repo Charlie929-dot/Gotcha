@@ -400,7 +400,7 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 ### 15.3 明确没做（下一阶段）
 
 1. **真机验收**：任务到点是否真的「开口」、窗口刷新是否顺眼，还没在真机跑过（`Unverified`）。
-2. **任务视图 UI**：现在只有 `/tasks` 命令，设置抽屉里没有任务块（方案 §12.1 的「统一任务视图、暂停 / 取消入口」只做了命令层）。
+2. **任务视图 UI**：第一阶段只有 `/tasks` 命令；设置抽屉里的任务 / 小本本块已在 §16.7 补上。
 3. **perceive / act 两段式、成长档案**：按 §12 的第三阶段继续；小本本已在 §16 落地。
 4. **`origin=system` 的固定写作任务**（日记 / 周记）：表与工具已支持，尚未排任务。
 
@@ -492,19 +492,55 @@ D57 的 `src/memory/agent/` 新循环决策不在本草案重开；若实现时�
 
 ### 16.6 测试与没做
 
-`npm test` 1961 条 / 173 文件全绿，`typecheck` / `build` 通过。
+`npm test` 1971 条 / 173 文件全绿，`typecheck` / `build` 通过。
 
 - `tests/unit/memory-notebook.test.ts`（16）：代码格式 / 手写行 / 勾选框、序列化往返、四条上限、
   改编号与日期、重复拒绝、文件不存在不建库、列表文案；
 - `tests/unit/chain-agent-notebook.test.ts`（9）：add/revise/remove 参数、缺参不调存储、没接后端如实报、
   `<now>` 注入带编号与栏名、阻断条目整条不列、空本子不写标题、回执回灌、失败不改口；
-- `tests/unit/main-notebook.test.ts`（4）：记忆仓路径、落盘前后、失败不动文件、列表 / 删除；
+- `tests/unit/main-notebook.test.ts`（5）：记忆仓路径、落盘前后、失败不动文件、列表 / 删除、四分区视图；
 - `tests/unit/main-commands.test.ts`：`/notebook` 没接上 / 列表 / `rm n1` / `rm 2` / 非法编号；
 - 工具数硬编码随之更新：16 个（`ask-mode` / `/tool` / `/log` / wire schema 一致性）。
 
 明确没做：
 
-1. **真机验收**：ta 真的会不会在邮件里主动记一条、纠正后旧理解是否消失，还没在真机跑过（`Unverified`）。
-2. **设置抽屉 UI**：任务 / 小本本仍只有命令与模型工具；可视化编辑入口（方案 §12.2「查看与纠正入口」的图形层）待做。
-3. **成长档案（§12.3）**：ta 记忆仓里的日记 / 周记 / 月度回顾与固定写作任务，尚未开工。
+1. **真机验收**：ta 真的会不会在对话里主动记一条、纠正后旧理解是否消失，还没在真机跑过（`Unverified`）。
+2. **成长档案（§12.3）**：ta 记忆仓里的日记 / 周记 / 月度回顾与固定写作任务，尚未开工。
+
+### 16.7 设置抽屉：任务 / 小本本可视化（2026-11-01 补）
+
+图形入口补齐（对应 §12.1「统一任务视图、暂停 / 取消入口」与 §12.2「查看与纠正入口」的图形层）。
+
+**任务块**：
+
+- 列出活着的任务（`active` + `paused`，active 在前，最多 50 条），带编号、人话时间、重复规则、
+  来源徽章（共建 / 自主 / 例行）、暂停徽章、Obsidian 同步状态（未同步 / 待同步）；
+- 每条两个按钮：**暂停 / 继续**、**取消**（取消要 confirm；共建计划会同步删掉 Obsidian 那一行）；
+- 暂停共建计划 = 把 Obsidian 那一行收起（`obsidian_state=pending`），继续时再写回去；
+  `planLineExists` 防重复，所以收起来再写回只有一行；自主任务只改状态，不碰用户日记；
+- 任务库不可用（没采集过 / 没迁到 v11）时如实显示，不建库、不抛错。
+
+**小本本块**：
+
+- 按四个分区铺（空栏不铺），每条 `n1 · 正文 · 日期`；每条两个按钮：
+  **改**（行内输入框 + 保存 / 取消，保存成 revise）与**删除**（再点一次确认，不弹系统对话框）；
+- 顶部状态行给出条数与 `notebook.md` 路径；提示「想纠正直接跟 ta 说 / `/notebook rm`」；
+- 改写 / 删除只动记忆仓里的 `notebook.md`，下一次提问起 `<now>` 里就是新内容。
+
+**接线**：
+
+| 层 | 文件 | 做了什么 |
+| - | - | - |
+| 任务视图 | `src/memory/agent/tasks.ts` · `task-tools.ts` · `src/main/task-runtime.ts` | `listLiveTasks` / `countLiveTasks`；`setState`（暂停收起计划行、继续写回）；运行时 `admin()` 视图 |
+| IPC | `src/main/ask-ipc.ts` · `src/renderer/ask-preload.ts` | `ask:tasks:get/action`、`ask:notebook:get/update/remove`；只认主框架，编号 / 动作 / 正文长度在边界校验 |
+| 渲染 | `src/renderer/ask/ask.html` · `ask.ts` · `ask.css` | 两个折叠分组；刷新 / 暂停 / 继续 / 取消 / 改写 / 删除；`openSettingsDrawer` 时一并读 |
+| 组合根 | `src/main/index.ts` | `tasksAdmin` / `taskAction`（走 `port.setState` / `port.cancel`）、`notebookAdmin` / `notebookUpdate` / `notebookRemove` |
+
+测试（`npm test` 1971 条 / 173 文件全绿，`typecheck` / `build` 通过）：
+
+- `memory-task-tools.test.ts` +3：共建计划暂停收行 / 继续写回且不重复、自主任务不碰日记、重复操作与已结束任务如实说；
+- `main-task-runtime.test.ts` +2：`admin()` 列 active + paused（完成 / 取消不列）、stop 后报不可用；
+- `ask-ipc.test.ts` +4：越权 / 没接时回空视图、任务编号与动作在边界钳住、小本本编号与正文校验（删 / 改）；
+- `main-notebook.test.ts` +1：四分区视图（空栏也在）、路径与编号日期。
+
 

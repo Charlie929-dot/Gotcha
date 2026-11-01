@@ -36,6 +36,8 @@ import type {
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from './qq/qq-settings'
 import type { NapcatView } from './qq/napcat'
+import type { TaskAdminView } from './task-runtime'
+import type { NotebookAdminView } from './notebook'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
 
@@ -130,6 +132,20 @@ function historyAttachments(
     }
   }
   return out
+}
+
+/** 设置抽屉「任务」：暂停 / 继续 / 取消之后的结果（带刷新后的视图） */
+export interface TaskAdminActionResult {
+  ok: boolean
+  message: string
+  view?: TaskAdminView
+}
+
+/** 设置抽屉「小本本」：删一条之后的结果（带刷新后的视图） */
+export interface NotebookAdminActionResult {
+  ok: boolean
+  message: string
+  view?: NotebookAdminView
 }
 
 export interface AskIpcDeps {
@@ -237,6 +253,23 @@ export interface AskIpcDeps {
     error?: string
     view?: MemoryRepoSettingsView
   }>
+  /**
+   * 设置抽屉「任务」（自调用 v0.2 §12.1 的统一任务视图）：列表 + 暂停 / 继续 / 取消。
+   * 不可用（没采集过 / 没迁到 v11）时 view.available=false，不抛错。
+   */
+  tasksAdmin?: () => TaskAdminView
+  taskAction?: (input: {
+    id: number
+    action: 'pause' | 'resume' | 'cancel'
+  }) => TaskAdminActionResult
+  /**
+   * 设置抽屉「小本本」（自调用 v0.2 §7）：四分区查看 + 按编号删除。
+   * 删除只动记忆仓里的 notebook.md，不碰用户 Obsidian 日记。
+   */
+  notebookAdmin?: () => NotebookAdminView
+  notebookRemove?: (id: string) => NotebookAdminActionResult
+  /** 抽屉里直接改写一条（等价于模型调用 `update_notebook` 的 revise） */
+  notebookUpdate?: (input: { id: string; text: string }) => NotebookAdminActionResult
   /**
    * 在途提问状态变化（自调用 v0.2 §9 合流）：任务到点要「先接用户」，
    * 组合根靠这个信号知道现在有没有一轮用户问答在跑。
@@ -907,6 +940,96 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         } catch (error) {
           deps.log('error', 'ask memory repo push failed', { error: String(error) })
           return { ok: false, error: '推送失败，细节看日志' }
+        }
+      }
+    ],
+    [
+      'ask:tasks:get',
+      (event) => {
+        const empty: TaskAdminView = { available: false, total: 0, tasks: [] }
+        if (!ensureSender(event)) return empty
+        if (!deps.tasksAdmin) return empty
+        try {
+          return deps.tasksAdmin()
+        } catch (error) {
+          deps.log('error', 'ask tasks admin read failed', { error: String(error) })
+          return empty
+        }
+      }
+    ],
+    [
+      'ask:tasks:action',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, message: 'forbidden' }
+        if (!deps.taskAction) return { ok: false, message: '当前版本不支持任务操作' }
+        if (!isPlainObject(input)) return { ok: false, message: '参数不合法' }
+        const id = input.id
+        const action = input.action
+        if (typeof id !== 'number' || !Number.isInteger(id) || id <= 0) {
+          return { ok: false, message: '任务编号不合法' }
+        }
+        if (action !== 'pause' && action !== 'resume' && action !== 'cancel') {
+          return { ok: false, message: '动作不合法' }
+        }
+        try {
+          return deps.taskAction({ id, action })
+        } catch (error) {
+          deps.log('error', 'ask task action failed', { error: String(error) })
+          return { ok: false, message: '操作失败，细节看日志' }
+        }
+      }
+    ],
+    [
+      'ask:notebook:get',
+      (event) => {
+        const empty: NotebookAdminView = { path: '', total: 0, groups: [] }
+        if (!ensureSender(event)) return empty
+        if (!deps.notebookAdmin) return empty
+        try {
+          return deps.notebookAdmin()
+        } catch (error) {
+          deps.log('error', 'ask notebook read failed', { error: String(error) })
+          return empty
+        }
+      }
+    ],
+    [
+      'ask:notebook:remove',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, message: 'forbidden' }
+        if (!deps.notebookRemove) return { ok: false, message: '当前版本不支持删除小本本条目' }
+        if (!isPlainObject(input)) return { ok: false, message: '参数不合法' }
+        const id = input.id
+        if (typeof id !== 'string' || !/^n\d{1,6}$/u.test(id)) {
+          return { ok: false, message: '编号不合法（如 n3）' }
+        }
+        try {
+          return deps.notebookRemove(id)
+        } catch (error) {
+          deps.log('error', 'ask notebook remove failed', { error: String(error) })
+          return { ok: false, message: '删除失败，细节看日志' }
+        }
+      }
+    ],
+    [
+      'ask:notebook:update',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, message: 'forbidden' }
+        if (!deps.notebookUpdate) return { ok: false, message: '当前版本不支持改写小本本条目' }
+        if (!isPlainObject(input)) return { ok: false, message: '参数不合法' }
+        const id = input.id
+        const text = input.text
+        if (typeof id !== 'string' || !/^n\d{1,6}$/u.test(id)) {
+          return { ok: false, message: '编号不合法（如 n3）' }
+        }
+        if (typeof text !== 'string' || text.trim() === '' || text.length > 500) {
+          return { ok: false, message: '内容不能为空（最多 140 字，超了主进程会拒）' }
+        }
+        try {
+          return deps.notebookUpdate({ id, text })
+        } catch (error) {
+          deps.log('error', 'ask notebook update failed', { error: String(error) })
+          return { ok: false, message: '改写失败，细节看日志' }
         }
       }
     ]

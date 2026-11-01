@@ -114,6 +114,12 @@ export interface TaskToolPort {
   }): TaskToolMutation
   cancel(id: number): TaskToolMutation
   /**
+   * 设置抽屉的暂停 / 继续（不是模型工具）。
+   * 共建计划同步：暂停把 Obsidian 那一行收起（obsidian_state=pending），继续时再写回去；
+   * 自主任务只改状态，不碰用户日记。
+   */
+  setState(id: number, state: 'active' | 'paused'): TaskToolMutation
+  /**
    * 把之前没同步上的共建计划再试一遍（启动时跑一次）。
    * `synced` 之外的 active 计划都算候选；写之前先看计划区里是不是已经有那一行，避免重复。
    */
@@ -420,6 +426,55 @@ export function createTaskToolPort(options: TaskToolDepsOptions): TaskToolPort {
       return {
         ok: true,
         message: `取消了 #${stored.id}：${stored.instruction}${tail}`,
+        task: viewOf(stored, now)
+      }
+    },
+    setState(id, state) {
+      const now = options.now?.() ?? Date.now()
+      const db = requireDb(options)
+      const before = getTaskById(db, id)
+      if (before === null) {
+        return { ok: false, message: `没有 #${id} 这条任务（刷新看看还有哪些）`, task: null }
+      }
+      if (before.state === 'completed' || before.state === 'cancelled') {
+        return { ok: false, message: `#${id} 已经结束了，不能${state === 'paused' ? '暂停' : '继续'}`, task: viewOf(before, now) }
+      }
+      if (before.state === state) {
+        return {
+          ok: true,
+          message: state === 'paused' ? `#${id} 已经是暂停的` : `#${id} 本来就在跑`,
+          task: viewOf(before, now)
+        }
+      }
+      const after = updateTask(db, { id, state, now })
+      if (after === null) {
+        return { ok: false, message: `没${state === 'paused' ? '暂停' : '继续'}成 #${id}`, task: null }
+      }
+      let sync: PlanSync | null = null
+      if (before.origin === 'user') {
+        if (state === 'paused') {
+          // 暂停 = 把 Obsidian 那一行收起（用户看到的是「今天没有这条计划」）；
+          // 同步状态标 pending，继续时按「新建」再写回去（resyncPlans 只捡 active，不会自己冒出来）。
+          const removed = syncPlanEdit(before, 'remove', null, options)
+          sync =
+            removed.state === 'removed' || removed.state === 'pending'
+              ? { state: 'pending', path: removed.path, note: '暂停中，计划行已收起' }
+              : removed
+        } else {
+          // 继续：这时 obsidian_state 通常还是 pending（暂停时改的），syncPlanCreate 会再写一行；
+          // 如果之前就是 synced（历史数据），也按新建处理：先看计划区里有没有那一行，避免重复。
+          sync = syncPlanCreate(after, options)
+        }
+      }
+      const stored = sync === null ? after : applySync(db, after, sync, now)
+      options.onChanged?.()
+      const tail = sync === null ? '' : ` · ${syncLabel(sync)}`
+      return {
+        ok: true,
+        message:
+          state === 'paused'
+            ? `暂停了 #${stored.id}：${stored.instruction}${tail}`
+            : `继续了 #${stored.id}：${readableTaskTime(stored.next_due_at, now)} ${stored.instruction}${tail}`,
         task: viewOf(stored, now)
       }
     },

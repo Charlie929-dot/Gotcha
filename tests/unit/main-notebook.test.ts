@@ -74,6 +74,27 @@ describe('createNotebookStore', () => {
     expect(readFileSync(join(root, 'notebook.md'), 'utf8')).toBe(before)
   })
 
+  it('view：四分区都在（空栏也在），条目带编号 / 日期，路径指向仓里的文件', () => {
+    const store = createNotebookStore({ root, now: () => NOW })
+    const empty = store.view()
+    expect(empty.path).toBe(join(root, 'notebook.md'))
+    expect(empty.total).toBe(0)
+    expect(empty.groups.map((group) => group.section)).toEqual([
+      '关于你',
+      '最近的你',
+      '我们之间',
+      '我给自己的提醒'
+    ])
+
+    store.update({ action: 'add', section: 'about_you', text: '喜欢周深' })
+    store.update({ action: 'add', section: 'reminders', text: '别连续追问' })
+    const view = store.view()
+    expect(view.total).toBe(2)
+    expect(view.groups[0].entries).toEqual([{ id: 'n1', text: '喜欢周深', at: TODAY }])
+    expect(view.groups[1].entries).toEqual([])
+    expect(view.groups[3].entries.map((entry) => entry.id)).toEqual(['n2'])
+  })
+
   it('参数不全时如实拒绝，不落盘', () => {
     const store = createNotebookStore({ root, now: () => NOW })
     expect(store.update({ action: 'add', section: 'about_you' }).ok).toBe(false)

@@ -1144,6 +1144,142 @@ button.stop {
   white-space: nowrap;
 }
 
+/* ---- 小本本（四分区 + 编号；一条一行小卡片） ---- */
+
+.notebook-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.notebook-group-title {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.notebook-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notebook-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 12.5px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.notebook-item-id {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.notebook-item-text {
+  flex: 1 1 auto;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.notebook-item-at {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.notebook-item-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+}
+
+.notebook-item-edit:focus {
+  outline: none;
+}
+
+/* ---- 任务（共建 / 自主；暂停 · 继续 · 取消） ---- */
+
+.task-items {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-item {
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.task-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.task-item-id {
+  color: var(--text);
+}
+
+.task-item-badge {
+  padding: 0 6px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.task-item-badge.paused {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.task-item-badge.sync-failed {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.task-item-text {
+  margin: 4px 0 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.task-item-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.task-item-actions button {
+  padding: 0 8px;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+
 /* ---- 模式条（D62）：三个预设 + 可展开的组合开关 ---- */
 
 .ask-modes {

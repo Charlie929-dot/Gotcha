@@ -327,6 +327,84 @@ describe('修改与取消：同步到同一计划区', () => {
   })
 })
 
+describe('暂停 / 继续（设置抽屉）', () => {
+  it('共建计划暂停：Obsidian 那一行收起；继续时写回来，且不重复', () => {
+    writeNote(DAY)
+    const p = port()
+    const created = p.schedule({
+      instruction: '一起去买猫粮',
+      when: WHEN,
+      repeat: '',
+      origin: 'user',
+      delivery: 'auto',
+      validUntil: null
+    })
+    expect(note()).toContain('- [ ] 19:30 一起去买猫粮')
+
+    const paused = p.setState(created.task!.id, 'paused')
+    expect(paused.ok).toBe(true)
+    expect(paused.message).toContain('暂停了')
+    expect(paused.task?.state).toBe('paused')
+    expect(note()).not.toContain('一起去买猫粮')
+    expect(getTaskById(db, created.task!.id)?.obsidian_state).toBe('pending')
+
+    const resumed = p.setState(created.task!.id, 'active')
+    expect(resumed.ok).toBe(true)
+    expect(resumed.message).toContain('继续了')
+    expect(resumed.task?.state).toBe('active')
+    expect(note()).toContain('- [ ] 19:30 一起去买猫粮')
+    // 收起来再写回去只留一行
+    expect(note().match(/一起去买猫粮/gu)?.length).toBe(1)
+    expect(getTaskById(db, created.task!.id)?.obsidian_state).toBe('synced')
+  })
+
+  it('自主任务暂停 / 继续不碰用户日记；重复操作如实说状态没变', () => {
+    writeNote(DAY)
+    const before = note()
+    const p = port()
+    const created = p.schedule({
+      instruction: '自己查一下他睡没睡',
+      when: WHEN,
+      repeat: '',
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    const paused = p.setState(created.task!.id, 'paused')
+    expect(paused.ok).toBe(true)
+    expect(paused.task?.state).toBe('paused')
+    expect(note()).toBe(before)
+
+    const again = p.setState(created.task!.id, 'paused')
+    expect(again.ok).toBe(true)
+    expect(again.message).toContain('已经是暂停的')
+
+    expect(p.setState(created.task!.id, 'active').task?.state).toBe('active')
+    expect(note()).toBe(before)
+  })
+
+  it('不存在 / 已结束的任务不能暂停或继续', () => {
+    writeNote(DAY)
+    const p = port()
+    const missing = p.setState(999, 'paused')
+    expect(missing.ok).toBe(false)
+    expect(missing.message).toContain('没有 #999')
+
+    const created = p.schedule({
+      instruction: '一次性的事',
+      when: WHEN,
+      repeat: '',
+      origin: 'agent',
+      delivery: 'auto',
+      validUntil: null
+    })
+    p.cancel(created.task!.id)
+    const ended = p.setState(created.task!.id, 'paused')
+    expect(ended.ok).toBe(false)
+    expect(ended.message).toContain('已经结束了')
+  })
+})
+
 describe('查与参数', () => {
   it('search 的四种视图直接透传（day 用当天那次的时间显示）', () => {
     writeNote(DAY)

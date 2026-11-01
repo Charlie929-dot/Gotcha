@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import type { NotebookUpdateRequest, NotebookUpdateResult } from '../chain/agent/tools'
 import {
   NOTEBOOK_FILE_NAME,
+  NOTEBOOK_SECTION_IDS,
   NOTEBOOK_SECTION_LABELS,
   addNotebookEntry,
   isNotebookSection,
@@ -34,6 +35,22 @@ export interface NotebookSnapshotEntry {
   text: string
 }
 
+/** 设置抽屉「小本本」块的一条 */
+export interface NotebookAdminEntry {
+  id: string
+  text: string
+  /** 最近一次写下的日期；空 = 老条目没记日期 */
+  at: string
+}
+
+/** 设置抽屉「小本本」块：按四个分区排，空栏也留着（看得出结构） */
+export interface NotebookAdminView {
+  /** 文件路径（给人看；换分支 / 换人时这里也跟着变） */
+  path: string
+  total: number
+  groups: readonly { section: string; entries: readonly NotebookAdminEntry[] }[]
+}
+
 export interface NotebookStore {
   /** 小本本文件（`<记忆仓>/notebook.md`） */
   readonly path: string
@@ -43,7 +60,9 @@ export interface NotebookStore {
   update(input: NotebookUpdateRequest): NotebookUpdateResult
   /** `/notebook` 的列表文本 */
   list(): string
-  /** `/notebook rm n3` */
+  /** 设置抽屉视图（四分区 + 编号） */
+  view(): NotebookAdminView
+  /** `/notebook rm n3` 与抽屉删除共用 */
   remove(id: string): string
 }
 
@@ -123,6 +142,19 @@ export function createNotebookStore(options: {
     read,
     update,
     list: () => notebookListText(readNotebookFile(path, today())),
+    view: () => {
+      const notebook = readNotebookFile(path, today())
+      return {
+        path,
+        total: notebook.entries.length,
+        groups: NOTEBOOK_SECTION_IDS.map((section) => ({
+          section: NOTEBOOK_SECTION_LABELS[section],
+          entries: notebook.entries
+            .filter((entry) => entry.section === section)
+            .map((entry) => ({ id: entry.id, text: entry.text, at: entry.at }))
+        }))
+      }
+    },
     remove: (id) => {
       const result = update({ action: 'remove', id })
       return result.message

@@ -18,8 +18,11 @@ import { existsSync } from 'node:fs'
 import type { Db } from '../db'
 import {
   claimTask,
+  countLiveTasks,
+  describeRepeat,
   expireTasks,
   listDueTasks,
+  listLiveTasks,
   nextDueTask,
   readableTaskTime,
   settleTask,
@@ -50,6 +53,27 @@ export interface TaskRuntimeDeps {
   clearTimer?: (handle: unknown) => void
 }
 
+/** 设置抽屉「任务」块里的一条（已算好人话时间 / 来源 / 同步状态） */
+export interface TaskAdminItem {
+  id: number
+  when: string
+  repeat: string
+  origin: 'user' | 'agent' | 'system'
+  delivery: 'foreground' | 'background' | 'auto'
+  state: 'active' | 'paused'
+  instruction: string
+  /** 共建计划的 Obsidian 同步状态；空 = 不需要同步 */
+  sync: string
+}
+
+/** 设置抽屉「任务」块的视图；不可用 = 任务库还没起来（没采集过 / 没迁到 v11） */
+export interface TaskAdminView {
+  available: boolean
+  /** 活着（active / paused）的总数，可能比 tasks 多（列表截到 50 条） */
+  total: number
+  tasks: TaskAdminItem[]
+}
+
 export interface TaskRuntime {
   /** 四个任务工具的执行端口（注入问记忆循环） */
   port: TaskToolPort
@@ -66,6 +90,8 @@ export interface TaskRuntime {
   busy: () => boolean
   /** 库里还有几条活着的任务（设置 / 状态行用） */
   count: () => number
+  /** 设置抽屉：活着的任务（active / paused），暂停 / 继续 / 取消都走 port.setState / port.cancel */
+  admin: () => TaskAdminView
 }
 
 /** 合流窗口：到点前多久就把它列进 `<now>`（与既有 10 分钟窗口同口径） */
@@ -204,6 +230,26 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
         .prepare(`SELECT COUNT(*) AS n FROM mem_tasks WHERE state = 'active'`)
         .get() as { n: number }
       return row.n
+    },
+    admin: () => {
+      const current = handle()
+      if (current === null) return { available: false, total: 0, tasks: [] }
+      const at = now()
+      const rows = listLiveTasks(current, 50)
+      return {
+        available: true,
+        total: countLiveTasks(current),
+        tasks: rows.map((task) => ({
+          id: task.id,
+          when: readableTaskTime(task.next_due_at, at),
+          repeat: describeRepeat(task.repeat),
+          origin: task.origin,
+          delivery: task.delivery,
+          state: task.state === 'paused' ? 'paused' : 'active',
+          instruction: task.instruction,
+          sync: task.obsidian_state
+        }))
+      }
     }
   }
 }

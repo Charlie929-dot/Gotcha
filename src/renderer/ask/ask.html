@@ -185,6 +185,35 @@
             </div>
           </section>
 
+          <section id="sec-notebook">
+            <h3>小本本</h3>
+            <p class="hint" id="notebook-status">读取中…</p>
+            <div id="notebook-groups" class="notebook-groups"></div>
+            <div class="memory-actions">
+              <button id="notebook-refresh" type="button">刷新</button>
+              <span id="notebook-msg" class="hint"></span>
+            </div>
+            <p class="hint">
+              ta 自己记的「当前理解」（关于你 / 最近的你 / 我们之间 / 给自己的提醒），跟着记忆仓分支走，
+              每次聊天都会带在身边。每条可以「改」或「删除」；想更自然地纠正，直接跟 ta 说，或用
+              <code>/notebook rm 编号</code>。文件在记忆仓的 <code>notebook.md</code>，也可以自己改。
+            </p>
+          </section>
+
+          <section id="sec-tasks">
+            <h3>任务</h3>
+            <p class="hint" id="tasks-status">读取中…</p>
+            <ul id="tasks-list" class="task-items"></ul>
+            <div class="memory-actions">
+              <button id="tasks-refresh" type="button">刷新</button>
+              <span id="tasks-msg" class="hint"></span>
+            </div>
+            <p class="hint">
+              共建计划（你俩约好的）与 ta 自己的任务。暂停后不再到点叫醒，继续可恢复；取消共建计划
+              会同步删掉 Obsidian 计划区那一行。到点说不说、什么时候说，仍由 ta 看当下情况决定。
+            </p>
+          </section>
+
           <section id="sec-memory-repo">
             <h3>记忆仓</h3>
             <p class="hint" id="memory-repo-status">读取中…</p>

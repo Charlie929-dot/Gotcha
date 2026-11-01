@@ -31,6 +31,8 @@ import type { MemoryRepoSettingsView } from '../../main/memory-repo-settings'
 import type { MemoryListItemView } from '../../main/memory-admin'
 import type { QqSettingsView } from '../../main/qq/qq-settings'
 import type { NapcatView } from '../../main/qq/napcat'
+import type { TaskAdminItem, TaskAdminView } from '../../main/task-runtime'
+import type { NotebookAdminView } from '../../main/notebook'
 import type { AskApi } from '../ask-preload'
 import { createSettingsPanel } from '../graph/graph-settings-panel'
 
@@ -88,6 +90,16 @@ const memoryPushInput = must<HTMLInputElement>('set-memory-push')
 const memoryRepoSaveButton = must<HTMLButtonElement>('memory-repo-save')
 const memoryRepoPushButton = must<HTMLButtonElement>('memory-repo-push')
 const memoryRepoMsg = must<HTMLElement>('memory-repo-msg')
+/* ---- 设置抽屉 · 小本本（自调用 v0.2 §7） ---- */
+const notebookStatusEl = must<HTMLElement>('notebook-status')
+const notebookGroupsEl = must<HTMLElement>('notebook-groups')
+const notebookRefreshButton = must<HTMLButtonElement>('notebook-refresh')
+const notebookMsg = must<HTMLElement>('notebook-msg')
+/* ---- 设置抽屉 · 任务（自调用 v0.2 §12.1：暂停 / 继续 / 取消） ---- */
+const tasksStatusEl = must<HTMLElement>('tasks-status')
+const tasksListEl = must<HTMLUListElement>('tasks-list')
+const tasksRefreshButton = must<HTMLButtonElement>('tasks-refresh')
+const tasksMsg = must<HTMLElement>('tasks-msg')
 /* ---- 设置抽屉 · 记忆条目（浏览 / 删除 / 撤销） ---- */
 const memorySearchInput = must<HTMLInputElement>('memory-search')
 const memoryKindSelect = must<HTMLSelectElement>('memory-kind')
@@ -1553,6 +1565,286 @@ async function refreshMemoryRepo(note = ''): Promise<void> {
   }
 }
 
+/* ---- 设置抽屉 · 小本本（自调用 v0.2 §7） ---------------------------- */
+
+/** 四分区 + 编号；空栏不铺（状态行已说「空」） */
+function fillNotebook(view: NotebookAdminView): void {
+  notebookGroupsEl.replaceChildren()
+  if (view.total === 0) {
+    notebookStatusEl.textContent = '小本本还是空的（ta 记下关于你的理解后会出现在这里）'
+    return
+  }
+  notebookStatusEl.textContent = `共 ${view.total} 条 · ${view.path}`
+  for (const group of view.groups) {
+    if (group.entries.length === 0) continue
+    const wrap = document.createElement('div')
+    wrap.className = 'notebook-group'
+    const title = document.createElement('p')
+    title.className = 'notebook-group-title'
+    title.textContent = `${group.section}（${group.entries.length}）`
+    const list = document.createElement('ul')
+    list.className = 'notebook-items'
+    for (const entry of group.entries) {
+      const item = document.createElement('li')
+      item.className = 'notebook-item'
+      const id = document.createElement('span')
+      id.className = 'notebook-item-id'
+      id.textContent = entry.id
+      const text = document.createElement('span')
+      text.className = 'notebook-item-text'
+      text.textContent = entry.text
+      item.append(id, text)
+      if (entry.at !== '') {
+        const at = document.createElement('span')
+        at.className = 'notebook-item-at'
+        at.textContent = entry.at
+        item.append(at)
+      }
+      const edit = document.createElement('button')
+      edit.type = 'button'
+      edit.className = 'memory-item-del'
+      edit.textContent = '改'
+      edit.title = `改写 ${entry.id}`
+      edit.addEventListener('click', () => {
+        startNotebookEdit(item, text, entry)
+      })
+      const del = document.createElement('button')
+      del.type = 'button'
+      del.className = 'memory-item-del'
+      del.textContent = '删除'
+      del.title = `从小本本删掉 ${entry.id}（再点一次确认）`
+      armConfirm(del, '删除', () => {
+        void runNotebookRemove(entry.id)
+      })
+      item.append(edit, del)
+      list.append(item)
+    }
+    wrap.append(title, list)
+    notebookGroupsEl.append(wrap)
+  }
+}
+
+/**
+ * 二次点击确认（不弹 window.confirm：Electron 里对话框会卡住渲染层，提示也更像人话）。
+ * 第一次点把按钮改成「确认…」，3 秒内再点才执行。
+ */
+function armConfirm(button: HTMLButtonElement, label: string, run: () => void): void {
+  let armed = false
+  let timer: number | undefined
+  button.addEventListener('click', () => {
+    if (!armed) {
+      armed = true
+      button.textContent = `确认${label}`
+      button.style.color = 'var(--error)'
+      button.style.borderColor = 'var(--error)'
+      timer = window.setTimeout(() => {
+        armed = false
+        button.textContent = label
+        button.style.color = ''
+        button.style.borderColor = ''
+      }, 3000)
+      return
+    }
+    if (timer !== undefined) window.clearTimeout(timer)
+    armed = false
+    button.textContent = label
+    button.style.color = ''
+    button.style.borderColor = ''
+    run()
+  })
+}
+
+/** 行内改写：把正文换成一个输入框 + 保存 / 取消（不开 prompt 对话框） */
+function startNotebookEdit(
+  item: HTMLElement,
+  textEl: HTMLElement,
+  entry: { id: string; text: string }
+): void {
+  if (item.dataset.editing === '1') return
+  item.dataset.editing = '1'
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.className = 'notebook-item-edit'
+  input.maxLength = 140
+  input.value = entry.text
+  const save = document.createElement('button')
+  save.type = 'button'
+  save.className = 'memory-item-del'
+  save.textContent = '保存'
+  const cancel = document.createElement('button')
+  cancel.type = 'button'
+  cancel.className = 'memory-item-del'
+  cancel.textContent = '取消'
+  textEl.hidden = true
+  item.insertBefore(input, textEl)
+  textEl.after(save, cancel)
+
+  const finish = (): void => {
+    input.remove()
+    save.remove()
+    cancel.remove()
+    textEl.hidden = false
+    delete item.dataset.editing
+  }
+  cancel.addEventListener('click', finish)
+  save.addEventListener('click', () => {
+    const body = input.value.trim()
+    if (body === '') {
+      notebookMsg.textContent = '内容不能为空'
+      notebookMsg.style.color = 'var(--error)'
+      return
+    }
+    void (async () => {
+      if (!api) return
+      save.disabled = true
+      notebookMsg.textContent = '保存中…'
+      notebookMsg.style.color = ''
+      try {
+        const result = await api.notebookUpdate(entry.id, body)
+        if (result.view) fillNotebook(result.view)
+        notebookMsg.textContent = result.message
+        notebookMsg.style.color = result.ok ? '' : 'var(--error)'
+        if (!result.ok) save.disabled = false
+      } catch (error) {
+        notebookMsg.textContent = `改写失败：${String(error)}`
+        notebookMsg.style.color = 'var(--error)'
+        save.disabled = false
+      }
+    })()
+  })
+  input.focus()
+  input.select()
+}
+
+async function refreshNotebook(note = ''): Promise<void> {
+  if (!api) return
+  notebookMsg.textContent = note
+  notebookMsg.style.color = ''
+  try {
+    fillNotebook(await api.notebookView())
+  } catch (error) {
+    notebookStatusEl.textContent = `读取小本本失败：${String(error)}`
+  }
+}
+
+async function runNotebookRemove(id: string): Promise<void> {
+  if (!api) return
+  notebookMsg.textContent = '删除中…'
+  notebookMsg.style.color = ''
+  try {
+    const result = await api.notebookRemove(id)
+    if (result.view) fillNotebook(result.view)
+    notebookMsg.textContent = result.message
+    notebookMsg.style.color = result.ok ? '' : 'var(--error)'
+  } catch (error) {
+    notebookMsg.textContent = `删除失败：${String(error)}`
+    notebookMsg.style.color = 'var(--error)'
+  }
+}
+
+/* ---- 设置抽屉 · 任务（自调用 v0.2 §12.1：暂停 / 继续 / 取消） -------- */
+
+const TASK_ORIGIN_TEXT: Readonly<Record<TaskAdminItem['origin'], string>> = {
+  user: '共建',
+  agent: '自主',
+  system: '例行'
+}
+
+function fillTasks(view: TaskAdminView): void {
+  tasksListEl.replaceChildren()
+  if (!view.available) {
+    tasksStatusEl.textContent = '任务库还没起来（没采集过，或还没迁到 v11）'
+    return
+  }
+  if (view.total === 0) {
+    tasksStatusEl.textContent = '现在没有挂着的计划或自主任务。'
+    return
+  }
+  const suffix = view.total > view.tasks.length ? `，只显示前 ${view.tasks.length} 条` : ''
+  tasksStatusEl.textContent = `挂着的任务（${view.total} 条${suffix}）`
+  for (const task of view.tasks) {
+    const item = document.createElement('li')
+    item.className = 'task-item'
+    const head = document.createElement('div')
+    head.className = 'task-item-head'
+    const id = document.createElement('span')
+    id.className = 'task-item-id'
+    id.textContent = `#${task.id}`
+    const when = document.createElement('span')
+    when.textContent = `${task.when}${task.repeat === '' ? '' : `（${task.repeat}）`}`
+    head.append(id, when)
+    const origin = document.createElement('span')
+    origin.className = 'task-item-badge'
+    origin.textContent = TASK_ORIGIN_TEXT[task.origin]
+    head.append(origin)
+    if (task.state === 'paused') {
+      const paused = document.createElement('span')
+      paused.className = 'task-item-badge paused'
+      paused.textContent = '已暂停'
+      head.append(paused)
+    }
+    if (task.sync === 'failed' || task.sync === 'pending') {
+      const sync = document.createElement('span')
+      sync.className = `task-item-badge${task.sync === 'failed' ? ' sync-failed' : ''}`
+      sync.textContent = task.sync === 'failed' ? 'Obsidian 未同步' : 'Obsidian 待同步'
+      head.append(sync)
+    }
+    const text = document.createElement('p')
+    text.className = 'task-item-text'
+    text.textContent = task.instruction
+    const actions = document.createElement('div')
+    actions.className = 'task-item-actions'
+    const toggle = document.createElement('button')
+    toggle.type = 'button'
+    toggle.textContent = task.state === 'paused' ? '继续' : '暂停'
+    toggle.addEventListener('click', () => {
+      void runTaskAction(task, task.state === 'paused' ? 'resume' : 'pause')
+    })
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.textContent = '取消'
+    cancel.title =
+      task.origin === 'user'
+        ? '取消这条共建计划（再点一次确认；会同步删掉 Obsidian 计划区那一行）'
+        : '取消这条任务（再点一次确认）'
+    armConfirm(cancel, '取消', () => {
+      void runTaskAction(task, 'cancel')
+    })
+    actions.append(toggle, cancel)
+    item.append(head, text, actions)
+    tasksListEl.append(item)
+  }
+}
+
+async function refreshTasks(note = ''): Promise<void> {
+  if (!api) return
+  tasksMsg.textContent = note
+  tasksMsg.style.color = ''
+  try {
+    fillTasks(await api.tasksView())
+  } catch (error) {
+    tasksStatusEl.textContent = `读取任务失败：${String(error)}`
+  }
+}
+
+async function runTaskAction(
+  task: TaskAdminItem,
+  action: 'pause' | 'resume' | 'cancel'
+): Promise<void> {
+  if (!api) return
+  tasksMsg.textContent = action === 'cancel' ? '取消中…' : action === 'pause' ? '暂停中…' : '继续中…'
+  tasksMsg.style.color = ''
+  try {
+    const result = await api.taskAction(task.id, action)
+    if (result.view) fillTasks(result.view)
+    tasksMsg.textContent = result.message
+    tasksMsg.style.color = result.ok ? '' : 'var(--error)'
+  } catch (error) {
+    tasksMsg.textContent = `操作失败：${String(error)}`
+    tasksMsg.style.color = 'var(--error)'
+  }
+}
+
 /* ---- 设置抽屉 · 折叠分组（D90） -------------------------------------- */
 
 /** 展开状态记在渲染层本地（不进设置库：它只是界面偏好） */
@@ -1622,11 +1914,19 @@ function openSettingsDrawer(): void {
   void refreshMemorySettings()
   void refreshMemoryRepo()
   void refreshQqSettings()
+  void refreshNotebook()
+  void refreshTasks()
   startNapcatPolling()
   void loadMemoryList(true)
 }
 
 if (api) {
+  notebookRefreshButton.addEventListener('click', () => {
+    void refreshNotebook('刷新中…')
+  })
+  tasksRefreshButton.addEventListener('click', () => {
+    void refreshTasks('刷新中…')
+  })
   memoryRepoSaveButton.addEventListener('click', async () => {
     const remote = memoryRemoteInput.value.trim()
     const commitMinutes = Number(memoryCommitInput.value)

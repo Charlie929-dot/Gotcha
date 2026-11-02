@@ -5,6 +5,11 @@
  * 默认关 / 白名单 fail-closed / 每用户串行 / 限流 / 长答分条 / 错误如实回一句。
  */
 
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createAskConversationFileStore } from '../../src/main/ask-conversation'
+import { appendAskConversationTurn } from '../../src/chain/agent/conversation'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChainAskResult } from '../../src/chain/agent/types'
@@ -801,6 +806,69 @@ describe('「还要继续查吗」在 QQ 里也能答', () => {
   })
 })
 describe('主动推送（D93：前台任务到点也发一份到 QQ）', () => {
+  it('重启后仍能从 QQ 会话读到提醒，其他会话不混入', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gotcha-push-context-'))
+    try {
+      const channel = createQqChannel(new FakeTransport(), {
+        ask: async () => answer('x'), log: () => {}, partGapMs: 0,
+        pushed: async ({ conversationId, question, text, at }) => {
+          const store = createAskConversationFileStore({ root, conversationId })
+          await store.save(appendAskConversationTurn(await store.load(), {
+            question, now: new Date(at).toISOString(), turns: [], answer: text
+          }))
+        }
+      })
+      await channel.start(config({ allowUsers: ['20002'] }))
+      await channel.push('刷课时间到了', '提醒刷课')
+      await channel.stop()
+      const restored = createAskConversationFileStore({ root, conversationId: 'qq-20002' })
+      expect((await restored.load()).turns).toEqual([
+        expect.objectContaining({ question: '提醒刷课', answer: '刷课时间到了' })
+      ])
+      expect((await createAskConversationFileStore({ root, conversationId: 'qq-30003' }).load()).turns).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('提醒成功后先写入收件人上下文，随后到达的追问等待记账完成', async () => {
+    const transport = new FakeTransport()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const history: string[] = []
+    const seen: string[][] = []
+    const pushed = vi.fn(async ({ conversationId, question, text }: { conversationId: string; question: string; text: string }) => {
+      expect(conversationId).toBe('qq-20002')
+      expect(question).toBe('提醒刷课')
+      await gate
+      history.push(text)
+    })
+    const channel = createQqChannel(transport, {
+      ask: async () => { seen.push([...history]); return answer('知道了') },
+      pushed, log: () => {}, partGapMs: 0
+    })
+    await channel.start(config({ allowUsers: ['20002', '30003'] }))
+    const sending = channel.push('该刷课啦', '提醒刷课')
+    const asking = channel.handleMessage(inbound('刚才提醒了吗', 20002))
+    await vi.waitFor(() => expect(pushed).toHaveBeenCalledTimes(1))
+    expect(seen).toEqual([])
+    release()
+    await Promise.all([sending, asking])
+    expect(seen).toEqual([['该刷课啦']])
+  })
+
+  it('发送失败不写提醒上下文', async () => {
+    const transport = new FakeTransport()
+    transport.sendPrivate = async () => { throw new Error('offline') }
+    const pushed = vi.fn()
+    const channel = createQqChannel(transport, {
+      ask: async () => answer('x'), pushed, log: () => {}
+    })
+    await channel.start(config())
+    expect((await channel.push('提醒', '提醒刷课')).sent).toBe(false)
+    expect(pushed).not.toHaveBeenCalled()
+  })
+
   it('通道没起：不发，回 not-running', async () => {
     const transport = new FakeTransport()
     const channel = createQqChannel(transport, { ask: async () => answer('x'), log: () => {} })

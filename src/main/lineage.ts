@@ -662,20 +662,26 @@ export function lifeOf(lineage: Lineage, branch: string): LineageLife | null {
 }
 
 /**
- * `/compact` 之后的用量（D69 §5.2 续命）：新上下文 ≈ 旧上下文 − 被压掉的旧轮 + 摘要本身。
- * 摘要请求的 `prompt_tokens` 就是被压掉那几轮的 token（外加一点点摘要系统提示词），
- * `completion_tokens` 是摘要本身的 token——两者都来自这次压缩调用，不用再引分词器。
- * 少算的那点系统提示词宁可当成余量：偏小只会多给一口气，偏大才会把人锁死。
+ * `/compact` 之后的用量（D69 §5.2 续命；2026-11-02 改口径，D97）。
+ *
+ * 新口径的压缩不再调模型（不删轮、不用摘要换原文，只把超长正文换成占位符），
+ * 所以没有「摘要请求的 token」可扣了：按**送云字符量的比值**缩放上一次的真实用量——
+ * `beforeChars` / `afterChars` 由 `askConversationSentChars()` 算（口径与回放一致）。
+ *
+ * 少算的部分（system 提示、工具占位符这些两边都有的常数）不入比值：
+ * 结果是偏小，偏小只会多给一口气，偏大才会把人锁死（下一次请求的真实 usage 会覆盖它）。
  */
 export function usageAfterCompact(
   used: number,
-  summaryPromptTokens: number,
-  summaryCompletionTokens: number
+  beforeChars: number,
+  afterChars: number
 ): number {
   const base = Number.isFinite(used) ? Math.max(0, Math.round(used)) : 0
-  const dropped = Number.isFinite(summaryPromptTokens) ? Math.max(0, Math.round(summaryPromptTokens)) : 0
-  const summary = Number.isFinite(summaryCompletionTokens) ? Math.max(0, Math.round(summaryCompletionTokens)) : 0
-  return Math.max(0, base - dropped + summary)
+  const before = Number.isFinite(beforeChars) ? Math.max(0, Math.round(beforeChars)) : 0
+  const after = Number.isFinite(afterChars) ? Math.max(0, Math.round(afterChars)) : 0
+  // 没有可比的正文量（空会话 / 全是短句）或压完反而更大：用量不动，别凭空多给 / 多扣
+  if (before <= 0 || after >= before) return base
+  return Math.max(0, Math.round((base * after) / before))
 }
 
 /**

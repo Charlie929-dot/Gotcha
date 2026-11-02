@@ -415,15 +415,25 @@ describe('生命记账（M3）', () => {
     expect(await recordLineageUsage(file, 'ask', 1)).toBe(false)
   })
 
-  it('usageAfterCompact：旧上下文 − 被压掉的旧轮 + 摘要本身', () => {
-    // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身
-    expect(usageAfterCompact(10_000, 4_000, 300)).toBe(6_300)
-    // 摘要比旧轮还大时如实变大（不硬压成 0）
-    expect(usageAfterCompact(1_000, 500, 800)).toBe(1_300)
-    // 减过头就落到 0，不出现负数
-    expect(usageAfterCompact(500, 900, 100)).toBe(0)
+  it('usageAfterCompact：按送云字符量缩放上一次用量（D97；不调模型就没有摘要 token）', () => {
+    // 压掉 90% 正文 → 用量按 10% 算（system / 工具占位符两边都有，不入比值）
+    expect(usageAfterCompact(10_000, 100_000, 10_000)).toBe(1_000)
+    // 压完反而更大 / 一样大：用量不动（不凭空多扣，也不凭空多给）
+    expect(usageAfterCompact(10_000, 10_000, 10_000)).toBe(10_000)
+    expect(usageAfterCompact(10_000, 10_000, 12_000)).toBe(10_000)
+    // 没有可比正文量（空会话 / 全是短句）：用量不动
+    expect(usageAfterCompact(10_000, 0, 0)).toBe(10_000)
     // 坏数据按 0 算，不把 NaN 写进家谱
     expect(usageAfterCompact(Number.NaN, Number.NaN, Number.NaN)).toBe(0)
+  })
+
+  it('usageAfterCompact：压完能把越过额度的用量拉回额度以内（不再「压完仍被冻结」）', () => {
+    const limit = 500_000
+    // 真机事故那一档：617550 / 500000，正文 500k 字压到 40k
+    const used = 617_550
+    const after = usageAfterCompact(used, 500_000, 40_000)
+    expect(after).toBeLessThan(used)
+    expect(after).toBeLessThan(limit)
   })
 
   it('旧家谱没有 life_tokens_used 字段时按 0 读（向后兼容）', async () => {

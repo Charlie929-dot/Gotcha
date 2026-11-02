@@ -161,6 +161,12 @@ import {
 import { giveBirth as giveBirthOnRepo } from './give-birth'
 import { handoverReceiptText } from './handover'
 import { createLetterStore } from './letters'
+import {
+  lifeGateOf,
+  settleLifeHandover,
+  type InheritLifeDeps,
+  type LifeGate
+} from './life-inherit'
 import { defaultMomLetterFor } from './default-mom-letter'
 import {
   birthDayOf,
@@ -188,10 +194,8 @@ import { createNotebookStore } from './notebook'
 import { createGrowthStore } from './growth'
 import { forkDetachedIfNeeded } from './node-fork'
 import {
-  appendAskConversationTurn,
-  ASK_CONVERSATION_KEEP_TURNS,
-  compactAskConversation,
-  type CloudAskConversation
+  askConversationSentChars,
+  compactAskConversation
 } from '../chain/agent/conversation'
 import {
   appendAskHistory,
@@ -2361,93 +2365,96 @@ if (primaryInstance) {
       if (life.letterPath !== undefined) return (await memoryRepo.readFile(life.letterPath)) ?? undefined
       return defaultMomLetterFor(life.kind, life.firstGeneration)
     }
-    /** 生命用完了 / 这一代已经传承过：拒绝提问（M3/M4）。返回提示文本；还能问返回 null */
-    const lifeEndedText = async (): Promise<string | null> => {
+    /**
+     * 生命闸门（M3/M4；2026-11-02 修「耗尽却没传承」，D97）。
+     *
+     * 改前：`used >= limit` 一律返回一句「生命已经结束」，既不调模型、也没有兜底传承——
+     * 模型在 85%–100% 的窗口里没调用 `give_birth`，下一问用量越过 100% 就永久冻结。
+     *
+     * 现在：还活着、是 persona/chat、还没有女儿的生命耗尽分支返回 `inherit`——这一问照常问
+     * （`give_birth` 按原门槛照旧注入），问完由 `settleLifeHandover` 兜底保证传承发生；
+     * dead / 纯模型 / 出生主干 / 已经有女儿的分支话术与行为都不变。
+     */
+    const lifeGateNow = async (): Promise<LifeGate> => {
       try {
         const read = await readLineage(lineageFile)
-        if (read.status !== 'ok') return null
-        const node = findBranch(read.lineage, read.lineage.active)
-        // 纯模型分支（D72 / D86）：有生命但**不冻结**——它可以一直 /compact，没有「生命耗尽」这一说
-        if (node !== null && node.kind === 'assistant') return null
-        if (node !== null && node.status !== 'alive') {
-          return node.status === 'dead'
-            ? '这一代已经把记忆线交给下一代了（只读）。/use 可以回看；要接着聊，先 /use 到活着的那一代。'
-            : '这一代的生命已经结束（只读）。/use 可以回看，或 /compact 续命。'
-        }
-        const life = lifeOf(read.lineage, read.lineage.active)
-        if (life === null || life.used < life.limit) return null
-        return `这一代的生命已经结束（${life.used} / ${life.limit} token）。/use 可以回看，或 /compact 续命。`
+        if (read.status !== 'ok') return { kind: 'allow' }
+        return lifeGateOf(read.lineage)
       } catch {
-        return null
+        // 家谱坏掉不能把提问整条链路带崩：按「放行」处理（老行为）
+        return { kind: 'allow' }
       }
     }
     /**
-     * `/compact`（M3）：压当前会话的旧轮。**唯一会调模型的命令**——
-     * 过出云门（D24）/ 日额度（D22）/ 脱敏墙；失败不写会话，回执只报原因。
+     * 临终传承的收口（2026-11-02，D97）：这一问答完，模型没传承就跑兜底（写信 + 生女儿）。
+     *
+     * - 模型自己传承了（`modelInherited`）→ 什么都不做，回执由 `onBirth` 那边挂；
+     * - 没传承（不配合 / 模型不可用 / 没走到那一步）→ 主进程兜底，成功就回交接回执；
+     * - 兜底失败（家谱坏 / 记忆仓不可用 / 已经切走）→ 只记日志，这一问的回答照常返回（不锁死）。
+     */
+    const settleInheritance = async (
+      gate: LifeGate,
+      modelInherited: boolean
+    ): Promise<{ inherited: boolean; receipt?: string }> => {
+      if (gate.kind !== 'inherit') return { inherited: modelInherited }
+      const deps: InheritLifeDeps = {
+        repo: memoryRepo,
+        lineageFile,
+        letters: letterStore,
+        now: () => Date.now(),
+        log: (level, message, data) => captureLog(level, message, data)
+      }
+      const settled = await settleLifeHandover(deps, {
+        motherBranch: gate.branch,
+        motherName: gate.motherName,
+        modelInherited
+      })
+      if (settled.inherited && modelInherited !== true) {
+        // 兜底真的出生了：清掉会话内存缓存，下一问从女儿的空会话开始
+        // （母亲最后那一问已经落在她自己的分支里）
+        askConversations.reload()
+      }
+      return settled
+    }
+    /** 这一问的结果 + 传承收口（回执 / conceived）；两条问路共用同一套口径 */
+    const withInheritance = async (
+      gate: LifeGate,
+      result: Awaited<ReturnType<typeof askChain>>,
+      birthReceipt?: string
+    ): Promise<Awaited<ReturnType<typeof askChain>>> => {
+      // 「还要继续查吗」的暂停轮先不收口：这一问还没完（用户点继续时会把最终答复问完），
+      // 等真正结束那一轮再兜底——否则会在这里把 active 切到女儿，暂停的检查点就串代了。
+      if (result.kind === 'continue-ask') return result
+      const settled = await settleInheritance(gate, result.conceived === true)
+      const conceived = result.conceived === true || settled.inherited
+      const receipt = settled.receipt ?? birthReceipt
+      return {
+        ...result,
+        ...(conceived ? { conceived: true as const } : {}),
+        ...(receipt !== undefined && receipt !== '' ? { receipt } : {})
+      }
+    }
+    /**
+     * `/compact`（M3；2026-11-02 改口径，D97）：把**所有轮次**里超长的问答正文 / 附件正文
+     * 记成「已压缩」——送云时换成占位符，原文仍在会话里（`recall` 取回），不删轮、不写摘要。
+     * 因此这里**不调模型**（也就不需要出云门 / 日额度 / 脱敏墙），失败只报原因。
      */
     const compactConversation = async (
       conversationId: string | undefined
     ): Promise<CompactOutcome> => {
       if (conversationId === undefined) return { ok: false, reason: 'no-session' }
-      const db = connections.queryDb()
-      if (!db) return { ok: false, reason: 'unavailable' }
-      if (getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) !== '1') {
-        return { ok: false, reason: 'consent' }
-      }
-      const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
-      if (budget > 0) {
-        const usage = readUsage(db, Date.now())
-        if (usage.promptTokens + usage.completionTokens >= budget) {
-          return { ok: false, reason: 'budget' }
-        }
-      }
-      const resolved = resolveClient()
-      const client = resolved.ok ? resolved.client : undefined
-      if (client?.completeSummary === undefined) return { ok: false, reason: 'no-client' }
-
       const store = askConversations.for(conversationId)
       const current = store.load()
-      if (current.turns.length <= ASK_CONVERSATION_KEEP_TURNS) {
-        return {
-          ok: false,
-          reason: 'too-short',
-          detail: `只有 ${current.turns.length} 轮，还不够压（至少 ${ASK_CONVERSATION_KEEP_TURNS + 1} 轮）。`
-        }
+      if (current.turns.length === 0) {
+        return { ok: false, reason: 'too-short', detail: '这个会话还没有轮次，没什么可压的。' }
       }
-      const older = current.turns.slice(0, -ASK_CONVERSATION_KEEP_TURNS)
-      const text = older.map((turn) => `问：${turn.question}\n答：${turn.answer}`).join('\n\n')
-      const built = askOutbound.buildSummary(text)
-      if (built.blocked || built.payload.text === '') return { ok: false, reason: 'blocked' }
-
-      let summary: string
-      let summaryUsage: { promptTokens: number; completionTokens: number }
-      try {
-        const result = await client.completeSummary(built.payload, { maxTokens: 2_000 })
-        summary = result.summary
-        summaryUsage = result.usage
-      } catch (error) {
-        captureLog('warn', 'memory compact summary failed', { error: String(error) })
-        return { ok: false, reason: 'failed' }
-      }
-
-      const compacted = compactAskConversation(current, summary, ASK_CONVERSATION_KEEP_TURNS)
-      if (compacted.dropped === 0) return { ok: false, reason: 'too-short' }
+      const compacted = compactAskConversation(current)
       store.save(compacted.conversation)
-      // 摘要也是一次出云（用户主动）：记日账；不进这个节点的生命（它不是「上下文占用」）
-      try {
-        const writable = connections.ensureWritable().db
-        recordUsage(writable, Date.now(), {
-          calls: 1,
-          promptTokens: summaryUsage.promptTokens,
-          completionTokens: summaryUsage.completionTokens
-        })
-      } catch (error) {
-        captureLog('warn', 'memory compact usage record failed', { error: String(error) })
-      }
+      // 只改本地会话（不产生出云请求）；留一个提交，记忆仓里能看出压过
       await memoryRepo.commit(`memory: compact ${memoryDayKey(Date.now())}`)
       // 续命（D69 §5.2）：压完把这一节点的用量改成「压缩后的近似值」——否则下一问仍然
       // 被「生命已结束」拦住，永远走不到「按新上下文重算」那一步（2026-10-31 真机复验抓到的死锁）。
-      // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身，两个数都在 summaryUsage 里；
+      // 新口径没有摘要请求的 usage 可扣：按送云字符量的比值缩放上一次的真实用量（`usageAfterCompact`）。
       // dead 节点由 recordLineageUsage 拒绝，不会复活已经交接出去的那一代。
       let beforeTokens = 0
       let afterTokens = 0
@@ -2456,7 +2463,11 @@ if (primaryInstance) {
         const life = read.status === 'ok' ? lifeOf(read.lineage, read.lineage.active) : null
         if (read.status === 'ok' && life !== null) {
           beforeTokens = life.used
-          afterTokens = usageAfterCompact(life.used, summaryUsage.promptTokens, summaryUsage.completionTokens)
+          afterTokens = usageAfterCompact(
+            life.used,
+            askConversationSentChars(current),
+            askConversationSentChars(compacted.conversation)
+          )
           await recordLineageUsage(lineageFile, read.lineage.active, afterTokens)
         }
       } catch (error) {
@@ -2464,9 +2475,8 @@ if (primaryInstance) {
       }
       return {
         ok: true,
-        dropped: compacted.dropped,
-        kept: compacted.conversation.turns.length,
-        summaryTokens: summaryUsage.completionTokens,
+        covered: compacted.covered,
+        placeheld: compacted.placeheld,
         beforeTokens,
         afterTokens
       }
@@ -2934,23 +2944,26 @@ if (primaryInstance) {
           reloadConversations: () => askConversations.reload(),
           log: (level, message, data) => captureLog(level, message, data)
         })
-        // 生命用尽（M3）：同一代鱼，QQ 与桌面一样冻结
-        const ended = await lifeEndedText()
-        if (ended !== null) {
+        // 生命闸门（M3/M4；D97）：同一代鱼，QQ 与桌面一样——dead 拒绝，耗尽但还没传承就照常问、
+        // 答完兜底传承（不再像改前那样一句「生命已经结束」把手机端永久锁住）
+        const gate = await lifeGateNow()
+        if (gate.kind === 'blocked') {
           return {
             kind: 'error',
             reason: 'life-ended',
-            message: ended,
+            message: gate.text,
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: text.length }
           }
         }
         syncMemoryIfDue()
         const db = connections.queryDb()
         if (!db) {
-          return {
+          // 没有库也得把传承做完：这一问没答出来，但下一代要能出生（不锁死）
+          const settled = await withInheritance(gate, {
             kind: 'no-evidence',
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: text.length }
-          }
+          })
+          return settled
         }
         const state = await askStateNow()
         const mode = state?.mode ?? fallbackMode
@@ -3025,10 +3038,12 @@ if (primaryInstance) {
             : qqOptions,
           text
         )
-        // 传承那一问不记进 QQ 的短上下文 / 说话时刻（女儿从空白开始；M4）
-        if (result.conceived !== true) rememberQqTurn(historyKey, text, result)
+        // 传承收口（D97）：模型自己生了就用它的回执；没生就主进程兜底（写信 + 生女儿）。
+        // 兜底出生也算「传承那一问」：不记进 QQ 的短上下文 / 说话时刻（女儿从空白开始）。
+        const settled = await withInheritance(gate, result, birth.receipt)
+        if (settled.conceived !== true) rememberQqTurn(historyKey, text, result)
         commitMemoryDay()
-        return birth.receipt !== undefined ? { ...result, receipt: birth.receipt } : result
+        return settled
       },
       // 「还要继续查吗」在 QQ 里也能答（2026-11-01 修）：与桌面同一个续查通道，
       // 问题用检查点里的原话（这边传 `''`），上下文取 QQ 自己的短上下文。
@@ -3096,9 +3111,11 @@ if (primaryInstance) {
           ''
         )
         // 续查的答案仍算当初那一问的答案：短上下文按原问题记
-        if (result.conceived !== true) rememberQqTurn(historyKey, question, result)
+        const gate = await lifeGateNow()
+        const settled = await withInheritance(gate, result)
+        if (settled.conceived !== true) rememberQqTurn(historyKey, question, result)
         commitMemoryDay()
-        return result
+        return settled
       }
     })
     /**
@@ -3308,13 +3325,14 @@ if (primaryInstance) {
           reloadConversations: () => askConversations.reload(),
           log: (level, message, data) => captureLog(level, message, data)
         })
-        // 生命用尽（M3）：这一代冻结，只读回看或 /compact 续命——不调模型、不记账
-        const ended = await lifeEndedText()
-        if (ended !== null) {
+        // 生命闸门（M3/M4；D97）：dead 拒绝；耗尽但还活着、是 persona/chat、还没传承 →
+        // 这一问照常问（临终传承轮），问完由 withInheritance 兜底保证女儿出生（不再永久冻结）
+        const gate = await lifeGateNow()
+        if (gate.kind === 'blocked') {
           return {
             kind: 'error',
             reason: 'life-ended',
-            message: ended,
+            message: gate.text,
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
           }
         }
@@ -3324,12 +3342,13 @@ if (primaryInstance) {
         syncMemoryIfDue()
         prepareAskUploads(context)
         const db = connections.queryDb()
-        // A3 红线：没有库（从未采集）就不建库；时间轴上本来也没东西可找
+        // A3 红线：没有库（从未采集）就不建库；时间轴上本来也没东西可找。
+        // 但传承照样要收口：这一问没答出来，下一代也得能出生（不锁死）。
         if (!db) {
-          return {
+          return withInheritance(gate, {
             kind: 'no-evidence',
             stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
-          }
+          })
         }
         const state = await askStateNow()
         const mode = state?.mode ?? fallbackMode
@@ -3340,7 +3359,7 @@ if (primaryInstance) {
         const onBirth = (receipt: string): void => {
           birth.receipt = receipt
         }
-        return askChain(
+        const result = await askChain(
           askOptionsFor(
             db,
             context,
@@ -3353,11 +3372,9 @@ if (primaryInstance) {
           ),
           question
         )
-          .then((result) => {
-            // 记忆落仓不阻塞回答：一天一个提交（M1），失败了只是这次没进仓
-            commitMemoryDay()
-            return birth.receipt !== undefined ? { ...result, receipt: birth.receipt } : result
-          })
+        // 记忆落仓不阻塞回答：一天一个提交（M1），失败了只是这次没进仓
+        commitMemoryDay()
+        return withInheritance(gate, result, birth.receipt)
     }
 
     disposeAskIpc = registerAskIpc({
@@ -3386,7 +3403,8 @@ if (primaryInstance) {
         const mode = state?.mode ?? fallbackMode
         const life = state?.life
         const momLetter = await momLetterFor(life)
-        return askChain(
+        const gate = await lifeGateNow()
+        const result = await askChain(
           {
             ...askOptionsFor(
               db,
@@ -3401,6 +3419,8 @@ if (primaryInstance) {
           },
           ''
         )
+        // 续查收尾也算「这一问结束」：生命早就耗尽的话，这里把兜底传承跑掉（D97）
+        return withInheritance(gate, result)
       },
       segment: (segmentId) => {
         const db = connections.queryDb()

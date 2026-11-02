@@ -15,7 +15,7 @@
  * 组合根（`main/index.ts`）才把云端策略接进来。
  */
 
-import type { CloudAskConversationTurn } from './conversation'
+import { placeholdAskTurn, type CloudAskConversationTurn } from './conversation'
 import { ASK_TOOL_NAMES, hasScreenTools } from './tool-catalog'
 import type { ChainAskChatRecent, ChainAskQuotedMessage } from './types'
 
@@ -641,6 +641,11 @@ export interface ChainAskLoopBuildInput {
   digest?: string
   /** 会话存储给出的之前轮次（已过策略，原样透传；给了就不再从 history 播种） */
   conversation?: readonly CloudAskConversationTurn[]
+  /**
+   * `/compact` 已经覆盖到第几轮（2026-11-02，D97）：前 N 轮里超长的问题 / 答复 /
+   * 附件正文在送云时换成占位符（原文仍在会话存储里，`recall` 取回）。
+   */
+  compactedTurns?: number
   /** 提问前最后一段证据（应用 / 标题 / 时刻；送云前过策略） */
   recent?: AskRecentSegment
   /** 开场注入（新对话第一问；送云前逐段过策略） */
@@ -1281,10 +1286,18 @@ export function buildAskLoopPayload(
 
   // 会话回放：有会话存储就用它（已过策略，逐字节原样）；没有就用历史问答播种。
   // 注意：播种只带问答、不带工具轮——第一问没缓存可命中，之后由会话存储接管。
-  // 已有 digest（更早的轮次被裁过）时不再用 history 播种，避免和摘要重复。
+  // 已有 digest（老会话的摘要）时不再用 history 播种，避免和摘要重复。
+  // 2026-11-02（D97）：`/compact` 覆盖过的轮次（前 compactedTurns 轮）里超长的问题 / 答复 /
+  // 附件正文在送云时换成占位符——原文仍在会话存储里，`recall` 按占位符里的 id 取回。
+  const compactedTurns =
+    typeof input.compactedTurns === 'number' && Number.isFinite(input.compactedTurns)
+      ? Math.max(0, Math.trunc(input.compactedTurns))
+      : 0
   const conversation: CloudAskConversationTurn[] =
     input.conversation !== undefined && input.conversation.length > 0
-      ? [...input.conversation]
+      ? input.conversation.map((turn, index) =>
+          index < compactedTurns ? placeholdAskTurn(turn) : turn
+        )
       : input.digest !== undefined && input.digest !== ''
         ? []
         : history.map((turn) => ({ question: turn.question, now: '', turns: [], answer: turn.answer }))

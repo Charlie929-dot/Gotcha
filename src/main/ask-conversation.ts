@@ -54,7 +54,11 @@ export function createAskConversationStore(): AskConversationPort {
   return {
     load: () => state,
     save: (next) => {
-      state = { digest: next.digest, turns: [...next.turns] }
+      state = {
+        digest: next.digest,
+        turns: [...next.turns],
+        ...(next.compactedTurns !== undefined ? { compactedTurns: next.compactedTurns } : {})
+      }
     },
     clear: () => {
       state = emptyAskConversation()
@@ -69,6 +73,15 @@ export function createAskConversationStore(): AskConversationPort {
 interface StoredMeta {
   v: 1
   digest: string
+  /** `/compact` 覆盖到第几轮（2026-11-02，D97）；没压过 / 旧文件就是缺省 */
+  compactedTurns?: number
+}
+
+/** meta 行里的 `compactedTurns`：只认非负整数，坏值按「没压过」 */
+function readCompactedTurns(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.trunc(value)
+    : undefined
 }
 
 interface StoredTurn extends Omit<CloudAskConversationTurn, 'turns' | 'attachments'> {
@@ -258,6 +271,7 @@ function loadFromDisk(
     return emptyAskConversation()
   }
   let digest = ''
+  let compactedTurns: number | undefined
   const turns: CloudAskConversationTurn[] = []
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue
@@ -270,6 +284,7 @@ function loadFromDisk(
     }
     if (isRecord(parsed) && parsed.v === 1 && typeof parsed.digest === 'string') {
       digest = parsed.digest
+      compactedTurns = readCompactedTurns(parsed.compactedTurns)
       continue
     }
     const turn = decodeTurn(parsed, root, log)
@@ -279,7 +294,7 @@ function loadFromDisk(
     }
     turns.push(turn)
   }
-  return { digest, turns }
+  return { digest, turns, ...(compactedTurns !== undefined ? { compactedTurns } : {}) }
 }
 
 function writeToDisk(
@@ -291,7 +306,12 @@ function writeToDisk(
   const file = conversationFilePath(root, conversationId)
   try {
     mkdirSync(dirname(file), { recursive: true })
-    const meta: StoredMeta = { v: 1, digest: conversation.digest }
+    const compacted = readCompactedTurns(conversation.compactedTurns)
+    const meta: StoredMeta = {
+      v: 1,
+      digest: conversation.digest,
+      ...(compacted !== undefined ? { compactedTurns: compacted } : {})
+    }
     const lines = [JSON.stringify(meta)]
     for (const turn of conversation.turns) {
       lines.push(JSON.stringify(encodeTurn(turn, root, log)))
@@ -319,7 +339,11 @@ export function createAskConversationFileStore(options: {
       return state
     },
     save: (next) => {
-      state = { digest: next.digest, turns: [...next.turns] }
+      state = {
+        digest: next.digest,
+        turns: [...next.turns],
+        ...(next.compactedTurns !== undefined ? { compactedTurns: next.compactedTurns } : {})
+      }
       writeToDisk(root, conversationId, state, log)
     },
     clear: () => {

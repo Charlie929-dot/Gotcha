@@ -22,7 +22,8 @@ import {
   conversationFilePath,
   conversationFileName,
   createAskConversationFileStore,
-  createAskConversationRegistry
+  createAskConversationRegistry,
+  createAskConversationStore
 } from '../../src/main/ask-conversation'
 import type { CloudAskConversation } from '../../src/chain/agent/conversation'
 
@@ -196,5 +197,30 @@ describe('会话落盘', () => {
     expect(store.load().turns).toHaveLength(2)
     store.clear?.()
     expect(store.load()).toEqual({ digest: '', turns: [] })
+  })
+
+  it('`/compact` 的覆盖轮数落进 meta 行：重启后占位口径不变（D97）', () => {
+    const root = tempRoot()
+    createAskConversationFileStore({ root, conversationId: 'c1' }).save({
+      ...conversation(),
+      compactedTurns: 2
+    })
+    const raw = readFileSync(conversationFilePath(root, 'c1'), 'utf8')
+    expect(raw).toContain('"compactedTurns":2')
+    // 原文照旧在文件里（不删轮、不用摘要替换）
+    expect(raw).toContain('一块蓝色')
+
+    const loaded = createAskConversationFileStore({ root, conversationId: 'c1' }).load()
+    expect(loaded.compactedTurns).toBe(2)
+    expect(loaded.turns).toHaveLength(2)
+    expect(loaded.turns[0]?.answer).toBe('一块蓝色')
+  })
+
+  it('内存实现也保留覆盖轮数；没压过的会话读回来仍是空形状', () => {
+    const store = createAskConversationStore()
+    expect(store.load()).toEqual({ digest: '', turns: [] })
+    store.save({ ...conversation(), compactedTurns: 1 })
+    expect(store.load().compactedTurns).toBe(1)
+    expect(store.load().turns).toHaveLength(2)
   })
 })

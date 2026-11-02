@@ -12,9 +12,10 @@ import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { askChain } from '../../src/chain/agent/ask'
-import { archiveIdOfImage } from '../../src/chain/agent/archive'
+import { archiveIdOfImage, archiveIdOfText } from '../../src/chain/agent/archive'
 import {
   appendAskConversationTurn,
+  askConversationSentChars,
   compactAskConversation,
   emptyAskConversation,
   type CloudAskConversationTurn
@@ -264,16 +265,15 @@ describe('图片：只有压缩才删', () => {
     expect(seen).toEqual([{ images: 1 }, { images: 0 }])
   })
 
-  it('压缩（/compact）：整轮丢弃旧轮；保留轮的图片一张都不删', () => {
+  it('压缩（/compact）：所有轮次都留着，图片一张都不删（D97）', () => {
     let conversation = appendAskConversationTurn(emptyAskConversation(), turnWithImage(0))
     conversation = appendAskConversationTurn(conversation, turnWithImage(1))
-    const compacted = compactAskConversation(conversation, '之前聊过：问 0 → 答 0', 1)
-    expect(compacted.dropped).toBe(1)
-    expect(compacted.conversation.turns).toHaveLength(1)
-    expect(compacted.conversation.digest).toContain('问 0')
-    // 保留轮（第 1 轮）的图必须还在：删图会改前缀、缓存失效
+    const compacted = compactAskConversation(conversation)
+    // 不删轮：轮数不变，原文也还在存储里（图 / 答复都在）
+    expect(compacted.conversation.turns).toHaveLength(2)
     expect(compacted.conversation.turns[0]?.attachments?.images).toEqual([TINY])
-    expect(compacted.conversation.turns[0]?.answer).toContain('答 1')
+    expect(compacted.conversation.turns[0]?.answer).toBe('答 0')
+    expect(compacted.conversation.compactedTurns).toBe(2)
   })
 })
 
@@ -300,22 +300,169 @@ describe('只追加：不自动裁剪（M3 / D69）', () => {
     expect(conversation.digest).toBe('')
   })
 
-  it('/compact 只留最近 N 轮，摘要进 digest；轮数不够时不压', () => {
+  it('/compact 覆盖所有轮次：不删轮、不写摘要、超长正文只换占位符（D97）', () => {
+    const long = (index: number): CloudAskConversationTurn => ({
+      question: `问 ${index} ${'q'.repeat(400)}`,
+      now: '当前时间：x',
+      turns: [],
+      answer: `答 ${index} ${'a'.repeat(800)}`
+    })
     let conversation = emptyAskConversation()
     for (let index = 0; index < 6; index += 1) {
-      conversation = appendAskConversationTurn(conversation, turn(index))
+      conversation = appendAskConversationTurn(conversation, long(index))
     }
-    const short = compactAskConversation(conversation, '摘要', 6)
-    expect(short.dropped).toBe(0)
-    expect(short.conversation).toBe(conversation)
+    const before = askConversationSentChars(conversation)
+    const compacted = compactAskConversation(conversation)
 
-    const compacted = compactAskConversation(conversation, '之前聊过 0–3 轮', 2)
-    expect(compacted.dropped).toBe(4)
-    expect(compacted.conversation.turns.map((item) => item.answer)).toEqual([
-      expect.stringContaining('答 4'),
-      expect.stringContaining('答 5')
-    ])
-    expect(compacted.conversation.digest).toContain('之前聊过 0–3 轮')
+    // 所有轮次都参与：前 6 轮全被覆盖，轮数与原文都没变
+    expect(compacted.covered).toBe(6)
+    expect(compacted.placeheld).toBe(12)
+    expect(compacted.conversation.turns).toHaveLength(6)
+    expect(compacted.conversation.compactedTurns).toBe(6)
+    expect(compacted.conversation.turns.map((item) => item.answer)).toEqual(
+      Array.from({ length: 6 }, (_, index) => expect.stringContaining(`答 ${index}`))
+    )
+    // 不再写摘要（digest 只留给老会话）
+    expect(compacted.conversation.digest).toBe('')
+
+    // 送云时：每轮的问题 / 答复都换成占位符，字符数明显下降
+    const after = askConversationSentChars(compacted.conversation)
+    expect(after).toBeLessThan(before / 4)
+    const messages = buildChainAskLoopMessages(
+      createLocalAskOutbound().buildLoop({
+        question: '再问',
+        systemTime: '2026-10-30 14:00 周五',
+        freshness: { latestEvidenceTs: null, captureRunning: false },
+        turns: [],
+        conversation: compacted.conversation.turns,
+        compactedTurns: compacted.conversation.compactedTurns
+      }).payload
+    )
+    const body = messages.map((message) => String(message.content)).join('\n')
+    expect(body).not.toContain('a'.repeat(800))
+    expect(body).toContain('已压缩')
+    expect(body).toContain('recall')
+  })
+
+  it('/compact 幂等：重复压缩不改变轮次、占位口径与送云字节（D97）', () => {
+    const long = (index: number): CloudAskConversationTurn => ({
+      question: `问 ${index} ${'q'.repeat(400)}`,
+      now: 'x',
+      turns: [],
+      answer: `答 ${index} ${'a'.repeat(400)}`
+    })
+    let conversation = appendAskConversationTurn(emptyAskConversation(), long(0))
+    conversation = appendAskConversationTurn(conversation, long(1))
+    const once = compactAskConversation(conversation).conversation
+    const twice = compactAskConversation(once)
+    expect(twice.covered).toBe(0)
+    expect(twice.conversation.turns).toHaveLength(2)
+    expect(twice.conversation.compactedTurns).toBe(once.compactedTurns)
+    expect(askConversationSentChars(twice.conversation)).toBe(askConversationSentChars(once))
+
+    const payloadOf = (conversation: typeof once) =>
+      buildChainAskLoopMessages(
+        createLocalAskOutbound().buildLoop({
+          question: '再问',
+          systemTime: '2026-10-30 14:00 周五',
+          freshness: { latestEvidenceTs: null, captureRunning: false },
+          turns: [],
+          conversation: conversation.turns,
+          compactedTurns: conversation.compactedTurns
+        }).payload
+      )
+    // 同样的输入 → 同样的消息（前缀缓存不因再压一次而断）
+    expect(payloadOf(twice.conversation)).toEqual(payloadOf(once))
+  })
+
+  it('/compact 只换超长正文：短句原样留着（D97）', () => {
+    let conversation = appendAskConversationTurn(emptyAskConversation(), {
+      question: '在吗',
+      now: '',
+      turns: [],
+      answer: '在'
+    })
+    conversation = appendAskConversationTurn(conversation, {
+      question: '今天改了什么',
+      now: '',
+      turns: [],
+      answer: `${'长'.repeat(500)}`
+    })
+    const compacted = compactAskConversation(conversation)
+    expect(compacted.placeheld).toBe(1)
+    const messages = buildChainAskLoopMessages(
+      createLocalAskOutbound().buildLoop({
+        question: '再说一次',
+        systemTime: '2026-10-30 14:00 周五',
+        freshness: { latestEvidenceTs: null, captureRunning: false },
+        turns: [],
+        conversation: compacted.conversation.turns,
+        compactedTurns: compacted.conversation.compactedTurns
+      }).payload
+    )
+    const body = messages.map((message) => String(message.content)).join('\n')
+    expect(body).toContain('在吗')
+    expect(body).toContain('已压缩')
+  })
+
+  it('压缩后的问答正文能 recall 回原文；没压缩过的轮次不占位（D97）', async () => {
+    const LONG_ANSWER = `这是很长的答复：${'记忆'.repeat(300)}`
+    const LONG_QUESTION = `这是很长的问题：${'背景'.repeat(300)}`
+    let conversation = emptyAskConversation()
+    conversation = appendAskConversationTurn(conversation, {
+      question: LONG_QUESTION,
+      now: '',
+      turns: [],
+      answer: LONG_ANSWER
+    })
+    const compacted = compactAskConversation(conversation).conversation
+    const answerId = archiveIdOfText(LONG_ANSWER)
+    const questionId = archiveIdOfText(LONG_QUESTION)
+
+    const store = createAskConversationStore()
+    store.save(compacted)
+    const client = new FakeLlmClient([])
+    // 模型照着占位符里的 id 把问题 / 答复原样取回
+    client.push({ toolCalls: [{ name: 'recall', arguments: { id: questionId } }] })
+    client.push({ toolCalls: [{ name: 'recall', arguments: { id: answerId } }] })
+    client.push({ json: '想起来了' })
+    const result = await ask(store, client, '刚才那两段原文是什么')
+    expect(result.kind).toBe('answer')
+    const recalled = client.askLoopRequests.at(-1)!
+    expect(recalled.turns[0]?.toolResult).toMatchObject({
+      kind: 'recall',
+      id: questionId,
+      text: LONG_QUESTION
+    })
+    expect(recalled.turns[1]?.toolResult).toMatchObject({
+      kind: 'recall',
+      id: answerId,
+      text: LONG_ANSWER
+    })
+    // 模型自己的 recall 轮在上下文里仍是原文（本轮不归档）
+    expect(recalled.turns[1]?.toolResult['media']).toBe('tool')
+  })
+
+  it('没压过的会话不占位（D97：占位只发生在 /compact 之后的轮次）', () => {
+    const conversation = appendAskConversationTurn(emptyAskConversation(), {
+      question: `问 ${'q'.repeat(400)}`,
+      now: '',
+      turns: [],
+      answer: `答 ${'a'.repeat(800)}`
+    })
+    const messages = buildChainAskLoopMessages(
+      createLocalAskOutbound().buildLoop({
+        question: '再问',
+        systemTime: '2026-10-30 14:00 周五',
+        freshness: { latestEvidenceTs: null, captureRunning: false },
+        turns: [],
+        conversation: conversation.turns,
+        compactedTurns: conversation.compactedTurns
+      }).payload
+    )
+    const body = messages.map((message) => String(message.content)).join('\n')
+    expect(body).toContain('a'.repeat(800))
+    expect(body).not.toContain('已压缩')
   })
 
   it('digest 挂在第一条 user 消息里（system 永不改；没有连续 user）', () => {

@@ -40,6 +40,7 @@ import type {
 } from './payload'
 import {
   appendAskConversationTurn,
+  compactedTurnsOf,
   emptyAskConversation,
   type AskConversationPort
 } from './conversation'
@@ -57,6 +58,8 @@ import {
   archiveIdOfImage,
   archiveIdOfText,
   archiveIdOfToolResult,
+  askPartLabel,
+  shouldPlaceholdAskPart,
   toolResultLabel,
   type RecalledAttachment
 } from './archive'
@@ -478,6 +481,10 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
 
   // 归档表：历史轮次里带过的图（用户附件 / 工具截图）与文本附件（D88）。
   // 图片过一轮就不在上下文里了，`recall` 只能从这里取——所以模型只能回想它真的见过的东西。
+  // 2026-11-02（D97）：`/compact` 覆盖过的轮次里，问题 / 答复在送云时也换成了占位符，
+  // 原文同样只在这里——不归档的话，模型按占位符里的 id `recall` 会查不到。
+  const compactedTurns = compactedTurnsOf(priorConversation)
+  let priorIndex = 0
   for (const turn of priorConversation.turns) {
     for (const url of turn.attachments?.images ?? []) {
       const id = archiveIdOfImage(url)
@@ -513,7 +520,20 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         recallArchive.set(id, { id, media: 'file', text: file.text, name: file.name })
       }
     }
+    if (priorIndex < compactedTurns) {
+      for (const [kind, text] of [
+        ['question', turn.question],
+        ['answer', turn.answer]
+      ] as const) {
+        if (!shouldPlaceholdAskPart(text)) continue
+        const id = archiveIdOfText(text)
+        if (!recallArchive.has(id)) {
+          recallArchive.set(id, { id, media: 'tool', text, label: askPartLabel(kind, id) })
+        }
+      }
+    }
     // QQ 引用 / 最近聊天不在归档表里：它们只跟着对应的 user 消息走
+    priorIndex += 1
   }
 
   // 本轮附件 / 选区截图也进归档（D96 / PR2）：这样同一轮的 `save_sticker` / `send_image`
@@ -539,7 +559,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(priorConversation.turns.length > 0 || priorConversation.digest !== ''
       ? {
           conversation: priorConversation.turns,
-          digest: priorConversation.digest
+          digest: priorConversation.digest,
+          ...(compactedTurns > 0 ? { compactedTurns } : {})
         }
       : {}),
     ...(ctx.history ? { history: ctx.history } : {}),

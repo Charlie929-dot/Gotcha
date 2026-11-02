@@ -49,6 +49,31 @@ export function filePlaceholder(name: string, id: string): string {
   return `[文件 ${name} #${id} 已归档，需要读正文用 recall({ id: "${id}" })]`
 }
 
+/**
+ * `/compact` 的占位阈值（2026-11-02）：一段问答正文 / 附件正文超过这么多字符才换成占位符。
+ * 短句留着——占位符本身也有几十字，换掉反而更长。
+ */
+export const ASK_COMPACT_PART_MAX_CHARS = 200
+
+/** 被 `/compact` 换成占位符的问答正文 */
+export type AskArchivedPartKind = 'question' | 'answer'
+
+/** 压缩后送云的问题 / 答复占位符（原文仍在会话存储里，`recall` 取回） */
+export function askPartPlaceholder(kind: AskArchivedPartKind, id: string): string {
+  const label = kind === 'question' ? '问题' : '答复'
+  return `[${label} #${id} 已压缩，需要原文用 recall({ id: "${id}" })]`
+}
+
+/** 问答正文的归档标签（`recall` 回显用；和占位符同一套 id） */
+export function askPartLabel(kind: AskArchivedPartKind, id: string): string {
+  return `#${id} ${kind === 'question' ? '当时问的话' : '当时的答复'}`
+}
+
+/** 这段正文要不要换成占位符（`/compact`）：超过阈值才换 */
+export function shouldPlaceholdAskPart(text: string): boolean {
+  return text.length > ASK_COMPACT_PART_MAX_CHARS
+}
+
 /** 归档里的一条：图片（data URL，最多拿一张）、文本文件正文（D88）或工具结果（D89） */
 export interface RecalledAttachment {
   id: string

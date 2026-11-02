@@ -1272,16 +1272,19 @@ describe('命令执行', () => {
       lineageFile,
       compact: async (id) => {
         received = id
-        return { ok: true, dropped: 3, kept: 6, summaryTokens: 270, beforeTokens: 6_600, afterTokens: 5_100 }
+        return { ok: true, covered: 6, placeheld: 9, beforeTokens: 6_600, afterTokens: 5_100 }
       }
     })
     const text = textOf(await compacted('/compact', { conversationId: 'c1' }))
     expect(received).toBe('c1')
     expect(text.startsWith('🎗️提示')).toBe(true)
     expect(text).not.toContain('===')
-    expect(text).toContain('压掉 3 轮（保留最近 6 轮原文），摘要 270 token')
+    expect(text).toContain('压了 6 轮')
+    expect(text).toContain('9 段大段正文换成占位符')
+    expect(text).toContain('recall')
     expect(text).toContain('上下文 6.6k → 5.1k token（估算）')
-    expect(text).not.toContain('字')
+    expect(text).not.toContain('摘要')
+    expect(text).not.toContain('保留最近')
   })
 
   it('/life：按格式报剩余生命（token）', async () => {
@@ -1325,13 +1328,9 @@ describe('命令执行', () => {
       createCommandHandler({ repo: fakeRepo(), lineageFile, compact: async () => outcome })
     expect(textOf(await make({ ok: false, reason: 'no-session' })('/compact'))).toContain('桌面窗口里用')
     expect(
-      textOf(await make({ ok: false, reason: 'too-short', detail: '只有 2 轮，还不够压' })('/compact'))
-    ).toContain('只有 2 轮')
-    expect(textOf(await make({ ok: false, reason: 'consent' })('/compact'))).toContain('还没确认出云')
-    expect(textOf(await make({ ok: false, reason: 'budget' })('/compact'))).toContain('额度用完')
-    expect(textOf(await make({ ok: false, reason: 'blocked' })('/compact'))).toContain('敏感内容')
-    expect(textOf(await make({ ok: false, reason: 'no-client' })('/compact'))).toContain('模型客户端')
-    expect(textOf(await make({ ok: false, reason: 'failed' })('/compact'))).toContain('摘要失败')
+      textOf(await make({ ok: false, reason: 'too-short', detail: '只有 0 轮，还不够压' })('/compact'))
+    ).toContain('只有 0 轮')
+    expect(textOf(await make({ ok: false, reason: 'unavailable' })('/compact'))).toContain('记忆仓不可用')
   })
 })
 

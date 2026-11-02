@@ -85,8 +85,8 @@ export interface CommandDeps {
   /** 切节点后清掉会话内存缓存：下次提问从盘上（目标节点）重读 */
   reloadConversations?: () => void
   /**
-   * `/compact`（M3）：压当前会话的旧轮。由组合根注入（要调模型 + 写会话 + 提交），
-   * 没注入就回「还没接上」。
+   * `/compact`（M3；2026-11-02 改口径，D97）：把所有轮次的大段正文记成「已压缩」。
+   * 由组合根注入（写会话 + 提交 + 按新口径重算生命）；没注入就回「还没接上」。
    */
   compact?: (conversationId: string | undefined) => Promise<CompactOutcome>
   /**
@@ -119,32 +119,25 @@ export interface CommandDeps {
   slugify?: (name: string) => string | null
 }
 
-/** `/compact` 的结果（M3）：成功只报数字，失败报原因，不把底层异常原文漏到界面 */
+/**
+ * `/compact` 的结果（M3；2026-11-02 改口径，D97）：成功只报数字，失败报原因，
+ * 不把底层异常原文漏到界面。新口径不调模型，所以没有「摘要 token」可报。
+ */
 export type CompactOutcome =
   | {
       ok: true
-      /** 压掉几轮 */
-      dropped: number
-      /** 保留几轮原文 */
-      kept: number
-      /** 摘要本身 token（响应里的 completion_tokens，原样） */
-      summaryTokens: number
+      /** 这次新覆盖了几轮（0 = 之前都已经压过） */
+      covered: number
+      /** 压完之后有多少段正文会在送云时换成占位符（问题 / 答复 / 附件正文） */
+      placeheld: number
       /** 压缩前这一问的上下文 token（上一次请求的用量） */
       beforeTokens: number
-      /** 压缩后估算的上下文 token（旧用量 − 被压掉的旧轮 + 摘要） */
+      /** 压缩后估算的上下文 token（按送云字符量缩放） */
       afterTokens: number
     }
   | {
       ok: false
-      reason:
-        | 'no-session'
-        | 'too-short'
-        | 'consent'
-        | 'budget'
-        | 'blocked'
-        | 'no-client'
-        | 'failed'
-        | 'unavailable'
+      reason: 'no-session' | 'too-short' | 'unavailable'
       detail?: string
     }
 
@@ -525,7 +518,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /notebook [rm <编号>]  看 ta 的小本本（当前理解）；rm 删掉一条',
     '  /growth [日期|周|月|年]  看 ta 的成长档案（日记 / 周记 / 月末总结 / 年终总结）；给键看全文',
     '  /main [分支]     看这一代的主线 / 把某条分支设成主线（只有主线写成长档案）',
-    '  /compact         压旧段、保留最近几轮（过一次模型）',
+    '  /compact         所有轮次的大段正文换成占位符（原文 recall 取回，不删轮、不调模型）',
     '  /life            看剩余生命（token；纯模型分支也有，但不冻结）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
     '  /git <参数>      在记忆仓里跑原生命令（/git n|l 翻页）',
@@ -1551,7 +1544,8 @@ async function toolEdit(
 
 /**
  * 返回处理函数：不是命令 → null（调用方继续走模型）；
- * 是命令 → 一条 `command` 回执（永不出网，除了 /backup 的 git push 与 /compact 的摘要）。
+ * 是命令 → 一条 `command` 回执（永不出网，除了 /backup 的 git push；/compact 自 2026-11-02
+ * 起只改本地会话、不调模型，也不出网）。
  *
  * 等待状态（命名 / 删除确认）也在这里：等待中的**非命令文本**会被当名字或 confirm，
  * 其它输入视为放弃等待、照常走模型。
@@ -1598,10 +1592,14 @@ export function createCommandHandler(
         outcome.beforeTokens > 0 && outcome.afterTokens > 0
           ? `上下文 ${formatTokens(outcome.beforeTokens)} → ${formatTokens(outcome.afterTokens)} token（估算）`
           : '上下文 token 数这轮没读到（细节看日志）'
+      const what =
+        outcome.covered > 0
+          ? `压了 ${outcome.covered} 轮（都留在会话里，${outcome.placeheld} 段大段正文换成占位符，要原文用 recall）。`
+          : `这 ${outcome.placeheld} 段大段正文之前都已经压过了（占位符不变；要原文用 recall）。`
       return commandResult(
         [
           RECEIPT_HEAD,
-          `压掉 ${outcome.dropped} 轮（保留最近 ${outcome.kept} 轮原文），摘要 ${outcome.summaryTokens} token。`,
+          what,
           `${contextLine}；生命按压完的上下文重算，下一问可以接着聊。`
         ].join('\n')
       )
@@ -1610,19 +1608,11 @@ export function createCommandHandler(
       case 'no-session':
         return commandResult('/compact 得在桌面窗口里用（这里不知道压哪个会话）。')
       case 'too-short':
-        return commandResult(outcome.detail ?? '轮数还不够，没什么可压的。')
-      case 'consent':
-        return commandResult('还没确认出云，先不压缩（摘要要过一次模型）。')
-      case 'budget':
-        return commandResult('今天的模型额度用完了，压不了。')
-      case 'blocked':
-        return commandResult('这段会话里有敏感内容，不能送去摘要。')
-      case 'no-client':
-        return commandResult('没有可用的模型客户端（缺 key / 配置不对）。')
+        return commandResult(outcome.detail ?? '这个会话还没有轮次，没什么可压的。')
       case 'unavailable':
         return commandResult('记忆仓不可用，没有压缩。')
       default:
-        return commandResult('摘要失败（网络 / 模型），细节看日志。')
+        return commandResult('压缩失败，细节看日志。')
     }
   }
 

@@ -781,7 +781,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'send_sticker',
       description:
-        '发一张你自己的表情包。不带 id：只把图鉴（最多 40 条：id / 标签 / 什么时候用 / 用过几次）列给你看，什么都不发；想发就带 id 再调一次。id 是图鉴里的 12 位编号，不是消息短号。一条回答最多带一张表情；同一张 24 小时内不会连发两次（被挡住不是你的错，换一张或者不发）。表情池是空的就如实说，别硬凑。',
+        '发送一张已保存的个人表情包。不带 id 时只返回图鉴（最多 40 条：id / 标签 / 什么时候用 / 用过几次），不会发送；带图鉴中的 12 位 id 时准备发送该表情。同一轮最多一张表情；同一张 24 小时内不会重复发送。',
       parameters: {
         type: 'object',
         properties: {
@@ -799,7 +799,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'save_sticker',
       description:
-        '把一张图收进自己的表情包（以后想发就能发）。image_id 用图片占位符里的 #id（这次会话里真实收到 / 看到过的那张）；label 必填（≤20 字，以后挑图就看它），desc 可选（≤100 字，写清楚什么场合用）。同一张图只存一份，再存就是更新标签。只能收这次会话里出现过的图，太早的取不到，如实说。',
+        '把本次会话里收到或看到过的一张图片保存到个人表情包，不会发送图片。image_id 用图片占位符里的 #id；label 必填（≤20 字），desc 可选（≤100 字）。同一张图只存一份，再存就是更新标签。成功结果返回 stickerId、标签及是否重复；图片不在本次会话里或无法读取时会返回失败结果。',
       parameters: {
         type: 'object',
         properties: {
@@ -816,7 +816,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'send_image',
       description:
-        '把这次会话里的一张图发给对方（回答之后单独发一条图）。archive_id 用图片占位符里的 #id：只发你这一轮收到 / 看到过、或者我刚才用 read_segment 打开过的截图；不许发任意本地文件，发不了的如实说。一条回答最多带一张图。',
+        '发送本次会话里收到或看到过的一张图片（图片由 QQ 通道在回答之后单独发送）。archive_id 用图片占位符里的 #id：只接受本轮收到、通过 read_segment 打开的截图或会话归档中的图片；不接受任意本地文件。一轮最多一张图。',
       parameters: {
         type: 'object',
         properties: {

@@ -191,6 +191,7 @@ describe('save_sticker / send_image（D96 / PR2）', () => {
       '存成表情包，叫翻白眼'
     )
     expect(result.kind).toBe('answer')
+    expect(result.outboundMedia).toBeUndefined()
     expect(port.saved).toEqual([
       { dataUrl: TINY_PNG, label: '翻白眼', desc: '被问住的时候' }
     ])

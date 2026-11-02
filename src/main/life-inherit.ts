@@ -270,6 +270,10 @@ export async function settleLifeHandover(
   }
   if (outcome.ok) return { inherited: true, receipt: outcome.receipt }
   if (outcome.reason === 'already') return { inherited: true }
-  deps.log?.('warn', 'memory life inherit fallback failed', { reason: outcome.reason })
+  // 带上 giveBirth 的原话：只记 reason 时真机上定位不了是哪一步失败（2026-11-02 事故）
+  deps.log?.('warn', 'memory life inherit fallback failed', {
+    reason: outcome.reason,
+    message: outcome.message
+  })
   return { inherited: false, message: outcome.message }
 }

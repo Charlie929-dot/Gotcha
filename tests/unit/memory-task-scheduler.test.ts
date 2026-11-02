@@ -203,7 +203,7 @@ describe('到点执行', () => {
     h.scheduler.stop()
   })
 
-  it('执行抛错：不丢任务，推到 RETRY_MS 之后再试', async () => {
+  it('执行抛错：不丢任务，退避 RETRY_MS 后再试（不改到点锚点）', async () => {
     const h = harness({
       tasks: [task(1, 1_000_000)],
       now: 1_000_000,
@@ -214,7 +214,9 @@ describe('到点执行', () => {
     h.scheduler.start()
     await h.scheduler.pump()
     expect(h.errors).toHaveLength(1)
-    expect(h.settled[0].outcome.nextDueAt).toBe(1_000_000 + RETRY_MS)
+    // 退避重试：给的是 retryIn，不再用 nextDueAt 把周期任务的钟点推走（2026-11-02 事故）
+    expect(h.settled[0].outcome.retryIn).toBe(RETRY_MS)
+    expect(h.settled[0].outcome.nextDueAt).toBeUndefined()
     h.scheduler.stop()
   })
 

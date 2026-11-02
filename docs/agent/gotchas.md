@@ -228,6 +228,8 @@
 | 同一代从不同岔口生两个女儿，会生出 `mother` 指向奶奶的 `gen-3` | 2026-11-03：`giveBirth` 只判当前分支活着 / 生命够，不判这一代是否已经有女儿；同代另一条枝（如 `default`）再调 `give_birth` 时 `withGenerationAdded` 取 `max(gen)+1` 造新代，`mother` 却写 `gen-1`——家谱跳代、母女链错 | `giveBirth` 在生命门槛前先查「家谱里已有一代的 `mother` 指向这一代」→ 直接拒并报女儿分支；兜底路径（`lifeGateOf` / `inheritAfterLife`）本来就有这条判定（D99）|
 | 任务「取消」会被自己的投递结算复活 | 2026-11-02 真机：22:41 那条跑步提醒跑到中途，ta 用 `cancel_task{id:6}` 取消（工具返回成功、复查只查到新建的 #14），但投递结束走 `settleTask` 时又写了一次 `state='active'`——`nextDueAt` 分支无条件写回，重复推进 / 一次性完成两条路也是同样写法。库里 #6 第二天 22:00 会照响，用户以为已经取消 | `settleTask` 的所有写回都加 `WHERE id = ? AND state = 'active'`：行已取消 / 暂停 / 完成就除 `last_run_at` 外一概不动（`tests/unit/memory-tasks.test.ts` 三条覆盖三种收尾路径） |
 | 失败重试不能写 `next_due_at`：那是重复任务的钟点锚点 | 2026-11-02 真机：`mem_tasks#6` 是 11-01 17:40 建的「每天」，投递失败时 `deliver` 返回 `{nextDueAt: at+10min}`，而重复任务的下一次是 `advanceOccurrence(next_due_at, repeat)` 推的——26 次失败把 17:40 一路推到 22:00，ta 读到 22:00 就跟用户说「原来设成了每天 22:00」，用户以为是自己设错 | 失败退避改用 `TaskOutcome.retryIn`：只清 `run_key` + 记 `last_run_at`，`next_due_at` / `state` 不动；退避时间由 `task-runtime` 的内存表 `retryUntil` 记（`nextDueAt` / `dueTasks` 按它算），重启丢表最多多试一次。调度器抛错路径也从 `{nextDueAt: now+RETRY_MS}` 改成 `{retryIn: RETRY_MS}` |
+| 出生日不能从「妈妈的信」落款推 | 2026-11-02 真机：问她「你啥时候出生的」，她答「信落款 10-30 23:40，所以我是那之后睁眼的」——家谱 `gen-1.born_at` 其实是 10-30 19:11:29，信比出生还晚 4 个半小时。根因：`askStateNow` 的 `bornDay` 只给「有母亲的女儿代」（那是日记边界），第一代没有任何出生事实可读 | `AskLifeContext` 拆成两个字段：`birthDay`（第一代也注入，进「此刻」那句出生事实）与 `bornDay`（只给女儿代，管日记只读边界）；出生日只认家谱 `born_at`，别拿信落款 / `birth.json` 之外的东西猜 |
+| 待寄信不清，下次传承会带走旧的 | 2026-11-02 真机：兜底传承「先写信、再生女儿」，22:41 信写成了、`giveBirth` 失败，信留在 `letters/outbox/`；`inheritAfterLife` 见 outbox 非空就不再补信，`giveBirth` 会把旧信原样带进新女儿分支——几天后出生的女儿会收到一封写给「default的女儿」、落款两天前的信 | 传承失败后要么清掉那封（它没有收信人），要么在出生时按新女儿名重写一封；别假设「待寄里的一定是给这次这个女儿的」 |
 
 ## 规则
 

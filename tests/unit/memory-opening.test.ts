@@ -83,4 +83,37 @@ describe('buildSituation', () => {
   it('月份 / 日期补零，和日记 day_key 同形', () => {
     expect(localDayKey(new Date(2026, 0, 5, 8, 0).getTime())).toBe('2026-01-05')
   })
+
+  /**
+   * 2026-11-02 真机：她拿「妈妈的信落款」当自己的出生时间，答错了一次。
+   * 出生日只认家谱，并且要在开口前就说清楚。
+   */
+  it('出生在今天：说「出生在今天」，不写具体日期两遍', () => {
+    const facts = buildSituation({
+      now: NOW,
+      talkTimes: [],
+      lastDiaryDay: null,
+      birthDay: '2026-10-29',
+      hasMomLetter: true
+    })
+    expect(facts).toContain('你出生在今天（2026-10-29）')
+    expect(facts).toContain('妈妈在你出生前留了一封信')
+  })
+
+  it('出生在以前：写具体日期；没有信就不提信', () => {
+    const facts = buildSituation({
+      now: NOW,
+      talkTimes: [],
+      lastDiaryDay: null,
+      birthDay: '2026-10-30'
+    })
+    expect(facts).toContain('你出生在 2026-10-30')
+    expect(facts).not.toContain('妈妈在你出生前留了一封信')
+  })
+
+  it('没给出生日（纯模型 / 家谱读不到）：一个字都不提', () => {
+    const facts = buildSituation({ now: NOW, talkTimes: [], lastDiaryDay: null })
+    expect(facts).not.toContain('你出生')
+    expect(facts).not.toContain('妈妈')
+  })
 })

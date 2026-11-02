@@ -138,6 +138,13 @@ export interface SituationInput {
   talkTimes: readonly number[]
   /** 日记最后一天（`yyyy-mm-dd`；null = 还没同步到日记） */
   lastDiaryDay: string | null
+  /**
+   * 这一代的出生日（`yyyy-mm-dd`，家谱 `born_at` 的本地日；2026-11-02）。
+   * 不传 = 不写出生这件事（纯模型 / 家谱读不到）。
+   */
+  birthDay?: string | null
+  /** 手里有没有妈妈留下的信：有才说「妈妈在你出生前留了一封信」 */
+  hasMomLetter?: boolean
 }
 
 /**
@@ -156,6 +163,13 @@ export function buildSituation(input: SituationInput): string {
   )
 
   const parts = [`现在是 ${today} ${pad2(date.getHours())}:${pad2(date.getMinutes())} 周${WEEKDAYS[date.getDay()]}`]
+  // 出生这件事：放在「此刻」最前面，让她一开口就知道自己在哪天睁的眼
+  // （2026-11-02：她曾把「妈妈的信落款」当成自己的出生时间，答错过一次）
+  const birthDay = input.birthDay?.trim() ?? ''
+  if (birthDay !== '') {
+    parts.push(birthDay === today ? `你出生在今天（${today}）` : `你出生在 ${birthDay}`)
+    if (input.hasMomLetter === true) parts.push('妈妈在你出生前留了一封信')
+  }
   parts.push(todayTalks === 0 ? '今天你们还没说过话' : `今天你们说过 ${todayTalks} 句话`)
   if (lastTalk !== null && lastTalk <= now) {
     parts.push(`上次说话是 ${formatGap(now - lastTalk)}`)

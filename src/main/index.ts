@@ -2274,6 +2274,11 @@ if (primaryInstance) {
       nickname: string
       /** 这一代的出生日（本地 `yyyy-mm-dd`）；代分支才有 */
       bornDay?: string
+      /**
+       * 这一代出生在哪天（本地 `yyyy-mm-dd`，**第一代也有**）。
+       * 只用于「此刻」里那句出生事实；`bornDay` 仍旧只管「日记只读出生之后」的边界。
+       */
+      birthDay?: string
       /** 母亲留下的信（仓内相对路径）；第一代没有 */
       letterPath?: string
     }
@@ -2337,6 +2342,8 @@ if (primaryInstance) {
         // 只有「女儿代」（有母亲）才有出生日边界；第一代看全部日记
         const bornDay =
           generation !== null && generation.mother !== null ? birthDayOf(lineage, branch) : null
+        // 出生日本身（第一代也有）：她答「你什么时候出生的」只认家谱，不拿信落款猜
+        const birthDay = generation !== null ? birthDayOf(lineage, branch) : null
         const unreadLetters = hasLetterTools(mode.tools) ? await letterStore.unreadCount() : 0
         return {
           mode,
@@ -2348,6 +2355,7 @@ if (primaryInstance) {
             firstGeneration: generation !== null && generation.mother === null,
             nickname: generation?.nickname ?? branch,
             ...(bornDay !== null ? { bornDay } : {}),
+            ...(birthDay !== null ? { birthDay } : {}),
             ...(generation?.letter ? { letterPath: generation.letter } : {})
           },
           ...(unreadLetters > 0 ? { unreadLetters } : {})
@@ -2501,15 +2509,21 @@ if (primaryInstance) {
       context: AskQueryContext,
       mode: AskModeState,
       talkTimes?: readonly number[],
-      sinceDay?: string
+      /** 这一代的处境：`bornDay` 只管日记边界，`birthDay` 进「此刻」的出生事实 */
+      life?: AskLifeContext,
+      /** 手里有没有妈妈留下的信（有才在「此刻」里说一句） */
+      hasMomLetter = false
     ): Promise<RedactableAskOpening | undefined> => {
       // 纯模型（ask）：不带「此刻 / 想到的」，否则它会显得知道你的记忆
       if (!asksMemoryContext(mode.kind)) return undefined
       const now = Date.now()
+      const sinceDay = life?.bornDay
       const facts = buildSituation({
         now,
         talkTimes: talkTimes ?? readAskHistory(askHistoryPath).filter((entry) => entry.conceived !== true).map((entry) => entry.at),
-        lastDiaryDay: memoryDayRange(db).lastDay
+        lastDiaryDay: memoryDayRange(db).lastDay,
+        ...(life?.birthDay !== undefined ? { birthDay: life.birthDay } : {}),
+        ...(hasMomLetter ? { hasMomLetter: true } : {})
       })
       const firstTurn = question.trim() !== '' && (context.history?.length ?? 0) === 0
       // 「想到的」要翻日记：这个分支没挂日记工具就不联想，免得给了片段又查不了
@@ -2985,7 +2999,7 @@ if (primaryInstance) {
           db,
           context,
           mode,
-          await askOpeningFor(db, text, context, mode, qqTalkTimes.get(historyKey) ?? [], life?.bornDay),
+          await askOpeningFor(db, text, context, mode, qqTalkTimes.get(historyKey) ?? [], life, momLetter !== undefined),
           life,
           momLetter,
           state?.unreadLetters,
@@ -3097,7 +3111,8 @@ if (primaryInstance) {
                 context,
                 mode,
                 qqTalkTimes.get(historyKey) ?? [],
-                life?.bornDay
+                life,
+                momLetter !== undefined
               ),
               life,
               momLetter,
@@ -3364,7 +3379,7 @@ if (primaryInstance) {
             db,
             context,
             mode,
-            await askOpeningFor(db, question, context, mode, undefined, life?.bornDay),
+            await askOpeningFor(db, question, context, mode, undefined, life, momLetter !== undefined),
             life,
             momLetter,
             state?.unreadLetters,
@@ -3410,7 +3425,7 @@ if (primaryInstance) {
               db,
               context,
               mode,
-              await askOpeningFor(db, '', context, mode, undefined, life?.bornDay),
+              await askOpeningFor(db, '', context, mode, undefined, life, momLetter !== undefined),
               life,
               momLetter,
               state?.unreadLetters

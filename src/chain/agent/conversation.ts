@@ -1,22 +1,10 @@
-/**
- * 问记忆 · 会话消息（2026-10-30，D64）
- *
- * 目标：同一会话的每次提问只**追加**消息，前面的字节不变——这样前缀缓存
- * （DeepSeek 的 context caching 按前缀命中）才有意义。这个模块只定义
- * 「会话里存什么」和「超限时怎么裁」，不碰网络、不碰提示词拼装。
- *
- * 存的是**已经过出云策略的云端视图**（`CloudAskConversationTurn`）：
- * - 这些消息当时就是按这个形态发出去的，回放时逐字节一致；
- * - 不能再过一次脱敏墙（否则 `[已脱敏]` 会被二次处理，前缀就变了）；
- * - 它们只能由 `buildAskLoopPayload()` 产出，主进程只负责按会话存取。
- *
- * 2026-10-30 M3（D69）改口径：**不再自动裁剪**。生命 = 当前上下文 / 额度，
- * 自动丢旧轮会让生命永远涨不到额度、冻结与传承都不会发生；旧轮只在用户主动
- * `/compact` 时压成一份摘要（`compactAskConversation`），平时原样重放。
- * 图片不单独删：只有整轮被压掉时，图才随轮一起走。
+/** Conversation replay is append-only except explicit local placeholder compact.
+ * All turns remain present; archived originals are session-scoped and recallable.
+ * Previously persisted digests remain readable, but compact never creates a digest.
  */
 
 import type { CloudAskAttachments, CloudAskLoopTurn } from './payload'
+import { archiveIdOfText, filePlaceholder, type RecalledAttachment } from './archive'
 import type { ChainAskChatRecent, ChainAskQuotedMessage } from './types'
 
 /** 会话里的一轮：问题 + 当时的 <now> + 工具轮 + 最终答复 + 随问题发出去的附件 */
@@ -42,13 +30,13 @@ export interface CloudAskConversationTurn {
   readonly chatRecent?: readonly ChainAskChatRecent[]
 }
 
-/** 一次会话的完整可见历史：更早的部分压成 digest，最近的在 turns 里 */
+/** 完整轮次；digest 只兼容旧版本已有摘要，新压缩不再生成摘要。 */
 export interface CloudAskConversation {
   readonly digest: string
   readonly turns: readonly CloudAskConversationTurn[]
 }
 
-/** 主进程按 conversationId 存取；只做内存 KV，不做持久化（重启后从问答历史重新播种） */
+/** 主进程按 conversationId 存取；文件实现随记忆仓分支持久化。 */
 export interface AskConversationPort {
   load(): CloudAskConversation
   save(next: CloudAskConversation): void
@@ -57,23 +45,22 @@ export interface AskConversationPort {
    * 可选：老调用方 / 测试的假实现不必实现；主进程的两种实现都会清内存。
    */
   clear?(): void
+  /** 本会话的本地原文归档；写成功后才能替换占位。 */
+  archive?(entry: RecalledAttachment): boolean
+  archives?(): readonly RecalledAttachment[]
 }
 
-/** 会话字符预算：超过就裁最旧的轮次（约 40k 汉字 / 80k 字符，给工具结果留余量） */
+/** 兼容旧调用方的字符预算；不再自动裁轮。 */
 export const ASK_CONVERSATION_MAX_CHARS = 80_000
-/** 最近几轮永远保留全文（裁剪只动更早的） */
-export const ASK_CONVERSATION_KEEP_TURNS = 8
-/** digest 自身也有上限：它是每轮都要重发的固定前缀，不能无限长 */
+/** Legacy export; all turns now participate in explicit compact. */
+export const ASK_CONVERSATION_KEEP_TURNS = 0
 export const ASK_CONVERSATION_DIGEST_MAX_CHARS = 4_000
-/** digest 一行里问题 / 答复的截断长度 */
-const DIGEST_QUESTION_MAX_CHARS = 80
-const DIGEST_ANSWER_MAX_CHARS = 120
 
 export function emptyAskConversation(): CloudAskConversation {
   return { digest: '', turns: [] }
 }
 
-/** 一轮的**文字**字符量：图片不计入预算（图片只在整轮被压缩掉时随轮删除） */
+/** 一轮的文字字符量；图片已有 D88 占位，不计 base64。 */
 export function askConversationTurnChars(turn: CloudAskConversationTurn): number {
   const turns = turn.turns.map((item) => {
     if (item.images === undefined) return item
@@ -96,38 +83,14 @@ export function askConversationChars(conversation: CloudAskConversation): number
   return total
 }
 
-/** 被裁掉的一轮 → 一行摘要（问题 / 答复各截一段，空白压平） */
-export function digestLineOf(turn: CloudAskConversationTurn): string {
-  const question = turn.question.replace(/\s+/gu, ' ').trim().slice(0, DIGEST_QUESTION_MAX_CHARS)
-  const answer = turn.answer.replace(/\s+/gu, ' ').trim().slice(0, DIGEST_ANSWER_MAX_CHARS)
-  if (question === '' && answer === '') return ''
-  if (answer === '') return `- 问：${question}`
-  return `- 问：${question || '（无）'} → 答：${answer}`
-}
-
-function appendDigest(digest: string, line: string): string {
-  if (line === '') return digest
-  const next = digest === '' ? line : `${digest}\n${line}`
-  return next.length <= ASK_CONVERSATION_DIGEST_MAX_CHARS
-    ? next
-    : next.slice(next.length - ASK_CONVERSATION_DIGEST_MAX_CHARS)
-}
-
 export interface AppendAskConversationOptions {
   /** 已不再生效（M3 起不自动裁剪）；保留字段只为兼容老调用方 */
   maxChars?: number
-  /** 已不再生效；`/compact` 的保留轮数见 `compactAskConversation` */
+  /** 已不再生效；所有轮次均可参与显式压缩。 */
   keepTurns?: number
 }
 
-/**
- * 追加一轮。**只追加，不裁剪**。
- *
- * 2026-10-30 M3（D69）改口径：以前到 80k 文字就自动丢最旧的轮次（D64），
- * 但生命 = 当前上下文 / 额度——自动裁剪会让生命永远停在 80k 字符附近，
- * 冻结与 M4 传承都不会发生。所以旧轮只在用户主动 `/compact` 时压成摘要
- * （`compactAskConversation`），平时原样重放；删图 / 删轮的时机仍然只有压缩。
- */
+/** Append without automatic trimming. */
 export function appendAskConversationTurn(
   previous: CloudAskConversation,
   turn: CloudAskConversationTurn,
@@ -136,36 +99,57 @@ export function appendAskConversationTurn(
   return { digest: previous.digest, turns: [...previous.turns, turn] }
 }
 
-/**
- * `/compact`：把「最近 keepTurns 轮」以外的旧轮压成一份摘要（LLM 产出，用户主动），
- * 拼进 digest；保留的轮次原文不动（含图片）。
- *
- * 旧摘要 + 新摘要都留在 digest 里，超 `ASK_CONVERSATION_DIGEST_MAX_CHARS` 时
- * 从**开头**截断（保留最近一次摘要的尾部）；旧轮原文仍在 git 历史里，可 `/use` 回看。
- */
+/** Compact every turn without deleting history. Archive writes must succeed first. */
 export interface CompactAskConversationResult {
   conversation: CloudAskConversation
-  /** 这次压掉几轮（0 = 没什么可压） */
+  /** Number of turns changed (legacy field name, no turns are dropped). */
   dropped: number
 }
 
 export function compactAskConversation(
   conversation: CloudAskConversation,
-  summary: string,
-  keepTurns = ASK_CONVERSATION_KEEP_TURNS
+  archive: (entry: RecalledAttachment) => boolean
 ): CompactAskConversationResult {
-  const keep = Math.max(1, Math.floor(keepTurns))
-  if (conversation.turns.length <= keep) {
-    return { conversation, dropped: 0 }
-  }
-  const dropped = conversation.turns.length - keep
-  const parts = [conversation.digest.trim(), summary.trim()].filter((part) => part !== '')
-  let digest = parts.join('\n')
-  if (digest.length > ASK_CONVERSATION_DIGEST_MAX_CHARS) {
-    digest = digest.slice(digest.length - ASK_CONVERSATION_DIGEST_MAX_CHARS)
-  }
-  return {
-    conversation: { digest, turns: conversation.turns.slice(-keep) },
-    dropped
-  }
+  let changed = 0
+  const turns = conversation.turns.map((turn) => {
+    let replaced = false
+    const compact = (text: string, name: string): string => {
+      if (text.length <= 256) return text
+      const id = archiveIdOfText(text)
+      if (!archive({ id, media: 'file', text, name })) throw new Error('compact archive write failed')
+      replaced = true
+      return filePlaceholder(name, id)
+    }
+    const record = (value: Record<string, unknown>, name: string): Record<string, unknown> => {
+      if (value['kind'] === 'compact-archive') return value
+      const text = JSON.stringify(value)
+      const next = compact(text, name)
+      return next === text ? value : { kind: 'compact-archive', id: archiveIdOfText(text), text: next }
+    }
+    const next: CloudAskConversationTurn = {
+      ...turn,
+      question: compact(turn.question, 'question'),
+      answer: compact(turn.answer, 'answer'),
+      now: compact(turn.now, 'now'),
+      turns: turn.turns.map((item) => ({
+        ...item,
+        toolCall: { ...item.toolCall, arguments: record(item.toolCall.arguments, 'arguments') },
+        toolResult: record(item.toolResult, 'tool-result'),
+        ...(item.reasoning !== undefined ? { reasoning: compact(item.reasoning, 'reasoning') } : {})
+      })),
+      ...(turn.attachments !== undefined ? {
+        attachments: { ...turn.attachments,
+          files: turn.attachments.files.map((file) => ({ ...file, text: compact(file.text, file.name) })) }
+      } : {}),
+      ...(turn.quoted !== undefined ? {
+        quoted: { ...turn.quoted, text: compact(turn.quoted.text, 'quoted') }
+      } : {}),
+      ...(turn.chatRecent !== undefined ? {
+        chatRecent: turn.chatRecent.map((item) => ({ ...item, text: compact(item.text, 'recent') }))
+      } : {})
+    }
+    if (replaced) changed += 1
+    return replaced ? next : turn
+  })
+  return { conversation: changed > 0 ? { digest: conversation.digest, turns } : conversation, dropped: changed }
 }

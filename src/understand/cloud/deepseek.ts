@@ -1026,6 +1026,7 @@ function archivedToolResultText(
   result: Record<string, unknown>,
   id: string
 ): string {
+  if (result['kind'] === 'compact-archive' && typeof result['text'] === 'string') return result['text']
   if (tool === 'recall') {
     const label = typeof result['label'] === 'string' ? result['label'] : undefined
     return recallPlaceholder(id, label)

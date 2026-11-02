@@ -661,21 +661,14 @@ export function lifeOf(lineage: Lineage, branch: string): LineageLife | null {
   }
 }
 
-/**
- * `/compact` 之后的用量（D69 §5.2 续命）：新上下文 ≈ 旧上下文 − 被压掉的旧轮 + 摘要本身。
- * 摘要请求的 `prompt_tokens` 就是被压掉那几轮的 token（外加一点点摘要系统提示词），
- * `completion_tokens` 是摘要本身的 token——两者都来自这次压缩调用，不用再引分词器。
- * 少算的那点系统提示词宁可当成余量：偏小只会多给一口气，偏大才会把人锁死。
+/** Local placeholder compact: scale the last measured context by the remaining text ratio.
+ * Keep at least one token of headroom when the context actually shrinks.
  */
-export function usageAfterCompact(
-  used: number,
-  summaryPromptTokens: number,
-  summaryCompletionTokens: number
-): number {
+export function usageAfterCompact(used: number, beforeChars: number, afterChars: number, limit = Infinity): number {
   const base = Number.isFinite(used) ? Math.max(0, Math.round(used)) : 0
-  const dropped = Number.isFinite(summaryPromptTokens) ? Math.max(0, Math.round(summaryPromptTokens)) : 0
-  const summary = Number.isFinite(summaryCompletionTokens) ? Math.max(0, Math.round(summaryCompletionTokens)) : 0
-  return Math.max(0, base - dropped + summary)
+  if (!Number.isFinite(beforeChars) || beforeChars <= 0 || !Number.isFinite(afterChars)) return base
+  if (afterChars >= beforeChars) return base
+  return Math.max(0, Math.min(base - 1, limit - 1, Math.floor(base * Math.max(0, afterChars) / beforeChars)))
 }
 
 /**

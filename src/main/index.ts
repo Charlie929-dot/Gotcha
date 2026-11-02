@@ -158,7 +158,7 @@ import {
   serializeCommands,
   type CompactOutcome
 } from './commands'
-import { giveBirth as giveBirthOnRepo } from './give-birth'
+import { createExhaustedInheritance, giveBirth as giveBirthOnRepo } from './give-birth'
 import { handoverReceiptText } from './handover'
 import { createLetterStore } from './letters'
 import { defaultMomLetterFor } from './default-mom-letter'
@@ -189,7 +189,7 @@ import { createGrowthStore } from './growth'
 import { forkDetachedIfNeeded } from './node-fork'
 import {
   appendAskConversationTurn,
-  ASK_CONVERSATION_KEEP_TURNS,
+  askConversationChars,
   compactAskConversation,
   type CloudAskConversation
 } from '../chain/agent/conversation'
@@ -2361,11 +2361,17 @@ if (primaryInstance) {
       if (life.letterPath !== undefined) return (await memoryRepo.readFile(life.letterPath)) ?? undefined
       return defaultMomLetterFor(life.kind, life.firstGeneration)
     }
-    /** 生命用完了 / 这一代已经传承过：拒绝提问（M3/M4）。返回提示文本；还能问返回 null */
-    const lifeEndedText = async (): Promise<string | null> => {
+    /** 耗尽的 chat 先尝试本地传承；交接回执或只读提示拦下本问，避免母亲上下文串进女儿。 */
+    const lifeEndedText = async (): Promise<string | { receipt: string } | null> => {
       try {
         const read = await readLineage(lineageFile)
         if (read.status !== 'ok') return null
+        const inherited = await inheritExhausted()
+        if (inherited !== null) {
+          return inherited.ok
+            ? { receipt: inherited.message }
+            : `${inherited.message} /compact`
+        }
         const node = findBranch(read.lineage, read.lineage.active)
         // 纯模型分支（D72 / D86）：有生命但**不冻结**——它可以一直 /compact，没有「生命耗尽」这一说
         if (node !== null && node.kind === 'assistant') return null
@@ -2382,73 +2388,26 @@ if (primaryInstance) {
       }
     }
     /**
-     * `/compact`（M3）：压当前会话的旧轮。**唯一会调模型的命令**——
-     * 过出云门（D24）/ 日额度（D22）/ 脱敏墙；失败不写会话，回执只报原因。
+     * `/compact`：所有轮次参与本地占位，原文先归档；无需模型或日额度。
      */
     const compactConversation = async (
       conversationId: string | undefined
     ): Promise<CompactOutcome> => {
       if (conversationId === undefined) return { ok: false, reason: 'no-session' }
-      const db = connections.queryDb()
-      if (!db) return { ok: false, reason: 'unavailable' }
-      if (getSetting(db, GRAPH_SETTING_KEYS.outboundConsent) !== '1') {
-        return { ok: false, reason: 'consent' }
-      }
-      const budget = getNumberSetting(db, GRAPH_SETTING_KEYS.budgetTokensPerDay, 1_000_000)
-      if (budget > 0) {
-        const usage = readUsage(db, Date.now())
-        if (usage.promptTokens + usage.completionTokens >= budget) {
-          return { ok: false, reason: 'budget' }
-        }
-      }
-      const resolved = resolveClient()
-      const client = resolved.ok ? resolved.client : undefined
-      if (client?.completeSummary === undefined) return { ok: false, reason: 'no-client' }
-
       const store = askConversations.for(conversationId)
       const current = store.load()
-      if (current.turns.length <= ASK_CONVERSATION_KEEP_TURNS) {
-        return {
-          ok: false,
-          reason: 'too-short',
-          detail: `只有 ${current.turns.length} 轮，还不够压（至少 ${ASK_CONVERSATION_KEEP_TURNS + 1} 轮）。`
-        }
-      }
-      const older = current.turns.slice(0, -ASK_CONVERSATION_KEEP_TURNS)
-      const text = older.map((turn) => `问：${turn.question}\n答：${turn.answer}`).join('\n\n')
-      const built = askOutbound.buildSummary(text)
-      if (built.blocked || built.payload.text === '') return { ok: false, reason: 'blocked' }
-
-      let summary: string
-      let summaryUsage: { promptTokens: number; completionTokens: number }
+      if (store.archive === undefined) return { ok: false, reason: 'unavailable' }
+      let compacted: ReturnType<typeof compactAskConversation>
       try {
-        const result = await client.completeSummary(built.payload, { maxTokens: 2_000 })
-        summary = result.summary
-        summaryUsage = result.usage
+        compacted = compactAskConversation(current, (entry) => store.archive!(entry))
       } catch (error) {
-        captureLog('warn', 'memory compact summary failed', { error: String(error) })
+        captureLog('warn', 'memory compact archive failed', { error: String(error) })
         return { ok: false, reason: 'failed' }
       }
-
-      const compacted = compactAskConversation(current, summary, ASK_CONVERSATION_KEEP_TURNS)
       if (compacted.dropped === 0) return { ok: false, reason: 'too-short' }
       store.save(compacted.conversation)
-      // 摘要也是一次出云（用户主动）：记日账；不进这个节点的生命（它不是「上下文占用」）
-      try {
-        const writable = connections.ensureWritable().db
-        recordUsage(writable, Date.now(), {
-          calls: 1,
-          promptTokens: summaryUsage.promptTokens,
-          completionTokens: summaryUsage.completionTokens
-        })
-      } catch (error) {
-        captureLog('warn', 'memory compact usage record failed', { error: String(error) })
-      }
+      if (JSON.stringify(store.load()) !== JSON.stringify(compacted.conversation)) return { ok: false, reason: 'failed' }
       await memoryRepo.commit(`memory: compact ${memoryDayKey(Date.now())}`)
-      // 续命（D69 §5.2）：压完把这一节点的用量改成「压缩后的近似值」——否则下一问仍然
-      // 被「生命已结束」拦住，永远走不到「按新上下文重算」那一步（2026-10-31 真机复验抓到的死锁）。
-      // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身，两个数都在 summaryUsage 里；
-      // dead 节点由 recordLineageUsage 拒绝，不会复活已经交接出去的那一代。
       let beforeTokens = 0
       let afterTokens = 0
       try {
@@ -2456,17 +2415,20 @@ if (primaryInstance) {
         const life = read.status === 'ok' ? lifeOf(read.lineage, read.lineage.active) : null
         if (read.status === 'ok' && life !== null) {
           beforeTokens = life.used
-          afterTokens = usageAfterCompact(life.used, summaryUsage.promptTokens, summaryUsage.completionTokens)
-          await recordLineageUsage(lineageFile, read.lineage.active, afterTokens)
+          afterTokens = usageAfterCompact(life.used, askConversationChars(current), askConversationChars(compacted.conversation), life.limit)
+          if (!(await recordLineageUsage(lineageFile, read.lineage.active, afterTokens))) {
+            return { ok: false, reason: 'failed' }
+          }
         }
       } catch (error) {
         captureLog('warn', 'memory compact life update failed', { error: String(error) })
+        return { ok: false, reason: 'failed' }
       }
       return {
         ok: true,
         dropped: compacted.dropped,
         kept: compacted.conversation.turns.length,
-        summaryTokens: summaryUsage.completionTokens,
+        summaryTokens: 0,
         beforeTokens,
         afterTokens
       }
@@ -2742,7 +2704,7 @@ if (primaryInstance) {
     /**
      * 本地命令（M1/M2/M3/M5）：桌面与 QQ **共用同一个 handler**——两路发 `/use` 改的是同一条鱼，
      * 「等名字 / 等 confirm」状态也只有一份。串行锁（M5）保证两路命令不互相踩。
-     * 命中就在本地执行、不调模型（`/compact` 例外：压摘要过一次模型）、不进问答历史。
+     * 命中就在本地执行、不调模型、不进问答历史。
      */
     const command = serializeCommands(
       createCommandHandler({
@@ -2844,6 +2806,7 @@ if (primaryInstance) {
 
       return result
     }
+    const inheritExhausted = createExhaustedInheritance({ repo: memoryRepo, lineageFile }, giveBirth)
     /** 通道配置：从没建过库（A3）就当关闭，不为 QQ 建库 */
     const qqChannelConfig = (): QqChannelConfig => {
       const db = connections.queryDb()
@@ -2937,6 +2900,10 @@ if (primaryInstance) {
         // 生命用尽（M3）：同一代鱼，QQ 与桌面一样冻结
         const ended = await lifeEndedText()
         if (ended !== null) {
+          if (typeof ended !== 'string') return {
+            kind: 'command', text: ended.receipt,
+            stats: { hits: 0, evidence: 0, cited: 0, questionChars: text.length }
+          }
           return {
             kind: 'error',
             reason: 'life-ended',
@@ -3311,6 +3278,10 @@ if (primaryInstance) {
         // 生命用尽（M3）：这一代冻结，只读回看或 /compact 续命——不调模型、不记账
         const ended = await lifeEndedText()
         if (ended !== null) {
+          if (typeof ended !== 'string') return {
+            kind: 'command', text: ended.receipt,
+            stats: { hits: 0, evidence: 0, cited: 0, questionChars: question.length }
+          }
           return {
             kind: 'error',
             reason: 'life-ended',

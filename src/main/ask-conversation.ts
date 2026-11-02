@@ -37,6 +37,7 @@ import {
   type CloudAskConversation,
   type CloudAskConversationTurn
 } from '../chain/agent/conversation'
+import type { RecalledAttachment } from '../chain/agent/archive'
 import type { CloudAskAttachments, CloudAskLoopTurn } from '../chain/agent/payload'
 
 /** 同时保留多少个会话（桌面最近窗口 + QQ 白名单用户，32 足够） */
@@ -51,13 +52,22 @@ export type AskConversationLog = (
 /** 纯内存实现：单测默认，也是记忆仓不可用时的退化路径 */
 export function createAskConversationStore(): AskConversationPort {
   let state: CloudAskConversation = emptyAskConversation()
+  const archives = new Map<string, RecalledAttachment>()
   return {
+    archive: (entry) => {
+      const previous = archives.get(entry.id)
+      if (previous !== undefined && previous.text !== entry.text) return false
+      archives.set(entry.id, entry)
+      return true
+    },
+    archives: () => [...archives.values()],
     load: () => state,
     save: (next) => {
       state = { digest: next.digest, turns: [...next.turns] }
     },
     clear: () => {
       state = emptyAskConversation()
+      archives.clear()
     }
   }
 }
@@ -176,7 +186,9 @@ function encodeTurn(turn: CloudAskConversationTurn, root: string, log?: AskConve
         ...(images !== undefined && images.length > 0 ? { images: encodeImages(images, root, log) } : {})
       }
     }),
-    answer: turn.answer
+    answer: turn.answer,
+    ...(turn.quoted !== undefined ? { quoted: turn.quoted } : {}),
+    ...(turn.chatRecent !== undefined ? { chatRecent: turn.chatRecent } : {})
   }
   if (turn.attachments !== undefined && turn.attachments.images.length > 0) {
     const attachments: CloudAskAttachments = {
@@ -237,6 +249,8 @@ function decodeTurn(raw: unknown, root: string, log?: AskConversationLog): Cloud
     if (images.length > 0 || files.length > 0) attachments = { images, files }
   }
   return {
+    ...(isRecord(raw.quoted) ? { quoted: raw.quoted as unknown as CloudAskConversationTurn["quoted"] } : {}),
+    ...(Array.isArray(raw.chatRecent) ? { chatRecent: raw.chatRecent as unknown as CloudAskConversationTurn["chatRecent"] } : {}),
     question: raw.question,
     now,
     turns,
@@ -287,7 +301,7 @@ function writeToDisk(
   conversationId: string,
   conversation: CloudAskConversation,
   log?: AskConversationLog
-): void {
+): boolean {
   const file = conversationFilePath(root, conversationId)
   try {
     mkdirSync(dirname(file), { recursive: true })
@@ -300,8 +314,10 @@ function writeToDisk(
     const tmp = `${file}.tmp`
     writeFileSync(tmp, text, 'utf8')
     renameSync(tmp, file)
+    return true
   } catch (error) {
     log?.('warn', 'memory conversation write failed', { conversationId, error: String(error) })
+    return false
   }
 }
 
@@ -313,14 +329,44 @@ export function createAskConversationFileStore(options: {
 }): AskConversationPort {
   const { root, conversationId, log } = options
   let state: CloudAskConversation | null = null
+  // Content-addressed assets scoped to this session; JSONL v1 remains unchanged.
+  const archiveDir = join(root, 'conversations', 'archives', conversationFileName(conversationId))
   return {
+    archive: (entry) => {
+      try {
+        mkdirSync(archiveDir, { recursive: true })
+        const file = join(archiveDir, `${entry.id}.json`)
+        if (existsSync(file)) {
+          const previous = JSON.parse(readFileSync(file, 'utf8')) as RecalledAttachment
+          return previous.text === entry.text && previous.media === entry.media
+        }
+        writeFileSync(file, JSON.stringify(entry), { encoding: 'utf8', flag: 'wx' })
+        return true
+      } catch (error) {
+        log?.('warn', 'memory archive write failed', { error: String(error) })
+        return false
+      }
+    },
+    archives: () => {
+      const entries: RecalledAttachment[] = []
+      try {
+        for (const name of readdirSync(archiveDir)) {
+          if (!/^[a-f0-9]{8}\.json$/u.test(name)) continue
+          const entry = JSON.parse(readFileSync(join(archiveDir, name), 'utf8')) as RecalledAttachment
+          if (entry.id === name.slice(0, -5) && entry.media === 'file' && typeof entry.text === 'string') entries.push(entry)
+        }
+      } catch (error) {
+        if (existsSync(archiveDir)) log?.('warn', 'memory archive read failed', { error: String(error) })
+      }
+      return entries
+    },
     load: () => {
       state ??= loadFromDisk(root, conversationId, log)
       return state
     },
     save: (next) => {
-      state = { digest: next.digest, turns: [...next.turns] }
-      writeToDisk(root, conversationId, state, log)
+      const saved = { digest: next.digest, turns: [...next.turns] }
+      if (writeToDisk(root, conversationId, saved, log)) state = saved
     },
     clear: () => {
       // 只清内存：M4 传承时调用方已经切到女儿分支，盘上的旧会话不在这个分支里。
@@ -407,6 +453,7 @@ export function createAskConversationRegistry(
       }
       try {
         rmSync(assetsDir(root), { recursive: true, force: true })
+        rmSync(join(root, 'conversations', 'archives'), { recursive: true, force: true })
       } catch (error) {
         log?.('warn', 'memory assets clear failed', { error: String(error) })
       }

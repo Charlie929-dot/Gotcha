@@ -12,8 +12,9 @@ import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { askChain } from '../../src/chain/agent/ask'
-import { archiveIdOfImage } from '../../src/chain/agent/archive'
+import { archiveIdOfText, archiveIdOfImage } from '../../src/chain/agent/archive'
 import {
+  askConversationChars,
   appendAskConversationTurn,
   compactAskConversation,
   emptyAskConversation,
@@ -264,16 +265,14 @@ describe('图片：只有压缩才删', () => {
     expect(seen).toEqual([{ images: 1 }, { images: 0 }])
   })
 
-  it('压缩（/compact）：整轮丢弃旧轮；保留轮的图片一张都不删', () => {
+  it('compact keeps every turn and image, including the newest turn', () => {
     let conversation = appendAskConversationTurn(emptyAskConversation(), turnWithImage(0))
     conversation = appendAskConversationTurn(conversation, turnWithImage(1))
-    const compacted = compactAskConversation(conversation, '之前聊过：问 0 → 答 0', 1)
-    expect(compacted.dropped).toBe(1)
-    expect(compacted.conversation.turns).toHaveLength(1)
-    expect(compacted.conversation.digest).toContain('问 0')
-    // 保留轮（第 1 轮）的图必须还在：删图会改前缀、缓存失效
+    const compacted = compactAskConversation(conversation, () => true)
+    expect(compacted.conversation.turns).toHaveLength(2)
     expect(compacted.conversation.turns[0]?.attachments?.images).toEqual([TINY])
-    expect(compacted.conversation.turns[0]?.answer).toContain('答 1')
+    expect(compacted.conversation.turns[1]?.attachments?.images).toEqual([TINY])
+    expect(compacted.conversation.digest).toBe('')
   })
 })
 
@@ -300,22 +299,56 @@ describe('只追加：不自动裁剪（M3 / D69）', () => {
     expect(conversation.digest).toBe('')
   })
 
-  it('/compact 只留最近 N 轮，摘要进 digest；轮数不够时不压', () => {
-    let conversation = emptyAskConversation()
-    for (let index = 0; index < 6; index += 1) {
-      conversation = appendAskConversationTurn(conversation, turn(index))
-    }
-    const short = compactAskConversation(conversation, '摘要', 6)
-    expect(short.dropped).toBe(0)
-    expect(short.conversation).toBe(conversation)
-
-    const compacted = compactAskConversation(conversation, '之前聊过 0–3 轮', 2)
-    expect(compacted.dropped).toBe(4)
-    expect(compacted.conversation.turns.map((item) => item.answer)).toEqual([
-      expect.stringContaining('答 4'),
-      expect.stringContaining('答 5')
+  it('compact archives all rounds, shrinks text, recalls originals and is idempotent', async () => {
+    const store = createAskConversationStore()
+    const originals = Array.from({ length: 12 }, (_, i) => ({
+      question: `question-${i} ` + 'q'.repeat(2000), now: '', turns: [],
+      answer: `answer-${i} ` + 'a'.repeat(4000)
+    }))
+    const conversation = { digest: '', turns: originals }
+    const compacted = compactAskConversation(conversation, store.archive!)
+    expect(compacted.dropped).toBe(12)
+    expect(compacted.conversation.turns).toHaveLength(12)
+    expect(askConversationChars(compacted.conversation)).toBeLessThan(askConversationChars(conversation) / 5)
+    expect(compacted.conversation.turns[11]?.answer).toContain(archiveIdOfText(originals[11]!.answer))
+    expect(compactAskConversation(compacted.conversation, store.archive!)).toEqual({ conversation: compacted.conversation, dropped: 0 })
+    store.save(compacted.conversation)
+    const id = archiveIdOfText(originals[0]!.question)
+    const client = new FakeLlmClient([
+      { toolCalls: [{ name: 'recall', arguments: { id } }] }, { json: 'recalled' }
     ])
-    expect(compacted.conversation.digest).toContain('之前聊过 0–3 轮')
+    await ask(store, client, 'recall that')
+    expect(client.askLoopRequests.at(-1)?.turns[0]?.toolResult).toMatchObject({ kind: 'recall', id, text: originals[0]!.question })
+  })
+
+  it('archive failure leaves the conversation untouched', () => {
+    const conversation = { digest: '', turns: [{ question: 'q'.repeat(2000), now: '', turns: [], answer: 'answer' }] }
+    expect(() => compactAskConversation(conversation, () => false)).toThrow('archive write failed')
+    expect(conversation.turns[0]?.question).toHaveLength(2000)
+  })
+
+  it('compacts tool bodies and arguments with recall ids that survive replay', async () => {
+    const store = createAskConversationStore()
+    const result = { kind: 'text', body: 'body'.repeat(2000) }
+    const arguments_ = { query: 'query'.repeat(1000) }
+    const conversation = { digest: '', turns: [{
+      question: 'question', now: '', answer: 'answer', turns: [{
+        toolCall: { name: 'search_info', arguments: arguments_ }, toolResult: result
+      }]
+    }] }
+    const compacted = compactAskConversation(conversation, store.archive!)
+    store.save(compacted.conversation)
+    expect(compacted.conversation.turns[0]?.turns).toHaveLength(1)
+    expect(compactAskConversation(compacted.conversation, store.archive!).dropped).toBe(0)
+    const id = archiveIdOfText(JSON.stringify(result))
+    const client = new FakeLlmClient([
+      { toolCalls: [{ name: 'recall', arguments: { id } }] }, { json: 'recalled' }
+    ])
+    await ask(store, client, 'recall result')
+    expect(client.askLoopRequests.at(-1)?.turns[0]?.toolResult).toMatchObject({ kind: 'recall', id, text: JSON.stringify(result) })
+    const messages = buildChainAskLoopMessages(client.askLoopRequests[0]!)
+    expect(messages.some((message) => String(message.content).includes(id))).toBe(true)
+    expect(store.archives!().some((entry) => entry.text === JSON.stringify(arguments_))).toBe(true)
   })
 
   it('digest 挂在第一条 user 消息里（system 永不改；没有连续 user）', () => {

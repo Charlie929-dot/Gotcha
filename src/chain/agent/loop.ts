@@ -478,6 +478,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
 
   // 归档表：历史轮次里带过的图（用户附件 / 工具截图）与文本附件（D88）。
   // 图片过一轮就不在上下文里了，`recall` 只能从这里取——所以模型只能回想它真的见过的东西。
+  for (const entry of ctx.conversation?.archives?.() ?? []) recallArchive.set(entry.id, entry)
+
   for (const turn of priorConversation.turns) {
     for (const url of turn.attachments?.images ?? []) {
       const id = archiveIdOfImage(url)

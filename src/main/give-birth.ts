@@ -28,7 +28,7 @@ import {
   type Lineage
 } from './lineage'
 import { defaultMemoryName, slugifyNodeName } from './commands'
-import { carryOutboxLetters, readOutboxLetters } from './letters'
+import { buildLetterContent, carryOutboxLetters, readOutboxLetters } from './letters'
 import type { MemoryRepo } from './memory-repo'
 
 export interface GiveBirthDeps {
@@ -141,6 +141,12 @@ export async function giveBirth(
   // D82：母亲这代没起过名（老数据 nickname = 分支名）就顺手补上人设名
   const named = withGenerationRealName(next, input.motherBranch, input.motherName ?? '')
   const snapshot = lineageSnapshot(named)
+  const fail = async (message: string): Promise<GiveBirthResult> => {
+    // 保留失败现场后再切回，不删除任何记忆；切换要求工作区干净。
+    await deps.repo.commit('memory: incomplete birth')
+    const back = await deps.repo.switchBranch(input.motherBranch)
+    return { ok: false, message: back.ok ? message : `${message} 回退母亲失败，请修复记忆仓后 /use ${input.motherBranch}。` }
+  }
 
   // 1) 主干：先补「第一代出生」标记（新建主干时），再落这一代的出生提交
   const hasTrunk = branches.some((entry) => entry.branch === trunk)
@@ -151,32 +157,36 @@ export async function giveBirth(
     return { ok: false, message: `切到 ${trunk} 主干失败，没有生（记忆不会丢）。` }
   }
   if (!hasTrunk) {
-    await deps.repo.writeFile('lineage.snapshot.json', lineageSnapshot(base))
-    await deps.repo.commit(`memory: birth ${base.generations[0]?.branch ?? 'default'}`)
+    if (!(await deps.repo.writeFile('lineage.snapshot.json', lineageSnapshot(base)))) return fail('出生主干写入失败，没有传承。')
+    const initial = await deps.repo.commit(`memory: birth ${base.generations[0]?.branch ?? 'default'}`)
+    if (!initial.committed && initial.reason !== 'clean') return fail('出生主干提交失败，没有传承。')
   }
-  await deps.repo.writeFile('lineage.snapshot.json', snapshot)
-  await deps.repo.commit(`memory: birth ${slug}`)
+  if (!(await deps.repo.writeFile('lineage.snapshot.json', snapshot))) return fail('出生快照写入失败，没有传承。')
+  const birthCommit = await deps.repo.commit(`memory: birth ${slug}`)
+  if (!birthCommit.committed) return fail('出生提交失败，没有传承。')
 
   // 2) 女儿：从**出生提交**分叉（图上是真分支），首个提交写待寄的信 + 出生记录 + 家谱快照。
   //    出生提交在主干的树上只有脚手架与快照、没有对话，所以她天然读不到母亲的记忆。
   const daughter = await deps.repo.switchCreate(slug)
   if (!daughter.ok) {
-    await deps.repo.switchBranch(input.motherBranch)
-    return { ok: false, message: '开女儿分支失败，没有生（记忆不会丢）。' }
+    return fail('开女儿分支失败，没有生（记忆不会丢）。')
   }
   const carried = await carryOutboxLetters(deps.repo, outbox)
-  await deps.repo.writeFile('birth.json', birthRecord(slug, input.motherBranch, at, realName))
-  await deps.repo.writeFile('lineage.snapshot.json', snapshot)
+  if (!carried) {
+    return fail('待寄的信没带上，没有传承。')
+  }
+  if (!(await deps.repo.writeFile('birth.json', birthRecord(slug, input.motherBranch, at, realName))) ||
+      !(await deps.repo.writeFile('lineage.snapshot.json', snapshot))) {
+    return fail('出生记录写入失败，没有传承。')
+  }
   const born = await deps.repo.commit(`memory: born ${slug}`)
   if (!born.committed) {
-    await deps.repo.switchBranch(input.motherBranch)
-    return { ok: false, message: '女儿分支的首个提交失败，没有生（记忆不会丢）。' }
+    return fail('女儿分支的首个提交失败，没有生（记忆不会丢）。')
   }
 
   // 3) 权威家谱最后写：git 已经一致，写失败就退回母亲节点，别让 active 与 HEAD 打架
   if (!(await writeLineage(deps.lineageFile, named))) {
-    await deps.repo.switchBranch(input.motherBranch)
-    return { ok: false, message: '家谱写不进去，生女儿没有生效（细节看日志）。' }
+    return fail('家谱写不进去，生女儿没有生效（细节看日志）。')
   }
 
   return {
@@ -186,5 +196,46 @@ export async function giveBirth(
     message: carried
       ? `女儿 ${realName}（分支 ${slug}）已出生；这一代到这里，之后从空白开始。`
       : `女儿 ${realName}（分支 ${slug}）已出生；待寄的信没带上（仓写失败，细节看日志）。`
+  }
+}
+
+/** 耗尽兜底：不依赖模型或新增提示词；一次尝试，失败如实返回，下一问可再试或 /compact。 */
+export function createExhaustedInheritance(
+  deps: GiveBirthDeps,
+  birth: (input: GiveBirthInput) => Promise<GiveBirthResult> = (input) => giveBirth(deps, input)
+): () => Promise<GiveBirthResult | null> {
+  let pending: Promise<GiveBirthResult | null> | null = null
+  const run = async (): Promise<GiveBirthResult | null> => {
+    const read = await readLineage(deps.lineageFile)
+    if (read.status !== 'ok') return null
+    const mother = findBranch(read.lineage, read.lineage.active)
+    const life = lifeOf(read.lineage, read.lineage.active)
+    if (mother?.kind !== 'persona' || mother.status !== 'alive' || life === null || life.used < life.limit) return null
+    try {
+      const branches = new Set((await deps.repo.listBranches()).map((item) => item.branch))
+      for (const node of read.lineage.branches) branches.add(node.branch)
+      let n = read.lineage.generations.length + 1
+      while (branches.has(`daughter-${n}`)) n += 1
+      const nickname = `daughter-${n}`
+      // 已有模型写好的信就沿用；没有时留下明确标注的本地交接记录，不冒充模型创作。
+      if ((await readOutboxLetters(deps.repo)).length === 0) {
+        const content = buildLetterContent({
+          from: mother.branch, to: nickname, at: (deps.now ?? Date.now)(),
+          text: `这封信由本机在生命耗尽时自动留存。母亲节点是 ${mother.branch}，上下文用量 ${life.used} / ${life.limit} token。\n母亲的聊天原文保留在她的分支里，这封交接信随你出生带入。`
+        })
+        if (!(await deps.repo.writeFile('letters/outbox/exhausted-inheritance.md', content))) {
+          return { ok: false, message: '生命已耗尽，但交接信写入失败，尚未传承。可 /compact 续命，或修复记忆仓后再试。' }
+        }
+      }
+      return await birth({ nickname, motherBranch: mother.branch })
+    } catch {
+      await deps.repo.switchBranch(mother.branch)
+      return { ok: false, message: '耗尽传承失败，已尝试退回母亲节点。可 /compact 续命，或修复记忆仓后再试。' }
+    }
+  }
+  return () => {
+    if (pending !== null) return pending
+    pending = run().finally(() => { pending = null })
+    return pending
   }
 }

@@ -1,5 +1,9 @@
 # 当前进度（手动维护）
 
+- 2026-11-02：**生命耗尽传承兜底 + `/compact` 全轮次占位**（`vibe/memory-life-compact-c`）。耗尽的 alive persona 在拒问前尝试一次本地传承：已有待寄信沿用，否则自动留存明确标注来源的交接信，避开重名后复用 giveBirth；成功重载会话，失败不写权威家谱、保留失败现场并回退母亲，不循环重试。压缩覆盖所有轮次的大段内容（>256 字符），先归档到按会话隔离的 `conversations/archives/<session>/<id>.json` 再占位，复用 archive id / recall；不删轮、不生成摘要、不调用模型，会话 JSONL v1 / DB schema 不变。生命按剩余文字比例估算，实际缩小时降到额度以内，下一问真实 usage 覆盖；dead 不复活。回归覆盖全轮次保留、问答/工具 recall、字符下降、幂等、重启归档、耗尽触发/并发去重、非 chat 不触发、无模型可完成、信带入女儿与失败不换代。
+**验收**：`npm test` 输出 `Test Files 183 passed (183)` / `Tests 2163 passed (2163)`；`npm run typecheck` 退出码 0。首次命令因本 worktree 缺 node_modules 未启动（vitest 缺失 / TS2688）；核对主工作区锁文件 SHA256 完全一致后，仅复制现成 node_modules 到本 worktree，再完成上述实际验证，未安装依赖、未修改源 worktree。
+**未做**：真机验收、操作用户数据、恢复旧版已摘要删掉的轮次、精确分词计数；未改提示词/依赖/schema，未新增出网路径，未合并 main。
+
 > 从 `workflow.md` §8 原文搬来（2026-10-26，`chore/agent-docs`），下面的表格与流水逐字未改，只是换了位置。
 > 规则：① 与 git 实况冲突时以 git 实况为准，并把本文件改过来；② 表格下方是按时间倒序的流水，新条目加在最上面，只写做了什么 + 验收证据 + 未做；③ 含「预留 / 待做 / 占位」的条目不许整条打 ✅（workflow.md §5）。
 

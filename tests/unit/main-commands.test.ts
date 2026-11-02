@@ -1279,7 +1279,7 @@ describe('命令执行', () => {
     expect(received).toBe('c1')
     expect(text.startsWith('🎗️提示')).toBe(true)
     expect(text).not.toContain('===')
-    expect(text).toContain('压掉 3 轮（保留最近 6 轮原文），摘要 270 token')
+    expect(text).toContain('压缩 3 轮的大段内容，保留全部 6 轮')
     expect(text).toContain('上下文 6.6k → 5.1k token（估算）')
     expect(text).not.toContain('字')
   })
@@ -1331,7 +1331,7 @@ describe('命令执行', () => {
     expect(textOf(await make({ ok: false, reason: 'budget' })('/compact'))).toContain('额度用完')
     expect(textOf(await make({ ok: false, reason: 'blocked' })('/compact'))).toContain('敏感内容')
     expect(textOf(await make({ ok: false, reason: 'no-client' })('/compact'))).toContain('模型客户端')
-    expect(textOf(await make({ ok: false, reason: 'failed' })('/compact'))).toContain('摘要失败')
+    expect(textOf(await make({ ok: false, reason: 'failed' })('/compact'))).toContain('压缩或续命记账失败')
   })
 })
 

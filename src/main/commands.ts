@@ -123,15 +123,15 @@ export interface CommandDeps {
 export type CompactOutcome =
   | {
       ok: true
-      /** 压掉几轮 */
+      /** 替换大段内容的轮数，不删除轮次 */
       dropped: number
-      /** 保留几轮原文 */
+      /** 保留的全部轮数 */
       kept: number
-      /** 摘要本身 token（响应里的 completion_tokens，原样） */
+      /** 兼容旧回执；本地压缩不生成摘要，恒为 0 */
       summaryTokens: number
       /** 压缩前这一问的上下文 token（上一次请求的用量） */
       beforeTokens: number
-      /** 压缩后估算的上下文 token（旧用量 − 被压掉的旧轮 + 摘要） */
+      /** 压缩后按剩余文字比例估算的上下文 token */
       afterTokens: number
     }
   | {
@@ -525,7 +525,7 @@ async function helpText(deps: CommandDeps): Promise<string> {
     '  /notebook [rm <编号>]  看 ta 的小本本（当前理解）；rm 删掉一条',
     '  /growth [日期|周|月|年]  看 ta 的成长档案（日记 / 周记 / 月末总结 / 年终总结）；给键看全文',
     '  /main [分支]     看这一代的主线 / 把某条分支设成主线（只有主线写成长档案）',
-    '  /compact         压旧段、保留最近几轮（过一次模型）',
+    '  /compact         所有轮次参与占位压缩，原文可 recall（本地）',
     '  /life            看剩余生命（token；纯模型分支也有，但不冻结）',
     '  /backup [-d]     立即提交记忆；不加 -d 回执起名，配了远端就推送',
     '  /git <参数>      在记忆仓里跑原生命令（/git n|l 翻页）',
@@ -1601,7 +1601,7 @@ export function createCommandHandler(
       return commandResult(
         [
           RECEIPT_HEAD,
-          `压掉 ${outcome.dropped} 轮（保留最近 ${outcome.kept} 轮原文），摘要 ${outcome.summaryTokens} token。`,
+          `压缩 ${outcome.dropped} 轮的大段内容，保留全部 ${outcome.kept} 轮；原文可用 recall 取回。`,
           `${contextLine}；生命按压完的上下文重算，下一问可以接着聊。`
         ].join('\n')
       )
@@ -1610,7 +1610,7 @@ export function createCommandHandler(
       case 'no-session':
         return commandResult('/compact 得在桌面窗口里用（这里不知道压哪个会话）。')
       case 'too-short':
-        return commandResult(outcome.detail ?? '轮数还不够，没什么可压的。')
+        return commandResult(outcome.detail ?? '没有需要替换的大段内容，全部轮次已保留。')
       case 'consent':
         return commandResult('还没确认出云，先不压缩（摘要要过一次模型）。')
       case 'budget':
@@ -1622,7 +1622,7 @@ export function createCommandHandler(
       case 'unavailable':
         return commandResult('记忆仓不可用，没有压缩。')
       default:
-        return commandResult('摘要失败（网络 / 模型），细节看日志。')
+        return commandResult('压缩或续命记账失败，细节看日志；原文归档保留。')
     }
   }
 

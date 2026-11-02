@@ -415,14 +415,11 @@ describe('生命记账（M3）', () => {
     expect(await recordLineageUsage(file, 'ask', 1)).toBe(false)
   })
 
-  it('usageAfterCompact：旧上下文 − 被压掉的旧轮 + 摘要本身', () => {
-    // 摘要请求的 prompt ≈ 被压掉的旧轮、completion = 摘要本身
-    expect(usageAfterCompact(10_000, 4_000, 300)).toBe(6_300)
-    // 摘要比旧轮还大时如实变大（不硬压成 0）
-    expect(usageAfterCompact(1_000, 500, 800)).toBe(1_300)
-    // 减过头就落到 0，不出现负数
-    expect(usageAfterCompact(500, 900, 100)).toBe(0)
-    // 坏数据按 0 算，不把 NaN 写进家谱
+  it('usageAfterCompact scales context and releases exhausted life without reviving dead nodes', () => {
+    expect(usageAfterCompact(10_000, 4_000, 300)).toBe(750)
+    expect(usageAfterCompact(1_000, 500, 800)).toBe(1_000)
+    expect(usageAfterCompact(617_550, 1000, 100, 500_000)).toBe(61_755)
+    expect(usageAfterCompact(617_550, 1000, 999, 500_000)).toBe(499_999)
     expect(usageAfterCompact(Number.NaN, Number.NaN, Number.NaN)).toBe(0)
   })
 

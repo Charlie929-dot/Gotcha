@@ -19,13 +19,14 @@ import { ensureChainSchema } from '../../src/chain/schema'
 import type { ChainDb } from '../../src/chain/store'
 import { ASK_TOOL_NAMES } from '../../src/chain/agent/tool-catalog'
 import { buildLetterContent } from '../../src/main/letters'
-import { giveBirth } from '../../src/main/give-birth'
+import { createExhaustedInheritance, giveBirth } from '../../src/main/give-birth'
 import {
   ensureLineage,
   findBranch,
   generationOf,
   readLineage,
   recordLineageUsage,
+  writeLineage,
   TRUNK_BRANCH
 } from '../../src/main/lineage'
 import { createMemoryRepo, type MemoryRepo } from '../../src/main/memory-repo'
@@ -185,5 +186,68 @@ describe('假模型驱动整条链路（askChain → give_birth 工具 → 真�
     expect(read.lineage.active).toBe('xiao-yu')
     expect((await repo.head()).branch).toBe('xiao-yu')
     expect(await repo.readFile(`letters/${LETTER_ID}.md`)).toContain('给女儿的话')
+  })
+})
+
+
+describe('exhausted inheritance fallback', () => {
+  it('works without any model, carries a letter and concurrent/repeated checks do not birth twice', { timeout: TIMEOUT }, async () => {
+    await recordLineageUsage(lineageFile, 'default', 617550)
+    const inherit = createExhaustedInheritance({ repo, lineageFile, now: () => 1800000000000 })
+    const [first, concurrent] = await Promise.all([inherit(), inherit()])
+    expect(first).toMatchObject({ ok: true, branch: 'daughter-2' })
+    expect(concurrent).toEqual(first)
+    const read = await readLineage(lineageFile)
+    if (read.status !== 'ok') throw new Error('lineage unreadable')
+    expect(read.lineage.generations).toHaveLength(2)
+    expect(findBranch(read.lineage, 'default')?.status).toBe('dead')
+    expect(await repo.readFile('letters/exhausted-inheritance.md')).toContain('617550 / 500000')
+    expect(await repo.readFile('letters/unread.json')).toContain('exhausted-inheritance')
+    expect(await inherit()).toBeNull()
+    expect(await repo.status()).toMatchObject({ ok: true, branch: 'daughter-2' })
+  })
+
+  it('does not trigger before exhaustion or on non-chat branches', { timeout: TIMEOUT }, async () => {
+    const inherit = createExhaustedInheritance({ repo, lineageFile })
+    expect(await inherit()).toBeNull()
+    await recordLineageUsage(lineageFile, 'default', 617550)
+    const read = await readLineage(lineageFile)
+    if (read.status !== 'ok') throw new Error('lineage unreadable')
+    for (const kind of ['assistant', 'life'] as const) {
+      await writeLineage(lineageFile, { ...read.lineage,
+        branches: read.lineage.branches.map((node) => ({ ...node, kind })) })
+      expect(await inherit()).toBeNull()
+    }
+    expect((await repo.listBranches()).map((item) => item.branch)).toEqual(['default'])
+  })
+
+  it('birth failure is bounded, keeps the mother authoritative and reuses the same outbox letter', { timeout: TIMEOUT }, async () => {
+    await recordLineageUsage(lineageFile, 'default', 617550)
+    let attempts = 0
+    const inherit = createExhaustedInheritance({ repo, lineageFile }, async () => {
+      attempts += 1
+      return { ok: false, message: 'birth unavailable' }
+    })
+    expect(await inherit()).toEqual({ ok: false, message: 'birth unavailable' })
+    expect(attempts).toBe(1)
+    expect(await inherit()).toMatchObject({ ok: false })
+    expect(attempts).toBe(2)
+    const read = await readLineage(lineageFile)
+    if (read.status !== 'ok') throw new Error('lineage unreadable')
+    expect(read.lineage.active).toBe('default')
+    expect(read.lineage.generations).toHaveLength(1)
+  })
+
+  it('letter carry failure does not write authoritative lineage and returns to mother', { timeout: TIMEOUT }, async () => {
+    await seedOutboxLetter()
+    const failedRepo: MemoryRepo = { ...repo, writeFile: async (path, content) =>
+      path.startsWith('letters/') ? false : repo.writeFile(path, content) }
+    const result = await giveBirth({ repo: failedRepo, lineageFile }, { nickname: 'daughter', motherBranch: 'default' })
+    expect(result.ok).toBe(false)
+    expect(await repo.status()).toMatchObject({ ok: true, branch: 'default' })
+    const read = await readLineage(lineageFile)
+    if (read.status !== 'ok') throw new Error('lineage unreadable')
+    expect(read.lineage.active).toBe('default')
+    expect(read.lineage.generations).toHaveLength(1)
   })
 })

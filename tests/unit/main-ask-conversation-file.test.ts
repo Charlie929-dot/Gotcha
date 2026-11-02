@@ -24,7 +24,7 @@ import {
   createAskConversationFileStore,
   createAskConversationRegistry
 } from '../../src/main/ask-conversation'
-import type { CloudAskConversation } from '../../src/chain/agent/conversation'
+import { compactAskConversation, type CloudAskConversation } from '../../src/chain/agent/conversation'
 
 const dirs: string[] = []
 
@@ -197,4 +197,18 @@ describe('会话落盘', () => {
     store.clear?.()
     expect(store.load()).toEqual({ digest: '', turns: [] })
   })
+})
+
+
+it('compact originals survive reopening and remain scoped to their conversation', () => {
+  const root = tempRoot()
+  const original = { digest: '', turns: [{ question: 'q'.repeat(3000), now: '', turns: [], answer: 'a'.repeat(5000) }] }
+  const store = createAskConversationFileStore({ root, conversationId: 'compact' })
+  const compacted = compactAskConversation(original, store.archive!)
+  store.save(compacted.conversation)
+  const reopened = createAskConversationFileStore({ root, conversationId: 'compact' })
+  expect(reopened.load()).toEqual(compacted.conversation)
+  expect(reopened.archives!().map((item) => item.text)).toEqual(expect.arrayContaining([original.turns[0]!.question, original.turns[0]!.answer]))
+  expect(createAskConversationFileStore({ root, conversationId: 'other' }).archives!()).toEqual([])
+  expect(compactAskConversation(reopened.load(), reopened.archive!).dropped).toBe(0)
 })

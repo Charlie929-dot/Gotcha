@@ -85,6 +85,10 @@ export interface CommandDeps {
   /** 切节点后清掉会话内存缓存：下次提问从盘上（目标节点）重读 */
   reloadConversations?: () => void
   /**
+   * 切节点后同步 QQ 名（D100 母女共存）：组合根注入；没注入就不改名（单测 / 没开 QQ）。
+   */
+  renameProfile?: (name: string) => void
+  /**
    * `/compact`（M3；2026-11-02 改口径，D97）：把所有轮次的大段正文记成「已压缩」。
    * 由组合根注入（写会话 + 提交 + 按新口径重算生命）；没注入就回「还没接上」。
    */
@@ -1164,6 +1168,11 @@ async function finishMemoryAction(
   if (!switched.ok) return { text: failureReasonText(switched, `切到 ${action.branch}`) }
   const synced = await syncActive(deps, lineage, action.branch, action.mode?.kind)
   deps.reloadConversations?.()
+  // D100：切到哪一代，QQ 名跟着改（母亲还活着，/use 切回去时名字也要跟着回去）
+  if (synced !== undefined) {
+    const generation = generationOf(synced, action.branch)
+    if (generation !== null) deps.renameProfile?.(displayNameOf(generation))
+  }
   // 切到的是一代已经交接过的母亲（D82）：顺手把那一行交接回执补给她看（同一个抬头下）
   const receipt = synced !== undefined ? handoverReceiptOf(synced, action.branch) : null
   return {
@@ -1419,7 +1428,7 @@ function toolSetText(): string {
     '工具集合（/tool ele <集合> 看元素）：',
     ...ASK_TOOL_SETS.map((set, index) => toolSetLine(index + 1, set)),
     '',
-    'give_birth 不在里面：生命 ≤15% 时自动出现。'
+    'give_birth 不在里面：生命用过 15% 后（准妈妈阶段）自动出现。'
   ].join('\n')
 }
 

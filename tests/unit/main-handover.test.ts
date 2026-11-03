@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { giveBirth } from '../../src/main/give-birth'
 import {
+  birthReceiptText,
   displayNameOf,
   handoverReceiptBody,
   handoverReceiptOf,
@@ -80,6 +81,12 @@ describe('回执文案', () => {
     const named = withGenerationRealName(lineage, 'default', '贴心大肥鱼')
     expect(handoverReceiptOf(named, 'default')).toBe(
       '✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
+    )
+  })
+
+  it('出生回执（D100 母女共存）：女儿出生、母亲还在，不说「生命耗尽」', () => {
+    expect(birthReceiptText({ mother: '贴心大肥鱼', daughter: '鱼苗' })).toBe(
+      '🎗️提示\n✨<贴心大肥鱼> 的女儿 ✨<鱼苗> 出生了  ta 还在，可以接着聊'
     )
   })
 })
@@ -172,10 +179,9 @@ describe('真仓：give_birth 写进家谱的是真名，回执能用', () => {
     if (read.status !== 'ok') return
     expect(generationOf(read.lineage, 'yu-miao')?.nickname).toBe('鱼苗')
     expect(generationOf(read.lineage, 'default')?.nickname).toBe('贴心大肥鱼')
-    expect(handoverReceiptOf(read.lineage, 'default')).toBe(
-      '✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
-    )
-    // 女儿这一代还活着：她自己身上没有回执
+    // D100：母亲还活着，不再有「生命耗尽」交接回执
+    expect(handoverReceiptOf(read.lineage, 'default')).toBeNull()
+    // 女儿这一代还活着：她自己身上也没有回执
     expect(handoverReceiptOf(read.lineage, 'yu-miao')).toBeNull()
   })
 })

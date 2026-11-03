@@ -801,6 +801,41 @@ describe('命令执行', () => {
     expect(text).toContain('✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命')
   })
 
+  it('/use 切节点后同步 QQ 名（D100）：切回母亲就改成她的真名', async () => {
+    const lineageFile = tempLineageFile()
+    const base = await ensureLineage(lineageFile, { now: 1 })
+    const born = withGenerationAdded(base.lineage, {
+      branch: 'yumiao',
+      nickname: '鱼苗',
+      mother: 'default',
+      at: 2,
+      keepMotherAlive: true
+    })
+    if (born === null) throw new Error('seed failed')
+    await writeLineage(lineageFile, withGenerationRealName(born, 'default', '贴心大肥鱼'))
+    let current = 'yumiao'
+    const renames: string[] = []
+    const run = createCommandHandler({
+      repo: fakeRepo({
+        listBranches: async () => [
+          { branch: 'default', sha: 'a1', subject: 'memory: 2026-10-31', at: 1 },
+          { branch: 'yumiao', sha: 'a2', subject: 'memory: born yumiao', at: 2 }
+        ],
+        head: async () => ({ branch: current, detached: false, sha: 'a2' }),
+        switchBranch: async (name) => {
+          current = name
+          return { ok: true, head: { branch: name, detached: false, sha: 'a1' } }
+        }
+      }),
+      lineageFile,
+      renameProfile: (name) => {
+        renames.push(name)
+      }
+    })
+    await run('/use default')
+    expect(renames).toEqual(['贴心大肥鱼'])
+  })
+
   it('/log 家谱树显示真名（D82）：有真名就「真名 (分支)」', async () => {
     const lineageFile = tempLineageFile()
     const base = await ensureLineage(lineageFile, { now: 1 })

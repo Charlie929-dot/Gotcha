@@ -16,13 +16,14 @@
  * 3. 兜底失败（家谱读不出来 / 记忆仓不可用 / 已经切走）**不把用户锁死**：这一问的回答照常
  *    返回，只记日志——下一次提问再试。
  *
- * 硬约束：不碰提示词；`give_birth` 的 85% 门槛 / 不重名 / 失败不写权威家谱 / 失败退回母亲
- * 节点全部保留（兜底走的就是同一个 `giveBirth`）；同一代已经有女儿就绝不生第二个。
+ * 硬约束：不碰提示词；`give_birth` 的 15% 门槛 / 不重名 / 失败不写权威家谱 / 失败退回母亲
+ * 节点全部保留（兜底走的就是同一个 `giveBirth`）；同一代已经有女儿就绝不生第二个（D99）。
+ * 2026-11-04（D100 母女共存）：出生不再把母亲置 dead，兜底出生也一样。
  */
 
 import { slugifyNodeName } from './commands'
 import { giveBirth, type GiveBirthDeps } from './give-birth'
-import { displayNameOf, handoverReceiptText } from './handover'
+import { birthReceiptText, displayNameOf } from './handover'
 import {
   findBranch,
   generationOf,
@@ -32,15 +33,12 @@ import {
 } from './lineage'
 import { readOutboxLetters, type LetterStore } from './letters'
 
-/** 兜底传承的生命门槛：与 `give_birth` 一致（生命 ≥85% 才允许） */
+/** 兜底传承自己的生命门槛：只在快到终点（used ≥ 85%）兜底；`give_birth` 本身从 15% 起就允许 */
 export const INHERIT_MIN_LIFE_RATIO = 0.85
 
 /** 这条分支已经传承过时的固定话术（2026-11-03 改：死亡按分支记，同代别的枝还活着） */
 const DEAD_TEXT =
   '这条分支已经把记忆线交给下一代了（只读）。/use 可以回看；要接着聊，先 /use 到还活着的分支。'
-/** 同代别的枝已经生过女儿：这一代不能再有第二个（D98 只改死亡口径，没加新守卫，沿用原判定） */
-const INHERITED_TEXT =
-  '这一代已经有女儿了（只读）。/use 可以回看；要接着聊，先 /use 到还活着的分支。'
 const FROZEN_TEXT = '这一代的生命已经结束（只读）。/use 可以回看，或 /compact 续命。'
 
 /** 一次提问前的生命闸门：放行 / 拒绝 / 这一问当「临终传承轮」 */
@@ -56,6 +54,7 @@ export type LifeGate =
  * - dead / frozen：只读回看，拒绝（原话术不变）；
  * - 生命耗尽且是活着的 persona 代、还没有女儿：**不拒绝**，标记 `inherit`
  *   ——这一问照常问，问完由 `settleLifeHandover` 兜底保证传承发生；
+ * - 已经有女儿（D100 母女共存）：放行——母亲还能接着聊，生命耗尽也不锁；
  * - 生命耗尽但不是鱼（出生主干 / 坏家谱）：照旧拒绝（不在这里新增传承）。
  */
 export function lifeGateOf(lineage: Lineage): LifeGate {
@@ -73,9 +72,10 @@ export function lifeGateOf(lineage: Lineage): LifeGate {
   if (node.kind !== 'persona' || generation === null) {
     return { kind: 'blocked', text: exhausted }
   }
-  // 已经有女儿（家谱里 mother 指向这一代）：不再生第二个，也不再让这一代接着问
+  // 已经有女儿（家谱里 mother 指向这一代）：母女共存（D100）——母亲还可以接着聊，
+  // 生命耗尽也放行；兜底不会再生第二个（由 inheritAfterLife 的 already 判定守住）
   if (lineage.generations.some((item) => item.mother === generation.id)) {
-    return { kind: 'blocked', text: INHERITED_TEXT }
+    return { kind: 'allow' }
   }
   return { kind: 'inherit', branch, motherName: displayNameOf(generation) }
 }
@@ -214,7 +214,7 @@ export async function inheritAfterLife(
     }
   }
 
-  // 2) 生女儿：走同一个 giveBirth（85% 门槛 / 不重名 / 失败不写家谱 / 失败退回母亲节点都还在）
+  // 2) 生女儿：走同一个 giveBirth（15% 门槛 / 不重名 / 失败不写家谱 / 失败退回母亲节点都还在）
   const birth = await giveBirth(deps, {
     nickname: daughterName,
     motherBranch: input.motherBranch,
@@ -234,7 +234,7 @@ export async function inheritAfterLife(
     daughter,
     branch: birth.branch ?? '',
     letterWritten,
-    receipt: handoverReceiptText({ mother: motherName, daughter }),
+    receipt: birthReceiptText({ mother: motherName, daughter }),
     message: birth.message
   }
 }

@@ -3,7 +3,7 @@
  *
  * 守这几件事：
  * 1. 生命耗尽、还活着、是 persona/chat、还没有女儿 → 闸门给「临终传承轮」（不再一句冻结）；
- * 2. 纯模型分支（assistant）不触发传承；出生主干 / dead / 已经有女儿 → 照旧拒绝；
+ * 2. 纯模型分支（assistant）不触发传承；出生主干 / dead 照旧拒绝；已经有女儿 → 放行（D100 母女共存）；
  * 3. 模型不配合（没调 give_birth）/ 模型不可用：主进程兜底写信 + 生女儿，有明确结果；
  * 4. 信真的被带进女儿分支（未读）；重复触发不重复出生；
  * 5. 兜底失败不抛、不锁死，只回一句人话。
@@ -153,7 +153,7 @@ describe('lifeGateOf：生命闸门', () => {
     if (gate.kind === 'blocked') expect(gate.text).toContain('已经把记忆线交给下一代')
   })
 
-  it('已经有女儿（母亲还 alive 的坏家谱）→ 不再生第二个', async () => {
+  it('已经有女儿（母亲还 alive）→ 闸门放行（D100 母女共存），兜底也不会再生第二个', async () => {
     const base = await seededLineage()
     const lineage: Lineage = {
       ...withUsage(base, 'default', LIFE_LIMIT + 1),
@@ -171,8 +171,8 @@ describe('lifeGateOf：生命闸门', () => {
         }
       ]
     }
-    const gate = lifeGateOf(lineage)
-    expect(gate.kind).toBe('blocked')
+    // 生命耗尽也放行：母亲还能接着聊（不再是「已经有女儿（只读）」）
+    expect(lifeGateOf(lineage)).toEqual({ kind: 'allow' })
   })
 })
 
@@ -207,10 +207,10 @@ describe('inheritAfterLife · 真实 git 仓', () => {
     expect(result.letterWritten).toBe(true)
     expect(result.daughter).toBe('default的女儿')
     expect(result.receipt).toContain('🎗️提示')
-    expect(result.receipt).toContain('生命耗尽')
+    expect(result.receipt).toContain('出生了')
     expect(result.receipt).toContain('default的女儿')
 
-    // 女儿分支出生了，母亲 dead，当前节点切到女儿
+    // 女儿分支出生了，母亲还活着（D100），当前节点切到女儿
     const branches = (await repo.listBranches()).map((entry) => entry.branch)
     expect(branches).toContain(result.branch)
     const read = await readLineage(lineageFile)
@@ -218,7 +218,7 @@ describe('inheritAfterLife · 真实 git 仓', () => {
     if (read.status !== 'ok') return
     expect(read.lineage.active).toBe(result.branch)
     expect(read.lineage.generations).toHaveLength(2)
-    expect(findBranch(read.lineage, 'default')?.status).toBe('dead')
+    expect(findBranch(read.lineage, 'default')?.status).toBe('alive')
     // D98：代不置死，只死母亲那条分支
     expect(generationOf(read.lineage, 'default')?.died_at).toBeNull()
     expect(generationOf(read.lineage, result.branch)?.nickname).toBe('default的女儿')
@@ -287,7 +287,7 @@ function brokenRepo(): MemoryRepo {
 }
 
 describe('兜底失败 / 约束不放开（不碰真仓）', () => {
-  it('还没到 85% 门槛：兜底也生不了（give_birth 的约束不放开）', async () => {
+  it('兜底只在自己 85% 门槛后发生（give_birth 从 15% 起就能生，但兜底不提前）', async () => {
     expect(await recordLineageUsage(lineageFile, 'default', Math.round(LIFE_LIMIT * 0.5))).toBe(true)
     const result = await inheritAfterLife(
       { repo: stubRepo(), lineageFile, now: () => NOW },
@@ -352,7 +352,7 @@ describe('settleLifeHandover：临终那一问的收口', () => {
         { motherBranch: 'default', modelInherited: false }
       )
       expect(settled.inherited).toBe(true)
-      expect(settled.receipt).toContain('生命耗尽')
+      expect(settled.receipt).toContain('出生了')
       expect((await repo.listBranches()).length).toBeGreaterThanOrEqual(2)
       const read = await readLineage(lineageFile)
       expect(read.status === 'ok' ? read.lineage.generations.length : 0).toBe(2)

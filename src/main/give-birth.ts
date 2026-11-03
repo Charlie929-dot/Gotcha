@@ -45,7 +45,7 @@ export interface GiveBirthDeps {
 
 export interface GiveBirthInput {
   nickname: string
-  /** 当前活动节点（必须 alive，且生命 ≥85%） */
+  /** 当前活动节点（必须 alive；生命用过 15% 才允许——宝宝 / 少女阶段会被拒） */
   motherBranch: string
   /**
    * 母亲这一代真正叫什么（D82）：老家谱里第一代只有分支名 `default`，
@@ -131,6 +131,7 @@ function birthRecord(slug: string, mother: string, at: number, name?: string): s
 
 /**
  * 生女儿：提交母亲 → 主干出生提交 → 女儿从出生提交分叉 → 带上待寄的信 → 家谱新代。
+ * 母亲分支保持 alive（D100 母女共存：`keepMotherAlive`），只是活动节点切到女儿。
  * 返回 `ok:false` 时仓与家谱都没变（失败前会退回母亲节点）。
  */
 export async function giveBirth(
@@ -158,8 +159,8 @@ export async function giveBirth(
     return { ok: false, message: '纯模型分支不是一条鱼，不能生。' }
   }
   const motherLife = lifeOf(lineage, input.motherBranch)
-  if (motherLife === null || motherLife.used < motherLife.limit * 0.85) {
-    return { ok: false, message: '还没到生的时候（生命剩得还多）。' }
+  if (motherLife === null || motherLife.used < motherLife.limit * 0.15) {
+    return { ok: false, message: '还没到能当妈妈的时候（生命剩得还多）。' }
   }
   const slug = slugifyNodeName(input.nickname)
   if (slug === null) {
@@ -193,7 +194,9 @@ export async function giveBirth(
     // D82：家谱存「真名」（模型给的原话），分支名仍是 slug
     nickname: realName,
     mother: input.motherBranch,
-    at
+    at,
+    // D100 母女共存：生完母亲那条分支还活着，/use 可以回去接着聊
+    keepMotherAlive: true
   })
   if (next === null) return { ok: false, message: '家谱加不进新的一代。' }
   // D82：母亲这代没起过名（老数据 nickname = 分支名）就顺手补上人设名

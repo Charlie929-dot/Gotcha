@@ -108,7 +108,7 @@ describe('giveBirth · 真实 git 仓', () => {
     const snapshot = JSON.parse((await repo.readFile('lineage.snapshot.json')) ?? '{}')
     expect(snapshot.active).toBe('xiao-yu')
 
-    // 家谱：新一代、母亲分支 dead（整代不置死，D98）、主干节点在；女儿的新 generation 没有 letter 字段
+    // 家谱：新一代、母亲分支保持 alive（D100 母女共存）、主干节点在；女儿的新 generation 没有 letter 字段
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
@@ -121,7 +121,7 @@ describe('giveBirth · 真实 git 仓', () => {
     // D82：家谱存的是真名（模型给的原话），分支名仍是 slug
     expect(daughter?.nickname).toBe('小雨')
     expect(daughter?.branch).toBe('xiao-yu')
-    expect(findBranch(lineage, 'default')?.status).toBe('dead')
+    expect(findBranch(lineage, 'default')?.status).toBe('alive')
     expect(generationOf(lineage, 'default')?.died_at).toBeNull()
     expect(findBranch(lineage, TRUNK_BRANCH)?.kind).toBe('life')
     expect(lineage.last).toEqual({ chat: 'xiao-yu' })
@@ -151,21 +151,37 @@ describe('giveBirth · 真实 git 仓', () => {
     const read = await readLineage(lineageFile)
     if (read.status === 'ok') {
       expect(read.lineage.active).toBe('xiao-yu')
-      expect(findBranch(read.lineage, 'default')?.status).toBe('dead')
+      expect(findBranch(read.lineage, 'default')?.status).toBe('alive')
     }
   })
 
-  it('生命还够时不生：仓与家谱都不动', { timeout: TIMEOUT }, async () => {
+  it('生命还够时（used < 15%）不生：仓与家谱都不动', { timeout: TIMEOUT }, async () => {
     expect(await recordLineageUsage(lineageFile, 'default', 10_000)).toBe(true)
     const result = await giveBirth(
       { repo, lineageFile },
       { nickname: '小雨', motherBranch: 'default' }
     )
     expect(result.ok).toBe(false)
-    expect(result.message).toContain('还没到生的时候')
+    expect(result.message).toContain('还没到能当妈妈的时候')
     expect((await repo.listBranches()).map((entry) => entry.branch)).toEqual(['default'])
     const read = await readLineage(lineageFile)
     if (read.status === 'ok') expect(read.lineage.active).toBe('default')
+  })
+
+  it('准妈妈阶段（used ≥15%）就能生，不用等生命快耗尽（D100）', { timeout: TIMEOUT }, async () => {
+    expect(await recordLineageUsage(lineageFile, 'default', Math.round(LIFE_LIMIT * 0.16))).toBe(true)
+    const result = await giveBirth(
+      { repo, lineageFile },
+      { nickname: '早早', motherBranch: 'default' }
+    )
+    expect(result.ok).toBe(true)
+    expect(result.branch).toBe('zao-zao')
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    // 母亲这条分支还活着，active 切到女儿
+    expect(findBranch(read.lineage, 'default')?.status).toBe('alive')
+    expect(read.lineage.active).toBe('zao-zao')
   })
 
   it('已有 life 主干：出生提交写在 life 上', { timeout: TIMEOUT }, async () => {

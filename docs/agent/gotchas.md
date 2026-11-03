@@ -224,6 +224,7 @@
 
 | 任务 `run_key` 抢了没结算就重启 = 永久卡死 + 定时器 0ms 空转 | 2026-11-02 真机：`mem_tasks#2`（每天 23:30 写日记）23:30:00 抢到租约、23:30:11 写完文件、23:30:15 应用重启，`settleTask` 没跑到。`claimTask` 见 `run_key` 已等于当前 occurrence 就永远返回 null：这条既不跑也不推进，`nextDueAt` 永远停在过去 → 调度器 `setTimeout(0)` 反复醒来，主进程单核 76% CPU | 启动时 `releaseStaleClaims()`（`task-runtime.start()` 里调，清 `run_key = id:next_due_at` 的 active 行）；`nextDueTask` / `listDueTasks` 用 `NOT_CLAIMED` 跳过「已抢未结算」的行，别让死行堵在队首 |
 | 已完成的一次性任务还能 update 时间，但永远不会再响 | 2026-11-02 真机：ta 把「23:45 收尾」改到 `#9`（23:00 已跑完，state=completed），`updateTask` 只改 `next_due_at`、state 不动；`/tasks` 只列 active/paused → 那条整个消失，回执却说「改好了 #9：11-01 23:45 …」 | `task-tools.update` 对 completed/cancelled 且给了 `when` 的请求如实拒绝（让它 `schedule` 新的），只改说明 / 显式 `state=active` 不受影响；一次性提醒一条任务只装一件事，改时间不会把已经跑掉的那次还回来 |
+| 「已经有女儿」不再等于「母亲只读」 | 2026-11-04 D100：母女共存后 `giveBirth` 不再把母亲分支置 dead；`lifeGateOf` 对「已经有女儿」的母亲放行（生命耗尽也能聊）。旧口径 / 旧测试里「has-daughter → blocked(INHERITED_TEXT)」的假设会把母亲误关 | 判「这条分支能不能聊」看 `status` 与生命闸门；判「会不会再生」看 giveBirth 的同代守卫与 `inheritAfterLife` 的 `already`；别拿「有女儿」当只读依据 |
 
 ## 规则
 

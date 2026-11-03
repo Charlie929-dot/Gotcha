@@ -108,7 +108,7 @@ describe('giveBirth · 真实 git 仓', () => {
     const snapshot = JSON.parse((await repo.readFile('lineage.snapshot.json')) ?? '{}')
     expect(snapshot.active).toBe('xiao-yu')
 
-    // 家谱：新一代、母亲 dead、主干节点在；女儿的新 generation 没有 letter 字段
+    // 家谱：新一代、母亲分支 dead（整代不置死，D98）、主干节点在；女儿的新 generation 没有 letter 字段
     const read = await readLineage(lineageFile)
     expect(read.status).toBe('ok')
     if (read.status !== 'ok') return
@@ -122,8 +122,37 @@ describe('giveBirth · 真实 git 仓', () => {
     expect(daughter?.nickname).toBe('小雨')
     expect(daughter?.branch).toBe('xiao-yu')
     expect(findBranch(lineage, 'default')?.status).toBe('dead')
+    expect(generationOf(lineage, 'default')?.died_at).toBeNull()
     expect(findBranch(lineage, TRUNK_BRANCH)?.kind).toBe('life')
     expect(lineage.last).toEqual({ chat: 'xiao-yu' })
+  })
+
+  it('切主干时第一次报 dirty：先落盘再重试，不把这一次出生丢掉', { timeout: TIMEOUT }, async () => {
+    await seedOutboxLetter()
+    let trunkAttempts = 0
+    // 这个用例还没有 life 主干 → 走 switchCreateOrphan；第一次假装工作区脏
+    const flaky: MemoryRepo = {
+      ...repo,
+      switchCreateOrphan: async (name: string) => {
+        trunkAttempts += 1
+        if (trunkAttempts === 1) {
+          return { ok: false, reason: 'dirty', detail: '工作区有未提交改动' }
+        }
+        return repo.switchCreateOrphan(name)
+      }
+    }
+    const result = await giveBirth(
+      { repo: flaky, lineageFile },
+      { nickname: '小雨', motherBranch: 'default' }
+    )
+    expect(result.ok).toBe(true)
+    expect(trunkAttempts).toBeGreaterThanOrEqual(2)
+    expect((await repo.listBranches()).map((entry) => entry.branch)).toContain('xiao-yu')
+    const read = await readLineage(lineageFile)
+    if (read.status === 'ok') {
+      expect(read.lineage.active).toBe('xiao-yu')
+      expect(findBranch(read.lineage, 'default')?.status).toBe('dead')
+    }
   })
 
   it('生命还够时不生：仓与家谱都不动', { timeout: TIMEOUT }, async () => {

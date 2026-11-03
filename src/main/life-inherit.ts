@@ -35,9 +35,12 @@ import { readOutboxLetters, type LetterStore } from './letters'
 /** 兜底传承的生命门槛：与 `give_birth` 一致（生命 ≥85% 才允许） */
 export const INHERIT_MIN_LIFE_RATIO = 0.85
 
-/** 这一代已经传承过 / 冻结时的固定话术（与改前逐字一致，界面不用跟着变） */
+/** 这条分支已经传承过时的固定话术（2026-11-03 改：死亡按分支记，同代别的枝还活着） */
 const DEAD_TEXT =
-  '这一代已经把记忆线交给下一代了（只读）。/use 可以回看；要接着聊，先 /use 到活着的那一代。'
+  '这条分支已经把记忆线交给下一代了（只读）。/use 可以回看；要接着聊，先 /use 到还活着的分支。'
+/** 同代别的枝已经生过女儿：这一代不能再有第二个（D98 只改死亡口径，没加新守卫，沿用原判定） */
+const INHERITED_TEXT =
+  '这一代已经有女儿了（只读）。/use 可以回看；要接着聊，先 /use 到还活着的分支。'
 const FROZEN_TEXT = '这一代的生命已经结束（只读）。/use 可以回看，或 /compact 续命。'
 
 /** 一次提问前的生命闸门：放行 / 拒绝 / 这一问当「临终传承轮」 */
@@ -72,7 +75,7 @@ export function lifeGateOf(lineage: Lineage): LifeGate {
   }
   // 已经有女儿（家谱里 mother 指向这一代）：不再生第二个，也不再让这一代接着问
   if (lineage.generations.some((item) => item.mother === generation.id)) {
-    return { kind: 'blocked', text: DEAD_TEXT }
+    return { kind: 'blocked', text: INHERITED_TEXT }
   }
   return { kind: 'inherit', branch, motherName: displayNameOf(generation) }
 }

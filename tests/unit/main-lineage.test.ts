@@ -283,7 +283,7 @@ describe('主线（2026-11-01：一代只有一条，只有主线写成长档案
 })
 
 describe('传承（M4）', () => {
-  it('加一代：母亲置 dead、女儿开新 generation + 分支、active 切过去', () => {
+  it('加一代：母亲那条分支置 dead、代不置死、女儿开新 generation + 分支、active 切过去', () => {
     const base = emptyLineage(1000)
     const next = withGenerationAdded(base, {
       branch: 'xiaoyu',
@@ -296,7 +296,8 @@ describe('传承（M4）', () => {
     if (next === null) return
     expect(next.active).toBe('xiaoyu')
     expect(next.generations).toHaveLength(2)
-    expect(next.generations[0]).toMatchObject({ id: 'gen-1', died_at: 2_000 })
+    // D98：死亡只记在分支上，整代不写 died_at（同代别的岔口还能用）
+    expect(next.generations[0]).toMatchObject({ id: 'gen-1', died_at: null })
     expect(next.generations[1]).toMatchObject({
       id: 'gen-2',
       branch: 'xiaoyu',

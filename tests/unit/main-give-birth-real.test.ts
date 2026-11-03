@@ -26,7 +26,8 @@ import {
   generationOf,
   readLineage,
   recordLineageUsage,
-  TRUNK_BRANCH
+  TRUNK_BRANCH,
+  writeLineage
 } from '../../src/main/lineage'
 import { createMemoryRepo, type MemoryRepo } from '../../src/main/memory-repo'
 import { createCloudAskOutbound } from '../../src/understand/cloud/ask-outbound'
@@ -166,6 +167,34 @@ describe('giveBirth · 真实 git 仓', () => {
     expect((await repo.listBranches()).map((entry) => entry.branch)).toEqual(['default'])
     const read = await readLineage(lineageFile)
     if (read.status === 'ok') expect(read.lineage.active).toBe('default')
+  })
+
+  it('同一代已经有女儿：从同代别的岔口再生一个，直接拒（D99）', { timeout: TIMEOUT }, async () => {
+    // 先正常生一个，再把家谱改回「母亲这条岔口还活着」——模拟同代另一条枝的人来生
+    const born = await giveBirth(
+      { repo, lineageFile },
+      { nickname: '小雨', motherBranch: 'default' }
+    )
+    expect(born.ok).toBe(true)
+    const read = await readLineage(lineageFile)
+    expect(read.status).toBe('ok')
+    if (read.status !== 'ok') return
+    await writeLineage(lineageFile, {
+      ...read.lineage,
+      active: 'default',
+      branches: read.lineage.branches.map((item) =>
+        item.branch === 'default' ? { ...item, status: 'alive' as const } : item
+      )
+    })
+
+    const again = await giveBirth(
+      { repo, lineageFile },
+      { nickname: '二丫', motherBranch: 'default' }
+    )
+    expect(again.ok).toBe(false)
+    expect(again.message).toContain('已经有女儿了')
+    expect(again.message).toContain('xiao-yu')
+    expect((await repo.listBranches()).map((entry) => entry.branch)).not.toContain('er-ya')
   })
 
   it('已有 life 主干：出生提交写在 life 上', { timeout: TIMEOUT }, async () => {

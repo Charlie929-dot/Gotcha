@@ -16,6 +16,7 @@
  */
 
 import { placeholdAskTurn, type CloudAskConversationTurn } from './conversation'
+import { lifeStageOf } from './life-stage'
 import { ASK_TOOL_NAMES, hasScreenTools } from './tool-catalog'
 import type { ChainAskChatRecent, ChainAskQuotedMessage } from './types'
 
@@ -1168,7 +1169,7 @@ function renderNowText(
     const limit = Math.max(1, input.life.limit)
     const remaining = Math.max(0, Math.min(limit, limit - input.life.used))
     const percent = Math.round((remaining / limit) * 100)
-    lines.push(`生命：还剩 ${percent}%（${formatTokenAmount(remaining)} token）`)
+    lines.push(`生命：还剩 ${percent}%（${formatTokenAmount(remaining)} token） · ${lifeStageOf(percent)}阶段`)
   }
   // 信（D81）：只报未读数，不把正文放进 system；让 ta 自己用 list_letter / read_letter 看
   if (input.letters !== undefined && input.letters.unread > 0) {

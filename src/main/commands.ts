@@ -28,6 +28,7 @@ import {
   type AskModeKind,
   type AskModeState
 } from '../chain/agent/mode'
+import { lifeStageOf } from '../chain/agent/life-stage'
 import {
   ASK_TOOL_LABELS,
   ASK_TOOL_NAMES,
@@ -1782,7 +1783,7 @@ export function createCommandHandler(
         if (life === null) return commandResult('这条分支还没记过生命。')
         return commandResult(
           [
-            `❤️剩余生命✨${life.percent}%`,
+            `❤️剩余生命✨${life.percent}%（${lifeStageOf(life.percent)}阶段）`,
             `🔤上下文 已使用✨${formatTokens(life.used)}，剩余✨${formatTokens(life.remaining)}（${formatTokens(life.limit)}）`
           ].join('\n')
         )

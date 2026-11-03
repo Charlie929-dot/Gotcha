@@ -29,7 +29,12 @@ import {
 } from './lineage'
 import { defaultMemoryName, slugifyNodeName } from './commands'
 import { carryOutboxLetters, readOutboxLetters } from './letters'
-import type { MemoryRepo } from './memory-repo'
+import type {
+  MemoryCommitResult,
+  MemoryRepo,
+  MemorySwitchReason,
+  MemorySwitchResult
+} from './memory-repo'
 
 export interface GiveBirthDeps {
   repo: MemoryRepo
@@ -60,6 +65,59 @@ function withTrunkNode(lineage: Lineage, trunk: string, at: number): Lineage {
     kind: 'life'
   })
   return added ?? lineage
+}
+
+/** 切分支失败时给人看的中文原因（`reason` 是英文码，直接进消息不好读） */
+export function switchFailureText(reason: MemorySwitchReason | undefined): string {
+  switch (reason) {
+    case 'dirty':
+      return '工作区还有没提交的改动'
+    case 'unavailable':
+      return '记忆仓不可用'
+    case 'not-found':
+      return '分支不存在'
+    case 'exists':
+      return '分支已存在'
+    case 'invalid':
+      return '分支名不合法'
+    case 'current':
+      return '已经在这条分支上'
+    default:
+      return '仓库操作失败'
+  }
+}
+
+/**
+ * 出生时的「先落盘、再切分支」（2026-11-03 修：兜底出生被并发写盘挡成 `dirty`）。
+ *
+ * `switchInner` 要求工作区干净；出生前一刻可能刚好有信 / 日记 / 同步在写，
+ * `git status --porcelain` 非空就整条出生失败（2026-11-02 22:41 真机：只留下
+ * `{"reason":"birth"}`，女儿没出生、信留在待寄里）。这里每次切换前先提交一次，
+ * 只在 `dirty` 时重试（其它原因重试也没用）；仍失败就把 reason 交给调用方报出去。
+ */
+export async function switchWhenClean(input: {
+  commit: (message: string) => Promise<MemoryCommitResult>
+  switchTo: () => Promise<MemorySwitchResult>
+  message: string
+  attempts?: number
+  delayMs?: number
+}): Promise<MemorySwitchResult> {
+  const attempts = Math.max(1, Math.trunc(input.attempts ?? 3))
+  const delayMs = Math.max(0, Math.trunc(input.delayMs ?? 300))
+  let result: MemorySwitchResult = { ok: false, reason: 'failed' }
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    // 提交失败（索引锁 / 暂时不可用）不阻断切换：切换自己会再判一次工作区
+    try {
+      await input.commit(input.message)
+    } catch {
+      // 同上：让 switchTo 的结果说话
+    }
+    result = await input.switchTo()
+    if (result.ok) return result
+    if (result.reason !== 'dirty' || attempt === attempts) return result
+    if (delayMs > 0) await new Promise<void>((done) => setTimeout(done, delayMs))
+  }
+  return result
 }
 
 /** 女儿分支里的出生记录（`birth.json`）：让首个提交一定有内容，也方便她知道自己从哪来 */
@@ -144,11 +202,16 @@ export async function giveBirth(
 
   // 1) 主干：先补「第一代出生」标记（新建主干时），再落这一代的出生提交
   const hasTrunk = branches.some((entry) => entry.branch === trunk)
-  const trunkBranch = hasTrunk
-    ? await deps.repo.switchBranch(trunk)
-    : await deps.repo.switchCreateOrphan(trunk)
+  const trunkBranch = await switchWhenClean({
+    commit: deps.repo.commit,
+    switchTo: hasTrunk ? () => deps.repo.switchBranch(trunk) : () => deps.repo.switchCreateOrphan(trunk),
+    message: 'memory: save before birth'
+  })
   if (!trunkBranch.ok) {
-    return { ok: false, message: `切到 ${trunk} 主干失败，没有生（记忆不会丢）。` }
+    return {
+      ok: false,
+      message: `切到 ${trunk} 主干失败（${switchFailureText(trunkBranch.reason)}），没有生（记忆不会丢）。`
+    }
   }
   if (!hasTrunk) {
     await deps.repo.writeFile('lineage.snapshot.json', lineageSnapshot(base))
@@ -159,10 +222,17 @@ export async function giveBirth(
 
   // 2) 女儿：从**出生提交**分叉（图上是真分支），首个提交写待寄的信 + 出生记录 + 家谱快照。
   //    出生提交在主干的树上只有脚手架与快照、没有对话，所以她天然读不到母亲的记忆。
-  const daughter = await deps.repo.switchCreate(slug)
+  const daughter = await switchWhenClean({
+    commit: deps.repo.commit,
+    switchTo: () => deps.repo.switchCreate(slug),
+    message: 'memory: save before born'
+  })
   if (!daughter.ok) {
     await deps.repo.switchBranch(input.motherBranch)
-    return { ok: false, message: '开女儿分支失败，没有生（记忆不会丢）。' }
+    return {
+      ok: false,
+      message: `开女儿分支失败（${switchFailureText(daughter.reason)}），没有生（记忆不会丢）。`
+    }
   }
   const carried = await carryOutboxLetters(deps.repo, outbox)
   await deps.repo.writeFile('birth.json', birthRecord(slug, input.motherBranch, at, realName))

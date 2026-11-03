@@ -3,7 +3,8 @@
  *
  * 三块：
  * - 文案格式照拍的样板（D83：`🎗️提示` 抬头 + `✨<母亲> 生命耗尽  ta的女儿 ✨<女儿> 将接续ta的使命`）；
- * - 什么时候有：这一代已经不在（dead / 有 died_at）且有女儿；
+ * - 什么时候有：**这条分支**已经不在（dead / 该代有 died_at）且有女儿（D98：死亡按分支记，
+ *   同代别的枝还活着就不出回执）；
  * - 名字从家谱来（真名优先，老数据回退分支名）。
  */
 
@@ -107,7 +108,7 @@ describe('什么时候有回执', () => {
     expect(handoverReceiptOf(lineage, 'nope')).toBeNull()
   })
 
-  it('同代的其它分支（如 test-2）交接：也算这一代，出回执', async () => {
+  it('同代的其它分支（如 test-2）没交接：不出回执（D98：死亡按分支记）', async () => {
     const { lineage } = await handoverLineage()
     const withSide = withBranchAdded(lineage, {
       branch: 'test-2',
@@ -116,7 +117,9 @@ describe('什么时候有回执', () => {
       at: 1_500
     })
     if (withSide === null) throw new Error('seed failed')
-    expect(handoverReceiptOf(withSide, 'test-2')).toBe(
+    // 生女儿的是 default 这条分支；test-2 还活着、没交接过，回执不该挂在它头上
+    expect(handoverReceiptOf(withSide, 'test-2')).toBeNull()
+    expect(handoverReceiptOf(withSide, 'default')).toBe(
       '✨<default> 生命耗尽  ta的女儿 ✨<鱼苗> 将接续ta的使命'
     )
   })

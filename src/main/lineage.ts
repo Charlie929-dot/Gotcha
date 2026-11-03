@@ -546,8 +546,13 @@ export interface AddGenerationInput {
 }
 
 /**
- * 追加一代：新 generation + 新 branch（parent=null，代根），母亲那一代记 died_at、
- * 母亲分支置 dead，活动节点切到女儿。任一条不合法返回 null，由调用方报原因。
+ * 追加一代：新 generation + 新 branch（parent=null，代根），母亲**那条分支**置 dead，
+ * 活动节点切到女儿。任一条不合法返回 null，由调用方报原因。
+ *
+ * 2026-11-03 改口径（D98）：出生**不再给这一代写 `died_at`**——同代可以有别的岔口
+ * （`default-2` 之外的 `default` / `test` / `life`），一条枝生了女儿不代表整代都结束；
+ * 死亡只记在分支上（`status: 'dead'`），读者按分支判只读。旧家谱里已有的 `died_at`
+ * 照旧读，不迁移、不清除。
  */
 export function withGenerationAdded(lineage: Lineage, input: AddGenerationInput): Lineage | null {
   if (input.branch.trim() === '' || input.nickname.trim() === '') return null
@@ -567,9 +572,7 @@ export function withGenerationAdded(lineage: Lineage, input: AddGenerationInput)
     ...lineage,
     active: input.branch,
     generations: [
-      ...lineage.generations.map((item) =>
-        item.id === motherGeneration.id ? { ...item, died_at: input.at } : item
-      ),
+      ...lineage.generations,
       {
         id: generationId,
         branch: input.branch,

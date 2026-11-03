@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 生命耗尽时的兜底传承（2026-11-02，D97）
  *
  * 守这几件事：
@@ -219,6 +219,8 @@ describe('inheritAfterLife · 真实 git 仓', () => {
     expect(read.lineage.active).toBe(result.branch)
     expect(read.lineage.generations).toHaveLength(2)
     expect(findBranch(read.lineage, 'default')?.status).toBe('dead')
+    // D98：代不置死，只死母亲那条分支
+    expect(generationOf(read.lineage, 'default')?.died_at).toBeNull()
     expect(generationOf(read.lineage, result.branch)?.nickname).toBe('default的女儿')
 
     // 信真的带进女儿分支：letters/<id>.md 在、unread 里有她那一封

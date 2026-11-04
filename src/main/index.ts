@@ -251,6 +251,7 @@ import { BALL_STATE_FILE } from './ball-state'
 import { createBallShell, type BallShell } from './ball'
 import { createBallMenu, type BallMenuShell } from './ball-menu'
 import { installTray, type TrayShell } from './tray'
+import { ensureStartupRegistration, setStartupEnabled, type StartupDeps } from './startup'
 import { toggleEnabled } from './tray-menu'
 import {
   DEFAULT_HOTKEYS,
@@ -1876,11 +1877,29 @@ const primaryInstance = claimSingleInstance(app, () => {
   openAsk()
 })
 
+/** 开机自启的 Electron 侧依赖（只在打包态真正写 HKCU Run；标记在 userData 下） */
+function startupDeps(): StartupDeps {
+  return {
+    packaged: app.isPackaged,
+    userDataDir: app.getPath('userData'),
+    getLoginItem: () => app.getLoginItemSettings(),
+    setLoginItem: (openAtLogin) =>
+      app.setLoginItemSettings({ openAtLogin, path: process.execPath }),
+    log: (message, data) => captureLog('info', message, data)
+  }
+}
+
 if (primaryInstance) {
   app.whenReady().then(async () => {
     installCrashLogging()
     cleanTempFramesOnStartup()
     startTempJanitor()
+    // M5 打包首发：打包态首次启动注册「开机自启」；用户以后自己关掉不会被强写（startup.ts）
+    try {
+      ensureStartupRegistration(startupDeps())
+    } catch (error) {
+      captureLog('warn', 'startup registration failed', { error: String(error) })
+    }
     // 选区问答的截图随对话留存 30 天：启动时按年龄清一轮（读不到图的历史条目界面如实降级）
     try {
       pruneAskShots(app.getPath('userData'))
@@ -3982,7 +4001,19 @@ if (primaryInstance) {
           app.quit()
         }
       },
-      controller.status()
+      controller.status(),
+      {
+        // 托盘「开机自启」勾选：只有打包态出现，状态以系统启动项为准
+        available: () => app.isPackaged,
+        enabled: () => app.getLoginItemSettings().openAtLogin,
+        toggle: () => {
+          try {
+            setStartupEnabled(startupDeps(), !app.getLoginItemSettings().openAtLogin)
+          } catch (error) {
+            captureLog('warn', 'startup toggle failed', { error: String(error) })
+          }
+        }
+      }
     )
 
     // 球是常驻外壳：窗口被关掉（异常 / 调试）就退出，避免只剩隐藏采集窗口驻留进程

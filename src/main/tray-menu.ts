@@ -13,13 +13,21 @@
 import type { CaptureStatus } from './capture-controller'
 import type { MenuItemConstructorOptions } from 'electron'
 
-export type TrayMenuActionId = 'open-ask' | 'open-settings' | 'toggle-capture' | 'quit'
+export type TrayMenuActionId =
+  | 'open-ask'
+  | 'open-settings'
+  | 'toggle-capture'
+  | 'toggle-autostart'
+  | 'quit'
 
 export interface TrayMenuAction {
   id: TrayMenuActionId
   label: string
   enabled: boolean
   click: () => void
+  /** checkbox 项（托盘「开机自启」）；球右键菜单的渲染层不画勾，所以那一路不放它 */
+  checkbox?: boolean
+  checked?: boolean
 }
 
 export interface TrayMenuSeparator {
@@ -66,6 +74,21 @@ export function buildTrayMenu(status: CaptureStatus, actions: TrayMenuActions): 
   ]
 }
 
+/** 托盘专用「开机自启」勾选项：只加在托盘菜单里（球右键菜单不渲染 checked） */
+export function autostartMenuEntry(
+  state: { available: boolean; enabled: boolean },
+  toggle: () => void
+): TrayMenuAction {
+  return {
+    id: 'toggle-autostart',
+    label: '开机自启',
+    enabled: state.available,
+    click: toggle,
+    checkbox: true,
+    checked: state.available && state.enabled
+  }
+}
+
 function isSeparator(entry: TrayMenuEntry): entry is TrayMenuSeparator {
   return (entry as TrayMenuSeparator).type === 'separator'
 }
@@ -73,7 +96,14 @@ function isSeparator(entry: TrayMenuEntry): entry is TrayMenuSeparator {
 /** 菜单项 → Electron 模板（托盘与球右键共用；类型导入不引入 Electron 运行时） */
 export function toMenuTemplate(entry: TrayMenuEntry): MenuItemConstructorOptions {
   if (isSeparator(entry)) return { type: 'separator' }
-  return { id: entry.id, label: entry.label, enabled: entry.enabled, click: entry.click }
+  const base: MenuItemConstructorOptions = {
+    id: entry.id,
+    label: entry.label,
+    enabled: entry.enabled,
+    click: entry.click
+  }
+  if (entry.checkbox) return { ...base, type: 'checkbox', checked: entry.checked === true }
+  return base
 }
 
 /** 托盘图标：32×32 圆球（浅色球体 + 深色内核），内联 PNG，见 §5「不新增依赖」 */

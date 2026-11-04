@@ -7,7 +7,14 @@
 
 import { Menu, Tray, nativeImage } from 'electron'
 import type { CaptureStatus } from './capture-controller'
-import { buildTrayMenu, toMenuTemplate, TRAY_ICON_DATA_URL, type TrayMenuActions } from './tray-menu'
+import {
+  autostartMenuEntry,
+  buildTrayMenu,
+  toMenuTemplate,
+  TRAY_ICON_DATA_URL,
+  type TrayMenuActions,
+  type TrayMenuEntry
+} from './tray-menu'
 
 export interface TrayShell {
   tray: Tray
@@ -17,13 +24,46 @@ export interface TrayShell {
   dispose(): void
 }
 
-export function installTray(actions: TrayMenuActions, status: CaptureStatus): TrayShell {
+/** 托盘「开机自启」勾选：只有打包态可用；状态以系统启动项为准 */
+export interface TrayAutostart {
+  available(): boolean
+  enabled(): boolean
+  toggle(): void
+}
+
+export function installTray(
+  actions: TrayMenuActions,
+  status: CaptureStatus,
+  autostart?: TrayAutostart
+): TrayShell {
   const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL)
   const tray = new Tray(icon)
   tray.setToolTip('记忆球 Gotcha')
 
+  let currentStatus = status
+
+  const entries = (): TrayMenuEntry[] => {
+    const base = buildTrayMenu(currentStatus, actions)
+    if (!autostart || !autostart.available()) return base
+    // 托盘专用项：插在「记录开关」之后、「退出」之前（尾部固定是 separator + quit）
+    const entry = autostartMenuEntry(
+      { available: true, enabled: autostart.enabled() },
+      () => {
+        autostart.toggle()
+        render()
+      }
+    )
+    const insertAt = Math.max(0, base.length - 2)
+    return [...base.slice(0, insertAt), entry, ...base.slice(insertAt)]
+  }
+
+  const render = (): void => {
+    tray.setContextMenu(Menu.buildFromTemplate(entries().map(toMenuTemplate)))
+  }
+
   const update = (next: CaptureStatus): void => {
-    tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenu(next, actions).map(toMenuTemplate)))
+    currentStatus = next
+    render()
   }
   update(status)
 

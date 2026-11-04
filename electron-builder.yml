@@ -1,0 +1,78 @@
+# Windows 安装包（M5 打包；2026-11-04 首发）
+#
+# 目标：当前用户安装（不弹 UAC）、一键安装到 %LOCALAPPDATA%\Programs\Gotcha，
+# 同 appId 覆盖安装 = 升级；userData（%APPDATA%\gotcha，含 memory.db / 家谱 / 密钥）不动。
+#
+# 随包资源：模型 / OCR / UIA 脚本 / 两个自编译 addon。
+# 运行时按 `process.resourcesPath` 找它们（index.ts:1402、chain-recording.ts:87、
+# screen-grab.ts:48、understand/embedding/paths.ts:66），所以用 extraResources 放到
+# `<安装目录>\resources\` 下，而不是打进 asar。
+
+appId: com.charlie929.gotcha
+productName: Gotcha
+copyright: Copyright © 2026 Charlie929
+
+directories:
+  output: dist
+  buildResources: build
+
+# 只把构建产物与 package.json 放进 asar；生产依赖（better-sqlite3 / onnxruntime-node /
+# active-win / ws / pinyin-pro / electron-log）由 electron-builder 按 dependencies 自动收。
+# 排除其他平台的预编译二进制：本机只装 win32-x64，带上 darwin/linux/arm64 会白占
+# ~236MB 解包体积（onnxruntime 223MB + better-sqlite3 13MB）。
+files:
+  - out/**/*
+  - package.json
+  - '!**/node_modules/onnxruntime-node/bin/napi-v6/darwin/**'
+  - '!**/node_modules/onnxruntime-node/bin/napi-v6/linux/**'
+  - '!**/node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**'
+  - '!**/node_modules/better-sqlite3/prebuilds/darwin-*'
+  - '!**/node_modules/better-sqlite3/prebuilds/linux-*'
+  - '!**/node_modules/better-sqlite3/prebuilds/linuxmusl-*'
+  - '!**/node_modules/better-sqlite3/prebuilds/win32-arm64.node'
+  - '!**/node_modules/active-win/lib/binding/napi-6-darwin-unknown-arm64/**'
+  - '!**/node_modules/active-win/lib/binding/napi-6-darwin-unknown-x64/**'
+
+asar: true
+# 原生模块不能从 asar 里 dlopen，必须解包：
+# - better-sqlite3：prebuilds/win32-x64.node
+# - onnxruntime-node：bin/napi-v6/win32/x64/*.dll + binding
+# - active-win：lib/binding/napi-9-win32-unknown-x64/node-active-win.node
+asarUnpack:
+  - '**/node_modules/better-sqlite3/**'
+  - '**/node_modules/onnxruntime-node/**'
+  - '**/node_modules/active-win/**'
+
+extraResources:
+  - from: resources/models
+    to: models
+  - from: resources/ocr
+    to: ocr
+  - from: resources/chain
+    to: chain
+  - from: native/chain-hook/build/Release/chain_hook.node
+    to: native/chain_hook.node
+  - from: native/screen-grab/build/Release/screen_grab.node
+    to: native/screen_grab.node
+
+# 全部原生依赖都是 N-API 预编译（better-sqlite3 13 / active-win 9 / onnxruntime-node 1.30），
+# 不需要 electron-rebuild；关掉重编译，避免打包时去拉 VS 工具链。
+npmRebuild: false
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowElevation: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Gotcha
+  runAfterFinish: true
+  # 卸载不删 userData：记忆/家谱/密钥要保下来，重装即恢复
+  deleteAppDataOnUninstall: false
+  artifactName: Gotcha-Setup-${version}.${ext}

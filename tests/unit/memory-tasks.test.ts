@@ -576,3 +576,101 @@ describe('窗口判定', () => {
     expect(occurrenceInWindow(task, at('2026-11-01', '00:00'), at('2026-11-02', '00:00'))).toBeNull()
   })
 })
+
+/**
+ * 2026-11-02 真机事故：模型在投递过程中 `cancel_task` 成功，投递结束结算又把它写回 active，
+ * 第二天重复提醒。结算只能改「还活着」的行。
+ */
+describe('结算不把已取消的任务掰回来', () => {
+  it('执行中被取消：给 nextDueAt 结算后仍是 cancelled', () => {
+    const due = at('2026-11-02', '17:40')
+    const task = createTask(db, {
+      instruction: '放学后去跑步',
+      nextDueAt: due,
+      repeat: 'daily',
+      origin: 'user',
+      now: due - 60_000
+    })
+    expect(claimTask(db, task.id, due)).not.toBeNull()
+    cancelTask(db, task.id, due + 1_000)
+    settleTask(db, task.id, { nextDueAt: due + 10 * 60_000 }, due + 2_000)
+    const row = getTaskById(db, task.id)
+    expect(row?.state).toBe('cancelled')
+    expect(row?.next_due_at).toBe(due)
+  })
+
+  it('执行中被取消：按重复规则推进后仍是 cancelled', () => {
+    const due = at('2026-11-02', '17:40')
+    const task = createTask(db, {
+      instruction: '放学后去跑步',
+      nextDueAt: due,
+      repeat: 'daily',
+      origin: 'user',
+      now: due - 60_000
+    })
+    expect(claimTask(db, task.id, due)).not.toBeNull()
+    cancelTask(db, task.id, due + 1_000)
+    settleTask(db, task.id, {}, due + 2_000)
+    const row = getTaskById(db, task.id)
+    expect(row?.state).toBe('cancelled')
+    expect(row?.next_due_at).toBe(due)
+  })
+
+  it('执行中被取消：一次性任务不会被结算成 completed', () => {
+    const due = at('2026-11-02', '17:40')
+    const task = createTask(db, {
+      instruction: '一次性提醒',
+      nextDueAt: due,
+      origin: 'user',
+      now: due - 60_000
+    })
+    expect(claimTask(db, task.id, due)).not.toBeNull()
+    cancelTask(db, task.id, due + 1_000)
+    settleTask(db, task.id, {}, due + 2_000)
+    expect(getTaskById(db, task.id)?.state).toBe('cancelled')
+  })
+})
+
+/**
+ * 2026-11-02 真机事故：投递失败时用 `nextDueAt: at + 10min` 重试，把「每天 17:40」
+ * 一步一步推成「每天 22:00」。失败只能退避，不能动锚点。
+ */
+describe('失败退避不动周期任务的锚点', () => {
+  it('retryIn：只放开租约，next_due_at 与 state 原样', () => {
+    const due = at('2026-11-02', '17:40')
+    const task = createTask(db, {
+      instruction: '放学后去跑步',
+      nextDueAt: due,
+      repeat: 'daily',
+      origin: 'user',
+      now: due - 60_000
+    })
+    expect(claimTask(db, task.id, due)).not.toBeNull()
+    settleTask(db, task.id, { retryIn: 10 * 60_000 }, due + 1_000)
+    const row = getTaskById(db, task.id)
+    expect(row?.next_due_at).toBe(due)
+    expect(row?.state).toBe('active')
+    // 租约必须放开，否则同一次 occurrence 再也抢不到、也就永远不重试
+    expect(row?.run_key).toBeNull()
+    expect(claimTask(db, task.id, due + 11 * 60_000)).not.toBeNull()
+  })
+
+  it('retryIn 之后成功：按原锚点推进（17:40 → 次日 17:40，不是 22:00）', () => {
+    const due = at('2026-11-02', '17:40')
+    const task = createTask(db, {
+      instruction: '放学后去跑步',
+      nextDueAt: due,
+      repeat: 'daily',
+      origin: 'user',
+      now: due - 60_000
+    })
+    claimTask(db, task.id, due)
+    settleTask(db, task.id, { retryIn: 10 * 60_000 }, due + 1_000)
+    claimTask(db, task.id, due + 20 * 60_000)
+    settleTask(db, task.id, {}, due + 20 * 60_000)
+    const row = getTaskById(db, task.id)
+    expect(row?.state).toBe('active')
+    expect(row?.next_due_at).toBe(at('2026-11-03', '17:40').valueOf())
+  })
+})
+

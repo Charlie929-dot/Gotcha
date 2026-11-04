@@ -343,4 +343,70 @@ describe('运行时', () => {
     expect(runtime.admin().running).toBeNull()
     runtime.stop()
   })
+
+  /**
+   * 2026-11-02 真机事故：投递失败时把 `nextDueAt = at + 10min` 写回库，
+   * 26 次失败把「每天 17:40」推成「每天 22:00」。失败只能退避，不能动锚点。
+   */
+  it('失败退避：next_due_at 不动、按退避时间再叫醒、到点后能再派发', async () => {
+    const due = at('2026-11-01', '17:40')
+    const seed = openDatabase(dbPath)
+    const task = createTask(seed, {
+      instruction: '放学后去跑步',
+      nextDueAt: due,
+      repeat: 'daily',
+      origin: 'user',
+      now: due - 60_000
+    })
+    seed.close()
+
+    let clock = due
+    const delivered: number[] = []
+    const timers: { fn: () => void; ms: number }[] = []
+    const runtime = createTaskRuntime({
+      dbPath,
+      now: () => clock,
+      vaultDir: () => null,
+      backupDir: () => null,
+      deliver: (row) => {
+        delivered.push(row.id)
+        return { retryIn: 10 * 60_000 }
+      },
+      log: () => {},
+      setTimer: (fn, ms) => {
+        const handle = { fn, ms }
+        timers.push(handle)
+        return handle
+      },
+      clearTimer: () => undefined
+    })
+    runtime.start()
+    await runtime.pump()
+    expect(delivered).toEqual([task.id])
+
+    // 库里锚点原样，租约放开（能再抢），状态仍 active
+    const after = openTaskDb(dbPath)
+    expect(after).not.toBeNull()
+    const row = after!.prepare(
+      'SELECT next_due_at, state, run_key FROM mem_tasks WHERE id = ?'
+    ).get(task.id) as { next_due_at: number; state: string; run_key: string | null }
+    expect(row.next_due_at).toBe(due)
+    expect(row.state).toBe('active')
+    expect(row.run_key).toBeNull()
+    after?.close()
+
+    // 下一次叫醒按退避时间（10 分钟），不是按已经过去的 due
+    expect(timers[timers.length - 1].ms).toBe(10 * 60_000)
+
+    // 退避期内：不派发
+    clock = due + 9 * 60_000
+    await runtime.pump()
+    expect(delivered).toEqual([task.id])
+
+    // 退避结束后：能再派发
+    clock = due + 11 * 60_000
+    await runtime.pump()
+    expect(delivered.length).toBe(2)
+    runtime.stop()
+  })
 })

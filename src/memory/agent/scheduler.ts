@@ -7,7 +7,8 @@
  * - **单飞**：同一时刻只跑一条任务；跑到一半又来一个，等这一轮结束再取；
  * - **去重**：`claim` 用库里的 `run_key` 抢租约，重启后同一次 occurrence 不会再跑；
  * - **过期不补发**：每次醒来先收掉过期的（`expire`），避免过期任务永远排在队首空转；
- * - **失败不丢**：执行抛错就把它推到 1 分钟后重试，而不是当成已完成。
+ * - **失败不丢**：执行抛错就交 `retryIn` 让调用方退避（默认 1 分钟）后再试；
+ *   **不改 `next_due_at`**——重复任务的钟点不能被一次失败推走（2026-11-02 事故）。
  *
  * 本模块不 import 数据库、不 import 模型：库读写与「真的执行」都由调用方注入，
  * 所以能用假钟、假定时器在单测里精确验证「什么时候醒、醒几次、跑几条」。
@@ -116,7 +117,8 @@ export function createTaskScheduler(deps: TaskSchedulerDeps): TaskScheduler {
           outcome = (await deps.run(claimed)) ?? {}
         } catch (error) {
           deps.onError?.(error)
-          outcome = { nextDueAt: now + RETRY_MS }
+          // 退避重试而不是改 `next_due_at`：重复任务的钟点不能被一次失败推走
+          outcome = { retryIn: RETRY_MS }
         }
         deps.settle(claimed.id, outcome, deps.now())
       }

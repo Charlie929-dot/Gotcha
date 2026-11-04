@@ -775,6 +775,13 @@ export interface TaskOutcome {
   state?: TaskState
   /** 延后到什么时候（任务仍保持 active）；不传就按重复规则推进或完成 */
   nextDueAt?: number | null
+  /**
+   * 这次没送出去，过多久再试（毫秒）。**不动 `next_due_at`、不动 `state`**：
+   * 重复任务的锚点是它自己的钟点（如「每天 17:40」），重试不能把它推走
+   * （2026-11-02 真机事故：26 次失败把 17:40 推成 22:00）。
+   * 只清 `run_key` 放开租约，退避时间由调度器在内存里记。
+   */
+  retryIn?: number
   /** 本次执行时间；默认 now */
   ranAt?: number
 }
@@ -782,10 +789,15 @@ export interface TaskOutcome {
 /**
  * 执行完之后结算：
  * - 明确给了 `state` → 照办；
+ * - 给了 `retryIn` → 失败退避：只清租约 + 记 `last_run_at`，到点与状态都不动；
  * - 给了 `nextDueAt` → 延后（保持 active）；
  * - 重复任务 → 把 `next_due_at` 推到下一次（跨过已经过去的若干次，不补发）；
  * - 一次性任务 → `completed`。
  * 无论哪条，`last_run_at` 只在真的跑过之后才写。
+ *
+ * **只在行仍是 `active` 时才改**（2026-11-02 事故）：这一轮跑的过程中用户可能已经
+ * 取消 / 暂停 / 完成了它；结算再写一次 `state = 'active'` 会把取消的活掰回来
+ * （真机：#6 被 `cancel_task` 取消，结算后自己复活，第二天重复提醒）。
  */
 export function settleTask(db: Db, id: number, outcome: TaskOutcome, now = Date.now()): TaskRow | null {
   const current = selectById(db, id)
@@ -800,8 +812,20 @@ export function settleTask(db: Db, id: number, outcome: TaskOutcome, now = Date.
       now
     })
   }
+  // 失败退避：锚点与状态都不碰，只放开租约让调度器到点再抢
+  if (outcome.retryIn !== undefined) {
+    db.prepare(
+      `UPDATE mem_tasks SET run_key = NULL, last_run_at = ?, updated_at = ?
+       WHERE id = ? AND state = 'active'`
+    ).run(ranAt, now, id)
+    return selectById(db, id)
+  }
   if (outcome.nextDueAt !== undefined) {
-    return updateTask(db, { id, nextDueAt: outcome.nextDueAt, state: 'active', now })
+    db.prepare(
+      `UPDATE mem_tasks SET next_due_at = ?, last_run_at = ?, updated_at = ?
+       WHERE id = ? AND state = 'active'`
+    ).run(optionalStamp(outcome.nextDueAt), ranAt, now, id)
+    return selectById(db, id)
   }
   if (current.repeat !== '' && current.next_due_at !== null) {
     let next = advanceOccurrence(current.next_due_at, current.repeat)
@@ -811,13 +835,14 @@ export function settleTask(db: Db, id: number, outcome: TaskOutcome, now = Date.
       guard += 1
     }
     db.prepare(
-      `UPDATE mem_tasks SET next_due_at = ?, state = 'active', last_run_at = ?, updated_at = ?
-       WHERE id = ?`
+      `UPDATE mem_tasks SET next_due_at = ?, last_run_at = ?, updated_at = ?
+       WHERE id = ? AND state = 'active'`
     ).run(next, ranAt, now, id)
     return selectById(db, id)
   }
   db.prepare(
-    `UPDATE mem_tasks SET state = 'completed', last_run_at = ?, updated_at = ? WHERE id = ?`
+    `UPDATE mem_tasks SET state = 'completed', last_run_at = ?, updated_at = ?
+     WHERE id = ? AND state = 'active'`
   ).run(ranAt, now, id)
   return selectById(db, id)
 }

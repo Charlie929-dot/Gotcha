@@ -3755,7 +3755,8 @@ if (primaryInstance) {
         })
         if (result.kind === 'error') {
           captureLog('warn', 'task deliver failed', { id: task.id, reason: result.reason })
-          return { nextDueAt: at + 10 * 60 * 1000 }
+          // 退避重试，但**不动** next_due_at：重复任务的钟点由用户/规则定，失败不能把它推走
+          return { retryIn: 10 * 60 * 1000 }
         }
         if (!quiet) {
           try {

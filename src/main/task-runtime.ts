@@ -183,6 +183,12 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
   let unavailableUntil = 0
   /** 此刻正在跑的那条（单飞；设置抽屉显示「正在做」） */
   let runningTask: TaskRow | null = null
+  /**
+   * 失败退避（2026-11-02）：任务 id → 什么时候才允许再试。
+   * **只在内存里**：不写库，所以重复任务的 `next_due_at` 锚点不会被一次失败推走
+   * （真机事故：26 次失败把「每天 17:40」推成 22:00）。重启丢表最多多试一次。
+   */
+  const retryUntil = new Map<number, number>()
 
   const handle = (): Db | null => {
     if (closed) return null
@@ -210,11 +216,21 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
       const current = handle()
       if (current === null) return null
       const next = nextDueTask(current)
-      return next?.next_due_at ?? null
+      if (next === null || next.next_due_at === null) return null
+      const due = next.next_due_at
+      const hold = retryUntil.get(next.id)
+      if (hold === undefined || hold <= due) return due
+      // 队首这条还在退避里：它后面可能有更早到点的（退避结束之前就该叫醒）
+      const others = listDueTasks(current, hold, 50).filter(
+        (row) => row.id !== next.id && row.next_due_at !== null
+      )
+      return others.length > 0 ? (others[0].next_due_at as number) : hold
     },
     dueTasks: (at) => {
       const current = handle()
-      return current === null ? [] : listDueTasks(current, at)
+      if (current === null) return []
+      // 退避期内的先不给：它们到点了，但要等退避结束再试
+      return listDueTasks(current, at).filter((row) => (retryUntil.get(row.id) ?? 0) <= at)
     },
     claim: (id, at) => {
       const current = handle()
@@ -231,6 +247,12 @@ export function createTaskRuntime(deps: TaskRuntimeDeps): TaskRuntime {
     settle: (id, outcome, at) => {
       const current = handle()
       if (current === null) return
+      // 退避时间只进内存：库里的 next_due_at 保持原样（周期任务的锚点不能被重试推走）
+      if (outcome.retryIn !== undefined) {
+        retryUntil.set(id, at + Math.max(0, outcome.retryIn))
+      } else {
+        retryUntil.delete(id)
+      }
       settleTask(current, id, outcome, at)
     },
     expire: (at) => {

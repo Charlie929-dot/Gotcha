@@ -46,6 +46,7 @@ import type {
   QuoteMessageLookup,
   TaskToolDeps
 } from './tools'
+import type { WorldToolDeps } from './world'
 import {
   EVIDENCE_TEXT_CHARS,
   type ChainAskChatRecent,
@@ -120,12 +121,13 @@ export interface ChainAskOptions {
   /** 任务记忆（自调用 v0.2 §6）：四个任务工具的端口；不传 = 这台机器没有任务库 */
   tasks?: TaskToolDeps
   /**
-   * 小本本（自调用 v0.2 §7）：`read()` 每轮注入 `<now>`，`update` 是
+   * 小本本（自调用 v0.2 §7）：`read()` 由 read_notebook 主动翻阅，`update` 是
    * `update_notebook` 的端口；不传 = 这个分支没有小本本。
    */
   notebook?: NotebookToolDeps & {
     read(): readonly { id: string; section: string; text: string }[]
   }
+  world?: WorldToolDeps
   /**
    * 成长档案（自调用 v0.2 §8）：`write` 是 `write_growth` 的端口；
    * 不传 = 这个分支没有成长档案工具（或记忆仓不可用）。
@@ -357,6 +359,7 @@ export async function askChain(options: ChainAskOptions, question: string): Prom
         ...(options.letters ? { letters: options.letters } : {}),
         ...(options.tasks ? { tasks: options.tasks } : {}),
         ...(options.notebook ? { notebook: options.notebook } : {}),
+        ...(options.world ? { world: options.world } : {}),
         ...(options.growth ? { growth: options.growth } : {}),
         ...(options.dueTasks ? { dueTasks: options.dueTasks } : {}),
         ...(options.unreadLetters !== undefined ? { unreadLetters: options.unreadLetters } : {}),

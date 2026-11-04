@@ -116,7 +116,7 @@ describe('life 主干 + ask 分支（真 git 仓）', { timeout: TIMEOUT }, () =
       [
         '[0] life · 主干',
         '  [1] ask · 纯模型 · 0 个工具  ← 当前',
-        '  [2] default · 17 个工具'
+        '  [2] default · 19 个工具'
       ].join('\n')
     )
     const history = bodyOf(await run('/log 1'))

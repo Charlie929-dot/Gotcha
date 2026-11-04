@@ -191,6 +191,7 @@ import {
 } from './memory-repo-settings'
 import { createMemoryScheduler } from './memory-schedule'
 import { createNotebookStore } from './notebook'
+import { createWorldStore } from './world'
 import { createGrowthStore } from './growth'
 import { forkDetachedIfNeeded } from './node-fork'
 import {
@@ -2191,7 +2192,7 @@ if (primaryInstance) {
     const lineageFile = join(app.getPath('userData'), 'memory-lineage.json')
     /**
      * 小本本（自调用 v0.2 §7）：记忆仓里的 `notebook.md`，跟着分支走。
-     * `read()` 每轮进 `<now>`，`update` 是 `update_notebook` 的端口；`/notebook` 看 / 删。
+     * `read()` 由 read_notebook 主动翻阅，`update` 是 `update_notebook` 的端口；`/notebook` 看 / 删。
      */
     const notebookStore = createNotebookStore({
       root: memoryRepo.root,
@@ -2617,7 +2618,7 @@ if (primaryInstance) {
     ): ChainAskOptions => {
       const chat = mode.kind === 'chat'
       const tools = mode.tools
-      // 人设：只有 chat（persona 分支）注入（卡启用 → 卡全文；卡没启用 → 名字 / 口吻 / 红线）。
+      // 人设：只有 chat（persona 分支）注入（卡启用 → 卡全文；卡没启用 → 名字 / 相识印象）。
       // 纯模型（ask）不带人设，免得它把「问个技术问题」也演成角色。
       const persona = chat ? readPersona(db, { userDataDir: app.getPath('userData') }) : null
       const personaPrompt = persona !== null ? buildPersonaPrompt(persona) : undefined
@@ -2688,9 +2689,10 @@ if (primaryInstance) {
               dueTasks: () => taskRuntime?.dueHints() ?? []
             }
           : {}),
-        // 小本本（自调用 v0.2 §7）：chat（persona）每轮注入当前核心页；
-        // 工具在不在由分支白名单决定（没挂 update_notebook 时只看不改）。
+        // 小本本（自调用 v0.2 §7）：chat（persona）主动领取与翻阅；
+        // 工具在不在由分支白名单决定（读写均按分支工具白名单决定）。
         ...(chat ? { notebook: notebookStore } : {}),
+        ...(chat && tools.includes('visit_world') ? { world: createWorldStore(notebookStore) } : {}),
         // 成长档案（自调用 v0.2 §8）：只有挂了 write_growth 的分支才接后端；
         // 全文不注入，写不写、写哪篇由 ta 在写作轮里自己决定。
         ...(hasGrowthTools(tools) ? { growth: growthStore } : {}),

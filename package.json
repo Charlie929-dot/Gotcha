@@ -1,7 +1,7 @@
 {
   "name": "gotcha",
   "productName": "Gotcha",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "记忆球（Gotcha / MemoryOrb）——常驻 Windows 桌面边缘的记忆球：记录屏幕使用，沉淀成可缩放探索的关系图谱（M1a 采集存储底座）",
   "private": true,
   "author": "Charlie929",

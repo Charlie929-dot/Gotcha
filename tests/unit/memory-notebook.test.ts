@@ -15,8 +15,6 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
-  NOTEBOOK_ENTRY_MAX_CHARS,
-  NOTEBOOK_SECTION_MAX_ENTRIES,
   addNotebookEntry,
   emptyNotebookText,
   normalizeNotebookText,
@@ -57,14 +55,15 @@ describe('解析 / 序列化', () => {
       '- n1 · 2026-10-31 · 答应过不连续追问'
     ].join('\n')
     const notebook = parseNotebook(text, TODAY)
-    expect(notebook.entries.map((item) => item.id)).toEqual(['n2', 'n3', 'n1'])
+    expect(notebook.entries.map((item) => item.id)).toEqual(['n2', 'n10', 'n9', 'n1'])
     expect(notebook.entries[1]).toEqual({
-      id: 'n3',
+      id: 'n10',
       section: 'about_you',
       text: '也爱在夜里写东西',
       at: TODAY
     })
-    expect(notebook.entries[2]?.text).toBe('答应过不连续追问')
+    expect(notebook.entries[2]?.section).toBe('放在外面的行')
+    expect(notebook.entries[3]?.text).toBe('答应过不连续追问')
   })
 
   it('序列化 → 再解析：内容一致，四个分区标题都在', () => {
@@ -84,7 +83,7 @@ describe('解析 / 序列化', () => {
   })
 
   it('正文归一：折叠空白、去掉开头的列表符', () => {
-    expect(normalizeNotebookText('  -  喜欢\n  周深  ')).toBe('喜欢 周深')
+    expect(normalizeNotebookText('  -  喜欢\n  周深  ')).toBe('喜欢\n  周深')
   })
 })
 
@@ -101,54 +100,39 @@ describe('增 / 改 / 删', () => {
     expect(second.total).toBe(2)
   })
 
-  it('add：同一栏重复的内容如实拒绝，指向已有的编号', () => {
-    const base = addNotebookEntry({ entries: [] }, 'about_you', '喜欢周深', TODAY)
-    if (!base.ok) throw new Error('setup failed')
-    const again = addNotebookEntry(base.notebook, 'about_you', '喜欢周深', TODAY)
-    expect(again.ok).toBe(false)
-    if (again.ok) return
-    expect(again.message).toContain('n1')
-    expect(again.message).toContain('revise')
+  it('add：重复的文字也各自保留，编号不同', () => {
+    const first = addNotebookEntry({ entries: [] }, '花', '今天开花了', TODAY)
+    if (!first.ok) throw new Error(first.message)
+    const second = addNotebookEntry(first.notebook, '花', '今天开花了', TODAY)
+    expect(second).toMatchObject({ ok: true, total: 2, entry: { id: 'n2' } })
   })
 
-  it('add：单条太长 / 空内容都拒', () => {
-    const tooLong = '好'.repeat(NOTEBOOK_ENTRY_MAX_CHARS + 1)
-    const long = addNotebookEntry({ entries: [] }, 'about_you', tooLong, TODAY)
-    expect(long.ok).toBe(false)
-    if (!long.ok) expect(long.message).toContain(String(NOTEBOOK_ENTRY_MAX_CHARS))
-    const empty = addNotebookEntry({ entries: [] }, 'about_you', '   ', TODAY)
-    expect(empty.ok).toBe(false)
+  it('add：长文与段落完整往返，空内容仍是无效参数', () => {
+    const text = '字'.repeat(8000) + '\n\n第二段\n  有缩进'
+    const added = addNotebookEntry({ entries: [] }, '我的梦', text, TODAY)
+    expect(added).toMatchObject({ ok: true, entry: { text } })
+    if (!added.ok) throw new Error(added.message)
+    expect(parseNotebook(serializeNotebook(added.notebook), TODAY)).toEqual(added.notebook)
+    expect(addNotebookEntry({ entries: [] }, '我的梦', '   ', TODAY).ok).toBe(false)
   })
 
-  it('add：一栏满了先拒，并列出编号让人合并', () => {
+  it('add：同一栏目超过原五条限制，没有条数或全本字数上限', () => {
     let notebook: Notebook = { entries: [] }
-    for (let index = 0; index < NOTEBOOK_SECTION_MAX_ENTRIES; index += 1) {
-      const added = addNotebookEntry(notebook, 'about_you', `第 ${index} 条`, TODAY)
-      if (!added.ok) throw new Error('setup failed')
+    for (let index = 0; index < 30; index += 1) {
+      const added = addNotebookEntry(notebook, '看云', `第${index}天 ` + '云'.repeat(200), TODAY)
+      if (!added.ok) throw new Error(added.message)
       notebook = added.notebook
     }
-    const over = addNotebookEntry(notebook, 'about_you', '再来一条', TODAY)
-    expect(over.ok).toBe(false)
-    if (over.ok) return
-    expect(over.message).toContain('满了')
-    expect(over.message).toContain('n1')
+    expect(notebook.entries).toHaveLength(30)
+    expect(parseNotebook(serializeNotebook(notebook), TODAY)).toEqual(notebook)
   })
 
-  it('add：全本超字数也拒（有界）', () => {
-    // 12 条 × 139 字 ≈ 1668 字；再塞一条 140 字的就过 1800
-    const chunk = '字'.repeat(138)
-    const entries: Notebook['entries'] = []
-    let index = 0
-    for (const section of ['about_you', 'recent_you', 'between_us', 'reminders'] as const) {
-      for (let i = 0; i < 3; i += 1) {
-        index += 1
-        entries.push(entry(`n${index}`, section, `${chunk}${index}`))
-      }
-    }
-    const over = addNotebookEntry({ entries }, 'about_you', `${chunk}新`, TODAY)
-    expect(over.ok).toBe(false)
-    if (over.ok) return
-    expect(over.message).toContain('上限')
+  it('新本子没有预设栏目，自取栏目名可以往返', () => {
+    expect(serializeNotebook({ entries: [] })).toBe('# 小本本\n')
+    const added = addNotebookEntry({ entries: [] }, '一些乱七八糟的想法', '很长的名字也不截断', TODAY)
+    if (!added.ok) throw new Error(added.message)
+    expect(parseNotebook(serializeNotebook(added.notebook), TODAY)).toEqual(added.notebook)
+    expect(serializeNotebook(added.notebook)).not.toContain('关于你')
   })
 
   it('revise：编号不变、位置不变、日期更新', () => {
@@ -168,7 +152,7 @@ describe('增 / 改 / 删', () => {
     })
   })
 
-  it('revise：不存在 / 与同栏另一条重复都拒', () => {
+  it('revise：不存在的编号拒绝，重复内容仍能写入', () => {
     const notebook: Notebook = {
       entries: [entry('n1', 'about_you', '喜欢周深'), entry('n2', 'about_you', '爱熬夜')]
     }
@@ -176,8 +160,7 @@ describe('增 / 改 / 删', () => {
     expect(missing.ok).toBe(false)
     if (!missing.ok) expect(missing.message).toContain('n9')
     const duplicate = reviseNotebookEntry(notebook, 'n2', '喜欢周深', TODAY)
-    expect(duplicate.ok).toBe(false)
-    if (!duplicate.ok) expect(duplicate.message).toContain('n1')
+    expect(duplicate).toMatchObject({ ok: true, entry: { id: 'n2', text: '喜欢周深' } })
   })
 
   it('remove：删掉一条，其余不动', () => {

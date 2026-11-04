@@ -82,11 +82,11 @@ describe('system 按工具分段（D64：动态事实改放 <now>）', () => {
     expect(text).toContain('<tools>')
     expect(text).toContain('search_info')
     expect(text).toContain('recall_diary')
-    expect(text).not.toContain('数据边界：')
+    expect(text).not.toContain('窗边的记录')
     const now = payloadOf(ALL).now
-    expect(now).toContain('数据边界：')
+    expect(now).toContain('窗边的记录')
     expect(now).toContain('此刻：现在是 2026-10-30')
-    expect(now).toContain('你想到的（只是联想')
+    expect(now).toContain('脑海里浮起几页旧日记')
   })
 
   it('只有日记：不写屏幕工具；<now> 不写数据边界 / 最近段', () => {
@@ -94,11 +94,11 @@ describe('system 按工具分段（D64：动态事实改放 <now>）', () => {
     expect(text).not.toContain('search_info')
     expect(text).toContain('recall_diary')
     const now = payloadOf(DIARY).now
-    expect(now).not.toContain('数据边界：')
+    expect(now).not.toContain('窗边的记录')
     expect(now).not.toContain('最近一段证据：')
     // 聊天仍给「此刻 / 想到的」（这是人味的来源，不是屏幕记忆）
     expect(now).toContain('此刻：')
-    expect(now).toContain('你想到的（只是联想')
+    expect(now).toContain('脑海里浮起几页旧日记')
   })
 
   it('空表（纯模型）：没有工具清单；<now> 只有时间', () => {
@@ -110,9 +110,9 @@ describe('system 按工具分段（D64：动态事实改放 <now>）', () => {
     // D88：时间行改成「现在是<时段> HH:mm（…）」+「距今天 24:00 还有 …」
     expect(now).toMatch(/^现在是(凌晨|早上|上午|中午|下午|傍晚|晚上) \d{2}:\d{2}/u)
     expect(now).toContain('距今天 24:00 还有')
-    expect(now).not.toContain('数据边界：')
-    // 底线仍在不编造
-    expect(text).toContain('不编造')
+    expect(now).not.toContain('窗边的记录')
+    // 有人格的分支不再叠加独立规则。
+    expect(text).not.toContain('<rules>')
   })
 
   it('有工具的收尾轮：不再追加消息（没有 tool call 本身就是收尾）', () => {

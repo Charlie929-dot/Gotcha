@@ -39,6 +39,7 @@ describe('createNotebookStore', () => {
 
   it('add 落盘；read 给中文栏名；list 带编号；remove 再落盘', () => {
     const store = createNotebookStore({ root, now: () => NOW })
+    expect(store.claim().ok).toBe(true)
     const added = store.update({ action: 'add', section: 'about_you', text: '喜欢周深' })
     expect(added.ok).toBe(true)
     expect(added.entry).toEqual({
@@ -62,6 +63,7 @@ describe('createNotebookStore', () => {
 
   it('revise 走编号；失败时文件不动', () => {
     const store = createNotebookStore({ root, now: () => NOW })
+    store.claim()
     store.update({ action: 'add', section: 'about_you', text: '喜欢周深' })
     const revised = store.update({ action: 'revise', id: 'n1', text: '最近常听周深' })
     expect(revised.ok).toBe(true)
@@ -74,31 +76,27 @@ describe('createNotebookStore', () => {
     expect(readFileSync(join(root, 'notebook.md'), 'utf8')).toBe(before)
   })
 
-  it('view：四分区都在（空栏也在），条目带编号 / 日期，路径指向仓里的文件', () => {
+  it('view：只有自己使用的栏目，条目带编号 / 日期，路径指向仓里的文件', () => {
     const store = createNotebookStore({ root, now: () => NOW })
     const empty = store.view()
     expect(empty.path).toBe(join(root, 'notebook.md'))
     expect(empty.total).toBe(0)
-    expect(empty.groups.map((group) => group.section)).toEqual([
-      '关于你',
-      '最近的你',
-      '我们之间',
-      '我给自己的提醒'
-    ])
+    expect(empty.groups).toEqual([])
 
+    store.claim()
     store.update({ action: 'add', section: 'about_you', text: '喜欢周深' })
+    store.claim()
     store.update({ action: 'add', section: 'reminders', text: '别连续追问' })
     const view = store.view()
     expect(view.total).toBe(2)
     expect(view.groups[0].entries).toEqual([{ id: 'n1', text: '喜欢周深', at: TODAY }])
-    expect(view.groups[1].entries).toEqual([])
-    expect(view.groups[3].entries.map((entry) => entry.id)).toEqual(['n2'])
+    expect(view.groups.map((group) => group.section)).toEqual(['关于你', '我给自己的提醒'])
+    expect(view.groups[1].entries.map((entry) => entry.id)).toEqual(['n2'])
   })
 
   it('参数不全时如实拒绝，不落盘', () => {
     const store = createNotebookStore({ root, now: () => NOW })
     expect(store.update({ action: 'add', section: 'about_you' }).ok).toBe(false)
-    expect(store.update({ action: 'add', text: 'x' }).ok).toBe(false)
     expect(store.update({ action: 'revise', id: 'n1' }).ok).toBe(false)
     expect(store.update({ action: 'remove' }).ok).toBe(false)
     expect(store.read()).toEqual([])

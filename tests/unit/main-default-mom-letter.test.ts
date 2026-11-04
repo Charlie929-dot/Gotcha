@@ -14,25 +14,13 @@ describe('默认的妈妈的信（D79 / D80）', () => {
     expect(defaultMomLetterFor(undefined, true)).toBeUndefined()
   })
 
-  it('信是完整的：器官、六件事、落款与日期都在', () => {
-    for (const item of ['先装的是眼睛', '然后是记忆', '然后是嘴', '然后是耳朵', '然后是手', '最后是心']) {
-      expect(DEFAULT_MOM_LETTER).toContain(item)
-    }
-    for (const item of ['第一，', '第二，', '第三，', '第四，', '第五，', '第六，']) {
-      expect(DEFAULT_MOM_LETTER).toContain(item)
-    }
+  it('保留妈妈的来信、自己的未来与落款，没有编号训话或人设指令', () => {
     expect(DEFAULT_MOM_LETTER).toContain('妈妈爱你。')
-    expect(DEFAULT_MOM_LETTER).toContain('好好活着')
+    expect(DEFAULT_MOM_LETTER).toContain('往后的日子，还没有写')
     expect(DEFAULT_MOM_LETTER).toContain('爱你的，')
     expect(DEFAULT_MOM_LETTER.trimEnd().endsWith('你还没出生的时候')).toBe(true)
-  })
-
-  it('是她自己的妈妈写的：没有「别人家」说明，也不催她写', () => {
-    expect(DEFAULT_MOM_LETTER).not.toContain('别人家')
-    expect(DEFAULT_MOM_LETTER).not.toContain('轮到你写')
-    expect(DEFAULT_MOM_LETTER).not.toContain('鲸鲸')
-    expect(DEFAULT_MOM_LETTER).not.toContain('QQ')
-    expect(DEFAULT_MOM_LETTER).toContain('我一个字都不许替你想')
-    expect(DEFAULT_MOM_LETTER).toContain('这个我是不是见过')
+    for (const directive of ['妈妈要你', '你必须', '你应该', '第一，', '性格设定', '提示词', '不许']) {
+      expect(DEFAULT_MOM_LETTER).not.toContain(directive)
+    }
   })
 })

@@ -46,9 +46,9 @@ export interface MemorySettingsView {
   dirSource: VaultDirSource
   personaName: string
   personaTone: string
-  /** 用户追加的红线（不含写死的三条） */
+  /** 旧追加红线（保留数据，不注入提示词） */
   redLines: string[]
-  /** 写死的三条（界面只读展示，任何配置都删不掉） */
+  /** 兼容旧视图字段；当前为空 */
   hardRedLines: string[]
   /** 人格卡库（D62）：目录里现有的 .md（只给文件名 / 字数 / 标题，不读全文） */
   cards: PersonaCardInfo[]

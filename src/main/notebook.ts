@@ -2,22 +2,23 @@
  * 小本本 · 主进程接线（自调用 v0.2 §7 / §12.2，2026-11-01）
  *
  * 把 `src/memory/notebook.ts` 的文件读写包成链层要的两个口子：
- * - `read()`：每轮注入 `<now>` 的当前核心页（带编号，模型据此 revise / remove）；
+ * - `read()`：read_notebook 主动翻阅内容（带编号，模型据此 revise / remove）；
  * - `update()`：`update_notebook` 的执行端口（add / revise / remove 后立刻落盘）；
  *
  * 文件在**记忆仓**里：`<memory-repo>/notebook.md`。它跟着分支走——换节点就是换一个人，
  * 小本本不串；git 里也有历史。用户 Obsidian 的日记一个字节都不碰。
  *
- * 读写都是同步小文件（< 4KB），不引 Promise；失败只回可读原因，不把异常抛进问答。
+ * 读写为本地文件操作，不引 Promise；失败只回可读原因，不把异常抛进问答。
  */
 
 import { join } from 'node:path'
+import { existsSync, writeFileSync } from 'node:fs'
 
 import type { NotebookUpdateRequest, NotebookUpdateResult } from '../chain/agent/tools'
 import {
   NOTEBOOK_FILE_NAME,
-  NOTEBOOK_SECTION_IDS,
-  NOTEBOOK_SECTION_LABELS,
+  notebookSections,
+  notebookSectionLabel,
   addNotebookEntry,
   isNotebookSection,
   notebookListText,
@@ -43,7 +44,7 @@ export interface NotebookAdminEntry {
   at: string
 }
 
-/** 设置抽屉「小本本」块：按四个分区排，空栏也留着（看得出结构） */
+/** 设置抽屉「小本本」块：按实际使用的栏目排列 */
 export interface NotebookAdminView {
   /** 文件路径（给人看；换分支 / 换人时这里也跟着变） */
   path: string
@@ -54,13 +55,15 @@ export interface NotebookAdminView {
 export interface NotebookStore {
   /** 小本本文件（`<记忆仓>/notebook.md`） */
   readonly path: string
-  /** 每轮注入用：当前全部条目（文件不存在 = 空数组） */
+  owned(): boolean
+  claim(): { ok: boolean; message: string }
+  /** 主动翻阅用：当前全部条目（文件不存在 = 空数组） */
   read(): readonly NotebookSnapshotEntry[]
   /** `update_notebook` 的端口：成功才落盘，失败如实回原因 */
   update(input: NotebookUpdateRequest): NotebookUpdateResult
   /** `/notebook` 的列表文本 */
   list(): string
-  /** 设置抽屉视图（四分区 + 编号） */
+  /** 设置抽屉视图（自定栏目 + 编号） */
   view(): NotebookAdminView
   /** `/notebook rm n3` 与抽屉删除共用 */
   remove(id: string): string
@@ -90,7 +93,7 @@ export function createNotebookStore(options: {
     const notebook = readNotebookFile(path, today())
     return notebook.entries.map((entry) => ({
       id: entry.id,
-      section: NOTEBOOK_SECTION_LABELS[entry.section],
+      section: notebookSectionLabel(entry.section),
       text: entry.text
     }))
   }
@@ -98,11 +101,12 @@ export function createNotebookStore(options: {
   const update = (input: NotebookUpdateRequest): NotebookUpdateResult => {
     const day = today()
     const notebook = readNotebookFile(path, day)
+    if (!existsSync(path)) return failure('这里还没有小本本；物品架上有一本空白的。', 0)
     let outcome: NotebookUpdateOutcome
     if (input.action === 'add') {
-      const section = input.section
-      if (section === undefined || !isNotebookSection(section)) {
-        return failure('add 需要有效的 section（about_you / recent_you / between_us / reminders）', notebook.entries.length)
+      const section = input.section?.trim() || '随手记'
+      if (!isNotebookSection(section)) {
+        return failure('栏目名称含换行，无法写成一个标题。', notebook.entries.length)
       }
       if (input.text === undefined) return failure('add 需要 text', notebook.entries.length)
       outcome = addNotebookEntry(notebook, section, input.text, day)
@@ -129,7 +133,7 @@ export function createNotebookStore(options: {
       message: outcome.message,
       entry: {
         id: outcome.entry.id,
-        section: NOTEBOOK_SECTION_LABELS[outcome.entry.section],
+        section: notebookSectionLabel(outcome.entry.section),
         text: outcome.entry.text,
         at: outcome.entry.at
       },
@@ -139,6 +143,19 @@ export function createNotebookStore(options: {
 
   return {
     path,
+    owned: () => existsSync(path),
+    claim: () => {
+      if (existsSync(path)) return { ok: true, message: '小本本已经在你的物品里，原来的字都还在。' }
+      try {
+        writeFileSync(path, '# 小本本\n', { encoding: 'utf8', flag: 'wx' })
+        return { ok: true, message: '你从物品架上拿了一本空白的小本本。' }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          return { ok: true, message: '小本本已经在你的物品里，原来的字都还在。' }
+        }
+        return { ok: false, message: `小本本没能拿到手（${error instanceof Error ? error.message : String(error)}）` }
+      }
+    },
     read,
     update,
     list: () => notebookListText(readNotebookFile(path, today())),
@@ -147,8 +164,8 @@ export function createNotebookStore(options: {
       return {
         path,
         total: notebook.entries.length,
-        groups: NOTEBOOK_SECTION_IDS.map((section) => ({
-          section: NOTEBOOK_SECTION_LABELS[section],
+        groups: notebookSections(notebook).map((section) => ({
+          section: notebookSectionLabel(section),
           entries: notebook.entries
             .filter((entry) => entry.section === section)
             .map((entry) => ({ id: entry.id, text: entry.text, at: entry.at }))

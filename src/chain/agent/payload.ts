@@ -459,6 +459,17 @@ export type RedactableAskLoopToolResult =
       total: number
       message: string
     }
+  | {
+      kind: 'read_notebook'
+      entries: readonly { id: string; section: string; text: string }[]
+    }
+  | {
+      kind: 'visit_world'
+      ok: boolean
+      id: string
+      text: string
+      items: readonly string[]
+    }
   /**
    * 成长档案（自调用 v0.2 §8）：日记 / 周记落盘后的真实回执。
    * 只回「写到哪一篇、多少字」，正文不回显（成长档案全文不每轮进上下文）。
@@ -669,8 +680,7 @@ export interface ChainAskLoopBuildInput {
     }[]
   }
   /**
-   * 小本本的当前核心页（自调用 v0.2 §7.2）：每轮由组合根从记忆仓现读，拼进 `<now>`。
-   * 只给有界的一页；正文逐条过策略，命中阻断的那条不出云。
+   * 旧调用方的兼容字段；不再向 `<now>` 自动注入正文，翻阅走 read_notebook。
    */
   notebook?: readonly {
     readonly id: string
@@ -678,6 +688,8 @@ export interface ChainAskLoopBuildInput {
     readonly section: string
     readonly text: string
   }[]
+  /** 当前物品与可抵达地点的旁白；不含小本本正文。 */
+  world?: string
   /** 用户随本轮问题上传的附件（用户主动提供，不过脱敏墙） */
   attachments?: RedactableAskAttachments
   /** QQ 引用回复（D96）：被引用原话与最近几条聊天；送云前逐条过策略 */
@@ -1156,7 +1168,7 @@ function renderNowText(
   } else {
     const clock = clockFactsOf(ms)
     lines.push(
-      `现在是${clock.period} ${clock.hhmm}（${clock.day}，毫秒时间戳 ${ms}，相对时间先按它换算）`,
+      `现在是${clock.period} ${clock.hhmm}（${clock.day}，毫秒时间戳 ${ms}）`,
       `距今天 24:00 还有 ${clock.untilMidnight}。`
     )
   }
@@ -1169,25 +1181,25 @@ function renderNowText(
     const limit = Math.max(1, input.life.limit)
     const remaining = Math.max(0, Math.min(limit, limit - input.life.used))
     const percent = Math.round((remaining / limit) * 100)
-    lines.push(`生命：还剩 ${percent}%（${formatTokenAmount(remaining)} token） · ${lifeStageOf(percent)}阶段`)
+    lines.push(`屋里的钟 · 生命：还剩 ${percent}%（${formatTokenAmount(remaining)} token） · ${lifeStageOf(percent)}阶段`)
   }
   // 信（D81）：只报未读数，不把正文放进 system；让 ta 自己用 list_letter / read_letter 看
   if (input.letters !== undefined && input.letters.unread > 0) {
-    lines.push(`信件：${input.letters.unread} 封未读`)
+    lines.push(`信箱里还有 ${input.letters.unread} 封未拆的信。`)
   }
   if (opening?.remembered !== undefined && opening.remembered.length > 0) {
-    lines.push('你想到的（只是联想，不一定对；想核对就用 recall_diary / read_diary）：')
+    lines.push('脑海里浮起几页旧日记，还带着模糊的印象：')
     for (const item of opening.remembered) lines.push(`- [${item.day}] ${item.snippet}`)
   }
   const groups = input.tools ?? ASK_TOOL_NAMES
   if (hasScreenTools(groups)) {
     const latest = input.freshness.latestEvidenceTs
     lines.push(
-      `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${input.freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`
+      `窗边的记录${latest === null ? '还没有写下第一页' : `最近停在 ${readableTime(latest)}（毫秒时间戳 ${latest}）`}；记录${input.freshness.captureRunning ? '仍在继续' : '此刻停着'}。`
     )
     if (recent !== undefined) {
       lines.push(
-        `最近一段证据：${clockTime(recent.at)} 的〈${recent.app}〉${recent.title ? `《${recent.title}》` : ''}——只当「这个界面 / 刚才那个」的指代线索，不是证据。`
+        `窗边最后留下的标题是 ${clockTime(recent.at)} 的〈${recent.app}〉${recent.title ? `《${recent.title}》` : ''}，这一眼还没有翻开里面的正文。`
       )
     }
   }
@@ -1206,55 +1218,17 @@ function renderDueTasks(
   tasks: ChainAskLoopBuildInput['tasks']
 ): string {
   if (tasks === undefined || tasks.due.length === 0) return ''
-  const lines: string[] = ['到点的事（你自己记下的；现在说、晚点说，还是已经不必说，由你判断）：']
+  const lines: string[] = ['日程翻到了这一刻，几件从前记下的事到了时间：']
   for (const task of tasks.due.slice(0, ASK_LOOP_DUE_TASKS_MAX)) {
     const instruction = policy.redact(normalizeText(task.instruction))
     if (instruction.blocked) continue
     const origin =
-      task.origin === 'user' ? '跟他约好的' : task.origin === 'agent' ? '你自己的' : '系统例行'
+      task.origin === 'user' ? '跟他约好的' : task.origin === 'agent' ? '你当时记下的' : '屋里原有的日程'
     lines.push(
       `- #${task.id} ${task.when.slice(0, 40)} ${instruction.text.slice(0, ASK_LOOP_TASK_INSTRUCTION_MAX_CHARS)}（${origin}）`
     )
   }
   return lines.length === 1 ? '' : lines.join('\n')
-}
-
-/** 小本本注入的硬上限（正常写入口已经把本子限住；这里防手工改大） */
-const ASK_LOOP_NOTEBOOK_MAX_CHARS = 2200
-
-/**
- * 小本本（自调用 v0.2 §7.2）：每轮把当前核心页递给 ta，不靠它记得主动查。
- *
- * - 每条带编号（revise / remove 要用）与栏名；
- * - 正文逐条过策略：命中阻断的那条不出云（本子里的内容也是从用户经历里来的）；
- * - 有界：超过硬上限就不再往下铺，并说明还有几条没展开。
- */
-function renderNotebook(
-  policy: AskTextPolicy,
-  entries: ChainAskLoopBuildInput['notebook']
-): string {
-  if (entries === undefined || entries.length === 0) return ''
-  const lines: string[] = [
-    '小本本（你自己记的当前理解，不是判决；过时了就改——编号就是前面的 nX）：'
-  ]
-  let used = 0
-  let shown = 0
-  let skipped = 0
-  for (const entry of entries) {
-    const text = policy.redact(normalizeText(entry.text))
-    if (text.blocked || text.text.trim() === '') continue
-    const line = `- ${entry.id.slice(0, 12)}（${entry.section.slice(0, 20)}）${text.text.slice(0, 200)}`
-    if (used + line.length > ASK_LOOP_NOTEBOOK_MAX_CHARS) {
-      skipped += 1
-      continue
-    }
-    used += line.length
-    shown += 1
-    lines.push(line)
-  }
-  if (shown === 0) return ''
-  if (skipped > 0) lines.push(`（还有 ${skipped} 条没展开）`)
-  return lines.join('\n')
 }
 
 /**
@@ -1316,8 +1290,8 @@ export function buildAskLoopPayload(
   // <now>：本轮处境事实（时间 / 此刻 / 想到的 / 数据边界 / 最近段），追加在 user 之后
   const nowText = renderNowText(input, opening, recent)
   const dueTasks = renderDueTasks(policy, input.tasks)
-  const notebookText = renderNotebook(policy, input.notebook)
-  const now = [nowText, notebookText, dueTasks].filter((part) => part !== '').join('\n')
+  const world = guardText(policy, input.world ?? '', Number.MAX_SAFE_INTEGER)
+  const now = [nowText, world.blocked ? '' : world.text, dueTasks].filter((part) => part !== '').join('\n')
 
   const turns: CloudAskLoopTurn[] = []
   const blockedSegmentIds: number[] = []
@@ -1569,12 +1543,13 @@ export function buildAskLoopPayload(
         )
         let entry: RedactableNotebookEntryView | null = null
         if (result.entry !== null) {
-          const text = policy.redact(normalizeText(result.entry.text))
-          if (!text.blocked && text.text.trim() !== '') {
+          const text = policy.redact(result.entry.text)
+          const section = policy.redact(result.entry.section)
+          if (!text.blocked && !section.blocked && text.text.trim() !== '') {
             entry = {
               id: result.entry.id.slice(0, 20),
-              section: result.entry.section.slice(0, 20),
-              text: text.text.slice(0, 200),
+              section: section.text,
+              text: text.text,
               at: result.entry.at.slice(0, 10)
             }
           }
@@ -1587,6 +1562,22 @@ export function buildAskLoopPayload(
           total: result.total,
           message
         }
+        break
+      }
+      case 'read_notebook': {
+        const entries: { id: string; section: string; text: string }[] = []
+        for (const entry of result.entries) {
+          const section = policy.redact(entry.section)
+          const text = policy.redact(entry.text)
+          if (!section.blocked && !text.blocked) entries.push({ id: entry.id, section: section.text, text: text.text })
+        }
+        view = { kind: 'read_notebook', entries }
+        break
+      }
+      case 'visit_world': {
+        const text = policy.redact(result.text)
+        view = { kind: 'visit_world', ok: result.ok && !text.blocked, id: result.id,
+          text: text.blocked ? '这一页暂时没有展开。' : text.text, items: result.items }
         break
       }
       case 'write_growth': {

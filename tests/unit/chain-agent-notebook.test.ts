@@ -79,16 +79,15 @@ describe('update_notebook 参数', () => {
     ])
   })
 
-  it('缺 action / 缺 section / 缺 text / 缺 id 都拒，不调存储层', async () => {
+  it('缺 action / 缺 text / 缺 id 或非法标题拒绝，不调存储层', async () => {
     const notebook = fakeNotebook()
     const { tool } = executor(notebook)
     for (const args of [
       {},
-      { action: 'add', text: '喜欢周深' },
-      { action: 'add', section: 'about_you' },
+            { action: 'add', section: 'about_you' },
       { action: 'revise', text: '改一下' },
       { action: 'remove' },
-      { action: 'add', section: '不存在的栏', text: 'x' }
+      { action: 'add', section: '含\n换行', text: 'x' }
     ]) {
       const outcome = await tool.execute({ name: 'update_notebook', arguments: args })
       expect(outcome.result.kind).toBe('error')
@@ -107,80 +106,47 @@ describe('update_notebook 参数', () => {
   })
 })
 
-describe('小本本进 <now>', () => {
-  it('每轮带编号与栏名；模型据此改 / 删', async () => {
-    const client = new FakeLlmClient([{ json: { answer: '嗯，我记得。', citations: [] } }])
-    await runAskLoop(
-      {
-        db: freshDb(),
-        client,
-        outbound: createLocalAskOutbound(),
-        now: () => NOW,
-        captureRunning: () => false,
-        tools: [],
-        notebook: {
-          read: () => [
-            { id: 'n1', section: '关于你', text: '喜欢周深' },
-            { id: 'n2', section: '我们之间', text: '约好睡前说一声' }
-          ],
-          update: fakeNotebook().update
-        }
-      },
-      '在吗'
-    )
-    const text = JSON.stringify(client.askLoopRequests.at(-1))
-    expect(text).toContain('小本本')
-    expect(text).toContain('n1（关于你）喜欢周深')
-    expect(text).toContain('n2（我们之间）约好睡前说一声')
-    expect(text).toContain('过时了就改')
+describe('小本本主动翻阅', () => {
+  it('每轮不会自动读取或注入正文，也不会虚构翻阅习惯', async () => {
+    const read = vi.fn(() => [{ id: 'n1', section: '我的世界', text: '很私人的梦' }])
+    const client = new FakeLlmClient([{ json: { answer: '嗯。', citations: [] } }])
+    const db = freshDb()
+    try {
+      await runAskLoop({ db, client, outbound: createLocalAskOutbound(), now: () => NOW,
+        captureRunning: () => false, tools: [], notebook: { read, update: fakeNotebook().update } }, '在吗')
+      expect(read).not.toHaveBeenCalled()
+      expect(JSON.stringify(client.askLoopRequests)).not.toContain('很私人的梦')
+      expect(JSON.stringify(client.askLoopRequests)).not.toContain('过时了就改')
+    } finally { db.close() }
   })
 
-  it('本子里命中脱敏规则的那条不列出来（其余照常）', async () => {
-    const blocking = createAskOutbound({
-      redact: (text: string) =>
-        text.includes('hunter2')
-          ? { text: '', redacted: true, blocked: true }
-          : { text, redacted: false, blocked: false }
-    })
-    const client = new FakeLlmClient([{ json: { answer: '嗯。', citations: [] } }])
-    await runAskLoop(
-      {
-        db: freshDb(),
-        client,
-        outbound: blocking,
-        now: () => NOW,
-        captureRunning: () => false,
-        tools: [],
-        notebook: {
-          read: () => [
-            { id: 'n1', section: '关于你', text: '密码是 hunter2' },
-            { id: 'n2', section: '关于你', text: '喜欢周深' }
-          ],
-          update: fakeNotebook().update
-        }
-      },
-      '在吗'
-    )
-    const text = JSON.stringify(client.askLoopRequests.at(-1))
-    expect(text).not.toContain('hunter2')
-    expect(text).toContain('喜欢周深')
+  it('read_notebook 返回自由栏目与完整正文，支持按栏目和正文检索', async () => {
+    const db = freshDb()
+    const longText = '长'.repeat(3000)
+    const tool = createAskToolExecutor({ db, now: () => NOW, captureRunning: () => false,
+      notebook: { ...fakeNotebook(), read: () => [
+        { id: 'n1', section: '自己的故事', text: longText },
+        { id: 'n2', section: '别的', text: '云' }
+      ] } })
+    try {
+      expect((await tool.execute({ name: 'read_notebook', arguments: { section: '自己的故事', query: '长' } })).result)
+        .toEqual({ kind: 'read_notebook', entries: [{ id: 'n1', section: '自己的故事', text: longText }] })
+    } finally { db.close() }
   })
 
-  it('空本子不写这一节（不出现空标题）', async () => {
-    const client = new FakeLlmClient([{ json: { answer: '嗯。', citations: [] } }])
-    await runAskLoop(
-      {
-        db: freshDb(),
-        client,
-        outbound: createLocalAskOutbound(),
-        now: () => NOW,
-        captureRunning: () => false,
-        tools: [],
-        notebook: { read: () => [], update: fakeNotebook().update }
-      },
-      '在吗'
-    )
-    expect(JSON.stringify(client.askLoopRequests.at(-1))).not.toContain('小本本')
+  it('翻阅结果里被策略挡住的条目不出云，其余完整保留', () => {
+    const outbound = createAskOutbound({ redact: (text) => text.includes('hunter2')
+      ? { text: '', redacted: true, blocked: true } : { text, redacted: false, blocked: false } })
+    const { payload } = outbound.buildLoop({ question: '翻开', systemTime: '2026-11-04 12:00',
+      freshness: { latestEvidenceTs: null, captureRunning: false }, turns: [{
+        toolCall: { name: 'read_notebook', arguments: {} }, toolResult: { kind: 'read_notebook', entries: [
+          { id: 'n1', section: '日常', text: 'hunter2' },
+          { id: 'n2', section: '日常', text: '云'.repeat(3000) }
+        ] }
+      }] })
+    expect(payload.turns[0]!.toolResult).toEqual({ kind: 'read_notebook', entries: [
+      { id: 'n2', section: '日常', text: '云'.repeat(3000) }
+    ] })
   })
 })
 

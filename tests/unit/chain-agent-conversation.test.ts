@@ -155,7 +155,8 @@ describe('图片：只有压缩才删', () => {
     expect(first).toMatchObject({ role: 'user' })
     expect(first?.images).toBeUndefined()
     expect(String(first?.content)).toContain(`#${id}`)
-    expect(String(first?.content)).toContain('recall')
+    expect(String(first?.content)).toContain('原图仍留在这段相处里')
+    expect(String(first?.content)).not.toContain('需要看原图用')
   })
 
   it('工具截图（read_segment）同样归档：不再原样重发，只留占位符（D88）', () => {
@@ -211,7 +212,7 @@ describe('图片：只有压缩才删', () => {
     expect(client.askLoopRequests[0]?.attachments?.images).toEqual([TINY])
     const second = buildChainAskLoopMessages(client.askLoopRequests[1]!)
     expect(second.some((message) => message.images?.includes(TINY))).toBe(false)
-    expect(second.some((message) => String(message.content).includes('已归档'))).toBe(true)
+    expect(second.some((message) => String(message.content).includes('画面暂时模糊'))).toBe(true)
   })
 
   it('recall：按上一问占位符里的 id 取回原图；没见过的 id 如实拒绝（D88）', async () => {
@@ -340,7 +341,7 @@ describe('只追加：不自动裁剪（M3 / D69）', () => {
     )
     const body = messages.map((message) => String(message.content)).join('\n')
     expect(body).not.toContain('a'.repeat(800))
-    expect(body).toContain('已压缩')
+    expect(body).toContain('细节暂时模糊')
     expect(body).toContain('recall')
   })
 
@@ -402,7 +403,7 @@ describe('只追加：不自动裁剪（M3 / D69）', () => {
     )
     const body = messages.map((message) => String(message.content)).join('\n')
     expect(body).toContain('在吗')
-    expect(body).toContain('已压缩')
+    expect(body).toContain('细节暂时模糊')
   })
 
   it('压缩后的问答正文能 recall 回原文；没压缩过的轮次不占位（D97）', async () => {
@@ -462,7 +463,7 @@ describe('只追加：不自动裁剪（M3 / D69）', () => {
     )
     const body = messages.map((message) => String(message.content)).join('\n')
     expect(body).toContain('a'.repeat(800))
-    expect(body).not.toContain('已压缩')
+    expect(body).not.toContain('细节暂时模糊')
   })
 
   it('digest 挂在第一条 user 消息里（system 永不改；没有连续 user）', () => {

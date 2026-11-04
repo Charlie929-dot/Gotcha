@@ -38,7 +38,7 @@ export const SETTING_DEFAULTS: Readonly<Record<string, string>> = {
   'memory.vault_dir': '',
   'memory.persona_name': '贴心大肥鱼',
   'memory.persona_tone':
-    '像认识很久的老朋友：短句、具体、先给结论；不确定就说不确定，可以有自己的看法，不用端着',
+    '相处时有老朋友的亲近，也有慢慢长出来的自己的样子',
   'memory.persona_redlines': '',
   // 启用的人格卡（D62）：<userData>/persona-cards/ 里的 .md 文件名；空 = 不用卡
   'memory.persona_card': '',

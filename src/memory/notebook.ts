@@ -17,11 +17,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 /* ------------------------------------------------------------------ */
-/* 分区与上限                                                          */
+/* 栏目（兼容旧本子）                                                          */
 /* ------------------------------------------------------------------ */
 
 export const NOTEBOOK_SECTION_IDS = ['about_you', 'recent_you', 'between_us', 'reminders'] as const
-export type NotebookSection = (typeof NOTEBOOK_SECTION_IDS)[number]
+export type NotebookSection = string
 
 /** 分区的人话名字（文件标题、工具回执、/notebook 都用它） */
 export const NOTEBOOK_SECTION_LABELS: Readonly<Record<NotebookSection, string>> = {
@@ -40,17 +40,17 @@ const SECTION_BY_HEADING: ReadonlyMap<string, NotebookSection> = new Map(
 )
 
 export function isNotebookSection(value: string): value is NotebookSection {
-  return (NOTEBOOK_SECTION_IDS as readonly string[]).includes(value)
+  return value.trim() !== '' && !/[\r\n]/u.test(value)
 }
 
-/** 单条上限：一条只说一件事；超了让模型自己挑重点，不静默截断 */
-export const NOTEBOOK_ENTRY_MAX_CHARS = 140
-/** 每栏最多几条：满了先合并 / 放下旧的，再记新的 */
-export const NOTEBOOK_SECTION_MAX_ENTRIES = 5
-/** 全本正文总字数上限：核心页必须有界 */
-export const NOTEBOOK_TOTAL_MAX_CHARS = 1800
-/** `<now>` 注入的硬上限（防御手工把文件改大；正常情况下写入口已经把本子限住） */
-export const NOTEBOOK_INJECT_MAX_CHARS = 2200
+/** 旧栏目只做兼容映射，新本子没有预设栏目。 */
+export function notebookSectionLabel(section: string): string {
+  return Object.hasOwn(NOTEBOOK_SECTION_LABELS, section) ? NOTEBOOK_SECTION_LABELS[section]! : section
+}
+
+export function notebookSections(notebook: Notebook): string[] {
+  return [...new Set(notebook.entries.map((entry) => entry.section))]
+}
 /** 记忆仓里的文件名 */
 export const NOTEBOOK_FILE_NAME = 'notebook.md'
 
@@ -99,10 +99,10 @@ const UNDATED_ENTRY_RE = /^-\s+(n\d+)\s+·\s+(.+)$/u
 /** 用户随手写：`- 一句话`（补编号） */
 const PLAIN_ENTRY_RE = /^-\s+(.+)$/u
 
-/** 正文归一：折叠空白成单空格，去掉开头可能的列表符 */
+/** 正文归一：保留段落与排版，只去掉首尾空白和开头的列表符 */
 export function normalizeNotebookText(raw: string): string {
   return raw
-    .replace(/\s+/gu, ' ')
+    .replace(/\r\n/gu, '\n')
     .trim()
     .replace(/^[-·:：]\s*/u, '')
     .trim()
@@ -112,7 +112,7 @@ function sectionOfHeading(raw: string): NotebookSection | null {
   const heading = raw.trim()
   const byLabel = SECTION_BY_HEADING.get(heading)
   if (byLabel !== undefined) return byLabel
-  return SECTION_BY_HEADING.get(heading.toLowerCase()) ?? null
+  return SECTION_BY_HEADING.get(heading.toLowerCase()) ?? heading
 }
 
 function maxIdNumber(entries: readonly NotebookEntry[]): number {
@@ -130,6 +130,10 @@ export function parseNotebook(text: string, today = ''): Notebook {
   /** 先收原始行：手写行还没编号，等知道最大编号后再补 */
   const raw: Array<{ id: string | null; section: NotebookSection; text: string; at: string }> = []
   for (const line of text.split(/\r?\n/u)) {
+    if (line.startsWith('  ') && raw.length > 0) {
+      raw[raw.length - 1]!.text += `\n${line.slice(2)}`
+      continue
+    }
     const heading = HEADING_RE.exec(line)
     if (heading !== null) {
       section = sectionOfHeading(heading[1] ?? '')
@@ -159,7 +163,8 @@ export function parseNotebook(text: string, today = ''): Notebook {
     if (item.id === null) continue
     used.add(Number(item.id.slice(1)))
   }
-  let next = Math.max(0, ...used) + 1
+  let next = 1
+  for (const id of used) next = Math.max(next, id + 1)
   const entries: NotebookEntry[] = []
   for (const item of raw) {
     let id = item.id
@@ -181,20 +186,17 @@ export function parseNotebook(text: string, today = ''): Notebook {
   return { entries }
 }
 
-/** 结构 → 文件内容。四个分区永远都在（空栏也留标题），方便人看 / 手改 */
+/** 只序列化实际使用的栏目；旧栏目保留原来的名称与编号。 */
 export function serializeNotebook(notebook: Notebook, today = ''): string {
-  const lines = [
-    '# 小本本',
-    '',
-    '> 当前理解，不是判决书。每条前面的编号用于修改 / 删除；可以直接改这个文件，也可以跟 ta 说。',
-    ''
-  ]
-  for (const section of NOTEBOOK_SECTION_IDS) {
-    lines.push(`## ${NOTEBOOK_SECTION_LABELS[section]}`, '')
+  const lines = ['# 小本本', '']
+  for (const section of notebookSections(notebook)) {
+    lines.push(`## ${notebookSectionLabel(section)}`, '')
     for (const entry of notebook.entries) {
       if (entry.section !== section) continue
       const at = entry.at === '' ? today : entry.at
-      lines.push(at === '' ? `- ${entry.id} · ${entry.text}` : `- ${entry.id} · ${at} · ${entry.text}`)
+      const [first, ...rest] = entry.text.split('\n')
+      lines.push(at === '' ? `- ${entry.id} · ${first}` : `- ${entry.id} · ${at} · ${first}`)
+      for (const line of rest) lines.push(`  ${line}`)
     }
     lines.push('')
   }
@@ -221,27 +223,13 @@ export function writeNotebookFile(path: string, notebook: Notebook, today = ''):
 /* 增 / 改 / 删                                                        */
 /* ------------------------------------------------------------------ */
 
-function totalTextChars(entries: readonly NotebookEntry[]): number {
-  return entries.reduce((sum, entry) => sum + entry.text.length, 0)
-}
-
-function entryIdsOf(entries: readonly NotebookEntry[], section: NotebookSection): string[] {
-  return entries.filter((entry) => entry.section === section).map((entry) => entry.id)
-}
-
 function checkEntryText(raw: string): { ok: true; text: string } | { ok: false; message: string } {
   const text = normalizeNotebookText(raw)
   if (text === '') return { ok: false, message: '要记的内容是空的' }
-  if (text.length > NOTEBOOK_ENTRY_MAX_CHARS) {
-    return {
-      ok: false,
-      message: `太长（${text.length} 字，一条最多 ${NOTEBOOK_ENTRY_MAX_CHARS} 字）。挑最重要的一句；细节留在记忆里。`
-    }
-  }
   return { ok: true, text }
 }
 
-/** 补一条：同一栏重复 / 栏满 / 全本超字数都如实拒绝，不静默丢旧条目 */
+/** 补一条；栏目、篇幅与条数由持有者决定。 */
 export function addNotebookEntry(
   notebook: Notebook,
   section: NotebookSection,
@@ -251,23 +239,7 @@ export function addNotebookEntry(
   const checked = checkEntryText(rawText)
   if (!checked.ok) return checked
   const text = checked.text
-  const duplicate = notebook.entries.find((entry) => entry.section === section && entry.text === text)
-  if (duplicate !== undefined) {
-    return { ok: false, message: `这一栏已经有这一条了（${duplicate.id}）。要改就用 revise。` }
-  }
-  const ids = entryIdsOf(notebook.entries, section)
-  if (ids.length >= NOTEBOOK_SECTION_MAX_ENTRIES) {
-    return {
-      ok: false,
-      message: `「${NOTEBOOK_SECTION_LABELS[section]}」满了（${ids.join('、')}）。先 revise 合并，或 remove 放下不重要的，再记新的。`
-    }
-  }
-  if (totalTextChars(notebook.entries) + text.length > NOTEBOOK_TOTAL_MAX_CHARS) {
-    return {
-      ok: false,
-      message: `小本本满了（正文上限 ${NOTEBOOK_TOTAL_MAX_CHARS} 字）。先合并 / 删掉不再重要的，再记新的。`
-    }
-  }
+  section = sectionOfHeading(section) ?? '随手记'
   const id = `n${maxIdNumber(notebook.entries) + 1}`
   const entry: NotebookEntry = { id, section, text, at }
   return {
@@ -275,7 +247,7 @@ export function addNotebookEntry(
     notebook: { entries: [...notebook.entries, entry] },
     entry,
     total: notebook.entries.length + 1,
-    message: `记下了 ${id}（${NOTEBOOK_SECTION_LABELS[section]}）。`
+    message: `记下了 ${id}（${notebookSectionLabel(section)}）。`
   }
 }
 
@@ -294,19 +266,6 @@ export function reviseNotebookEntry(
   if (!checked.ok) return checked
   const text = checked.text
   const old = notebook.entries[index] as NotebookEntry
-  const duplicate = notebook.entries.find(
-    (entry) => entry.id !== id && entry.section === old.section && entry.text === text
-  )
-  if (duplicate !== undefined) {
-    return { ok: false, message: `这一栏已经有这一条了（${duplicate.id}）；两条一样的话用 remove 放下 ${id}。` }
-  }
-  const total = totalTextChars(notebook.entries) - old.text.length + text.length
-  if (total > NOTEBOOK_TOTAL_MAX_CHARS) {
-    return {
-      ok: false,
-      message: `改完会超过正文上限（${total} > ${NOTEBOOK_TOTAL_MAX_CHARS} 字）。写短一点，或先删掉不重要的。`
-    }
-  }
   const entry: NotebookEntry = { ...old, text, at }
   const entries = [...notebook.entries]
   entries[index] = entry
@@ -341,7 +300,7 @@ export function removeNotebookEntry(notebook: Notebook, id: string): NotebookUpd
 
 /** 空本子时的一句人话 */
 export function emptyNotebookText(): string {
-  return '小本本还是空的——等 ta 记下关于你的重要理解，这里就会有内容。'
+  return '小本本还是空的。'
 }
 
 /**
@@ -351,10 +310,10 @@ export function emptyNotebookText(): string {
 export function notebookListText(notebook: Notebook): string {
   if (notebook.entries.length === 0) return emptyNotebookText()
   const lines = [`小本本（${notebook.entries.length} 条；文件在记忆仓的 ${NOTEBOOK_FILE_NAME}）`]
-  for (const section of NOTEBOOK_SECTION_IDS) {
+  for (const section of notebookSections(notebook)) {
     const entries = notebook.entries.filter((entry) => entry.section === section)
     if (entries.length === 0) continue
-    lines.push('', NOTEBOOK_SECTION_LABELS[section])
+    lines.push('', notebookSectionLabel(section))
     for (const entry of entries) {
       lines.push(`  ${entry.id} ${entry.text}${entry.at === '' ? '' : `（${entry.at}）`}`)
     }

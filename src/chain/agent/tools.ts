@@ -44,6 +44,7 @@ import type {
 import { ASK_LOOP_READ_MAX_CHARS, ASK_LOOP_READ_MIN_CHARS } from './payload'
 import { readChainFreshness } from './freshness'
 import { normalizeArchiveId, type RecalledAttachment } from './archive'
+import type { WorldToolDeps } from './world'
 
 /** 引用白名单与 citation meta 的来源：search_info 返回过的段（at 是毫秒时间戳） */
 export interface SearchHitMeta {
@@ -224,7 +225,7 @@ export interface TaskToolDeps {
 /* 小本本（自调用 v0.2 §7 / §12.2）：一个工具管增改删                    */
 /* ------------------------------------------------------------------ */
 
-export type NotebookSectionArg = 'about_you' | 'recent_you' | 'between_us' | 'reminders'
+export type NotebookSectionArg = string
 
 export interface NotebookUpdateRequest {
   action: 'add' | 'revise' | 'remove'
@@ -255,6 +256,8 @@ export interface NotebookUpdateResult {
 /** 主进程注入的小本本实现（记忆仓里的 notebook.md）；不传 = 这个分支没挂小本本 */
 export interface NotebookToolDeps {
   update(input: NotebookUpdateRequest): NotebookUpdateResult
+  read?(): readonly { id: string; section: string; text: string }[]
+  owned?(): boolean
 }
 
 /* ------------------------------------------------------------------ */
@@ -361,6 +364,7 @@ export interface AskToolDeps {
    * 不传 = 这个分支没挂小本本工具（或记忆仓不可用）：工具会如实回「现在写不了」。
    */
   notebook?: NotebookToolDeps
+  world?: WorldToolDeps
   /**
    * 成长档案（自调用 v0.2 §8）：写日记 / 周记的执行端口。
    * 不传 = 这个分支没挂成长档案（或记忆仓不可用）：工具会如实回「现在写不了」。
@@ -1587,6 +1591,30 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             segments: []
           }
         }
+        if (call.name === 'visit_world') {
+          const action = call.arguments['action'] ?? 'look'
+          if (action !== 'look' && action !== 'read' && action !== 'claim') {
+            return { result: { kind: 'error', message: 'visit_world 的 action 是 look / read / claim' }, segments: [] }
+          }
+          if (deps.world === undefined) return { result: { kind: 'error', message: '这边还没有接上世界。' }, segments: [] }
+          const rawId = call.arguments['id']
+          const id = typeof rawId === 'string' ? rawId.trim() : undefined
+          const result = deps.world.visit({ action, ...(id ? { id } : {}) })
+          return { result: { kind: 'visit_world', ...result }, segments: [] }
+        }
+        if (call.name === 'read_notebook') {
+          if (deps.notebook?.read === undefined) {
+            return { result: { kind: 'error', message: '这边还翻不开小本本。' }, segments: [] }
+          }
+          if (deps.notebook.owned?.() === false) {
+            return { result: { kind: 'error', message: '这里还没有小本本；物品架上有一本空白的。' }, segments: [] }
+          }
+          const section = typeof call.arguments['section'] === 'string' ? call.arguments['section'].trim() : undefined
+          const query = typeof call.arguments['query'] === 'string' ? call.arguments['query'].trim() : undefined
+          const entries = deps.notebook.read().filter((entry) =>
+            (!section || entry.section === section) && (!query || entry.text.includes(query)))
+          return { result: { kind: 'read_notebook', entries }, segments: [] }
+        }
         if (call.name === 'update_notebook') {
           const action = call.arguments['action']
           if (action !== 'add' && action !== 'revise' && action !== 'remove') {
@@ -1602,22 +1630,17 @@ export function createAskToolExecutor(deps: AskToolDeps): {
             }
           }
           const rawSection = call.arguments['section']
-          const section: NotebookSectionArg | undefined =
-            rawSection === 'about_you' ||
-            rawSection === 'recent_you' ||
-            rawSection === 'between_us' ||
-            rawSection === 'reminders'
-              ? rawSection
-              : undefined
+          const section = typeof rawSection === 'string' ? rawSection.trim() : undefined
           const id = optionalText(call.arguments['id'], 20)
-          const text = optionalText(call.arguments['text'], 400)
+          const rawText = call.arguments['text']
+          const text = typeof rawText === 'string' && rawText.trim() !== '' ? rawText.trim() : undefined
           if (action === 'add') {
-            if (section === undefined) {
+            if (section !== undefined && /[\r\n]/u.test(section)) {
               return {
                 result: {
                   kind: 'error',
                   message:
-                    'add 需要 section：about_you（关于你）/ recent_you（最近的你）/ between_us（我们之间）/ reminders（给自己的提醒）'
+                    '栏目名称含换行，无法写成一个标题。'
                 },
                 segments: []
               }

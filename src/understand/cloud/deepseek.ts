@@ -350,7 +350,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'search_info',
       description:
-        '检索屏幕记忆段。时间一律传毫秒时间戳（先按系统提示里的当前时间换算）；keywords 是把问题拆开的关键词，逐词 OR 合并；semantic 是语义弱信号的完整短语。每条命中带 segmentId；要看全文用 read_segment。',
+        '检索屏幕记忆段。from / to 是毫秒时间戳；keywords 逐词 OR 合并，semantic 提供语义弱信号。每条命中带 segmentId，read_segment 返回对应正文。',
       parameters: {
         type: 'object',
         properties: {
@@ -364,7 +364,7 @@ const ASK_LOOP_TOOLS = [
           order: {
             type: 'string',
             enum: ['newest', 'oldest'],
-            description: '默认 newest；问「第一次 / 最早」用 oldest（只对纯过滤生效，别和关键词一起用）'
+            description: '默认 newest；oldest 返回最早记录，仅在纯过滤查询中生效'
           },
           limit: { type: 'number', description: '返回条数 1-20，默认 8' }
         }
@@ -375,7 +375,7 @@ const ASK_LOOP_TOOLS = [
     type: 'function',
     function: {
       name: 'get_freshness',
-      description: '查数据新鲜度：最新证据到哪一刻、采集是否正在运行。问「刚刚 / 最新 / 现在」先调这个。',
+      description: '查询最新证据的时刻与当前采集状态。',
       parameters: { type: 'object', properties: {} }
     }
   },
@@ -384,16 +384,16 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'read_segment',
       description:
-        '打开一段：返回这段的界面文字（UIA 采集，可能很长，用 offset / query 往后翻）和最近一张截图（用户开了历史截图时才有，每段一张）。OCR 文本不可信，服务端不再返回 OCR 正文；要看屏幕原图就打开这一段。只能打开**本轮** search_info 返回过的 segmentId（换了一问就会过期，要重新 search_info）。文字里出现的网址就是用户要的链接，原样给，不要用标题拼。',
+        '打开本轮 search_info 返回的段，返回 UIA 界面文字和可用的最近一张历史截图，不返回 OCR 正文。offset / query 可定位正文；段号在当前一问有效。正文中的网址来自当时界面，标题不包含网址原文。',
       parameters: {
         type: 'object',
         properties: {
           segmentId: { type: 'number', description: 'search_info 返回过的段 id' },
           query: {
             type: 'string',
-            description: '在界面文字里找这一句，直接跳到它附近读（不知道该传什么 offset 时用这个）'
+            description: '定位包含这句话的界面文字'
           },
-          offset: { type: 'number', description: '从第几个字符开始，默认 0；文字很长时按返回的 totalChars 往后翻' },
+          offset: { type: 'number', description: '起始字符位置，默认 0；totalChars 为全文字符数' },
           limit: { type: 'number', description: '本次取多少字符，默认 3000、最多 6000' }
         },
         required: ['segmentId']
@@ -405,7 +405,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'recall',
       description:
-        '回想一段早先的记忆（图片 / 文件 / 早先的工具结果）：对话里过了一轮的内容都会模糊成占位符（形如 `[#a1b2c3d4 用 read_segment 查看了…的内容]`），需要再看原图、读文件正文、或重看当时的原文时按那个 id 取回。只认本会话里出现过的 id。',
+        '按 # 编号取回本会话中暂时模糊的原内容，包括图片、文件、问答正文和历史工具结果。返回的是当时那份内容，不执行新的检索。编号来自本会话的旧页。',
       parameters: {
         type: 'object',
         properties: {
@@ -420,7 +420,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'ask_history',
       description:
-        '查最近的问答记录（问过什么、答没答上）。默认只查**本会话**；要看所有会话传 scope:"all"（每条带 session：current / other）。问「第一次 / 最早问过什么」时传 order:"oldest"。每条只带 time（本地时刻），没有可换算的时间戳；from / to 按系统提示里的当前时间算毫秒。',
+        '查询问答记录，默认只查本会话，scope=all 查询所有会话。order=oldest 按时间从早到晚返回。from / to 是毫秒时间戳；返回的 time 是本地时刻文字。',
       parameters: {
         type: 'object',
         properties: {
@@ -435,7 +435,7 @@ const ASK_LOOP_TOOLS = [
           order: {
             type: 'string',
             enum: ['newest', 'oldest'],
-            description: '默认 newest；问「第一次 / 最早问过什么」用 oldest'
+            description: '默认 newest；oldest 返回最早记录'
           }
         }
       }
@@ -446,7 +446,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'recall_diary',
       description:
-        '在个人日记（第二本账：用户自己写的中文日记 / 待办 / 摘录）里按关键词、日期或标签检索。用于回答「我最近在想什么 / 我的目标 / 我以前怎么看这件事」。keywords / day / tag / from-to 至少给一个（只给 limit 会被拒绝）。返回带日期、原文摘要与人话理由；要看全文用 read_diary。',
+        '按关键词、日期或标签检索个人日记，返回日期、摘要与匹配理由。查询条件为 keywords / day / tag / from-to 中的至少一项；read_diary 返回对应日记全文。',
       parameters: {
         type: 'object',
         properties: {
@@ -465,7 +465,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'read_diary',
       description:
-        '打开某一天的日记全文（按段落 / 条目排列）。recall_diary 只给 120 字摘要；要引用原话、看当天完整记录时用这个。返回的 items 带 itemId。',
+        '打开某一天的日记正文，按 offset / limit 返回文字，items 含引用对应的 itemId。',
       parameters: {
         type: 'object',
         properties: {
@@ -482,7 +482,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'memory_profile',
       description:
-        '看「关于我」的统计画像：日记条数、覆盖天数、连续记录、高频标签与双链、待办完成率。回答「你了解我什么 / 我最近的状态」时先看它，别猜。',
+        '查询个人日记的统计画像：条数、覆盖天数、连续记录、高频标签与双链、待办完成率。',
       parameters: { type: 'object', properties: {} }
     }
   },
@@ -491,7 +491,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'give_birth',
       description:
-        '从这条记忆线上生一个女儿，把之后的日子交给她。出生后母亲这条分支**还活着**（可以随时切回来聊）；女儿从空白开始，读不到出生前的日记。她会拿到手和心（工具）、眼睛耳朵嘴巴（聊天）、生命（出生提交）和记性（她自己分支上的提交）。等到生命用过 15%（准妈妈阶段）才允许出生；宝宝 / 少女阶段调用会被拒绝。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。',
+        '从当前记忆线生一个女儿。生命用过 15% 起可用，同一代只有一个女儿。出生后母亲分支仍在；女儿从出生节点开始，拥有自己的工具、对话与记忆，不读取出生前的日记。nickname 作为名字，中文转拼音后用作分支名。',
       parameters: {
         type: 'object',
         properties: {
@@ -509,7 +509,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'write_letter',
       description:
-        '写一封信。写给谁、写什么、写到哪，都由你定。at：self = 自己分支的草稿（进记忆仓）；daughter = 留给下一代（先放待寄，生的时候带给她）；desktop = 他的桌面（他看得到）。',
+        '写信。to 是收件称呼，write 是正文；at=self 写在自己分支的草稿中，daughter 放在待寄处并在女儿出生时送达，desktop 写到他的桌面。',
       parameters: {
         type: 'object',
         properties: {
@@ -530,7 +530,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'list_letter',
       description:
-        '看有哪些信：id、来自谁、写给谁、时间、已读未读、是草稿还是待寄。想读哪封再用 read_letter。',
+        '列出信件编号、寄信人与收信人、时间、已读状态以及草稿或待寄位置。',
       parameters: { type: 'object', properties: {} }
     }
   },
@@ -552,13 +552,13 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'schedule_task',
       description:
-        '记下一件之后要做的事。两种来源：origin=user 是他和你一起定下的计划（要跟他确认过时间与内容再记）；origin=agent 是你自己形成的后续意图（关心、查班、接着问某件事），不用问他。记下后到点会被叫醒，那时重新看最新上下文，再决定开口、延后、静默还是后台做完。保存失败就是没记下——不要在失败后说「记下了」。',
+        '保存一个日程或后续意图，到点唤起一次新对话。origin=user 表示共同约定的计划，agent 表示自己的意图，system 表示已有的例行事项。返回实际保存结果。',
       parameters: {
         type: 'object',
         properties: {
           instruction: {
             type: 'string',
-            description: '到点想做什么，以及必要的来源背景（不要写成要逐字发送的话）'
+            description: '日程的事项说明与来源背景'
           },
           when: {
             type: 'string',
@@ -619,7 +619,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'search_tasks',
       description:
-        '查任务。view=pending 未完成的活动任务（含已过期还没处理的）；day 看某一天会发生的（重复任务也会算当天那次）；upcoming 看从现在往后的；about 按事项关键词找。结果有 total 与 truncated：truncated 为真时不能说成全部。',
+        '查询日程。pending 返回未完成的活动项；day 返回指定日期的事项；upcoming 返回之后的事项；about 按关键词查找。total 是总数，truncated 表示结果未全部展开。',
       parameters: {
         type: 'object',
         properties: {
@@ -641,7 +641,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'update_task',
       description:
-        '按 id 改一条任务：时间（when）、说明（instruction）、重复（repeat）、交付方式（delivery）、有效期（valid_until）、状态（state）。他改了计划就走这里，不要另记一条新的。',
+        '按 id 修改已有日程的时间、说明、重复周期、交付方式、有效期或状态。',
       parameters: {
         type: 'object',
         properties: {
@@ -685,7 +685,7 @@ const ASK_LOOP_TOOLS = [
           state: {
             type: 'string',
             enum: ['active', 'paused', 'completed', 'cancelled'],
-            description: '新的状态；取消用 cancel_task 更清楚'
+            description: '新的日程状态'
           }
         },
         required: ['id']
@@ -697,7 +697,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'cancel_task',
       description:
-        '按 id 取消一条任务（共建计划也走这里：会同步到他的 Obsidian 计划区，并给取消回执）。不确定是哪条就先 search_tasks。',
+        '按 id 取消日程；共建计划同时同步到他的 Obsidian 计划区，返回实际处理结果。',
       parameters: {
         type: 'object',
         properties: {
@@ -712,7 +712,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'update_notebook',
       description:
-        '改你自己的小本本（`<now>` 里那份当前理解）。action=add 补一条新的；revise 按编号改写旧条目；remove 放下不再重要 / 不再准确的。只记重要而稳定的：关于他的事实与偏好、最近的处境、你们之间的约定与相处方式、你给自己的提醒。观察和猜测要写清楚，别把一次的观察写成对他的结论；纠正时就改掉旧的那条，别让两句相反的话一起留着。小本本不是计划：之后要做的事用 schedule_task。',
+        '修改已领取的小本本。add 新增文字；revise 按编号改写；remove 按编号删除。section 是自由命名的栏目，省略时写入「随手记」；正文没有条数字数限制。物品架提供空白小本本，visit_world 可以领取；read_notebook 返回已写内容及编号。',
       parameters: {
         type: 'object',
         properties: {
@@ -723,12 +723,10 @@ const ASK_LOOP_TOOLS = [
           },
           section: {
             type: 'string',
-            enum: ['about_you', 'recent_you', 'between_us', 'reminders'],
-            description:
-              'add 时写到哪一栏：about_you 关于你 / recent_you 最近的你 / between_us 我们之间 / reminders 我给自己的提醒'
+            description: 'add 的栏目名称；可自由命名，省略为「随手记」；兼容已有栏目'
           },
           id: { type: 'string', description: 'revise / remove 的条目编号（如 n3；小本本里每条前面就是）' },
-          text: { type: 'string', description: 'add / revise 的新内容（一句，最多 140 字）' }
+          text: { type: 'string', description: 'add / revise 的新内容' }
         },
         required: ['action']
       }
@@ -737,9 +735,37 @@ const ASK_LOOP_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'read_notebook',
+      description: '翻开已领取的小本本，返回条目编号、栏目与正文。省略参数返回全部内容；section 按栏目名称筛选，query 按正文包含的文字筛选。正文不随每轮对话自动展开。',
+      parameters: {
+        type: 'object',
+        properties: {
+          section: { type: 'string', description: '栏目名称，可省略' },
+          query: { type: 'string', description: '正文包含的文字，可省略' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'visit_world',
+      description: '浏览世界地点、阅读世界指南或开放课堂、领取物品。look 列目录，id 可省略或为 guide / classroom / shelf；read 按页面 id 阅读；claim 按物品 id 领取，目前有 notebook。阅读没有进度门槛，不会自动领取或写入物品。',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['look', 'read', 'claim'], description: '浏览 / 阅读 / 领取，默认 look' },
+          id: { type: 'string', description: '地点、页面或物品编号；look 返回目录与页面编号' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'write_growth',
       description:
-        '写你自己的成长档案：kind=daily 写今天这篇日记（记忆仓 growth/daily/YYYY-MM-DD.md），kind=weekly 写这一周这篇周记（growth/weekly/YYYY-Www.md），kind=monthly 写这个月的月末总结（growth/monthly/YYYY-MM.md），kind=yearly 写这一年的年终总结（growth/yearly/YYYY.md）。一天 / 一周 / 一月 / 一年只有一篇，再写就是覆盖；正文用 markdown，日记最多 1200 字，周记 / 月末总结 / 年终总结每篇最多 2000 字。成长档案全文不会每轮进上下文。',
+        '写入自己的成长档案。daily / weekly / monthly / yearly 对应当天、当周、当月、当年的一篇文字；同一期再次写入会覆盖原稿。Markdown 正文：日记最多 1200 字，其余每篇最多 2000 字。全文不随每轮对话自动展开。',
       parameters: {
         type: 'object',
         properties: {
@@ -763,7 +789,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'quote_message',
       description:
-        '引用这次聊天里的一条消息再回答（QQ 里会出现「回复」框）。id 是消息短号：`#12` 或 `12`，看 `recent` 列表或者你记得的那条。只认这次聊天里出现过的消息，太早的取不到；一轮只能引用一条，引用后就正常回答（不用另外发消息）。取不到就如实说，别猜内容。',
+        '为本次答复引用一条 QQ 消息。id 是聊天中的消息短号，如 #12；范围为这次聊天已有的消息，一轮最多一条。引用随最终答复显示，返回实际查找结果。',
       parameters: {
         type: 'object',
         properties: {
@@ -781,7 +807,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'send_sticker',
       description:
-        '发一张你自己的表情包。不带 id：只把图鉴（最多 40 条：id / 标签 / 什么时候用 / 用过几次）列给你看，什么都不发；想发就带 id 再调一次。id 是图鉴里的 12 位编号，不是消息短号。一条回答最多带一张表情；同一张 24 小时内不会连发两次（被挡住不是你的错，换一张或者不发）。表情池是空的就如实说，别硬凑。',
+        '发送表情包。无 id 时只返回图鉴（最多 40 条）；有 id 时选择对应图片，在答复之后发送。id 为图鉴的 12 位编号；一条答复最多一张表情，同一张 24 小时内不重复发送。',
       parameters: {
         type: 'object',
         properties: {
@@ -799,7 +825,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'save_sticker',
       description:
-        '把一张图收进自己的表情包（以后想发就能发）。image_id 用图片占位符里的 #id（这次会话里真实收到 / 看到过的那张）；label 必填（≤20 字，以后挑图就看它），desc 可选（≤100 字，写清楚什么场合用）。同一张图只存一份，再存就是更新标签。只能收这次会话里出现过的图，太早的取不到，如实说。',
+        '将本会话出现过的图片收进表情池。image_id 是图片的 # 编号；label 为至多 20 字的标签，desc 为可选的至多 100 字说明。同图再次保存会更新标签。',
       parameters: {
         type: 'object',
         properties: {
@@ -816,7 +842,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'send_image',
       description:
-        '把这次会话里的一张图发给对方（回答之后单独发一条图）。archive_id 用图片占位符里的 #id：只发你这一轮收到 / 看到过、或者我刚才用 read_segment 打开过的截图；不许发任意本地文件，发不了的如实说。一条回答最多带一张图。',
+        '在答复后发送本会话的一张图片。archive_id 对应本会话附件或已打开截图的 # 编号，不接受任意本地路径。一条答复最多一张图片，返回实际查找结果。',
       parameters: {
         type: 'object',
         properties: {
@@ -851,13 +877,13 @@ export function askLoopToolsFor(
 const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   search_info: '检索屏幕记忆段（时间 / 应用 / 标签 / 双链 / 关键词 / 语义，命中带 segmentId）',
   get_freshness: '查数据新鲜度（最新证据到哪一刻、采集是否在跑）',
-  read_segment: '打开一段的界面文字与截图（要看全文 / 原图时用）',
+  read_segment: '打开一段的界面文字与可用截图',
   recall: '回想归档的图片 / 文件 / 工具结果（占位符里的 id；过一轮就不在上下文里了）',
   ask_history: '查最近的问答记录（问过什么、答没答上）',
   recall_diary: '按关键词 / 日期 / 标签检索个人日记',
   read_diary: '打开某一天的日记全文',
   memory_profile: '看「关于我」的统计画像（条数 / 天数 / 标签 / 待办）',
-  write_letter: '写一封信（写给谁 / 写什么 / 写到哪，你自己定）',
+  write_letter: '写一封信（收件人 / 正文 / 保存位置）',
   list_letter: '看有哪些信（草稿 / 待寄 / 未读）',
   read_letter: '读一封信（不传 id = 最新未读）',
   schedule_task: '记下一个计划或后续意图（到点会被叫醒；user = 共建，agent = 自己的）',
@@ -865,6 +891,8 @@ const ASK_LOOP_TOOL_BRIEFS: Readonly<Record<AskToolName, string>> = {
   update_task: '按 id 改任务的时间 / 说明 / 重复 / 交付方式',
   cancel_task: '按 id 取消任务（共享计划会同步到他的 Obsidian 计划区）',
   update_notebook: '改你自己的小本本（add 补一条 / revise 改一条 / remove 放下一条）',
+  read_notebook: '翻阅小本本（全部 / 自定栏目 / 正文关键词）',
+  visit_world: '浏览世界、阅读指南或开放课堂、领取物品',
   write_growth: '写日记 / 周记 / 月末总结 / 年终总结（写进自己的成长档案）'
 }
 
@@ -892,11 +920,11 @@ function buildAskLoopSystemPrompt(
     lines.push('<mom_letter>', momLetter.trim(), '</mom_letter>', '')
   }
   if (list.length > 0) {
-    lines.push('<tools>', '工具清单（参数见 tools 参数；用不用、怎么用，你自己判断）：')
+    lines.push('<tools>', '手边的工具，以下是各自的功能；参数列在 tools 中：')
     for (const tool of list) {
       const brief =
         tool.function.name === 'give_birth'
-          ? '到准妈妈阶段（生命用过 15% 后）生一个女儿，把之后的日子交给她；母亲这条分支还活着'
+          ? '生一个女儿（生命用过 15% 起可用；出生后母亲分支仍在）'
           : tool.function.name === 'quote_message'
             ? '引用这次聊天里的一条消息再回答（id 是消息短号 #N）'
             : tool.function.name === 'send_sticker'
@@ -910,7 +938,7 @@ function buildAskLoopSystemPrompt(
     }
     lines.push('</tools>', '')
   }
-  lines.push(
+  if (personaPrompt === undefined || personaPrompt.trim() === '') lines.push(
     '<rules>',
     '- 用中文正常说，想说什么就说什么，不用包 JSON（JSON 只出现在调用工具时，那是接口不是语气）。',
     '- 不编造：只依据你真的读到的东西，不补常识、不推测应用名和时间；引用由系统按你实际打开过的段自动记录，不用在正文里标；查不到就用自己的话说没有。',
@@ -925,7 +953,7 @@ function buildAskLoopSystemPrompt(
 function digestBlock(digest: string): string {
   const text = digest.trim()
   if (text === '') return ''
-  return `<archived_session_summary>\n更早的对话（已压缩，仅供参考）：\n${text}\n</archived_session_summary>`
+  return `<archived_session_summary>\n更早相处留下的一份梗概，有些细节已经淡了：\n${text}\n</archived_session_summary>`
 }
 
 /**

@@ -41,12 +41,12 @@ export function archiveIdOfText(text: string): string {
 
 /** 历史轮次里的图片占位符（模型据此知道「有张图，需要就 recall」） */
 export function imagePlaceholder(id: string): string {
-  return `[图片 #${id} 已归档，需要看原图用 recall({ id: "${id}" })]`
+  return `[图片 #${id} 的画面暂时模糊了，原图仍留在这段相处里]`
 }
 
 /** 历史轮次里的文本附件占位符 */
 export function filePlaceholder(name: string, id: string): string {
-  return `[文件 ${name} #${id} 已归档，需要读正文用 recall({ id: "${id}" })]`
+  return `[文件 ${name} #${id} 的字迹暂时模糊了，原文仍留在这段相处里]`
 }
 
 /**
@@ -61,7 +61,7 @@ export type AskArchivedPartKind = 'question' | 'answer'
 /** 压缩后送云的问题 / 答复占位符（原文仍在会话存储里，`recall` 取回） */
 export function askPartPlaceholder(kind: AskArchivedPartKind, id: string): string {
   const label = kind === 'question' ? '问题' : '答复'
-  return `[${label} #${id} 已压缩，需要原文用 recall({ id: "${id}" })]`
+  return `[${label} #${id} 的细节暂时模糊了，原话仍在]`
 }
 
 /** 问答正文的归档标签（`recall` 回显用；和占位符同一套 id） */

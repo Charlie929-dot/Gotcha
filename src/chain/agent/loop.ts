@@ -92,6 +92,7 @@ import {
   type TaskToolDeps
 } from './tools'
 import type { ChainDb } from '../store'
+import type { WorldToolDeps } from './world'
 import type { ChainSearchBatchQuery, ChainSearchBatchResult } from '../query'
 
 /** 允许模型调用工具的轮数上限（用户点一次「继续查」就再批这么多） */
@@ -159,12 +160,13 @@ export interface AskLoopContext {
   /** 任务记忆（自调用 v0.2 §6）：四个任务工具的端口；不传 = 这台机器没有任务库 */
   tasks?: TaskToolDeps
   /**
-   * 小本本（自调用 v0.2 §7）：`read()` 给 `<now>` 每轮注入当前核心页，
+   * 小本本（自调用 v0.2 §7）：`read()` 由 read_notebook 主动翻阅，
    * `update` 是 `update_notebook` 的执行端口。不传 = 这个分支没有小本本。
    */
   notebook?: NotebookToolDeps & {
     read(): readonly { id: string; section: string; text: string }[]
   }
+  world?: WorldToolDeps
   /**
    * 成长档案（自调用 v0.2 §8）：`write` 是 `write_growth` 的执行端口。
    * 不传 = 这个分支没有成长档案工具（或记忆仓不可用）。
@@ -357,6 +359,10 @@ function summarizeToolOutcome(
       return result.ok
         ? `小本本 ${result.entry !== null ? `${result.entry.id} ` : ''}已改（${result.total} 条）`
         : '小本本没改成'
+    case 'read_notebook':
+      return `翻开小本本（${result.entries.length} 条）`
+    case 'visit_world':
+      return result.ok ? `来到世界 · ${result.id}` : '这次没有找到'
     case 'write_growth':
       return result.ok
         ? `${result.growthKind === 'weekly' ? '周记' : '日记'}已写（${result.period}，${result.chars} 字）`
@@ -444,6 +450,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
     ...(ctx.letters ? { letters: ctx.letters } : {}),
     ...(ctx.tasks ? { tasks: ctx.tasks } : {}),
     ...(ctx.notebook ? { notebook: ctx.notebook } : {}),
+    ...(ctx.world ? { world: ctx.world } : {}),
     ...(ctx.growth ? { growth: ctx.growth } : {}),
     ...(ctx.quoteMessage ? { quoteMessage: ctx.quoteMessage } : {}),
     ...(ctx.stickers ? { stickers: ctx.stickers } : {}),
@@ -474,6 +481,8 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
   }
   const systemTime = formatSystemTime(now)
   const systemTimeMs = now
+  // 本次相遇的开头固定下来；领取后的变化由工具结果说明，下一问刷新旁白。
+  const world = ctx.world?.snapshot()
   /** 工具白名单（D72）：缺省 = 全开（老调用方 / 测试行为不变）；空数组 = 纯模型 */
   const tools = ctx.tools ?? ASK_TOOL_NAMES
   const toolsAvailable = tools.length > 0
@@ -699,7 +708,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
       ...(ctx.life ? { life: ctx.life } : {}),
       ...(ctx.unreadLetters !== undefined ? { letters: { unread: ctx.unreadLetters } } : {}),
       ...(ctx.dueTasks ? { tasks: { due: ctx.dueTasks() } } : {}),
-      ...(ctx.notebook ? { notebook: ctx.notebook.read() } : {}),
+      ...(world !== undefined ? { world } : {}),
       ...(ctx.attachments ? { attachments: ctx.attachments } : {}),
       ...(ctx.quoted ? { quoted: ctx.quoted } : {}),
       ...(ctx.chatRecent ? { chatRecent: ctx.chatRecent } : {})

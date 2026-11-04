@@ -185,7 +185,7 @@ describe('载荷与 <now>', () => {
       turns: [],
       letters: { unread: 2 }
     })
-    expect(withUnread.payload.now).toContain('信件：2 封未读')
+    expect(withUnread.payload.now).toContain('信箱里还有 2 封未拆的信。')
     expect(withUnread.payload.now).not.toContain('来自')
 
     const read = outbound.buildLoop({
@@ -196,6 +196,6 @@ describe('载荷与 <now>', () => {
       turns: [],
       letters: { unread: 0 }
     })
-    expect(read.payload.now).not.toContain('信件：')
+    expect(read.payload.now).not.toContain('信箱里还有')
   })
 })

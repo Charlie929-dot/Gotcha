@@ -140,13 +140,13 @@ describe('开场注入：拼进 <now>（不再塞 system）', () => {
       opening: OPENING
     })
     expect(payload.now).toContain('此刻：现在是 2026-10-29 23:40')
-    expect(payload.now).toContain('你想到的（只是联想，不一定对')
+    expect(payload.now).toContain('脑海里浮起几页旧日记')
     expect(payload.now).toContain('[2026-10-28] 下午编译一直报错')
     // 动态事实在 user 消息的 <now> 里，system 固定
     const messages = buildChainAskLoopMessages(payload, {}, undefined, '你叫「贴心大肥鱼」。')
     const text = messages[0]?.content ?? ''
     expect(text).not.toContain('此刻：')
-    expect(text).not.toContain('你想到的（只是联想')
+    expect(text).not.toContain('脑海里浮起几页旧日记')
     expect(text).not.toContain('你是这个记忆系统本身')
     expect(text).not.toContain('不是检索工具')
     expect(text).not.toContain('工具就是你的眼睛和手')

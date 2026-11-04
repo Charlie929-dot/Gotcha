@@ -1607,7 +1607,7 @@ async function refreshMemoryRepo(note = ''): Promise<void> {
 function fillNotebook(view: NotebookAdminView): void {
   notebookGroupsEl.replaceChildren()
   if (view.total === 0) {
-    notebookStatusEl.textContent = '小本本还是空的（ta 记下关于你的理解后会出现在这里）'
+    notebookStatusEl.textContent = '小本本还是空的'
     return
   }
   notebookStatusEl.textContent = `共 ${view.total} 条 · ${view.path}`

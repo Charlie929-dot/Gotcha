@@ -383,9 +383,10 @@ describe('循环里的回执与合流', () => {
     )
     const payload = client.askLoopRequests.at(-1)
     const text = JSON.stringify(payload)
-    expect(text).toContain('到点的事')
+    expect(text).toContain('日程翻到了这一刻')
     expect(text).toContain('问他吃没吃饭')
-    expect(text).toContain('由你判断')
+    expect(text).toContain('你当时记下的')
+    expect(text).not.toContain('由你判断')
   })
 
   it('到点的事命中脱敏规则：整条不列（不拆半句话送出去）', async () => {

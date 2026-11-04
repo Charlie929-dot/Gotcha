@@ -144,11 +144,11 @@
             <label>名字
               <input id="set-persona-name" type="text" maxlength="20" placeholder="贴心大肥鱼" />
             </label>
-            <label>口吻（一句话）
-              <input id="set-persona-tone" type="text" maxlength="120" placeholder="像认识很久的朋友：短句、具体、先给结论" />
+            <label>相识时的印象（一句话）
+              <input id="set-persona-tone" type="text" maxlength="120" placeholder="相处时有老朋友的亲近，也有自己的样子" />
             </label>
-            <label>追加红线（每行一条，最多 8 条；写死的三条删不掉）
-              <textarea id="set-persona-redlines" rows="3" placeholder="别提比赛成绩&#10;别用感叹号"></textarea>
+            <label>旧版红线（保留原文，不再发给模型）
+              <textarea id="set-persona-redlines" rows="3" readonly placeholder="别提比赛成绩&#10;别用感叹号"></textarea>
             </label>
             <div class="memory-actions">
               <button id="memory-save" type="button" class="primary">保存并同步</button>
@@ -194,8 +194,8 @@
               <span id="notebook-msg" class="hint"></span>
             </div>
             <p class="hint">
-              ta 自己记的「当前理解」（关于你 / 最近的你 / 我们之间 / 给自己的提醒），跟着记忆仓分支走，
-              每次聊天都会带在身边。每条可以「改」或「删除」；想更自然地纠正，直接跟 ta 说，或用
+              ta 可以从世界的物品架领取小本本，自由命名栏目、记录和翻阅；内容跟着记忆仓分支走，
+              正文不会每次聊天自动展开。每条可以「改」或「删除」；想更自然地纠正，直接跟 ta 说，或用
               <code>/notebook rm 编号</code>。文件在记忆仓的 <code>notebook.md</code>，也可以自己改。
             </p>
           </section>
@@ -337,7 +337,7 @@
             </label>
             <p id="persona-card-msg" class="hint"></p>
             <p class="hint">
-              卡启用时名字 / 口吻让位（卡里写什么就是什么），三条写死的底线仍压在最上面、冲突时以底线为准；
+              卡启用时名字 / 相识印象让位，卡片全文原样呈现，不再追加独立底线；
               整张卡会随聊天模式的每次提问发给模型。卡片就是 <code>persona-cards/</code> 里的 .md，也可以直接把文件放进去。
             </p>
           </section>

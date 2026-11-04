@@ -1,14 +1,13 @@
 /**
  * 个人记忆 · 性格架构（persona）
  *
- * 参考 dsh-bili-scroll 的「人设 + 红线」写法：人设是**可改的配置**，红线是**写死的纪律**。
- * 人设决定「它像谁在说话」，红线决定「它永远不能做什么」——两者不能混在一段自由文本里，
- * 否则用户改人设时会把红线一起改掉。
+ * 名字与相识印象作为处境的一部分；性格也在传承与对话中继续变化。
+ * 旧红线字段仅兼容保存，不再作为独立指令送给模型。
  *
  * 存 settings 表（与其它自定义项同表，不新建表）：
  * - `memory.persona_name`    名字（默认「记忆球」）
  * - `memory.persona_tone`    说话方式（一句话，用户可改）
- * - `memory.persona_redlines` 额外红线（`|` 分隔，追加在默认三条之后）
+ * - `memory.persona_redlines` 旧额外红线（`|` 分隔，保留存储）
  * - `memory.persona_card`    启用的人格卡（`<userData>/persona-cards/` 里的 .md 文件名；空 = 不用卡）
  * - `memory.vault_dir`       日记目录（留空 = 自动找）
  *
@@ -32,7 +31,7 @@ export const PERSONA_CARD_DIRNAME = 'persona-cards'
 export interface MemoryPersona {
   name: string
   tone: string
-  /** 默认三条 + 用户追加的 */
+  /** 兼容读取的旧追加红线；不进入 prompt */
   redLines: string[]
   /** 启用的人格卡（文件名 + 全文）；没启用 / 文件读不到时为 null */
   card: { name: string; text: string } | null
@@ -48,12 +47,8 @@ export interface PersonaCardInfo {
   title: string
 }
 
-/** 写死的三条底线：不编造 / 不泄露 / 不越权。任何配置都不能删掉它们。 */
-export const PERSONA_HARD_RED_LINES: readonly string[] = [
-  '只依据检索到的记录说话：没查到就说没查到，不补常识、不推测、不编造日期和名字。',
-  '不把日记原文、路径、账号、密钥之类的隐私主动抖出来；用户没问就不提。',
-  '不替用户做决定、不评价对错：你的活儿是把当时的事一起想起来，而不是替他下结论。'
-]
+/** 兼容设置视图的旧字段；人格聊天不再注入独立的强制底线。 */
+export const PERSONA_HARD_RED_LINES: readonly string[] = []
 
 const PERSONA_NAME_DEFAULT = '贴心大肥鱼'
 /**
@@ -65,7 +60,7 @@ const PERSONA_NAME_DEFAULT = '贴心大肥鱼'
  * （settings 层不能反向 import 本模块，避免循环依赖）；改这里要同步改那边。
  */
 const PERSONA_TONE_DEFAULT =
-  '像认识很久的老朋友：短句、具体、先给结论；不确定就说不确定，可以有自己的看法，不用端着'
+  '相处时有老朋友的亲近，也有慢慢长出来的自己的样子'
 
 /** 用户追加的红线（`|` 分隔；空串 = 没有追加；重复的只留一条） */
 export function parseRedLines(raw: string): string[] {
@@ -195,9 +190,12 @@ export function readPersona(db: Db, options: { userDataDir?: string } = {}): Mem
     const text = readPersonaCard(options.userDataDir, cardName)
     if (text !== null) card = { name: cardName, text }
   }
+  const savedTone = getSetting(db, 'memory.persona_tone').trim()
+  const tone = savedTone === '像认识很久的老朋友：短句、具体、先给结论；不确定就说不确定，可以有自己的看法，不用端着'
+    ? PERSONA_TONE_DEFAULT : savedTone || PERSONA_TONE_DEFAULT
   return {
     name: getSetting(db, 'memory.persona_name').trim() || PERSONA_NAME_DEFAULT,
-    tone: getSetting(db, 'memory.persona_tone').trim() || PERSONA_TONE_DEFAULT,
+    tone,
     redLines: [...PERSONA_HARD_RED_LINES, ...parseRedLines(getSetting(db, 'memory.persona_redlines'))],
     card
   }
@@ -215,32 +213,12 @@ export function savePersona(
   return readPersona(db)
 }
 
-/**
- * 拼进 system 提示的人设段。
- *
- * 2026-10-29 深夜七（拍板人）：这里**只放事实**——名字、他写下的口吻、红线。
- * 不再写「你不是助理 / 不是检索工具 / 你有自己的脾气」：这类宣言是贴上去的人味，
- * 一删就回到客服腔；人味要靠处境（时间、对话、记忆）和它自己的判断长出来。
- *
- * 2026-10-30（D62）：启用人格卡时，卡全文排在最前面，名字 / 口吻让位（卡里写什么就是什么）；
- * 三条写死红线永远在最后，且明说冲突时以红线为准——卡是性格，不是免罪符。
- *
- * 注意：这里是**本地配置**，不是屏幕文本，不进脱敏墙；但它会出现在出云请求里，
- * 所以只放用户自己写的文本（保存时已限长），不放任何运行时数据。
- */
+/** 人格卡全文保留；无卡时只叙述名字与相识印象。旧红线配置不再进入提示词。 */
 export function buildPersonaPrompt(persona: MemoryPersona): string {
-  const head: string[] = []
   if (persona.card !== null) {
-    head.push(persona.card.text, '', '以上是你的性格设定。')
-  } else {
-    head.push(`你叫「${persona.name}」。`, `你说话的样子：${persona.tone}。`)
+    return persona.card.text
   }
-  return [
-    ...head,
-    '',
-    '你的底线（任何情况下都不破；和上面的设定冲突时以这里为准）：',
-    ...persona.redLines.map((line, index) => `${index + 1}) ${line}`)
-  ].join('\n')
+  return [`这间屋子里，大家叫你「${persona.name}」。`, `相识时留下的印象：${persona.tone}。`].join('\n')
 }
 
 /** 目录里有几篇日记（读不了算 -1，用来在同机多个 vault 里挑容量最大的那个） */

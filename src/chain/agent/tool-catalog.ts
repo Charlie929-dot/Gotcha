@@ -41,7 +41,8 @@ export const ASK_TOOL_TASK_NAMES = [
   'cancel_task'
 ] as const
 /** 小本本（自调用 v0.2 §7 / §12.2）：自己的当前理解，增改删都走这一个工具 */
-export const ASK_TOOL_NOTEBOOK_NAMES = ['update_notebook'] as const
+export const ASK_TOOL_NOTEBOOK_NAMES = ['update_notebook', 'read_notebook'] as const
+export const ASK_TOOL_WORLD_NAMES = ['visit_world'] as const
 /** 成长档案（自调用 v0.2 §8 / §12.3）：ta 自己的日记 / 周记，一天 / 一周一篇 */
 export const ASK_TOOL_GROWTH_NAMES = ['write_growth'] as const
 
@@ -65,6 +66,7 @@ export type AskToolName =
   | (typeof ASK_TOOL_TASK_NAMES)[number]
   | (typeof ASK_TOOL_NOTEBOOK_NAMES)[number]
   | (typeof ASK_TOOL_GROWTH_NAMES)[number]
+  | (typeof ASK_TOOL_WORLD_NAMES)[number]
 
 export const ASK_TOOL_SETS: readonly AskToolSet[] = [
   { id: 'screen', label: '屏幕记忆', tools: [...ASK_TOOL_SCREEN_NAMES] },
@@ -72,7 +74,8 @@ export const ASK_TOOL_SETS: readonly AskToolSet[] = [
   { id: 'letter', label: '信', tools: [...ASK_TOOL_LETTER_NAMES] },
   { id: 'task', label: '任务', tools: [...ASK_TOOL_TASK_NAMES] },
   { id: 'notebook', label: '小本本', tools: [...ASK_TOOL_NOTEBOOK_NAMES] },
-  { id: 'growth', label: '成长档案', tools: [...ASK_TOOL_GROWTH_NAMES] }
+  { id: 'growth', label: '成长档案', tools: [...ASK_TOOL_GROWTH_NAMES] },
+  { id: 'world', label: '世界', tools: [...ASK_TOOL_WORLD_NAMES] }
 ]
 
 /** 全部工具元素（顺序：先屏幕后日记，与 `ASK_TOOL_SETS` 一致） */
@@ -98,6 +101,8 @@ export const ASK_TOOL_LABELS: Readonly<Record<AskToolName, string>> = {
   update_task: '改一条任务的时间 / 说明 / 重复 / 交付方式',
   cancel_task: '取消一条任务',
   update_notebook: '改自己的小本本：补一条 / 修正 / 放下（编号在小本本里）',
+  read_notebook: '翻阅小本本（全部 / 栏目 / 正文关键词）',
+  visit_world: '浏览世界、阅读指南或课堂、领取物品',
   write_growth: '写日记 / 周记 / 月末总结 / 年终总结（写进自己的成长档案）'
 }
 

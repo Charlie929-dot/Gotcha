@@ -3183,7 +3183,9 @@ if (primaryInstance) {
         ensureChainSchema(db)
         writeNapcatShellDir(db, dir)
       },
-      log: (level, message, data) => captureLog(level, message, data)
+      log: (level, message, data) => captureLog(level, message, data),
+      // 掉线提醒走托盘气泡（托盘还没装好时静默；QQ 通道掉线不该只留在日志里）
+      notify: (title, content) => trayShell?.balloon(title, content)
     })
     void qqNapcat.locate()
     const refreshQqChannel = async (): Promise<{ ok: boolean; error?: string }> => {

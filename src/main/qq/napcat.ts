@@ -45,9 +45,15 @@ export const NAPCAT_REQUIRED_FILES = [
 export const NAPCAT_QRCODE_REL = join('cache', 'qrcode.png')
 /**
  * 二维码票的有效期（约 2 分钟，留一点余量）：比这还旧的图不算数。
- * NapCat 只在启动 / 收到刷新请求时写 `cache/qrcode.png`，不会自己换——旧图扫出来就是「已过期」。
+ * NapCat 停在登录页时自己也会隔约 2 分钟重写一次 `cache/qrcode.png`（2026-11-04 实测：Gotcha
+ * 轮询停掉后文件 mtime 仍在走），所以这里只按新鲜度判；主动刷新是兜底，不是唯一来源。
  */
 export const NAPCAT_QR_MAX_AGE_MS = 110_000
+/**
+ * 等 WebUI 的宽限期：NapCat 刚拉起时 WebUI 要几十秒才起。
+ * 过了宽限只报可读原因、**不停止轮询**——NapCat / QQ 重启后要能自己接回来（2026-11-04 真机）。
+ */
+export const NAPCAT_WEBUI_GRACE_MS = 60_000
 /** WebUI 默认端口（config/webui.json 里通常也是 6099） */
 export const NAPCAT_DEFAULT_WEBUI_PORT = 6099
 /** 下载包名（官方 Releases 里的 Windows Shell 包） */
@@ -99,6 +105,8 @@ export interface NapcatDeps {
   getShellDir: () => string
   setShellDir: (dir: string) => void
   log: QqLog
+  /** 掉线提醒（托盘气泡等）：只在「本来在线 → 掉了」时调一次；没注入就静默 */
+  notify?: (title: string, content: string) => void
   now?: () => number
   /** 测试替换：进程 / 网络 / 系统查询 */
   isBootmainRunning?: () => Promise<boolean>
@@ -416,6 +424,14 @@ export class NapcatManager {
   /** 本次 start 的时刻：WebUI 一直不通就按超时收口，别让界面永远停在「启动中」 */
   private startedAt = 0
   private lastPollErrorAt = 0
+  /** 这次会话里连上过（用来区分「掉线」和「从没连上」：只有前者值得弹提醒） */
+  private wasOnline = false
+  /** 本轮掉线已经提醒过；恢复在线后重置，别每 1.5 秒弹一次 */
+  private offlineNotified = false
+  /** 上一次 WebUI 真的响应成功的时刻（判断「WebUI 掉线」用；start 时置为当前） */
+  private lastWebuiOkAt = 0
+  /** 当前这条 error 是哪种原因设的：只有 webui 那条会在 WebUI 恢复后自动收掉 */
+  private errorKind: 'webui' | 'link' | null = null
   /** 上一次找 NapCat 换二维码的时刻（别每个轮询都调） */
   private lastQrRefreshAt = 0
 
@@ -490,6 +506,8 @@ export class NapcatManager {
       this.attachedToExisting = true
       this.qrMinMtime = 0
       this.startedAt = this.now()
+      this.lastWebuiOkAt = this.now()
+      this.errorKind = null
       this.phase = 'waiting-login'
       this.error = null
       this.beginPoll()
@@ -510,6 +528,8 @@ export class NapcatManager {
     this.stopping = false
     this.configApplied = false
     this.startedAt = this.now()
+    this.lastWebuiOkAt = this.now()
+    this.errorKind = null
     this.lastPollErrorAt = 0
     // 复用旧安装时 cache/qrcode.png 里可能还躺着上一次的码：只认本次启动之后写的
     this.qrMinMtime = this.now() - 5_000
@@ -545,6 +565,10 @@ export class NapcatManager {
     this.error = attached ? 'NapCat 不是 Gotcha 启动的：已只断开托管，QQ 仍在运行' : null
     this.progress = null
     this.stopping = false
+    this.wasOnline = false
+    this.offlineNotified = false
+    this.errorKind = null
+    this.lastWebuiOkAt = 0
   }
 
   /** Gotcha 退出：只停轮询，不动 NapCat/QQ（拍板：退出不关） */
@@ -630,6 +654,27 @@ export class NapcatManager {
     return { ok: false, error: message }
   }
 
+  /** 连上了：记一笔「曾经在线」，并允许下一次掉线再提醒 */
+  private markOnline(): void {
+    this.wasOnline = true
+    this.offlineNotified = false
+  }
+
+  /** 掉线提醒：只在本会话「在线过又掉了」时弹一次，别每轮轮询都弹 */
+  private notifyOffline(reason: 'login-required' | 'webui-down' | 'link'): void {
+    if (!this.wasOnline || this.offlineNotified) return
+    this.offlineNotified = true
+    this.log('warn', 'qq offline detected', { reason })
+    this.deps.notify?.(
+      'QQ 掉线了',
+      reason === 'login-required'
+        ? '去「设置 → QQ 通道」扫一下码就能接上'
+        : reason === 'link'
+          ? 'NapCat 登录正常但没连上 Gotcha（检查 access_token / 端口），正在后台重试'
+          : 'NapCat 暂时没响应，正在后台重试；恢复了会自动接上'
+    )
+  }
+
   private log(level: 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>): void {
     this.deps.log(level, message, data)
   }
@@ -712,6 +757,7 @@ export class NapcatManager {
         this.loggedIn = true
         this.qrDataUrl = null
         this.error = null
+        this.markOnline()
         return
       }
       if (this.shellDir === null) return
@@ -720,14 +766,33 @@ export class NapcatManager {
       // 二维码先读：WebUI 挂了也不耽误扫码
       await this.readQr()
 
-      // 60s 还没摸到 WebUI：QQ/NapCat 基本是没起来，给原因并停止干等
-      if (this.webuiCredential === null && this.now() - this.startedAt > 60_000) {
-        this.stopPoll()
-        this.fail('NapCat 没起来：没读到 WebUI（QQ 可能没启动 / 被安全软件拦了），点「启动」重试')
-        return
+      // 宽限期过了还没摸到 WebUI：先作废旧凭据探一次（NapCat 重启会换凭据），还连不上才报错。
+      // 重点是**继续轮询**——NapCat / QQ 重启后要能自己接回来（2026-11-04 真机：WebUI 掉了几秒
+      // 就回来了，旧逻辑已经永久停表，只能手动点「启动」）。
+      const stale = this.now() - this.lastWebuiOkAt > NAPCAT_WEBUI_GRACE_MS
+      if (stale) {
+        this.webuiCredential = null
+        if (!(await this.probeWebui())) {
+          this.loggedIn = false
+          // 掉线期间连接时长不再可信：恢复了重新起算，否则「已登录但没连上」的 45s 判会立刻误报
+          this.loggedInSince = null
+          if (this.phase !== 'error') {
+            this.errorKind = 'webui'
+            this.fail('NapCat 暂时没响应（WebUI 连不上），正在后台重试；恢复了会自动接上')
+            this.notifyOffline('webui-down')
+          }
+          return
+        }
       }
 
       await this.ensureWebui()
+      // 自愈：WebUI 回来了（或换了新凭据），把「连不上」那条错误收掉，别让界面一直停在报错上
+      if (this.errorKind === 'webui' && this.webuiCredential !== null) {
+        this.error = null
+        this.errorKind = null
+        this.phase = 'waiting-login'
+        this.log('info', 'napcat webui recovered')
+      }
 
       if (this.webuiCredential !== null) {
         const status = await this.webuiPost('/api/QQLogin/CheckLoginStatus')
@@ -736,6 +801,7 @@ export class NapcatManager {
           this.loggedIn = true
           this.qrDataUrl = null
           this.error = null
+          this.errorKind = null
           if (this.loggedInSince === null) this.loggedInSince = this.now()
           if (this.uin === null) await this.refreshLoginInfo()
           if (!this.configApplied && this.now() - this.lastConfigAttempt > 10_000) {
@@ -745,10 +811,13 @@ export class NapcatManager {
           if (this.deps.isConnected()) {
             this.phase = 'connected'
           } else if (this.now() - this.loggedInSince > 45_000) {
-            // 登录成功但一直没拨回来：八成是 token / 端口 / 代理问题，给可读原因而不是干等
-            this.stopPoll()
-            this.fail('QQ 已登录，但 NapCat 没连上 Gotcha（检查 access_token / 端口，改完点「启动」重试）')
-            return
+            // 登录成功但一直没拨回来：八成是 token / 端口 / 代理问题。只报原因、不停轮询：
+            // 改完设置后 NapCat 会重连回来，这里能自己恢复（别让人只能手动点「启动」）
+            if (this.phase !== 'error') {
+              this.errorKind = 'link'
+              this.fail('QQ 已登录，但 NapCat 没连上 Gotcha（检查 access_token / 端口 / 代理，改完会自动重试）')
+              this.notifyOffline('link')
+            }
           } else {
             // 已登录但还没拨回来（配置刚写入 / 正在重连）：保持等待，不要退回二维码
             this.phase = 'waiting-login'
@@ -757,6 +826,7 @@ export class NapcatManager {
         }
         this.loggedInSince = null
         this.loggedIn = false
+        this.notifyOffline('login-required')
       }
 
       // 没登录：码过期（或还没有码）就让 NapCat 换一张——它自己不会换，旧码扫出来是「已过期」
@@ -776,6 +846,16 @@ export class NapcatManager {
     } finally {
       this.polling = false
     }
+  }
+
+  /** WebUI 能不能连上（作废旧凭据后重登一次）；连不上返回 false，不抛 */
+  private async probeWebui(): Promise<boolean> {
+    try {
+      await this.ensureWebui()
+    } catch {
+      // 连不上就是连不上：由调用方按轮询节奏重试，这里不刷日志
+    }
+    return this.webuiCredential !== null
   }
 
   private async ensureWebui(): Promise<void> {
@@ -820,6 +900,7 @@ export class NapcatManager {
       if (json.message === 'Unauthorized') this.webuiCredential = null
       throw new Error(`WebUI ${path} code ${json.code}${json.message ? `：${json.message}` : ''}`)
     }
+    this.lastWebuiOkAt = this.now()
     return json.data ?? null
   }
 
@@ -869,9 +950,9 @@ export class NapcatManager {
   }
 
   /**
-   * 二维码过期就让 NapCat 换一张（2026-10-31 真机：它只在启动时写 `cache/qrcode.png`，
-   * 旧码会一直挂在界面上，手机扫出来是「已过期」）。刷新后 NapCat 会把那张 PNG 重写，
-   * 再按普通路径读回来——不引入二维码编码器，也不新增依赖。
+   * 二维码过期就让 NapCat 换一张（旧码扫出来是「已过期」）。NapCat 停在登录页时自己也会隔
+   * 约 2 分钟重写一次 PNG（2026-11-04 实测），但刷新是兜底：轮询停掉时也得有人主动换。
+   * 刷新后 NapCat 会把那张 PNG 重写，再按普通路径读回来——不引入二维码编码器，也不新增依赖。
    */
   private async refreshQr(): Promise<void> {
     if (this.webuiCredential === null) return

@@ -444,9 +444,15 @@ export class QqOb11Server {
     this.sockets.add(socket)
     this.log('info', 'qq ws connected', { connections: this.sockets.size })
     socket.on('message', (data) => this.receive(data))
-    socket.on('close', () => {
+    socket.on('close', (code, reason) => {
       this.sockets.delete(socket)
-      this.log('info', 'qq ws closed', { connections: this.sockets.size })
+      // 带上关闭码 / 原因：掉线排查最缺的就是「谁先关、为什么」（2026-11-04）
+      const text = Buffer.isBuffer(reason) ? reason.toString('utf8') : String(reason ?? '')
+      this.log('info', 'qq ws closed', {
+        connections: this.sockets.size,
+        code,
+        ...(text !== '' ? { reason: text.slice(0, 120) } : {})
+      })
     })
     socket.on('error', (error) => this.log('warn', 'qq ws socket error', { error: String(error) }))
   }
@@ -475,9 +481,16 @@ export class QqOb11Server {
     }
     const inbound = parsePrivateMessageEvent(payload)
     if (!inbound) {
-      // 群聊 / 心跳 / 上线通知：M1 静默丢弃（只记一条 debug 级的 info，不打正文）
+      // 群聊 / 心跳 / 上线通知：M1 静默丢弃（只记一条 debug 级的 info，不打正文）。
+      // notice 带上 notice_type：掉线排查要看得出是「账号被踢 / 离线」还是「输入中」这类噪音。
       const kind = String(payload['post_type'] ?? 'unknown')
-      if (kind !== 'meta_event') this.log('info', 'qq event ignored', { kind })
+      if (kind !== 'meta_event') {
+        const noticeType = kind === 'notice' ? String(payload['notice_type'] ?? '') : ''
+        this.log('info', 'qq event ignored', {
+          kind,
+          ...(noticeType !== '' ? { noticeType } : {})
+        })
+      }
       return
     }
     if (inbound.messageId > 0) {

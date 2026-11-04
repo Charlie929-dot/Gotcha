@@ -23,6 +23,7 @@ import {
   mergeOneBotConfig,
   NAPCAT_QR_MAX_AGE_MS,
   NAPCAT_REQUIRED_FILES,
+  NAPCAT_WEBUI_GRACE_MS,
   napcatTokenHash,
   NapcatManager,
   parseWebuiConfig,
@@ -318,5 +319,166 @@ describe('NapcatManager 启动前的 QQ / 僵尸进程判断（2026-11-04 真机
     expect(result.ok).toBe(true)
     expect(spawnImpl).toHaveBeenCalledTimes(1)
     manager.dispose()
+  })
+})
+
+describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
+  /** 造带 WebUI 配置和一张二维码的 Shell 目录 */
+  async function makeShellWithWebui(root: string): Promise<string> {
+    const shell = await makeShell(join(root, 'shell'))
+    await mkdir(join(shell, 'config'), { recursive: true })
+    await writeFile(
+      join(shell, 'config', 'webui.json'),
+      JSON.stringify({ host: '::', port: 6099, token: 'webui-token' }),
+      'utf8'
+    )
+    await mkdir(join(shell, 'cache'), { recursive: true })
+    const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 9, 9, 9])
+    await writeFile(join(shell, 'cache', 'qrcode.png'), png)
+    return shell
+  }
+
+  function jsonResponse(body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    })
+  }
+
+  /** 直接驱动一轮轮询：停掉自动定时器后手动跑，免得每个用例真等 1.5s */
+  function pollOnce(manager: NapcatManager): Promise<void> {
+    return (manager as unknown as { poll: () => Promise<void> }).poll()
+  }
+
+  async function attachedManager(options: {
+    clock: () => number
+    fetchImpl: typeof fetch
+    isConnected?: () => boolean
+    notify?: (title: string, content: string) => void
+    logs?: string[]
+  }): Promise<NapcatManager> {
+    const root = await makeDir()
+    const shell = await makeShellWithWebui(root)
+    const manager = new NapcatManager(
+      deps({
+        now: options.clock,
+        getShellDir: () => shell,
+        isBootmainRunning: async () => true,
+        isQqRunning: async () => true,
+        fetchImpl: options.fetchImpl,
+        ...(options.isConnected !== undefined ? { isConnected: options.isConnected } : {}),
+        ...(options.notify !== undefined ? { notify: options.notify } : {}),
+        log: (_level, message) => options.logs?.push(message)
+      })
+    )
+    const result = await manager.start()
+    expect(result.ok).toBe(true)
+    manager.dispose() // 只停自动轮询；下面手动驱动
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    return manager
+  }
+
+  it('WebUI 暂时连不上：只报原因不停轮询，恢复后自己收回错误', async () => {
+    let clock = Date.now()
+    const logs: string[] = []
+    let webuiUp = false
+    let loggedIn = false
+    const fetchImpl = (async (input: unknown) => {
+      if (!webuiUp) throw new TypeError('fetch failed')
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: loggedIn } })
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = await attachedManager({ clock: () => clock, fetchImpl, logs })
+
+    await pollOnce(manager)
+    expect(manager.status().phase).toBe('waiting-login')
+    expect(manager.status().error).toBeUndefined()
+
+    // 宽限期过了还连不上：报一次可读原因（旧逻辑这时候已经永久停表）
+    clock += NAPCAT_WEBUI_GRACE_MS + 1_000
+    await pollOnce(manager)
+    expect(manager.status().phase).toBe('error')
+    expect(manager.status().error).toContain('后台重试')
+
+    // 还在轮询：同一轮错误不重复刷日志（不停表才会继续走到这里）
+    const failures = logs.filter((message) => message === 'napcat failed').length
+    clock += 5_000
+    await pollOnce(manager)
+    expect(logs.filter((message) => message === 'napcat failed').length).toBe(failures)
+
+    // WebUI 回来了（NapCat 重启会换凭据）：自己接回来，错误收掉
+    webuiUp = true
+    await pollOnce(manager)
+    expect(manager.status().phase).toBe('waiting-login')
+    expect(manager.status().error).toBeUndefined()
+    expect(logs).toContain('napcat webui recovered')
+
+    // 账号其实还登录着：掉线期间的时长不能沿用，别在刚恢复时就把「连不上」判出来
+    loggedIn = true
+    await pollOnce(manager)
+    expect(manager.status().error).toBeUndefined()
+  })
+
+  it('本来在线又掉了：弹一次掉线提醒，不重复弹', async () => {
+    const clock = (): number => Date.now()
+    const notify = vi.fn()
+    let connected = false
+    let loggedIn = true
+    const fetchImpl = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: loggedIn } })
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = await attachedManager({
+      clock,
+      fetchImpl,
+      isConnected: () => connected,
+      notify
+    })
+
+    connected = true
+    await pollOnce(manager)
+    expect(manager.status().phase).toBe('connected')
+    expect(notify).not.toHaveBeenCalled()
+
+    // QQ 账号掉线：NapCat 回到扫码页
+    connected = false
+    loggedIn = false
+    await pollOnce(manager)
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenCalledWith('QQ 掉线了', '去「设置 → QQ 通道」扫一下码就能接上')
+
+    await pollOnce(manager)
+    expect(notify).toHaveBeenCalledTimes(1)
+
+    // 重新登录并连上后，下一轮掉线还要能提醒
+    connected = true
+    loggedIn = true
+    await pollOnce(manager)
+    expect(manager.status().phase).toBe('connected')
+    connected = false
+    loggedIn = false
+    await pollOnce(manager)
+    expect(notify).toHaveBeenCalledTimes(2)
+  })
+
+  it('从没连过就不弹提醒（首次扫码不算掉线）', async () => {
+    const clock = (): number => Date.now()
+    const notify = vi.fn()
+    const fetchImpl = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: false } })
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = await attachedManager({ clock, fetchImpl, notify })
+    await pollOnce(manager)
+    expect(notify).not.toHaveBeenCalled()
   })
 })

@@ -1,5 +1,5 @@
 /**
- * 记忆仓 · 交接回执与回执抬头（D82 / D83，2026-10-31）
+ * 记忆仓 · 交接回执与回执抬头（D82 / D83，2026-10-31；D100 加出生回执 2026-11-04）
  *
  * 母亲生命耗尽、下一代接手时，界面上要有一行字：
  *
@@ -8,6 +8,9 @@
  * ✨<贴心大肥鱼> 生命耗尽  ta的女儿 ✨<小满> 将接续ta的使命
  * ```
  *
+ * 2026-11-04 起母女共存：出生那一刻母亲还活着，回执改用 `birthReceiptText`
+ * （「✨<母亲> 的女儿 ✨<女儿> 出生了  ta 还在，可以接着聊」）；`handoverReceiptText`
+ * 只留给旧家谱里已经置 dead 的母亲。
  * 样式（D83，拍板人定）：回执和提示**不用 `===…===` 标记**，统一以 `🎗️提示` 起头；
  * 名字 / 分支 / 提交这类「占位符」前面加 `✨`，一眼能看出哪里是可变的。
  *
@@ -40,6 +43,19 @@ export function handoverReceiptBody(names: { mother: string; daughter: string })
 /** 完整交接回执（抬头 + 正文），出生那一刻直接用它 */
 export function handoverReceiptText(names: { mother: string; daughter: string }): string {
   return receiptText(handoverReceiptBody(names))
+}
+
+/**
+ * 出生回执的正文（D100 母女共存，2026-11-04）：女儿出生，母亲**还活着**——
+ * 不再说「生命耗尽 将接续使命」，只报「出生了」并告诉用户还能回去找她。
+ */
+export function birthReceiptBody(names: { mother: string; daughter: string }): string {
+  return `✨<${names.mother}> 的女儿 ✨<${names.daughter}> 出生了  ta 还在，可以接着聊`
+}
+
+/** 完整出生回执（抬头 + 正文），出生那一刻直接用它 */
+export function birthReceiptText(names: { mother: string; daughter: string }): string {
+  return receiptText(birthReceiptBody(names))
 }
 
 /**

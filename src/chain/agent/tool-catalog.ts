@@ -10,7 +10,7 @@
  *
  * 这里只放**名字与说明**，wire 格式（参数 schema）在 `understand/cloud/deepseek.ts`；
  * 两边各有一份清单，靠单测卡住「目录里有的，deepseek 必须也认识」。
- * `give_birth` 是生命周期工具（生命 ≤15% 自动出现），不进目录、不给 /tool 管。
+ * `give_birth` 是生命周期工具（persona 分支常驻，生命用过 15% 起可调用），不进目录、不给 /tool 管。
  */
 
 export interface AskToolSet {

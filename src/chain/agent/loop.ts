@@ -149,7 +149,8 @@ export interface AskLoopContext {
   /** 日记记忆（第二本账）；不传 = 没有接入，三个记忆工具会如实报错 */
   diary?: DiaryToolDeps
   /**
-   * 生女儿（D81）：只有在生命 ≤15% 且模式带工具时由组合根注入；
+   * 生女儿（D81 / D100）：persona 分支带工具就由组合根注入（常驻）；
+   * 能不能生由 `giveBirth` 自己判（生命用过 15% 起）。
    * 不传 = 模型调 `give_birth` 会回「现在还不能传承」。
    */
   giveBirth?: (nickname: string) => Promise<GiveBirthResult>
@@ -727,7 +728,7 @@ export async function runAskLoop(ctx: AskLoopContext, question: string): Promise
         ...(ctx.personaPrompt ? { personaPrompt: ctx.personaPrompt } : {}),
         // 工具白名单必须每轮都传：空表时客户端据此摘掉「数据边界 / 工具」段
         toolElements: tools,
-        // 生女儿（D81）：生命 ≤15% 才把 give_birth 放进 tools + 工具清单
+        // 生女儿（D81 / D100）：persona 分支常驻 give_birth，门槛在 giveBirth 自己判
         ...(ctx.giveBirth ? { giveBirth: true } : {}),
         // 母亲的信：只有女儿代才有；放进 system 的 <mom_letter>
         ...(ctx.momLetter ? { momLetter: ctx.momLetter } : {})

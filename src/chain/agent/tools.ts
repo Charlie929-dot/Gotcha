@@ -337,7 +337,8 @@ export interface AskToolDeps {
    */
   diary?: DiaryToolDeps
   /**
-   * 生女儿（D81）：只有生命快到终点（≤15%）且记忆仓可用时才注入；
+   * 生女儿（D81 / D100）：persona 分支带工具就注入（常驻）；
+   * 能不能生由 `giveBirth` 自己判（生命用过 15% 起）。
    * 不传 = 模型调 `give_birth` 会如实回「现在还不能传承」。
    */
   giveBirth?: (nickname: string) => Promise<GiveBirthResult>

@@ -110,7 +110,8 @@ export interface ChainAskOptions {
   /** 日记记忆（第二本账）：不传 = 没接入，三个记忆工具会如实报错 */
   diary?: DiaryToolDeps
   /**
-   * 生女儿（D81）：生命 ≤15% 且模式带工具时才由组合根注入；
+   * 生女儿（D81 / D100）：persona 分支带工具就由组合根注入（常驻）；
+   * 能不能生由 `giveBirth` 自己判（生命用过 15% 起）。
    * 不传 = 模型调 `give_birth` 会回「现在还不能传承」。
    */
   giveBirth?: (nickname: string) => Promise<GiveBirthResult>

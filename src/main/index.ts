@@ -159,7 +159,7 @@ import {
   type CompactOutcome
 } from './commands'
 import { giveBirth as giveBirthOnRepo } from './give-birth'
-import { handoverReceiptText } from './handover'
+import { birthReceiptText } from './handover'
 import { createLetterStore } from './letters'
 import {
   lifeGateOf,
@@ -2593,12 +2593,9 @@ if (primaryInstance) {
       const letterFrom = personaName || life?.nickname || ''
       // 指代线索：提问前最后一段（不是证据；引用仍要经 search_info / read_segment）
       const recent = hasScreenTools(tools) ? latestSegmentHint(db) : undefined
-      // 生女儿（D81）：只有 persona 分支、生命 ≤15% 且带工具时才给这个入口；纯模型保持单轮
-      const birthEnabled =
-        life !== undefined &&
-        chat &&
-        tools.length > 0 &&
-        life.used >= life.limit * 0.85
+      // 生女儿（D81 / D100）：persona 分支 + 带工具就给入口（孕育常驻）；
+      // 能不能生由 giveBirth 自己判（生命用过 15% 的准妈妈阶段起）；纯模型保持单轮
+      const birthEnabled = life !== undefined && chat && tools.length > 0
       return {
         db,
         resolveClient,
@@ -2667,7 +2664,7 @@ if (primaryInstance) {
         ...(personaPrompt !== undefined ? { personaPrompt } : {}),
         // 这次给哪些工具（D72：当前分支的 /tool 白名单）：链层据此决定单轮 / 工具循环
         tools,
-        // 生女儿（D81）：生命 ≤15% 才把 give_birth 放进来（工具描述在 deepseek.ts）
+        // 生女儿（D81 / D100）：persona 分支常驻入口，能不能生由 giveBirth 判（≥15%）
         ...(birthEnabled && life !== undefined
           ? {
               giveBirth: async (nickname: string) => {
@@ -2681,7 +2678,7 @@ if (primaryInstance) {
                 if (result.ok && onBirth !== undefined && daughter !== undefined && daughter !== '') {
                   // 母亲名：人设名 > 这代真名 > 分支名；女儿名用刚出生的那个
                   onBirth(
-                    handoverReceiptText({
+                    birthReceiptText({
                       mother: personaName || life.nickname || life.branch,
                       daughter
                     })
@@ -2750,6 +2747,19 @@ if (primaryInstance) {
     }
 
     /**
+     * QQ 改名（M4 / D100）：把当前活跃那一代的名字同步过去。
+     * 只在通道开着、有连接、transport 支持时调；失败只记日志，不挡回答。
+     */
+    const renameQqProfile = (nickname: string): void => {
+      const online =
+        qqChannel !== null && qqChannel.setProfile !== undefined && qqChannel.status().connections > 0
+      if (!online || qqChannel?.setProfile === undefined) return
+      void qqChannel
+        .setProfile(nickname)
+        .catch((error) => captureLog('warn', 'qq profile rename failed', { error: String(error) }))
+    }
+
+    /**
      * 本地命令（M1/M2/M3/M5）：桌面与 QQ **共用同一个 handler**——两路发 `/use` 改的是同一条鱼，
      * 「等名字 / 等 confirm」状态也只有一份。串行锁（M5）保证两路命令不互相踩。
      * 命中就在本地执行、不调模型（`/compact` 例外：压摘要过一次模型）、不进问答历史。
@@ -2759,6 +2769,8 @@ if (primaryInstance) {
         repo: memoryRepo,
         lineageFile,
         reloadConversations: () => askConversations.reload(),
+        // D100：/use /new 切到哪一代，QQ 名就跟着改（母亲还能被切回去聊，名字不能停在女儿上）
+        renameProfile: (name) => renameQqProfile(name),
         compact: compactConversation,
         // /tasks：挂在 /help 上的任务视图（共建计划 + 自主任务），取消也走这里
         tasks: {
@@ -2819,7 +2831,8 @@ if (primaryInstance) {
      * 生女儿（D81 / D73）：真正的动作抽到 `give-birth.ts`（真实 git 仓可独立验收，不弹窗口）；
      * 这里只做组合根的事：女儿出生后重读会话、清 QQ 内存上下文、在线改 QQ 名。
      *
-     * 只有生命 ≤15% 时工具才会出现，这里再校验一次（模型可能伪造调用 / 旧检查点恢复）。
+     * 工具从出生起就常驻（D100），能不能生由 `giveBirth` 自己卡 15% 门槛；
+     * 这里再校验一次（模型可能伪造调用 / 旧检查点恢复）。
      */
     const giveBirth = async (input: {
       nickname: string
@@ -2843,14 +2856,8 @@ if (primaryInstance) {
       qqHistories.clear()
       qqTalkTimes.clear()
 
-      // QQ 在线（有连接）就改名；离线不调，免得等 action 超时；失败只记日志
-      const qqOnline =
-        qqChannel !== null && qqChannel.setProfile !== undefined && qqChannel.status().connections > 0
-      if (qqOnline && qqChannel?.setProfile !== undefined && result.nickname !== undefined) {
-        void qqChannel
-          .setProfile(result.nickname)
-          .catch((error) => captureLog('warn', 'qq profile rename failed', { error: String(error) }))
-      }
+      // 女儿出生后她就是活跃节点：QQ 名跟着切（D100；母亲仍可 /use 切回去，名字会再改回来）
+      if (result.nickname !== undefined) renameQqProfile(result.nickname)
 
       return result
     }

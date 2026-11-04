@@ -122,7 +122,7 @@ export interface LlmCompleteOptions {
    */
   toolElements?: readonly string[]
   /**
-   * 生女儿（D81）：生命 ≤15% 时才带 `give_birth` 这个工具（以及 system 里的一行说明）。
+   * 生女儿（D81 / D100）：persona 分支常驻带 `give_birth`（门槛在 giveBirth 里判，生命用过 15% 起）。
    * 缺省 false = 不给模型这个入口。
    */
   giveBirth?: boolean

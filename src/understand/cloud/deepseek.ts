@@ -491,7 +491,7 @@ const ASK_LOOP_TOOLS = [
     function: {
       name: 'give_birth',
       description:
-        '当 `<now>` 里的「生命」快用完时，从这条记忆线上生一个女儿，把之后的日子交给她。调用后这一代停下、只读；她从空白开始，读不到出生前的日记。她会拿到手和心（工具）、眼睛耳朵嘴巴（聊天）、生命（出生提交）和记性（她自己分支上的提交）。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。只在生命剩得很少时出现；还不到时候调用会被拒绝。',
+        '从这条记忆线上生一个女儿，把之后的日子交给她。出生后母亲这条分支**还活着**（可以随时切回来聊）；女儿从空白开始，读不到出生前的日记。她会拿到手和心（工具）、眼睛耳朵嘴巴（聊天）、生命（出生提交）和记性（她自己分支上的提交）。等到生命用过 15%（准妈妈阶段）才允许出生；宝宝 / 少女阶段调用会被拒绝。昵称会成为她的分支名（英文 / 数字 / 连字符；中文会转拼音）。',
       parameters: {
         type: 'object',
         properties: {
@@ -833,7 +833,7 @@ type AskLoopToolName = AskLoopTool['function']['name']
 
 /**
  * 按分支的工具白名单过滤（D72）：`/tool add|rm` 存的是元素名，这里只发命中的那几个。
- * `give_birth` 不在目录里（生命周期工具，生命 ≤15% 时自动出现）。
+ * `give_birth` 不在目录里（生命周期工具，persona 分支常驻，能不能生由门槛判；D100）。
  */
 export function askLoopToolsFor(
   tools: readonly string[] = ASK_TOOL_NAMES,
@@ -896,7 +896,7 @@ function buildAskLoopSystemPrompt(
     for (const tool of list) {
       const brief =
         tool.function.name === 'give_birth'
-          ? '生命快用完时生一个女儿，把之后的日子交给她'
+          ? '到准妈妈阶段（生命用过 15% 后）生一个女儿，把之后的日子交给她；母亲这条分支还活着'
           : tool.function.name === 'quote_message'
             ? '引用这次聊天里的一条消息再回答（id 是消息短号 #N）'
             : tool.function.name === 'send_sticker'

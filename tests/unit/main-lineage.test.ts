@@ -316,6 +316,21 @@ describe('传承（M4）', () => {
     expect(withBranchRemoved(next, 'xiaoyu')).toBeNull()
   })
 
+  it('keepMotherAlive（D100）：母亲那条分支保持 alive，代与 active 照旧', () => {
+    const next = withGenerationAdded(emptyLineage(1000), {
+      branch: 'xiaoyu',
+      nickname: 'xiaoyu',
+      mother: 'default',
+      at: 2_000,
+      keepMotherAlive: true
+    })
+    expect(next).not.toBeNull()
+    if (next === null) return
+    expect(next.active).toBe('xiaoyu')
+    expect(next.branches.find((item) => item.branch === 'default')?.status).toBe('alive')
+    expect(next.generations[1]).toMatchObject({ id: 'gen-2', mother: 'gen-1', died_at: null })
+  })
+
   it('重名 / 母亲不存在 / 母亲已 dead 都返回 null', () => {
     const base = emptyLineage(1000)
     const next = withGenerationAdded(base, {

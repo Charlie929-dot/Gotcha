@@ -543,11 +543,17 @@ export interface AddGenerationInput {
   at: number
   /** 母亲的信（仓内相对路径）；没有就是 null */
   letter?: string | null
+  /**
+   * 2026-11-04（D100 母女共存）：true = 母亲那条分支**保持 alive**，不置 dead。
+   * 缺省 false（旧行为：出生即把母亲分支置 dead）。
+   */
+  keepMotherAlive?: boolean
 }
 
 /**
- * 追加一代：新 generation + 新 branch（parent=null，代根），母亲**那条分支**置 dead，
- * 活动节点切到女儿。任一条不合法返回 null，由调用方报原因。
+ * 追加一代：新 generation + 新 branch（parent=null，代根），活动节点切到女儿。
+ * 母亲**那条分支**默认置 dead；`keepMotherAlive: true` 时保留 alive（D100 母女共存）。
+ * 任一条不合法返回 null，由调用方报原因。
  *
  * 2026-11-03 改口径（D98）：出生**不再给这一代写 `died_at`**——同代可以有别的岔口
  * （`default-2` 之外的 `default` / `test` / `life`），一条枝生了女儿不代表整代都结束；
@@ -586,7 +592,9 @@ export function withGenerationAdded(lineage: Lineage, input: AddGenerationInput)
     ],
     branches: [
       ...lineage.branches.map((item) =>
-        item.branch === input.mother ? { ...item, status: 'dead' as const } : item
+        item.branch === input.mother && input.keepMotherAlive !== true
+          ? { ...item, status: 'dead' as const }
+          : item
       ),
       {
         branch: input.branch,

@@ -16,7 +16,6 @@
  */
 
 import { placeholdAskTurn, type CloudAskConversationTurn } from './conversation'
-import { lifeStageOf } from './life-stage'
 import { ASK_TOOL_NAMES, hasScreenTools } from './tool-catalog'
 import type { ChainAskChatRecent, ChainAskQuotedMessage } from './types'
 
@@ -1080,28 +1079,11 @@ function clockTime(ts: number): string {
 }
 
 /**
- * 人生进度（已用百分比）→ 阶段怎么说（2026-11-04 拍板人：说人话，不报 token）。
- * 阶段本身仍按 D99 的 `lifeStageOf`（剩余百分比）判，只换说法。
- */
-function lifeStageTextOf(usedPercent: number): string {
-  switch (lifeStageOf(100 - usedPercent)) {
-    case '宝宝':
-      return '还是个宝宝'
-    case '少女':
-      return '还是个少女'
-    case '准妈妈':
-      return '快要当妈妈了'
-    default:
-      return '快走完了'
-  }
-}
-
-/**
  * 本轮 `<now>` 正文。只拼已经过策略的字段（opening / recent），本地时间不是隐私；
  * 没有屏幕工具就不写最近段（与 D62 的模式口径一致）。
  *
  * 2026-11-04（拍板人）：处境改用日常话——时间只报当前毫秒时间戳（工具参数要它），
- * 生命报「人生进度 N%，还是个宝宝」这类说法；不再报 token、倒计时、数据边界。
+ * 生命只报「人生进度 N%」；不再报 token、倒计时、数据边界、人生阶段。
  */
 function renderNowText(
   input: ChainAskLoopBuildInput,
@@ -1119,11 +1101,11 @@ function renderNowText(
   if (opening?.facts !== undefined && opening.facts !== '') {
     lines.push(`此刻：${opening.facts}`)
   }
-  // 人生进度（M3 / D99）：让它自己知道「快想不动了」，说法换成日常话（不报 token）。
+  // 人生进度（M3）：让它自己知道「快想不动了」；2026-11-04 拍板人：去掉阶段话，只报用掉多少。
   if (input.life !== undefined) {
     const limit = Math.max(1, input.life.limit)
     const usedPercent = Math.min(100, Math.max(0, Math.round((input.life.used / limit) * 100)))
-    lines.push(`人生进度：${usedPercent}% ，${lifeStageTextOf(usedPercent)}`)
+    lines.push(`人生进度：${usedPercent}%`)
   }
   // 信（D81）：只报未读数，不把正文放进 system；让 ta 自己用 list_letter / read_letter 看
   if (input.letters !== undefined && input.letters.unread > 0) {

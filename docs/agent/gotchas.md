@@ -238,6 +238,8 @@
 | 堆叠 PR 的基分支被合并删除 → 上游 PR 自动关闭 | 2026-11-04：`#141` 的 base 是 `#140` 的 `fix/task-cancel-and-retry`；`gh pr merge 140 --delete-branch` 删掉基分支后，GitHub 把 `#141` 标成 CLOSED（没合、也没有冲突提示） | 合并前先看 `gh pr view <n> --json baseRefName`；发现堆叠就先合基分支，再把子分支 `git rebase --onto main <baseTip> <branch>`，push 后重开 PR（本例 #141 → #145） |
 | Electron 开机自启项不叫 Gotcha | `setLoginItemSettings` 在 HKCU Run 里写的值名是 `electron.app.Gotcha`（app name 前缀），不是 `Gotcha`；按 `Gotcha` 查会以为没写进去（2026-11-04 实测） | 验证按 `electron.app.<productName>` 查；卸载 / 改安装路径后旧值要清（同名下一次打包启动会覆盖路径） |
 | NapCat 在「QQ 已运行」时被拉起 = 僵尸 bootmain，二维码永远不出 | 2026-11-04 真机：QQ 设了开机自启、启动时已在跑，Gotcha 启动仍去 spawn NapCat；bootmain 拉不起已运行的 QQ，进程残留；之后每次点「启动」都走「接管已有 NapCat」分支，WebUI 一直 `fetch failed`，`cache/qrcode.png` 停在旧时间，抽屉里没有码 | `start()` 先查 QQ 进程（`tasklist /FI "IMAGENAME eq QQ.exe"`）：在跑就别 spawn，提示先退 QQ；bootmain 在跑但 QQ 没起来按僵尸报错、要求先结束 `NapCatWinBootMain.exe`；QQ 是开机自启的建议关掉（或改用 NapCat 自带启动器手动起） |
+| 安装器在「先手工卸载旧版」后写不进 `Uninstall Gotcha.exe` | 2026-11-04 真机：手工跑旧 uninstaller 卸掉 0.1.1（目录、卸载项都清干净），再用 WMI 启动 `Gotcha-Setup-0.1.2.exe`：NSIS 先报「Gotcha 无法关闭」（`Get-CimInstance` 那条路径前缀判据假阳性），点重试后变成「不能打开要写入的文件: …\Programs\gotcha\Uninstall Gotcha.exe」，点重试 / 忽略都装不进去。已确认：目录可建可写、无残留进程、`PendingFileRenameOperations` 里没有本路径——原因未定（疑似卸载残留 / 安全软件），`/S` 与交互模式一样失败 | 先手工部署：`robocopy dist\win-unpacked %LOCALAPPDATA%\Programs\Gotcha /MIR`，再用 `WScript.Shell` 重建开始菜单 / 桌面快捷方式（指向 `<安装目录>\Gotcha.exe`）；应用可直接跑。**手工部署后注册表卸载项是空的**，下次要装安装包才能恢复卸载 / 升级链路；安装器本身另开卡排查（重启后再试一次） |
+| DSH 沙箱里 `Start-Process` 启动安装包 / Electron 会挂住 | 2026-11-04 本机：`Start-Process -Wait Gotcha-Setup-0.1.2.exe /S` 直接挂 10 分钟、连进程都没创建；改用 `Invoke-CimMethod Win32_Process Create` 才正常起来（进程不进 agent 的 job） | 装包 / 启动 Electron 一律走 WMI `Win32_Process.Create`；`Start-Process` 挂住时先 `job_kill`，别等 |
 
 ## 规则
 

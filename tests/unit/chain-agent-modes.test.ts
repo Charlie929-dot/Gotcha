@@ -77,24 +77,24 @@ function systemText(tools: readonly string[]): string {
 }
 
 describe('system 按工具分段（D64：动态事实改放 <now>）', () => {
-  it('全开：工具清单两边都在；时间 / 数据边界在 <now> 里', () => {
+  it('全开：工具清单两边都在；时间 / 此刻在 <now> 里', () => {
     const text = systemText(ALL)
     expect(text).toContain('<tools>')
     expect(text).toContain('search_info')
     expect(text).toContain('recall_diary')
     expect(text).not.toContain('数据边界：')
     const now = payloadOf(ALL).now
-    expect(now).toContain('数据边界：')
+    expect(now).toContain('当前毫秒时间戳为')
+    expect(now).not.toContain('数据边界：')
     expect(now).toContain('此刻：现在是 2026-10-30')
     expect(now).toContain('你想到的（只是联想')
   })
 
-  it('只有日记：不写屏幕工具；<now> 不写数据边界 / 最近段', () => {
+  it('只有日记：不写屏幕工具；<now> 不写最近段', () => {
     const text = systemText(DIARY)
     expect(text).not.toContain('search_info')
     expect(text).toContain('recall_diary')
     const now = payloadOf(DIARY).now
-    expect(now).not.toContain('数据边界：')
     expect(now).not.toContain('最近一段证据：')
     // 聊天仍给「此刻 / 想到的」（这是人味的来源，不是屏幕记忆）
     expect(now).toContain('此刻：')
@@ -107,12 +107,10 @@ describe('system 按工具分段（D64：动态事实改放 <now>）', () => {
     const messages = messagesOf(NONE, true)
     expect(messages.some((message) => message.content.includes('<final>'))).toBe(false)
     const now = payloadOf(NONE).now
-    // D88：时间行改成「现在是<时段> HH:mm（…）」+「距今天 24:00 还有 …」
-    expect(now).toMatch(/^现在是(凌晨|早上|上午|中午|下午|傍晚|晚上) \d{2}:\d{2}/u)
-    expect(now).toContain('距今天 24:00 还有')
+    // 2026-11-04（拍板人）：时间只报当前毫秒时间戳（工具参数要它）
+    expect(now).toMatch(/^当前毫秒时间戳为 \d+。/u)
     expect(now).not.toContain('数据边界：')
-    // 底线仍在不编造
-    expect(text).toContain('不编造')
+    expect(now).not.toContain('距今天 24:00')
   })
 
   it('有工具的收尾轮：不再追加消息（没有 tool call 本身就是收尾）', () => {

@@ -1073,74 +1073,35 @@ function parseSystemTimeMs(text: string): number | null {
   return Number.isFinite(ts) ? ts : null
 }
 
-/** 毫秒 → 'yyyy-mm-dd HH:mm'（与 system 里同格式，便于模型对齐） */
-function readableTime(ts: number): string {
-  const date = new Date(ts)
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
-}
-
 /** 毫秒 → 'HH:mm'（最近一段证据只报时刻） */
 function clockTime(ts: number): string {
   const date = new Date(ts)
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`
 }
 
-/** token 数 → `310K` / `820`（生命行给量级就够，不报个位） */
-function formatTokenAmount(value: number): string {
-  const tokens = Math.max(0, Math.round(value))
-  if (tokens < 1000) return String(tokens)
-  return `${Math.round(tokens / 1000)}K`
-}
-
-const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const
-
-/** 时段词（说话时用）：0-4 凌晨 / 5-7 早上 / 8-10 上午 / 11-12 中午 / 13-16 下午 / 17-18 傍晚 / 其余晚上 */
-function periodOfHour(hour: number): string {
-  if (hour < 5) return '凌晨'
-  if (hour < 8) return '早上'
-  if (hour < 11) return '上午'
-  if (hour < 13) return '中午'
-  if (hour < 17) return '下午'
-  if (hour < 19) return '傍晚'
-  return '晚上'
-}
-
 /**
- * 时间事实（D88）：`现在是晚上 20:11` + 日期 + 离 24:00 还有多久。
- * 最后一项是本机算的——模型连着三次把「十二点」当成 22:00（差两小时），
- * 与其让它心算，不如直接把差了多少告诉它。
+ * 人生进度（已用百分比）→ 阶段怎么说（2026-11-04 拍板人：说人话，不报 token）。
+ * 阶段本身仍按 D99 的 `lifeStageOf`（剩余百分比）判，只换说法。
  */
-function clockFactsOf(ms: number): {
-  period: string
-  hhmm: string
-  day: string
-  untilMidnight: string
-} {
-  const date = new Date(ms)
-  const hour = date.getHours()
-  const minute = date.getMinutes()
-  const day = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${WEEKDAY_NAMES[date.getDay()]}`
-  const remainMinutes = Math.max(
-    0,
-    24 * 60 - (hour * 60 + minute) - (date.getSeconds() > 0 ? 1 : 0)
-  )
-  const hours = Math.floor(remainMinutes / 60)
-  const rest = remainMinutes % 60
-  const untilMidnight =
-    hours > 0
-      ? `${hours} 小时${rest > 0 ? ` ${rest} 分` : ''}`
-      : `${rest} 分`
-  return {
-    period: periodOfHour(hour),
-    hhmm: `${pad2(hour)}:${pad2(minute)}`,
-    day,
-    untilMidnight
+function lifeStageTextOf(usedPercent: number): string {
+  switch (lifeStageOf(100 - usedPercent)) {
+    case '宝宝':
+      return '还是个宝宝'
+    case '少女':
+      return '还是个少女'
+    case '准妈妈':
+      return '快要当妈妈了'
+    default:
+      return '快走完了'
   }
 }
 
 /**
  * 本轮 `<now>` 正文。只拼已经过策略的字段（opening / recent），本地时间不是隐私；
- * 没有屏幕工具就不写数据边界 / 最近段（与 D62 的模式口径一致）。
+ * 没有屏幕工具就不写最近段（与 D62 的模式口径一致）。
+ *
+ * 2026-11-04（拍板人）：处境改用日常话——时间只报当前毫秒时间戳（工具参数要它），
+ * 生命报「人生进度 N%，还是个宝宝」这类说法；不再报 token、倒计时、数据边界。
  */
 function renderNowText(
   input: ChainAskLoopBuildInput,
@@ -1149,27 +1110,20 @@ function renderNowText(
 ): string {
   const ms = input.systemTimeMs ?? parseSystemTimeMs(input.systemTime)
   const lines: string[] = []
-  // 时间（D88）：模型自己把「十一点半 / 十二点」算成 21:30 / 22:00，连着错三次。
-  // 这里给它本机算好的三件事：现在是几点（带时段）、今天是哪天、离今天结束还有多久。
+  // 2026-11-04（拍板人）：时间只说这一句——`search_info` 要毫秒时间戳，别的都不报。
   if (ms === null) {
     lines.push(`当前时间：${input.systemTime}`)
   } else {
-    const clock = clockFactsOf(ms)
-    lines.push(
-      `现在是${clock.period} ${clock.hhmm}（${clock.day}，毫秒时间戳 ${ms}，相对时间先按它换算）`,
-      `距今天 24:00 还有 ${clock.untilMidnight}。`
-    )
+    lines.push(`当前毫秒时间戳为 ${ms}。`)
   }
   if (opening?.facts !== undefined && opening.facts !== '') {
     lines.push(`此刻：${opening.facts}`)
   }
-  // 生命（M3）：当前节点还剩多少上下文额度。让它自己知道「快想不动了」，
-  // 而不是等 /compact 或冻结时才发现；数字来自最近一次请求的 usage。
+  // 人生进度（M3 / D99）：让它自己知道「快想不动了」，说法换成日常话（不报 token）。
   if (input.life !== undefined) {
     const limit = Math.max(1, input.life.limit)
-    const remaining = Math.max(0, Math.min(limit, limit - input.life.used))
-    const percent = Math.round((remaining / limit) * 100)
-    lines.push(`生命：还剩 ${percent}%（${formatTokenAmount(remaining)} token） · ${lifeStageOf(percent)}阶段`)
+    const usedPercent = Math.min(100, Math.max(0, Math.round((input.life.used / limit) * 100)))
+    lines.push(`人生进度：${usedPercent}% ，${lifeStageTextOf(usedPercent)}`)
   }
   // 信（D81）：只报未读数，不把正文放进 system；让 ta 自己用 list_letter / read_letter 看
   if (input.letters !== undefined && input.letters.unread > 0) {
@@ -1180,16 +1134,10 @@ function renderNowText(
     for (const item of opening.remembered) lines.push(`- [${item.day}] ${item.snippet}`)
   }
   const groups = input.tools ?? ASK_TOOL_NAMES
-  if (hasScreenTools(groups)) {
-    const latest = input.freshness.latestEvidenceTs
+  if (hasScreenTools(groups) && recent !== undefined) {
     lines.push(
-      `数据边界：信息链最新证据到 ${latest === null ? '还没有任何数据（空库）' : `${readableTime(latest)}（毫秒时间戳 ${latest}）`}；采集${input.freshness.captureRunning ? '正在运行' : '当前没有在运行'}。`
+      `最近一段证据：${clockTime(recent.at)} 的〈${recent.app}〉${recent.title ? `《${recent.title}》` : ''}——只当「这个界面 / 刚才那个」的指代线索，不是证据。`
     )
-    if (recent !== undefined) {
-      lines.push(
-        `最近一段证据：${clockTime(recent.at)} 的〈${recent.app}〉${recent.title ? `《${recent.title}》` : ''}——只当「这个界面 / 刚才那个」的指代线索，不是证据。`
-      )
-    }
   }
   return lines.join('\n')
 }
@@ -1234,9 +1182,7 @@ function renderNotebook(
   entries: ChainAskLoopBuildInput['notebook']
 ): string {
   if (entries === undefined || entries.length === 0) return ''
-  const lines: string[] = [
-    '小本本（你自己记的当前理解，不是判决；过时了就改——编号就是前面的 nX）：'
-  ]
+  const lines: string[] = ['小本本：', '（这是我自己的小本本，现在是个备忘录）']
   let used = 0
   let shown = 0
   let skipped = 0

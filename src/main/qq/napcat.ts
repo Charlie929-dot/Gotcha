@@ -102,6 +102,10 @@ export interface NapcatDeps {
   now?: () => number
   /** 测试替换：进程 / 网络 / 系统查询 */
   isBootmainRunning?: () => Promise<boolean>
+  /** QQ 是否已在运行（NapCat 必须自己拉起 QQ，已在运行就没法注入） */
+  isQqRunning?: () => Promise<boolean>
+  /** 测试替换：找 QQ 安装路径 */
+  resolveQqPath?: (manualPath?: string) => Promise<string | null>
   spawnImpl?: typeof spawn
   fetchImpl?: typeof fetch
 }
@@ -349,6 +353,19 @@ async function bootmainRunning(): Promise<boolean> {
   }
 }
 
+async function qqRunning(): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync(
+      'tasklist.exe',
+      ['/FI', 'IMAGENAME eq QQ.exe', '/NH'],
+      { timeout: 4_000, windowsHide: true }
+    )
+    return /QQ\.exe/iu.test(stdout)
+  } catch {
+    return false
+  }
+}
+
 async function killTree(pid: number): Promise<void> {
   try {
     await execFileAsync('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
@@ -455,13 +472,20 @@ export class NapcatManager {
       return { ok: false, error: '没找到 NapCat：点「下载并安装」，或选择已有目录' }
     }
 
-    this.qqPath = this.qqPath ?? (await resolveQqPath())
+    this.qqPath = this.qqPath ?? (await this.resolveQq())
     if (this.qqPath === null) {
       return this.fail('没找到 QQ：请先安装腾讯 QQ（NapCat 要注入它）')
     }
 
-    // 已经有一个 NapCat 在跑（手动开的 / 上一次 Gotcha 留下的）：接管轮询，不重复拉
+    // 已经有一个 NapCat 在跑（手动开的 / 上一次 Gotcha 留下的）：接管轮询，不重复拉。
+    // 但 bootmain 在跑、QQ 没起来时它是上次启动失败的僵尸：接管只会一直等不到码，
+    // 如实报错并把出路说清楚（不 taskkill 用户手动开的进程，D66）。
     if (this.childPid !== null || (await this.bootmainIsRunning())) {
+      if (!(await this.isQqRunning())) {
+        return this.fail(
+          'NapCat 在跑但 QQ 没起来（上次启动失败留下的）：先在任务管理器结束 NapCatWinBootMain.exe，再点「启动」'
+        )
+      }
       this.ownedProcess = false
       this.attachedToExisting = true
       this.qrMinMtime = 0
@@ -470,6 +494,14 @@ export class NapcatManager {
       this.error = null
       this.beginPoll()
       return { ok: true }
+    }
+
+    // NapCat 必须由它自己拉起 QQ 才能注入；QQ 已经在运行就拉不起来，
+    // 以前这里直接 spawn 会留下 bootmain 僵尸、之后每次「启动」都只接管它（2026-11-04 真机）。
+    if (await this.isQqRunning()) {
+      return this.fail(
+        'QQ 已经在运行：NapCat 要自己拉起 QQ 才能注入。先退出 QQ 再点「启动」；QQ 设了开机自启的话建议关掉，免得每次都要手动退'
+      )
     }
 
     this.phase = 'starting'
@@ -646,6 +678,16 @@ export class NapcatManager {
   private async bootmainIsRunning(): Promise<boolean> {
     if (this.deps.isBootmainRunning !== undefined) return this.deps.isBootmainRunning()
     return bootmainRunning()
+  }
+
+  private async isQqRunning(): Promise<boolean> {
+    if (this.deps.isQqRunning !== undefined) return this.deps.isQqRunning()
+    return qqRunning()
+  }
+
+  private async resolveQq(): Promise<string | null> {
+    if (this.deps.resolveQqPath !== undefined) return this.deps.resolveQqPath()
+    return resolveQqPath()
   }
 
   private beginPoll(): void {

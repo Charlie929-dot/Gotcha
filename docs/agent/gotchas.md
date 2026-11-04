@@ -235,6 +235,7 @@
 | 从 DSH 工作区路径直接跑打包好的 Electron 起不来 | 在 `D:\Gotcha\dist\win-unpacked` 下启动 `Gotcha.exe`：默认参数 `0x80000003` 直接崩、加 `--no-sandbox` 报 SingletonLock / GPUPersistentCache「拒绝访问」(0x5)；同一份文件复制到 `%LOCALAPPDATA%\Programs` 下就正常（2026-11-04 实测）——原因在 DSH 工作区沙箱，不在打包产物 | 验证打包产物先复制到安装位置（`%LOCALAPPDATA%\Programs\...`）再跑，或用桌面驱动 / WMI 从外部路径启动；别把工作区里的启动失败当成安装包坏了 |
 | 堆叠 PR 的基分支被合并删除 → 上游 PR 自动关闭 | 2026-11-04：`#141` 的 base 是 `#140` 的 `fix/task-cancel-and-retry`；`gh pr merge 140 --delete-branch` 删掉基分支后，GitHub 把 `#141` 标成 CLOSED（没合、也没有冲突提示） | 合并前先看 `gh pr view <n> --json baseRefName`；发现堆叠就先合基分支，再把子分支 `git rebase --onto main <baseTip> <branch>`，push 后重开 PR（本例 #141 → #145） |
 | Electron 开机自启项不叫 Gotcha | `setLoginItemSettings` 在 HKCU Run 里写的值名是 `electron.app.Gotcha`（app name 前缀），不是 `Gotcha`；按 `Gotcha` 查会以为没写进去（2026-11-04 实测） | 验证按 `electron.app.<productName>` 查；卸载 / 改安装路径后旧值要清（同名下一次打包启动会覆盖路径） |
+| NapCat 在「QQ 已运行」时被拉起 = 僵尸 bootmain，二维码永远不出 | 2026-11-04 真机：QQ 设了开机自启、启动时已在跑，Gotcha 启动仍去 spawn NapCat；bootmain 拉不起已运行的 QQ，进程残留；之后每次点「启动」都走「接管已有 NapCat」分支，WebUI 一直 `fetch failed`，`cache/qrcode.png` 停在旧时间，抽屉里没有码 | `start()` 先查 QQ 进程（`tasklist /FI "IMAGENAME eq QQ.exe"`）：在跑就别 spawn，提示先退 QQ；bootmain 在跑但 QQ 没起来按僵尸报错、要求先结束 `NapCatWinBootMain.exe`；QQ 是开机自启的建议关掉（或改用 NapCat 自带启动器手动起） |
 
 ## 规则
 

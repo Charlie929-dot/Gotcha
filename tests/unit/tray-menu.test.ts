@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  autostartMenuEntry,
   buildTrayMenu,
   toMenuTemplate,
   toggleEnabled,
@@ -82,6 +83,40 @@ describe('buildTrayMenu：托盘 / 球右键共用菜单（Q4）', () => {
   })
 })
 
+describe('autostartMenuEntry：托盘「开机自启」勾选（M5 打包首发）', () => {
+  it('打包态可用且已开启：checkbox + checked', () => {
+    const toggle = vi.fn()
+    const entry = autostartMenuEntry({ available: true, enabled: true }, toggle)
+    expect(entry).toMatchObject({
+      id: 'toggle-autostart',
+      label: '开机自启',
+      enabled: true,
+      checkbox: true,
+      checked: true
+    })
+    entry.click()
+    expect(toggle).toHaveBeenCalledTimes(1)
+  })
+
+  it('系统里没开：checked=false', () => {
+    const entry = autostartMenuEntry({ available: true, enabled: false }, (): void => {})
+    expect(entry.checked).toBe(false)
+  })
+
+  it('开发态不可用：禁用且不显示勾选', () => {
+    const entry = autostartMenuEntry({ available: false, enabled: true }, (): void => {})
+    expect(entry.enabled).toBe(false)
+    expect(entry.checked).toBe(false)
+  })
+
+  it('不塞进共用菜单：buildTrayMenu 结构不变（球右键菜单没有勾选渲染）', () => {
+    const ids = buildTrayMenu('paused', actions()).flatMap((entry) =>
+      'id' in entry ? [entry.id] : []
+    )
+    expect(ids).not.toContain('toggle-autostart')
+  })
+})
+
 describe('toMenuTemplate', () => {
   it('分隔线映射为 type=separator', () => {
     expect(toMenuTemplate({ type: 'separator' })).toEqual({ type: 'separator' })
@@ -94,6 +129,27 @@ describe('toMenuTemplate', () => {
       label: '退出',
       enabled: true,
       click
+    })
+  })
+
+  it('checkbox 动作项映射为 type=checkbox + checked', () => {
+    const click = (): void => {}
+    expect(
+      toMenuTemplate({
+        id: 'toggle-autostart',
+        label: '开机自启',
+        enabled: true,
+        click,
+        checkbox: true,
+        checked: true
+      })
+    ).toEqual({
+      id: 'toggle-autostart',
+      label: '开机自启',
+      enabled: true,
+      click,
+      type: 'checkbox',
+      checked: true
     })
   })
 })

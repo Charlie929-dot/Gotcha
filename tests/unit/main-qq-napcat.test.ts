@@ -15,7 +15,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   findNapcatDir,
@@ -249,5 +249,74 @@ describe('NapcatManager 早退路径', () => {
     const result = await manager.setShellDir(shell)
     expect(result.ok).toBe(true)
     expect(saved).toBe(shell)
+  })
+})
+
+describe('NapcatManager 启动前的 QQ / 僵尸进程判断（2026-11-04 真机）', () => {
+  async function managerWithShell(overrides: Partial<NapcatDeps> = {}): Promise<{
+    manager: NapcatManager
+    spawnImpl: ReturnType<typeof vi.fn>
+  }> {
+    const root = await makeDir()
+    const shell = await makeShell(join(root, 'shell'))
+    const child = { pid: 4321, unref: (): void => {}, on: (): unknown => child }
+    const spawnImpl = vi.fn(() => child)
+    const manager = new NapcatManager(
+      deps({
+        getShellDir: () => shell,
+        resolveQqPath: async () => 'C:\\Program Files\\QQ.exe',
+        fetchImpl: (() => Promise.reject(new Error('offline'))) as unknown as typeof fetch,
+        spawnImpl: spawnImpl as unknown as NapcatDeps['spawnImpl'],
+        ...overrides
+      })
+    )
+    return { manager, spawnImpl }
+  }
+
+  it('QQ 已经在运行：不 spawn（拉不起来，只会留僵尸），报可读原因', async () => {
+    const { manager, spawnImpl } = await managerWithShell({
+      isBootmainRunning: async () => false,
+      isQqRunning: async () => true
+    })
+    const result = await manager.start()
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('先退出 QQ')
+    expect(spawnImpl).not.toHaveBeenCalled()
+    manager.dispose()
+  })
+
+  it('bootmain 在跑但 QQ 没起来：判定为上次失败的僵尸，不接管、不 spawn', async () => {
+    const { manager, spawnImpl } = await managerWithShell({
+      isBootmainRunning: async () => true,
+      isQqRunning: async () => false
+    })
+    const result = await manager.start()
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('QQ 没起来')
+    expect(spawnImpl).not.toHaveBeenCalled()
+    manager.dispose()
+  })
+
+  it('bootmain 在跑且 QQ 也在跑：接管轮询（手动开的 NapCat 照常可用）', async () => {
+    const { manager, spawnImpl } = await managerWithShell({
+      isBootmainRunning: async () => true,
+      isQqRunning: async () => true
+    })
+    const result = await manager.start()
+    expect(result.ok).toBe(true)
+    expect(manager.status().phase).toBe('waiting-login')
+    expect(spawnImpl).not.toHaveBeenCalled()
+    manager.dispose()
+  })
+
+  it('QQ 没跑、也没有 bootmain：正常 spawn 一次', async () => {
+    const { manager, spawnImpl } = await managerWithShell({
+      isBootmainRunning: async () => false,
+      isQqRunning: async () => false
+    })
+    const result = await manager.start()
+    expect(result.ok).toBe(true)
+    expect(spawnImpl).toHaveBeenCalledTimes(1)
+    manager.dispose()
   })
 })

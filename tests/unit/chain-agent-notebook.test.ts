@@ -132,7 +132,7 @@ describe('小本本进 <now>', () => {
     expect(text).toContain('小本本')
     expect(text).toContain('n1（关于你）喜欢周深')
     expect(text).toContain('n2（我们之间）约好睡前说一声')
-    expect(text).toContain('过时了就改')
+    expect(text).toContain('这是我自己的小本本')
   })
 
   it('本子里命中脱敏规则的那条不列出来（其余照常）', async () => {

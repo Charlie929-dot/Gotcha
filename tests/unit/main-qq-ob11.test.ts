@@ -229,6 +229,40 @@ describe('反向 WS 服务端', () => {
     socket.close()
   })
 
+  it('notice 记 notice_type；ws 关闭记 code（掉线排查，2026-11-04）', async () => {
+    const logs: Array<{ message: string; data?: Record<string, unknown> }> = []
+    server = new QqOb11Server()
+    const { port } = await server.start({
+      port: 0,
+      accessToken: TOKEN,
+      onMessage: () => {},
+      log: (_level, message, data) => logs.push({ message, ...(data !== undefined ? { data } : {}) })
+    })
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+    socket.send(
+      JSON.stringify({
+        post_type: 'notice',
+        notice_type: 'client_status',
+        self_id: 10001,
+        time: 1_700_000_000
+      })
+    )
+    await new Promise((resolve) => setTimeout(resolve, 60))
+
+    const ignored = logs.find((entry) => entry.message === 'qq event ignored')
+    expect(ignored?.data).toMatchObject({ kind: 'notice', noticeType: 'client_status' })
+
+    socket.close(4001, 'bye')
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const closed = logs.find((entry) => entry.message === 'qq ws closed')
+    expect(closed?.data?.['code']).toBe(4001)
+  })
+
   it('sendPrivate 走 action/echo 并等回执；retcode 非 0 就报错', async () => {
     server = new QqOb11Server()
     const { port } = await server.start({ port: 0, accessToken: TOKEN, onMessage: () => {} })

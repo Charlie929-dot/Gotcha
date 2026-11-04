@@ -2973,6 +2973,16 @@ if (primaryInstance) {
     qqChannel = createQqChannel(new QqOb11Server(), {
       log: (level, message, data) => captureLog(level, message, data),
       chatLog: qqChatLog,
+      pushed: async ({ conversationId, question, text, at }) => {
+        const store = askConversations.for(conversationId)
+        const previous = await store.load()
+        await store.save(appendAskConversationTurn(previous, {
+          question,
+          now: new Date(at).toISOString(),
+          turns: [],
+          answer: text
+        }))
+      },
       mediaGate: qqMediaGate,
       // 命令（M5）：与桌面同一个 handler；命中就不进模型，也不占限流 / 排队
       command,
@@ -3819,7 +3829,7 @@ if (primaryInstance) {
         // 后台任务（写日记 / 周记那类）绝不推；通道没开 / 白名单空只记日志，不重试（重试会重复提醒）。
         if (!quiet && qqChannel !== null) {
           void qqChannel
-            .push(formatAskResult(result))
+            .push(formatAskResult(result), task.instruction)
             .then((pushed) => {
               if (!pushed.sent) {
                 captureLog('warn', 'qq push skipped', {

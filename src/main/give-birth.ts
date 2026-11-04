@@ -16,6 +16,7 @@
 import type { GiveBirthResult } from '../chain/agent/tools'
 import {
   findBranch,
+  generationOf,
   isTrunkName,
   lifeOf,
   lineageSnapshot,
@@ -156,6 +157,19 @@ export async function giveBirth(
   }
   if (mother.kind === 'assistant') {
     return { ok: false, message: '纯模型分支不是一条鱼，不能生。' }
+  }
+  // 同一代只生一个女儿（2026-11-03 拍板，D99）：同代别的岔口已经生过，就不再从这一代生第二个。
+  // 兜底路径（life-inherit）本来就有这条判定；这里补上模型手调 give_birth 的入口。
+  const motherGeneration = generationOf(lineage, input.motherBranch)
+  const existingDaughter =
+    motherGeneration === null
+      ? undefined
+      : lineage.generations.find((item) => item.mother === motherGeneration.id)
+  if (existingDaughter !== undefined) {
+    return {
+      ok: false,
+      message: `这一代已经有女儿了（${existingDaughter.branch}），不能再生一个；要接着传承，得等她的下一代。`
+    }
   }
   const motherLife = lifeOf(lineage, input.motherBranch)
   if (motherLife === null || motherLife.used < motherLife.limit * 0.85) {

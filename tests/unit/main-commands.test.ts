@@ -1300,7 +1300,7 @@ describe('命令执行', () => {
     })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     const text = bodyOf(await run('/life'))
-    expect(text).toBe('❤️剩余生命✨80%\n🔤上下文 已使用✨200k，剩余✨800k（1000k）')
+    expect(text).toBe('❤️剩余生命✨80%（准妈妈阶段）\n🔤上下文 已使用✨200k，剩余✨800k（1000k）')
   })
 
   it('/life：纯模型分支也有生命（同样 500K，只是不冻结）', async () => {
@@ -1318,7 +1318,7 @@ describe('命令执行', () => {
     await writeLineage(lineageFile, { ...withAsk, active: 'ask' })
     const run = createCommandHandler({ repo: fakeRepo(), lineageFile })
     const text = bodyOf(await run('/life'))
-    expect(text).toContain('❤️剩余生命✨100%')
+    expect(text).toContain('❤️剩余生命✨100%（宝宝阶段）')
     expect(text).toContain('已使用✨0，剩余✨500k（500k）')
   })
 

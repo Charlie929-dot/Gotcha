@@ -37,4 +37,14 @@ describe('<now> 生命行', () => {
     expect(build({ used: 200, limit: 500_000 })).toContain('生命：还剩 100%（500K token）')
     expect(build({ used: 0, limit: 900 })).toContain('生命：还剩 100%（900 token）')
   })
+
+  it('生命行带阶段词（D99）：62% 准妈妈 / 0% 快要离开', () => {
+    expect(build({ used: 190_000, limit: 500_000 })).toContain(
+      '生命：还剩 62%（310K token） · 准妈妈阶段'
+    )
+    expect(build({ used: 500_000, limit: 500_000 })).toContain(
+      '生命：还剩 0%（0 token） · 快要离开阶段'
+    )
+    expect(build({ used: 200, limit: 500_000 })).toContain(' · 宝宝阶段')
+  })
 })

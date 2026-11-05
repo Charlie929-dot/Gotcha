@@ -205,6 +205,11 @@ export interface AskIpcDeps {
   conversationHistory?: (
     conversationId: string
   ) => readonly ChainAskTurnContext[] | Promise<readonly ChainAskTurnContext[]>
+  /**
+   * 记下「桌面正打开哪段会话」（2026-11-05 C+D）：QQ 的消息要写进这一段，
+   * 让手机和桌面共用同一条上下文。不传 = 不共享（QQ 仍按 `qq-<号>` 各聊各的）。
+   */
+  setActiveConversation?: (conversationId: string) => void
   /** 全部历史（最新在前） */
   history: () => AskHistoryEntry[]
   /** 清空历史（接记忆仓时会先提交一次再删会话文件，允许返回 Promise） */
@@ -444,6 +449,8 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
           typeof payload.conversationId === 'string' && CONVERSATION_ID_RE.test(payload.conversationId)
             ? payload.conversationId
             : `c${Date.now().toString(36)}`
+        // 桌面问一次也算「当前会话」：QQ 之后的消息跟着写进这一段（C+D）
+        deps.setActiveConversation?.(conversationId)
         // 模式（D72）：模式 = 当前分支的 kind，主进程按家谱现算，渲染层不再传。
         // 本地命令先过（方案 §6）：命中就在本地执行、回一条文本，不调模型、不写会话 / 历史。
         // 放在问题长度校验之前：命令的参数长度不该受「提问 500 字」限制。
@@ -501,6 +508,18 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
             deps.onActiveChange?.(false)
           }
         }
+      }
+    ],
+    [
+      'ask:conversation:active',
+      (event, input) => {
+        if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
+        const id = isPlainObject(input) ? input.conversationId : input
+        if (typeof id !== 'string' || !CONVERSATION_ID_RE.test(id)) {
+          return { ok: false, error: 'invalid-conversation' }
+        }
+        deps.setActiveConversation?.(id)
+        return { ok: true }
       }
     ],
     [

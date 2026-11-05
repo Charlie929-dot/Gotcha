@@ -277,6 +277,39 @@ describe('一次问答', () => {
     expect(transport.sent[1]!.text).toContain('Chrome')
   })
 
+  it('桌面共享会话（C+D）：conversationFor 指哪段就写进哪段', async () => {
+    const transport = new FakeTransport()
+    const asked: string[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ conversationId }) => {
+        asked.push(conversationId)
+        return answer('好。')
+      },
+      log: () => {},
+      partGapMs: 0,
+      conversationFor: () => 'cmw3leoaw'
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('在吗'))
+    expect(asked).toEqual(['cmw3leoaw'])
+  })
+
+  it('没接 conversationFor 就还是各聊各的（qq-<号>）', async () => {
+    const transport = new FakeTransport()
+    const asked: string[] = []
+    const channel = createQqChannel(transport, {
+      ask: async ({ conversationId }) => {
+        asked.push(conversationId)
+        return answer('嗯。')
+      },
+      log: () => {},
+      partGapMs: 0
+    })
+    await channel.start(config())
+    await channel.handleMessage(inbound('在吗'))
+    expect(asked).toEqual(['qq-20002'])
+  })
+
   it('多段回答分条发送（每段一条），长段落仍按上限切', async () => {
     const transport = new FakeTransport()
     const channel = createQqChannel(transport, {

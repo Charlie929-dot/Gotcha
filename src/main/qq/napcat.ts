@@ -12,8 +12,10 @@
  *   NapCat WebUI（`config/webui.json` 里的 token，登录后拿 Credential）。
  * - OneBot 配置（`config/onebot11_<uin>.json`）可以通过 WebUI 的
  *   `/api/OB11Config/SetConfig` **热更新**，不需要重启 NapCat。
- * - 退出 Gotcha 不结束 QQ/NapCat（拍板 2026-10-30）：只清自己的轮询；「停止」也
- *   只结束 Gotcha 自己拉起的进程，绝不 taskkill 用户手动开的 QQ。
+ * - 退出 Gotcha 不结束 QQ/NapCat（拍板 2026-10-30）：只清自己的轮询。
+ * - 「停止」= 把 Gotcha 拉起的那条链整条收掉（2026-11-05 拍板，D105）：自己 spawn 的
+ *   `NapCatWinBootMain` 用 `taskkill /T /F` 连它拉起的 QQ 一起结束；**接管来的**
+ *   （不是 Gotcha 起的）先问一句，确认了才结束；用户自己开的 QQ 一律不碰。
  *
  * 纪律：
  * - token / WebUI 凭据只在本机内存里用，**绝不进日志**；
@@ -24,7 +26,7 @@
 
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -94,6 +96,13 @@ export interface NapcatView {
   error?: string
 }
 
+/** 「停止」的结果：接管来的 NapCat 先回 needsConfirm，确认后带 force 再调一次（D105） */
+export interface NapcatStopResult {
+  ok: boolean
+  needsConfirm?: boolean
+  error?: string
+}
+
 export interface NapcatDeps {
   userDataDir: string
   /** 现在 QQ 通道监听在哪个端口、用哪个 token（与 WebUI 配置保持一致） */
@@ -114,6 +123,10 @@ export interface NapcatDeps {
   isQqRunning?: () => Promise<boolean>
   /** 测试替换：找 QQ 安装路径 */
   resolveQqPath?: (manualPath?: string) => Promise<string | null>
+  /** 测试替换：找正在跑的 bootmain 的 pid / 认 pid 身份 / 结束进程树 */
+  findBootmainPid?: () => Promise<number | null>
+  isBootmainPid?: (pid: number) => Promise<boolean>
+  killTreeImpl?: (pid: number) => Promise<void>
   spawnImpl?: typeof spawn
   fetchImpl?: typeof fetch
 }
@@ -385,6 +398,37 @@ async function killTree(pid: number): Promise<void> {
   }
 }
 
+/** 正在跑的 `NapCatWinBootMain.exe` 的 pid（没有就 null） */
+async function findBootmainPid(): Promise<number | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'tasklist.exe',
+      ['/FI', 'IMAGENAME eq NapCatWinBootMain.exe', '/FO', 'CSV', '/NH'],
+      { timeout: 4_000, windowsHide: true }
+    )
+    const match = /"NapCatWinBootMain\.exe","(\d+)"/iu.exec(stdout)
+    return match === null ? null : Number(match[1])
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 这个 pid 现在是不是 bootmain：杀之前认一遍身份。
+ * pid 会被系统回收复用，只按记录文件里的数字杀可能误伤别的进程。
+ */
+async function pidIsBootmain(pid: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('tasklist.exe', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      timeout: 4_000,
+      windowsHide: true
+    })
+    return new RegExp(`"NapCatWinBootMain\\.exe","${pid}"`, 'iu').test(stdout)
+  } catch {
+    return false
+  }
+}
+
 interface WebuiResponse {
   code?: number
   data?: unknown
@@ -434,9 +478,12 @@ export class NapcatManager {
   private errorKind: 'webui' | 'link' | null = null
   /** 上一次找 NapCat 换二维码的时刻（别每个轮询都调） */
   private lastQrRefreshAt = 0
+  /** 自己拉起的 bootmain 的 pid 记录：Gotcha 重启后还能认领上次那条链（D105） */
+  private readonly pidFilePath: string
 
   constructor(private readonly deps: NapcatDeps) {
     this.now = deps.now ?? Date.now
+    this.pidFilePath = join(deps.userDataDir, 'napcat', 'napcat.pid')
   }
 
   /** 启动时探一次（界面开抽屉前就知道有没有装） */
@@ -540,12 +587,17 @@ export class NapcatManager {
     } catch (error) {
       return this.fail(`NapCat 启动失败：${String(error)}`)
     }
+    if (this.childPid !== null) await this.writePidFile(this.childPid)
     this.beginPoll()
     return { ok: true }
   }
 
-  /** 用户点在设置里「停止」：只结束 Gotcha 自己拉起的进程 */
-  async stop(): Promise<void> {
+  /** 用户点在设置里「停止」：把 Gotcha 拉起的那条链收掉（D105） */
+  async stop(options: { force?: boolean } = {}): Promise<NapcatStopResult> {
+    if (this.attachedToExisting && options.force !== true) {
+      return { ok: false, needsConfirm: true }
+    }
+
     this.stopping = true
     this.stopPoll()
     const pid = this.childPid
@@ -554,7 +606,22 @@ export class NapcatManager {
     this.childPid = null
     this.ownedProcess = false
     this.attachedToExisting = false
-    if (pid !== null && owned) await killTree(pid)
+
+    let killPid: number | null = null
+    if (pid !== null && owned) {
+      killPid = pid
+    } else {
+      // 重启后 childPid 丢了（或接管的）：按记录文件认领自己那条链；接管的要 force 才动
+      const recorded = await this.readPidFile()
+      if (recorded !== null && (await this.isBootmainPid(recorded))) {
+        killPid = recorded
+      } else if (attached) {
+        killPid = await this.findBootmainPid()
+      }
+    }
+    if (killPid !== null) await this.kill(killPid)
+    await this.clearPidFile()
+
     this.phase = 'idle'
     this.qrDataUrl = null
     this.qrAt = null
@@ -562,13 +629,14 @@ export class NapcatManager {
     this.loggedIn = false
     this.loggedInSince = null
     this.uin = null
-    this.error = attached ? 'NapCat 不是 Gotcha 启动的：已只断开托管，QQ 仍在运行' : null
+    this.error = null
     this.progress = null
     this.stopping = false
     this.wasOnline = false
     this.offlineNotified = false
     this.errorKind = null
     this.lastWebuiOkAt = 0
+    return { ok: true }
   }
 
   /** Gotcha 退出：只停轮询，不动 NapCat/QQ（拍板：退出不关） */
@@ -728,6 +796,53 @@ export class NapcatManager {
   private async isQqRunning(): Promise<boolean> {
     if (this.deps.isQqRunning !== undefined) return this.deps.isQqRunning()
     return qqRunning()
+  }
+
+  private async findBootmainPid(): Promise<number | null> {
+    if (this.deps.findBootmainPid !== undefined) return this.deps.findBootmainPid()
+    return findBootmainPid()
+  }
+
+  private async isBootmainPid(pid: number): Promise<boolean> {
+    if (this.deps.isBootmainPid !== undefined) return this.deps.isBootmainPid(pid)
+    return pidIsBootmain(pid)
+  }
+
+  private async kill(pid: number): Promise<void> {
+    this.log('info', 'napcat kill', { pid })
+    if (this.deps.killTreeImpl !== undefined) {
+      await this.deps.killTreeImpl(pid)
+      return
+    }
+    await killTree(pid)
+  }
+
+  /** 记下自己拉起的 pid：Gotcha 重启后「停止」还能认领这条链（写失败不影响托管） */
+  private async writePidFile(pid: number): Promise<void> {
+    try {
+      await mkdir(dirname(this.pidFilePath), { recursive: true })
+      await writeFile(this.pidFilePath, String(pid), 'utf8')
+    } catch {
+      // 只是收尾用的辅助信息，失败就算了
+    }
+  }
+
+  private async readPidFile(): Promise<number | null> {
+    try {
+      const raw = (await readFile(this.pidFilePath, 'utf8')).trim()
+      const pid = Number(raw)
+      return Number.isInteger(pid) && pid > 0 ? pid : null
+    } catch {
+      return null
+    }
+  }
+
+  private async clearPidFile(): Promise<void> {
+    try {
+      await rm(this.pidFilePath, { force: true })
+    } catch {
+      // 同上
+    }
   }
 
   private async resolveQq(): Promise<string | null> {

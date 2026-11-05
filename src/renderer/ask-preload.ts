@@ -28,7 +28,7 @@ import type { GrowthEntryView, GrowthPage } from '../main/growth'
 import type { GrowthKind } from '../memory/growth'
 import type { ProviderKeySaveResult, ProviderModelsInput } from '../main/graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from '../main/qq/qq-settings'
-import type { NapcatView } from '../main/qq/napcat'
+import type { NapcatStopResult, NapcatView } from '../main/qq/napcat'
 import type { QqStickerListView } from '../main/qq/stickers'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
@@ -120,7 +120,7 @@ export interface AskApi {
   /* ---- NapCat 托管（D66）：状态 / 二维码 / 启动停止 / 下载安装 / 选目录 ---- */
   qqNapcatStatus(): Promise<NapcatView | { error: string }>
   qqNapcatStart(): Promise<{ ok: boolean; error?: string }>
-  qqNapcatStop(): Promise<{ ok: boolean; error?: string }>
+  qqNapcatStop(options?: { force?: boolean }): Promise<NapcatStopResult>
   qqNapcatInstall(): Promise<{ ok: boolean; error?: string }>
   qqNapcatChooseDir(): Promise<{ ok: boolean; error?: string; view?: NapcatView }>
   /* ---- QQ 表情包（D96 / PR2）：列表 / 导入 / 改标签 / 回收站 ---- */
@@ -224,8 +224,8 @@ const api: AskApi = {
     ipcRenderer.invoke('ask:qq:napcat:get') as Promise<NapcatView | { error: string }>,
   qqNapcatStart: () =>
     ipcRenderer.invoke('ask:qq:napcat:start') as Promise<{ ok: boolean; error?: string }>,
-  qqNapcatStop: () =>
-    ipcRenderer.invoke('ask:qq:napcat:stop') as Promise<{ ok: boolean; error?: string }>,
+  qqNapcatStop: (options) =>
+    ipcRenderer.invoke('ask:qq:napcat:stop', options) as Promise<NapcatStopResult>,
   qqNapcatInstall: () =>
     ipcRenderer.invoke('ask:qq:napcat:install') as Promise<{ ok: boolean; error?: string }>,
   qqNapcatChooseDir: () =>

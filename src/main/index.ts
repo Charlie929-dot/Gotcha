@@ -3717,9 +3717,8 @@ if (primaryInstance) {
       qqNapcatStatus: () =>
         qqNapcat?.status() ?? { phase: 'idle', installed: false, autoStart: true, loggedIn: false },
       qqNapcatStart: () => qqNapcat?.start() ?? Promise.resolve({ ok: false, error: 'NapCat 未初始化' }),
-      qqNapcatStop: async () => {
-        await qqNapcat?.stop()
-      },
+      qqNapcatStop: async (options) =>
+        (await qqNapcat?.stop(options)) ?? { ok: false, error: 'NapCat 未初始化' },
       qqNapcatInstall: () =>
         qqNapcat?.install() ?? Promise.resolve({ ok: false, error: 'NapCat 未初始化' }),
       qqNapcatChooseDir: async () => {

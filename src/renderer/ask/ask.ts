@@ -30,7 +30,7 @@ import type { MemorySettingsView } from '../../main/memory-settings'
 import type { MemoryRepoSettingsView } from '../../main/memory-repo-settings'
 import type { MemoryListItemView } from '../../main/memory-admin'
 import type { QqSettingsView } from '../../main/qq/qq-settings'
-import type { NapcatView } from '../../main/qq/napcat'
+import type { NapcatStopResult, NapcatView } from '../../main/qq/napcat'
 import type { QqStickerListView } from '../../main/qq/stickers'
 import type {
   TaskAdminItem,
@@ -2845,7 +2845,8 @@ function renderNapcatView(view: NapcatView): void {
   qqNapcatStartButton.disabled =
     !view.installed || working || view.phase === 'connected' || view.phase === 'waiting-login'
   qqNapcatStopButton.disabled =
-    !view.installed || view.phase === 'idle' || view.phase === 'error' || view.phase === 'downloading'
+    // 出错 / 空闲时也允许点：用来收掉上次留下的 NapCat（D105）
+    !view.installed || working
 
   if (view.qrDataUrl !== undefined) {
     qqNapcatQrEl.src = view.qrDataUrl
@@ -2889,14 +2890,27 @@ async function refreshNapcat(): Promise<void> {
   if (!api) return
   try {
     const view = await api.qqNapcatStatus()
-    if ('error' in view) {
-      qqNapcatStatusEl.textContent = 'NapCat：读取状态失败'
+    // `NapcatView` 自己就带 `error` 字段（phase=error 时的可读原因）：
+    // 只有「连 phase 都没有」的才是 IPC 回了错误（D105 修：以前这里把真实原因吞成「读取状态失败」）
+    if (!('phase' in view)) {
+      qqNapcatStatusEl.textContent = `NapCat：读取状态失败（${view.error}）`
       return
     }
     renderNapcatView(view)
   } catch (error) {
     qqNapcatStatusEl.textContent = `NapCat：读取状态失败（${String(error)}）`
   }
+}
+
+/** 停止（D105）：接管来的 NapCat 先确认——它可能把 QQ 一起关掉 */
+async function stopNapcat(): Promise<NapcatStopResult> {
+  if (!api) return { ok: false, error: '界面没准备好' }
+  const first = await api.qqNapcatStop()
+  if (first.ok || first.needsConfirm !== true) return first
+  const yes = window.confirm(
+    '这个 NapCat 不是 Gotcha 启动的。要连它一起结束吗？\n\n（它拉起的 QQ 会被一起关掉；你自己另外开的 QQ 不受影响）'
+  )
+  return yes ? await api.qqNapcatStop({ force: true }) : { ok: false, error: '已取消停止' }
 }
 
 async function runNapcatAction(action: 'start' | 'stop' | 'install' | 'dir'): Promise<void> {
@@ -2916,7 +2930,7 @@ async function runNapcatAction(action: 'start' | 'stop' | 'install' | 'dir'): Pr
       action === 'start'
         ? await api.qqNapcatStart()
         : action === 'stop'
-          ? await api.qqNapcatStop()
+          ? await stopNapcat()
           : action === 'install'
             ? await api.qqNapcatInstall()
             : await api.qqNapcatChooseDir()

@@ -11,7 +11,7 @@
  * 真正的「拉起 QQ + 扫码」属于真机验收，不在单测里跑。
  */
 
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -480,5 +480,106 @@ describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
     const manager = await attachedManager({ clock, fetchImpl, notify })
     await pollOnce(manager)
     expect(notify).not.toHaveBeenCalled()
+  })
+})
+
+describe('NapcatManager 停止：收掉自己拉起的链（D105）', () => {
+  async function stopManager(overrides: Partial<NapcatDeps> = {}): Promise<{
+    manager: NapcatManager
+    killTreeImpl: ReturnType<typeof vi.fn>
+    userData: string
+    spawnImpl: ReturnType<typeof vi.fn>
+  }> {
+    const userData = await makeDir()
+    const shell = await makeShell(join(userData, 'shell'))
+    const child = { pid: 4321, unref: (): void => {}, on: (): unknown => child }
+    const spawnImpl = vi.fn(() => child)
+    const killTreeImpl = vi.fn(async () => undefined)
+    const manager = new NapcatManager(
+      deps({
+        userDataDir: userData,
+        getShellDir: () => shell,
+        resolveQqPath: async () => 'C:\\Program Files\\QQ.exe',
+        fetchImpl: (() => Promise.reject(new Error('offline'))) as unknown as typeof fetch,
+        spawnImpl: spawnImpl as unknown as NapcatDeps['spawnImpl'],
+        isBootmainRunning: async () => false,
+        isQqRunning: async () => false,
+        killTreeImpl: killTreeImpl as unknown as NapcatDeps['killTreeImpl'],
+        ...overrides
+      })
+    )
+    return { manager, killTreeImpl, userData, spawnImpl }
+  }
+
+  it('自己拉起的：停止把整条链结束掉，pid 记录也清掉', async () => {
+    const { manager, killTreeImpl, userData } = await stopManager()
+    expect((await manager.start()).ok).toBe(true)
+    const pidFile = join(userData, 'napcat', 'napcat.pid')
+    expect(await readFile(pidFile, 'utf8')).toBe('4321')
+
+    const result = await manager.stop()
+    expect(result.ok).toBe(true)
+    expect(killTreeImpl).toHaveBeenCalledWith(4321)
+    expect(manager.status().phase).toBe('idle')
+    await expect(readFile(pidFile, 'utf8')).rejects.toThrow()
+    manager.dispose()
+  })
+
+  it('接管来的 NapCat：先回 needsConfirm、不动进程；确认后（force）才结束', async () => {
+    const { manager, killTreeImpl } = await stopManager({
+      isBootmainRunning: async () => true,
+      isQqRunning: async () => true,
+      findBootmainPid: async () => 777
+    })
+    expect((await manager.start()).ok).toBe(true)
+
+    const first = await manager.stop()
+    expect(first).toEqual({ ok: false, needsConfirm: true })
+    expect(killTreeImpl).not.toHaveBeenCalled()
+    expect(manager.status().phase).toBe('waiting-login')
+
+    const second = await manager.stop({ force: true })
+    expect(second.ok).toBe(true)
+    expect(killTreeImpl).toHaveBeenCalledWith(777)
+    expect(manager.status().phase).toBe('idle')
+    manager.dispose()
+  })
+
+  it('Gotcha 重启后按 pid 记录认领上次那条链', async () => {
+    const userData = await makeDir()
+    await mkdir(join(userData, 'napcat'), { recursive: true })
+    await writeFile(join(userData, 'napcat', 'napcat.pid'), '5150', 'utf8')
+    const killTreeImpl = vi.fn(async () => undefined)
+    const manager = new NapcatManager(
+      deps({
+        userDataDir: userData,
+        isBootmainPid: async () => true,
+        killTreeImpl: killTreeImpl as unknown as NapcatDeps['killTreeImpl']
+      })
+    )
+
+    const result = await manager.stop()
+    expect(result.ok).toBe(true)
+    expect(killTreeImpl).toHaveBeenCalledWith(5150)
+    await expect(readFile(join(userData, 'napcat', 'napcat.pid'), 'utf8')).rejects.toThrow()
+    manager.dispose()
+  })
+
+  it('pid 被系统复用成别的进程：不杀，只清记录', async () => {
+    const userData = await makeDir()
+    await mkdir(join(userData, 'napcat'), { recursive: true })
+    await writeFile(join(userData, 'napcat', 'napcat.pid'), '5150', 'utf8')
+    const killTreeImpl = vi.fn(async () => undefined)
+    const manager = new NapcatManager(
+      deps({
+        userDataDir: userData,
+        isBootmainPid: async () => false,
+        killTreeImpl: killTreeImpl as unknown as NapcatDeps['killTreeImpl']
+      })
+    )
+
+    expect((await manager.stop()).ok).toBe(true)
+    expect(killTreeImpl).not.toHaveBeenCalled()
+    manager.dispose()
   })
 })

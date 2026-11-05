@@ -35,7 +35,7 @@ import type {
 } from './memory-admin'
 import type { ProviderKeySaveResult, ProviderModelsInput } from './graph-ipc'
 import type { QqSettingsSaveResult, QqSettingsView } from './qq/qq-settings'
-import type { NapcatView } from './qq/napcat'
+import type { NapcatStopResult, NapcatView } from './qq/napcat'
 import type { QqStickerListView } from './qq/stickers'
 import type { TaskAdminSaveInput, TaskAdminView } from './task-runtime'
 import type { NotebookAdminView } from './notebook'
@@ -253,7 +253,8 @@ export interface AskIpcDeps {
    */
   qqNapcatStatus?: () => NapcatView
   qqNapcatStart?: () => Promise<{ ok: boolean; error?: string }>
-  qqNapcatStop?: () => Promise<void>
+  /** 停止（D105）：接管来的 NapCat 先回 needsConfirm，界面确认后带 force 再调 */
+  qqNapcatStop?: (options?: { force?: boolean }) => Promise<NapcatStopResult>
   qqNapcatInstall?: () => Promise<{ ok: boolean; error?: string }>
   qqNapcatChooseDir?: () => Promise<{ ok: boolean; error?: string; view?: NapcatView }>
   /**
@@ -789,12 +790,11 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
     ],
     [
       'ask:qq:napcat:stop',
-      async (event) => {
+      async (event, options?: unknown) => {
         if (!ensureSender(event)) return { ok: false, error: 'forbidden' }
         if (!deps.qqNapcatStop) return { ok: false, error: '当前版本不支持托管 NapCat' }
         try {
-          await deps.qqNapcatStop()
-          return { ok: true }
+          return await deps.qqNapcatStop(options as { force?: boolean } | undefined)
         } catch (error) {
           deps.log('error', 'ask qq napcat stop failed', { error: String(error) })
           return { ok: false, error: '停止 NapCat 失败' }

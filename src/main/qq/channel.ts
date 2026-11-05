@@ -174,6 +174,12 @@ export interface QqChannelDeps {
   askTimeoutMs?: number
   /** 分条之间隔多久（默认 200ms；测试传 0） */
   partGapMs?: number
+  /**
+   * 这条 QQ 消息该写进哪个会话（2026-11-05 拍板 C+D）：默认 `qq-<QQ号>`（各聊各的）；
+   * 主进程传「桌面当前会话」时，QQ 与桌面共用同一条上下文——桌面能看到 QQ 说的话，
+   * QQ 也能接上桌面说过的话。
+   */
+  conversationFor?: (userId: number) => string
 }
 
 export interface QqChannelStatus extends QqTransportStatus {
@@ -434,6 +440,9 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
 
   const log = deps.log
   const chatLog = deps.chatLog
+  /** 这条消息写进哪个会话：主进程接了「桌面当前会话」就用它（C+D），否则各聊各的 */
+  const conversationFor = (userId: number): string =>
+    deps.conversationFor?.(userId) ?? `qq-${userId}`
 
   /**
    * 图片引用 → data URL。优先 `get_image` 的 base64（不下载），没有才走 url；
@@ -541,7 +550,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     warnedAt.set(userId, at)
     try {
       // 提醒也算 ta 说的话：记进台账，用户引用它时能解出原话
-      await sendOne(userId, `qq-${userId}`, text)
+      await sendOne(userId, conversationFor(userId), text)
     } catch (error) {
       log('warn', 'qq reply failed', { error: String(error) })
     }
@@ -581,7 +590,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
    */
   const sendParts = async (userId: number, text: string, replyTo?: number): Promise<number> => {
     const parts = splitForQq(text, config?.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
-    const conversationId = `qq-${userId}`
+    const conversationId = conversationFor(userId)
     for (let index = 0; index < parts.length; index += 1) {
       const part = parts[index] ?? ''
       const target = index === 0 ? replyTo : undefined
@@ -741,7 +750,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     if (command === undefined) return false
     let handled: ChainAskResult | null
     try {
-      handled = await command(inbound.text, { conversationId: `qq-${inbound.userId}` })
+      handled = await command(inbound.text, { conversationId: conversationFor(inbound.userId) })
     } catch (error) {
       log('warn', 'qq command failed', { userId: inbound.userId, error: String(error) })
       await warnOnce(inbound.userId, '命令没跑成，细节看日志。')
@@ -754,7 +763,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
   }
 
   const answer = async (inbound: QqInbound): Promise<void> => {
-    const conversationId = `qq-${inbound.userId}`
+    const conversationId = conversationFor(inbound.userId)
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | null = null
     // 挂着「要不要接着查」时，回 1 / 2 是选择，不是新问题（没接续查能力就当普通提问）

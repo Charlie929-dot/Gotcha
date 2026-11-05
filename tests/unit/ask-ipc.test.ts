@@ -985,3 +985,24 @@ describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () =
     })
   })
 })
+
+describe('ask IPC：桌面当前会话（C+D，2026-11-05）', () => {
+  it('渲染层报上来的会话 id 记进主进程；非法 id 不接', async () => {
+    const seen: string[] = []
+    const deps = buildDeps({ setActiveConversation: (id) => seen.push(id) })
+    const setActive = handler(deps, 'ask:conversation:active')
+    expect(await setActive(SENDER_OK as never, { conversationId: 'conv-9' })).toEqual({ ok: true })
+    expect(seen).toEqual(['conv-9'])
+    expect(await setActive(SENDER_OK as never, { conversationId: '带 空格' })).toMatchObject({
+      ok: false
+    })
+    expect(seen).toEqual(['conv-9'])
+  })
+
+  it('桌面问一次也算当前会话：QQ 之后的消息跟着写进这一段', async () => {
+    const seen: string[] = []
+    const deps = buildDeps({ setActiveConversation: (id) => seen.push(id) })
+    await handler(deps, 'ask:query')(SENDER_OK as never, { question: '问', conversationId: 'conv-1' })
+    expect(seen).toContain('conv-1')
+  })
+})

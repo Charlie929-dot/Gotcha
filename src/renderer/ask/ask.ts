@@ -179,6 +179,14 @@ const THREAD_RENDER_LIMIT = 40
 
 let entries: AskHistoryEntry[] = []
 let activeConversationId: string | null = null
+/**
+ * 切会话时顺手报给主进程（2026-11-05 C+D）：QQ 的消息要写进桌面正打开的这一段，
+ * 手机和桌面共用同一条上下文。窗口还没开 / 刚清空（null）就不报，主进程自己回退。
+ */
+function setActiveConversationId(id: string | null): void {
+  activeConversationId = id
+  if (id !== null) void api?.setActiveConversation(id)
+}
 let filter = ''
 let busy = false
 
@@ -596,7 +604,7 @@ function renderHistoryList(): void {
     }${entryLabel(last)}`
     button.append(title, meta)
     button.addEventListener('click', () => {
-      activeConversationId = conversation.id
+      setActiveConversationId(conversation.id)
       renderHistoryList()
       renderThread()
     })
@@ -1230,7 +1238,10 @@ async function ask(
     setStatus('error', '窗口没接上主进程（preload 缺失）')
     return
   }
-  if (activeConversationId === null) activeConversationId = newConversationId()
+  if (activeConversationId === null) {
+    activeConversationId = newConversationId()
+    setActiveConversationId(activeConversationId)
+  }
   // 空会话里只摘掉空态提示：命令回执不落历史（主进程直接返回、不过 settle），
   // 这里整片 replaceChildren 会让连续几条命令只剩最后一条。
   if (currentThreadEntries.length === 0) threadEl.querySelector('.thread-empty')?.remove()
@@ -1287,7 +1298,7 @@ async function ask(
     // 传承会切分支（D72）：回答完刷新一下模式条与分支信息
     void refreshMode()
     await refreshHistory()
-    activeConversationId = conversationId
+    setActiveConversationId(conversationId)
     renderThread()
     renderHistoryList()
   } catch (error) {
@@ -1367,7 +1378,7 @@ resumeLastButton.addEventListener('click', () => {
   if (busy) return
   const latest = listConversations()[0]
   if (!latest) return
-  activeConversationId = latest.id
+  setActiveConversationId(latest.id)
   renderThread()
   renderHistoryList()
   setStatus('idle', '继续上一段')

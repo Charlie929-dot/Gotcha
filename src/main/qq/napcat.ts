@@ -58,6 +58,14 @@ export const NAPCAT_QR_MAX_AGE_MS = 110_000
 export const NAPCAT_WEBUI_GRACE_MS = 60_000
 /** WebUI 默认端口（config/webui.json 里通常也是 6099） */
 export const NAPCAT_DEFAULT_WEBUI_PORT = 6099
+/**
+ * 二维码生成失败的退避表（毫秒）：NapCat 卡住时 `RefreshQRcode` 会一直超时，
+ * 以前每 15 秒重试并记一条 warn，8 小时能刷 1800 条日志（2026-11-06 真机）。
+ * 失败越多、等得越久；连续失败到最后一档就判定「二维码生不出来」并只提醒一次。
+ */
+export const NAPCAT_QR_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000, 300_000] as const
+/** 连续失败到这个次数：二维码是真的生不出来了，交给上层报错，别再默默重试 */
+export const NAPCAT_QR_STUCK_FAILURES = 5
 /** 下载包名（官方 Releases 里的 Windows Shell 包） */
 export const NAPCAT_SHELL_ASSET = 'NapCat.Shell.zip'
 const NAPCAT_RELEASE_API = 'https://api.github.com/repos/NapNeko/NapCatQQ/releases/latest'
@@ -478,18 +486,27 @@ export class NapcatManager {
   private errorKind: 'webui' | 'link' | null = null
   /** 上一次找 NapCat 换二维码的时刻（别每个轮询都调） */
   private lastQrRefreshAt = 0
+  /** 二维码刷新连续失败次数 / 下一次允许重试的时刻（退避用，2026-11-06） */
+  private qrFailCount = 0
+  private qrNextAttemptAt = 0
+  /** 「二维码生不出来」只提醒一次，别每分钟弹一次气泡 */
+  private qrStuckNotified = false
   /** 自己拉起的 bootmain 的 pid 记录：Gotcha 重启后还能认领上次那条链（D105） */
   private readonly pidFilePath: string
+  /** 上次登录过的 uin：下次拉起时带上做快速登录（NapCat 的 quick login），免扫码自愈的前提 */
+  private readonly uinFilePath: string
 
   constructor(private readonly deps: NapcatDeps) {
     this.now = deps.now ?? Date.now
     this.pidFilePath = join(deps.userDataDir, 'napcat', 'napcat.pid')
+    this.uinFilePath = join(deps.userDataDir, 'napcat', 'uin.txt')
   }
 
   /** 启动时探一次（界面开抽屉前就知道有没有装） */
   async locate(): Promise<void> {
     this.shellDir = await findNapcatDir(this.deps.getShellDir(), this.deps.userDataDir)
     this.qqPath = await resolveQqPath()
+    if (this.uin === null) this.uin = await this.readUinFile()
   }
 
   status(): NapcatView {
@@ -546,9 +563,11 @@ export class NapcatManager {
     if (this.childPid !== null || (await this.bootmainIsRunning())) {
       if (!(await this.isQqRunning())) {
         return this.fail(
-          'NapCat 在跑但 QQ 没起来（上次启动失败留下的）：先在任务管理器结束 NapCatWinBootMain.exe，再点「启动」'
+          'NapCat 在跑但 QQ 没起来（上次启动失败留下的）：先在设置里点「停止」收掉它，再点「启动」；或到任务管理器结束 NapCatWinBootMain.exe'
         )
       }
+      // 接管别人的链路：日志里说清「这不是本次拉起的」，出问题时好判断该谁收拾
+      this.log('info', 'napcat attach existing chain')
       this.ownedProcess = false
       this.attachedToExisting = true
       this.qrMinMtime = 0
@@ -578,6 +597,8 @@ export class NapcatManager {
     this.lastWebuiOkAt = this.now()
     this.errorKind = null
     this.lastPollErrorAt = 0
+    // 上次登录过的号：带上它让 NapCat 走快速登录（能省一次扫码）
+    if (this.uin === null) this.uin = await this.readUinFile()
     // 复用旧安装时 cache/qrcode.png 里可能还躺着上一次的码：只认本次启动之后写的
     this.qrMinMtime = this.now() - 5_000
     this.qrMtime = 0
@@ -626,6 +647,9 @@ export class NapcatManager {
     this.qrDataUrl = null
     this.qrAt = null
     this.qrMtime = 0
+    this.qrFailCount = 0
+    this.qrNextAttemptAt = 0
+    this.qrStuckNotified = false
     this.loggedIn = false
     this.loggedInSince = null
     this.uin = null
@@ -752,24 +776,24 @@ export class NapcatManager {
     const qqPath = this.qqPath
     if (shellDir === null || qqPath === null) throw new Error('missing-shell-or-qq')
     const spawnImpl = this.deps.spawnImpl ?? spawn
-    const child: ChildProcess = spawnImpl(
-      join(shellDir, 'NapCatWinBootMain.exe'),
-      [qqPath, join(shellDir, 'NapCatWinBootHook.dll')],
-      {
-        cwd: shellDir,
-        env: {
-          ...process.env,
-          NAPCAT_PATCH_PACKAGE: join(shellDir, 'qqnt.json'),
-          NAPCAT_LOAD_PATH: join(shellDir, 'loadNapCat.js'),
-          NAPCAT_INJECT_PATH: join(shellDir, 'NapCatWinBootHook.dll'),
-          NAPCAT_LAUNCHER_PATH: join(shellDir, 'NapCatWinBootMain.exe'),
-          NAPCAT_MAIN_PATH: join(shellDir, 'napcat.mjs')
-        },
-        stdio: 'ignore',
-        windowsHide: false,
-        detached: true
-      }
-    )
+    // 带上上次登录的 uin：NapCat 的快速登录（quick login）能省掉一次扫码。
+    // 没记过 / 号里没存凭据时会自动退回二维码登录，不会因为多一个参数就起不来。
+    const args = [qqPath, join(shellDir, 'NapCatWinBootHook.dll')]
+    if (this.uin !== null) args.push(this.uin)
+    const child: ChildProcess = spawnImpl(join(shellDir, 'NapCatWinBootMain.exe'), args, {
+      cwd: shellDir,
+      env: {
+        ...process.env,
+        NAPCAT_PATCH_PACKAGE: join(shellDir, 'qqnt.json'),
+        NAPCAT_LOAD_PATH: join(shellDir, 'loadNapCat.js'),
+        NAPCAT_INJECT_PATH: join(shellDir, 'NapCatWinBootHook.dll'),
+        NAPCAT_LAUNCHER_PATH: join(shellDir, 'NapCatWinBootMain.exe'),
+        NAPCAT_MAIN_PATH: join(shellDir, 'napcat.mjs')
+      },
+      stdio: 'ignore',
+      windowsHide: false,
+      detached: true
+    })
     // 脱离父进程：Gotcha 关了 NapCat 还活着（拍板：退出不关）
     child.unref()
     this.childPid = child.pid ?? null
@@ -845,6 +869,26 @@ export class NapcatManager {
     }
   }
 
+  /** 记住上次登录的 uin：下次拉 NapCat 时带上，能走快速登录就不必再扫码 */
+  private async writeUinFile(uin: string): Promise<void> {
+    if (!/^\d{5,12}$/u.test(uin)) return
+    try {
+      await mkdir(dirname(this.uinFilePath), { recursive: true })
+      await writeFile(this.uinFilePath, uin, 'utf8')
+    } catch {
+      // 只是让下次启动少扫一次码，写失败不影响托管
+    }
+  }
+
+  private async readUinFile(): Promise<string | null> {
+    try {
+      const raw = (await readFile(this.uinFilePath, 'utf8')).trim()
+      return /^\d{5,12}$/u.test(raw) ? raw : null
+    } catch {
+      return null
+    }
+  }
+
   private async resolveQq(): Promise<string | null> {
     if (this.deps.resolveQqPath !== undefined) return this.deps.resolveQqPath()
     return resolveQqPath()
@@ -917,6 +961,10 @@ export class NapcatManager {
           this.qrDataUrl = null
           this.error = null
           this.errorKind = null
+          // 登录成功：二维码那套退避状态一并清掉，下次掉线重新从第一档开始
+          this.qrFailCount = 0
+          this.qrNextAttemptAt = 0
+          this.qrStuckNotified = false
           if (this.loggedInSince === null) this.loggedInSince = this.now()
           if (this.uin === null) await this.refreshLoginInfo()
           if (!this.configApplied && this.now() - this.lastConfigAttempt > 10_000) {
@@ -1023,7 +1071,11 @@ export class NapcatManager {
     const info = asRecord(await this.webuiPost('/api/QQLogin/GetQQLoginInfo'))
     if (info === null) return
     const uin = info['uin']
-    if (typeof uin === 'string' || typeof uin === 'number') this.uin = String(uin)
+    if (typeof uin === 'string' || typeof uin === 'number') {
+      this.uin = String(uin)
+      // 记下来：下次拉起 NapCat 时带上它做快速登录（免扫码自愈的前提）
+      void this.writeUinFile(this.uin)
+    }
   }
 
   private async applyConfig(): Promise<void> {
@@ -1068,22 +1120,55 @@ export class NapcatManager {
    * 二维码过期就让 NapCat 换一张（旧码扫出来是「已过期」）。NapCat 停在登录页时自己也会隔
    * 约 2 分钟重写一次 PNG（2026-11-04 实测），但刷新是兜底：轮询停掉时也得有人主动换。
    * 刷新后 NapCat 会把那张 PNG 重写，再按普通路径读回来——不引入二维码编码器，也不新增依赖。
+   *
+   * 失败要退避（2026-11-06 真机）：NapCat 卡住时这个调用会一直超时，每 15 秒刷一条 warn
+   * 能把日志刷爆（8 小时 1800 条）。改成按 `NAPCAT_QR_BACKOFF_MS` 递进，连续失败到
+   * `NAPCAT_QR_STUCK_FAILURES` 就收口成一条可读错误，提醒人点「停止 → 启动」。
    */
   private async refreshQr(): Promise<void> {
     if (this.webuiCredential === null) return
-    if (this.now() - this.lastQrRefreshAt < 15_000) return
-    this.lastQrRefreshAt = this.now()
+    const at = this.now()
+    if (at - this.lastQrRefreshAt < 15_000) return
+    if (at < this.qrNextAttemptAt) return
+    this.lastQrRefreshAt = at
     try {
       const data = asRecord(await this.webuiPost('/api/QQLogin/RefreshQRcode'))
       const url = data?.['qrcodeurl']
+      this.qrFailCount = 0
+      this.qrNextAttemptAt = 0
+      this.qrStuckNotified = false
       if (typeof url !== 'string' || url === '') return
       // 文件刚被重写：旧的 mtime 不能再拦住它
       this.qrMtime = 0
       await this.readQr()
       if (this.qrDataUrl !== null) this.log('info', 'napcat qrcode refreshed')
     } catch (error) {
-      this.log('warn', 'napcat qrcode refresh failed', { error: String(error) })
+      this.qrFailCount += 1
+      const step = Math.min(this.qrFailCount, NAPCAT_QR_BACKOFF_MS.length) - 1
+      const wait = NAPCAT_QR_BACKOFF_MS[step] ?? NAPCAT_QR_BACKOFF_MS[NAPCAT_QR_BACKOFF_MS.length - 1]
+      this.qrNextAttemptAt = this.now() + wait
+      // 每一档只记一条：第 1 次失败、每次退避档位变化、以及判定卡死那一次
+      if (this.qrFailCount === 1 || this.qrFailCount === NAPCAT_QR_STUCK_FAILURES) {
+        this.log('warn', 'napcat qrcode refresh failed', {
+          error: String(error),
+          failures: this.qrFailCount,
+          retryInMs: wait
+        })
+      }
+      if (this.qrFailCount >= NAPCAT_QR_STUCK_FAILURES) this.markQrStuck()
     }
+  }
+
+  /**
+   * 二维码连续生不出来 = 这条链卡住了（大多发生在接管了一个半死的 NapCat 之后）。
+   * 只提醒一次，并把可读出路写进错误里；轮询继续，NapCat 自己缓过来还能自动收掉。
+   */
+  private markQrStuck(): void {
+    if (this.qrStuckNotified) return
+    this.qrStuckNotified = true
+    this.errorKind = 'webui'
+    this.fail('二维码一直生不出来（NapCat 卡住了）：在设置里点「停止」再「启动」重建链路')
+    this.notifyOffline('webui-down')
   }
 
   private async latestDownloadUrl(): Promise<string> {

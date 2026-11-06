@@ -350,6 +350,14 @@ describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
     return (manager as unknown as { poll: () => Promise<void> }).poll()
   }
 
+  /** 等 start() 顺手触发的那次 poll 跑完：否则手动 poll 会被 `polling` 标志直接挡掉（负载高时会偶发） */
+  async function settlePolling(manager: NapcatManager): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (!(manager as unknown as { polling: boolean }).polling) return
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+  }
+
   async function attachedManager(options: {
     clock: () => number
     fetchImpl: typeof fetch
@@ -480,6 +488,108 @@ describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
     const manager = await attachedManager({ clock, fetchImpl, notify })
     await pollOnce(manager)
     expect(notify).not.toHaveBeenCalled()
+  })
+
+  it('二维码一直生不出来：退避重试、不刷日志，最后收口成一条可读错误（2026-11-06）', async () => {
+    // 时钟往后拨一小时：Shell 里那张旧码就过期了，轮询才会去要新码
+    let clock = Date.now() + 3_600_000
+    const logs: string[] = []
+    let refreshCalls = 0
+    const fetchImpl = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: false } })
+      if (url.endsWith('/api/QQLogin/RefreshQRcode')) {
+        refreshCalls += 1
+        throw new Error('TimeoutError')
+      }
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = await attachedManager({ clock: () => clock, fetchImpl, logs })
+    await settlePolling(manager)
+
+    // 第 1 次失败 → 退避 15s；紧接着再轮询不该再打接口
+    await pollOnce(manager)
+    expect(refreshCalls).toBe(1)
+    await pollOnce(manager)
+    expect(refreshCalls).toBe(1)
+
+    // 按退避表递进（15 / 30 / 60 / 120），到第 5 次判定卡死
+    for (const wait of [15_000, 30_000, 60_000, 120_000]) {
+      clock += wait
+      await pollOnce(manager)
+    }
+    expect(refreshCalls).toBe(5)
+    expect(manager.status().phase).toBe('error')
+    expect(manager.status().error).toContain('停止')
+    expect(manager.status().error).toContain('启动')
+
+    // 5 次失败只留 2 条日志（第一次 + 判定卡死那次），不再是每 15 秒一条
+    expect(logs.filter((message) => message === 'napcat qrcode refresh failed')).toHaveLength(2)
+
+    // 再轮询也不重复报错、不重复打接口
+    clock += 300_000
+    const callsBefore = refreshCalls
+    await pollOnce(manager)
+    expect(refreshCalls).toBeLessThanOrEqual(callsBefore + 1)
+  })
+
+  it('登录过的 uin 会记下来，下次拉起时带上走快速登录', async () => {
+    const clock = (): number => Date.now()
+    const root = await makeDir()
+    const shell = await makeShellWithWebui(root)
+    const fetchImpl = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: true } })
+      if (url.endsWith('/api/QQLogin/GetQQLoginInfo')) {
+        return jsonResponse({ code: 0, data: { uin: '2876349587', online: true } })
+      }
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = new NapcatManager(
+      deps({
+        userDataDir: root,
+        now: clock,
+        getShellDir: () => shell,
+        isBootmainRunning: async () => true,
+        isQqRunning: async () => true,
+        fetchImpl
+      })
+    )
+    await manager.start()
+    manager.dispose()
+    await settlePolling(manager)
+    await pollOnce(manager)
+    expect(manager.status().uin).toBe('2876349587')
+    // writeUinFile 是 fire-and-forget：等文件真的落盘再断言
+    let saved = ''
+    for (let attempt = 0; attempt < 50 && saved === ''; attempt += 1) {
+      saved = await readFile(join(root, 'napcat', 'uin.txt'), 'utf8').catch(() => '')
+      if (saved === '') await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(saved.trim()).toBe('2876349587')
+
+    // 新实例（等同 Gotcha 重启）：spawn 的第三个参数就是那个 uin
+    const child = { pid: 4321, unref: (): void => {}, on: (): unknown => child }
+    const spawnImpl = vi.fn((..._args: unknown[]) => child)
+    const next = new NapcatManager(
+      deps({
+        userDataDir: root,
+        getShellDir: () => shell,
+        resolveQqPath: async () => 'C:\\Program Files\\QQ.exe',
+        isBootmainRunning: async () => false,
+        isQqRunning: async () => false,
+        spawnImpl: spawnImpl as unknown as NapcatDeps['spawnImpl']
+      })
+    )
+    expect((await next.start()).ok).toBe(true)
+    next.dispose()
+    const args = spawnImpl.mock.calls[0]?.[1] as string[]
+    expect(args[0]).toBe('C:\\Program Files\\QQ.exe')
+    expect(args[2]).toBe('2876349587')
   })
 })
 

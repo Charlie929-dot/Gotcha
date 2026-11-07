@@ -369,6 +369,43 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * `<QQ 安装目录>/versions/config.json` 的 `curVersion`（如 `9.9.36-53644`）。
+ * 这是 QQ 自己记「现在跑哪个版本」的地方；格式不合就返回 null，不猜。
+ */
+export function parseQqRuntimeVersion(raw: string): string | null {
+  try {
+    const record = asRecord(JSON.parse(raw) as unknown)
+    const current = record?.['curVersion']
+    if (typeof current !== 'string') return null
+    const version = current.trim()
+    return /^\d+\.\d+\.\d+-\d+$/u.test(version) ? version : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * NapCat 的适配表里有没有这个 QQ 版本（2026-11-08 查证：napcat.mjs 里的 hook 签名表按
+ * `<版本>-x64` / `-arm64` 建键，比如 `9.9.36-53644-x64`）。没有就说明 QQ 比 NapCat 新，
+ * 注入后可能在启动阶段卡死——D107 的「锁 QQ 版本」就是从这条判断起手。
+ */
+export function shellKnowsQqVersion(script: string, version: string): boolean {
+  return script.includes(`${version}-x64`) || script.includes(`${version}-arm64`)
+}
+
+/** 读本机 QQ 的运行版本；读不到返回 null（别因为读不到就不让启动） */
+async function readQqRuntimeVersion(qqPath: string): Promise<string | null> {
+  const raw = await readFile(join(dirname(qqPath), 'versions', 'config.json'), 'utf8').catch(() => null)
+  return raw === null ? null : parseQqRuntimeVersion(raw)
+}
+
+/** Shell 的 napcat.mjs 认不认这个 QQ 版本；读不到脚本就当「认」（判不了别吓人） */
+async function shellKnowsVersion(shellDir: string, version: string): Promise<boolean> {
+  const script = await readFile(join(shellDir, 'napcat.mjs'), 'utf8').catch(() => null)
+  return script === null ? true : shellKnowsQqVersion(script, version)
+}
+
 async function bootmainRunning(): Promise<boolean> {
   try {
     const { stdout } = await execFileAsync(
@@ -482,8 +519,15 @@ export class NapcatManager {
   private offlineNotified = false
   /** 上一次 WebUI 真的响应成功的时刻（判断「WebUI 掉线」用；start 时置为当前） */
   private lastWebuiOkAt = 0
-  /** 当前这条 error 是哪种原因设的：只有 webui 那条会在 WebUI 恢复后自动收掉 */
-  private errorKind: 'webui' | 'link' | null = null
+  /**
+   * 当前这条 error 是哪种原因设的：
+   * - `webui`：WebUI 连不上，恢复后自动收掉；
+   * - `link`：登录了但没拨回 Gotcha，等它自己接上；
+   * - `qr-stuck`：二维码生不出来，**不能被 WebUI 自愈顺手收掉**（2026-11-08 真机：提示只活了 0.5 秒）。
+   */
+  private errorKind: 'webui' | 'link' | 'qr-stuck' | null = null
+  /** QQ 版本不在 NapCat 适配表里时的提示素材：卡死报错会带上它 */
+  private versionHint: string | null = null
   /** 上一次找 NapCat 换二维码的时刻（别每个轮询都调） */
   private lastQrRefreshAt = 0
   /** 二维码刷新连续失败次数 / 下一次允许重试的时刻（退避用，2026-11-06） */
@@ -505,7 +549,8 @@ export class NapcatManager {
   /** 启动时探一次（界面开抽屉前就知道有没有装） */
   async locate(): Promise<void> {
     this.shellDir = await findNapcatDir(this.deps.getShellDir(), this.deps.userDataDir)
-    this.qqPath = await resolveQqPath()
+    // 走 deps 版本（测试能替换）：以前直接调模块函数，deps.resolveQqPath 从来没生效过
+    this.qqPath = await this.resolveQq()
     if (this.uin === null) this.uin = await this.readUinFile()
   }
 
@@ -557,6 +602,9 @@ export class NapcatManager {
       return this.fail('没找到 QQ：请先安装腾讯 QQ（NapCat 要注入它）')
     }
 
+    // QQ 自动更新会跑到 NapCat 还没适配的版本上：每次启动对一次表，卡死时好把原因说清楚
+    await this.checkQqVersion()
+
     // 已经有一个 NapCat 在跑（手动开的 / 上一次 Gotcha 留下的）：接管轮询，不重复拉。
     // 但 bootmain 在跑、QQ 没起来时它是上次启动失败的僵尸：接管只会一直等不到码，
     // 如实报错并把出路说清楚（不 taskkill 用户手动开的进程，D66）。
@@ -574,6 +622,10 @@ export class NapcatManager {
       this.startedAt = this.now()
       this.lastWebuiOkAt = this.now()
       this.errorKind = null
+      // 重新点一次「启动」= 重新评估这条链：上次的卡死状态清零，好让「生不出码」能再报一次
+      this.qrFailCount = 0
+      this.qrNextAttemptAt = 0
+      this.qrStuckNotified = false
       this.phase = 'waiting-login'
       this.error = null
       this.beginPoll()
@@ -603,6 +655,9 @@ export class NapcatManager {
     this.qrMinMtime = this.now() - 5_000
     this.qrMtime = 0
     this.qrDataUrl = null
+    this.qrFailCount = 0
+    this.qrNextAttemptAt = 0
+    this.qrStuckNotified = false
     try {
       this.spawnNapcat()
     } catch (error) {
@@ -894,6 +949,27 @@ export class NapcatManager {
     return resolveQqPath()
   }
 
+  /**
+   * 启动前对一次「QQ 版本 ↔ NapCat 适配表」。
+   * 本机 QQ 是自动更新的：跑到 NapCat 还没适配的版本时，注入能成、界面也能连，
+   * 但 QQ 会在启动阶段卡住、二维码永远出不来（2026-11-07 真机）。这里不拦启动
+   * （拦了反而救不回来），只把版本记下来；卡死时报错里带上这句，别让人猜。
+   */
+  private async checkQqVersion(): Promise<void> {
+    const shellDir = this.shellDir
+    const qqPath = this.qqPath
+    if (shellDir === null || qqPath === null) return
+    const version = await readQqRuntimeVersion(qqPath)
+    this.versionHint = null
+    if (version === null) return
+    if (await shellKnowsVersion(shellDir, version)) {
+      this.log('info', 'napcat qq version', { qq: version, supported: true })
+      return
+    }
+    this.versionHint = version
+    this.log('warn', 'napcat qq version unsupported', { qq: version, shellDir })
+  }
+
   private beginPoll(): void {
     if (this.pollTimer !== null) return
     this.pollTimer = setInterval(() => void this.poll(), 1_500)
@@ -1114,6 +1190,13 @@ export class NapcatManager {
     this.qrAt = this.now()
     this.qrMtime = info.mtimeMs
     this.log('info', 'napcat qrcode updated')
+    // 码真的出来了 = 「卡死」这个结论不成立：把那条错误收掉（webui 自愈不收它，这里收）
+    if (this.errorKind === 'qr-stuck') {
+      this.errorKind = null
+      this.error = null
+      this.qrStuckNotified = false
+      if (this.phase === 'error') this.phase = 'waiting-login'
+    }
   }
 
   /**
@@ -1166,9 +1249,16 @@ export class NapcatManager {
   private markQrStuck(): void {
     if (this.qrStuckNotified) return
     this.qrStuckNotified = true
-    this.errorKind = 'webui'
-    this.fail('二维码一直生不出来（NapCat 卡住了）：在设置里点「停止」再「启动」重建链路')
+    // 单独一种 errorKind：WebUI 正常不代表这条链正常，别让 webui 自愈把提示顺手收掉
+    this.errorKind = 'qr-stuck'
+    this.fail(`二维码一直生不出来（NapCat 卡住了）：在设置里点「停止」再「启动」重建链路${this.versionNote()}`)
     this.notifyOffline('webui-down')
+  }
+
+  /** QQ 比 NapCat 新时给报错补一句版本原因；适配表认这个版本就什么都不说 */
+  private versionNote(): string {
+    if (this.versionHint === null) return ''
+    return `；另外本机 QQ 是 ${this.versionHint}，超过这套 NapCat 的适配表，先更新 NapCat Shell 或别升级 QQ`
   }
 
   private async latestDownloadUrl(): Promise<string> {

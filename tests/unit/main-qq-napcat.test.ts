@@ -26,9 +26,11 @@ import {
   NAPCAT_WEBUI_GRACE_MS,
   napcatTokenHash,
   NapcatManager,
+  parseQqRuntimeVersion,
   parseWebuiConfig,
   qrcodeDataUrl,
   qrExpired,
+  shellKnowsQqVersion,
   type NapcatDeps
 } from '../../src/main/qq/napcat'
 
@@ -322,6 +324,21 @@ describe('NapcatManager 启动前的 QQ / 僵尸进程判断（2026-11-04 真机
   })
 })
 
+describe('QQ 版本适配检查（2026-11-08）', () => {
+  it('从 QQ 的 versions/config.json 读运行版本', () => {
+    expect(parseQqRuntimeVersion('{"curVersion":"9.9.36-53644"}')).toBe('9.9.36-53644')
+    expect(parseQqRuntimeVersion('{"curVersion":"latest"}')).toBeNull()
+    expect(parseQqRuntimeVersion('{"curVersion":123}')).toBeNull()
+    expect(parseQqRuntimeVersion('not json')).toBeNull()
+  })
+
+  it('NapCat 适配表按 <版本>-x64 / -arm64 建键', () => {
+    const script = '{"9.9.36-53644-x64":{"send":"C3EE2F"},"9.9.36-53644-arm64":{}}'
+    expect(shellKnowsQqVersion(script, '9.9.36-53644')).toBe(true)
+    expect(shellKnowsQqVersion(script, '9.9.37-54001')).toBe(false)
+  })
+})
+
 describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
   /** 造带 WebUI 配置和一张二维码的 Shell 目录 */
   async function makeShellWithWebui(root: string): Promise<string> {
@@ -533,6 +550,87 @@ describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
     const callsBefore = refreshCalls
     await pollOnce(manager)
     expect(refreshCalls).toBeLessThanOrEqual(callsBefore + 1)
+  })
+
+  it('二维码卡死的提示不会被 WebUI 自愈顺手收掉（2026-11-07 真机）', async () => {
+    // 真机：23:24:15 判定卡死写了错误，0.5 秒后「napcat webui recovered」把它清掉，
+    // 抽屉永远停在「等待二维码…」，人只能干等。这里锁住：WebUI 正常也得保留提示。
+    let clock = Date.now() + 3_600_000
+    let loggedIn = false
+    const fetchImpl = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: loggedIn } })
+      if (url.endsWith('/api/QQLogin/RefreshQRcode')) throw new Error('TimeoutError')
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = await attachedManager({ clock: () => clock, fetchImpl })
+    await settlePolling(manager)
+    await pollOnce(manager)
+    for (const wait of [15_000, 30_000, 60_000, 120_000]) {
+      clock += wait
+      await pollOnce(manager)
+    }
+    const stuck = manager.status().error ?? ''
+    expect(manager.status().phase).toBe('error')
+    expect(stuck).toContain('停止')
+
+    // WebUI 一直是好的：下一轮不能把这条错误自愈掉
+    clock += 300_000
+    await pollOnce(manager)
+    expect(manager.status().phase).toBe('error')
+    expect(manager.status().error).toBe(stuck)
+
+    // 真的登录成功了，才算这条链缓过来
+    loggedIn = true
+    await pollOnce(manager)
+    expect(manager.status().error).toBeUndefined()
+  })
+
+  it('QQ 比 NapCat 新：启动时记一条 warn，卡死时把版本带进错误里（2026-11-08）', async () => {
+    const root = await makeDir()
+    const shell = await makeShellWithWebui(root)
+    // 适配表按真实 napcat.mjs 的键格式造：只认 9.9.36-53644
+    await writeFile(join(shell, 'napcat.mjs'), '{"9.9.36-53644-x64":{"send":"C3EE2F"}}', 'utf8')
+    await mkdir(join(root, 'qq', 'versions'), { recursive: true })
+    await writeFile(join(root, 'qq', 'QQ.exe'), '', 'utf8')
+    await writeFile(join(root, 'qq', 'versions', 'config.json'), JSON.stringify({ curVersion: '9.9.99-99999' }), 'utf8')
+
+    let clock = Date.now() + 3_600_000
+    const logs: string[] = []
+    const fetchImpl = (async (input: unknown) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: false } })
+      if (url.endsWith('/api/QQLogin/RefreshQRcode')) throw new Error('TimeoutError')
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = new NapcatManager(
+      deps({
+        userDataDir: root,
+        now: () => clock,
+        getShellDir: () => shell,
+        resolveQqPath: async () => join(root, 'qq', 'QQ.exe'),
+        isBootmainRunning: async () => true,
+        isQqRunning: async () => true,
+        fetchImpl,
+        log: (_level, message) => logs.push(message)
+      })
+    )
+    await manager.start()
+    expect(logs).toContain('napcat qq version unsupported')
+    manager.dispose()
+    await settlePolling(manager)
+
+    await pollOnce(manager)
+    for (const wait of [15_000, 30_000, 60_000, 120_000]) {
+      clock += wait
+      await pollOnce(manager)
+    }
+    expect(manager.status().error).toContain('9.9.99-99999')
+    expect(manager.status().error).toContain('NapCat Shell')
   })
 
   it('登录过的 uin 会记下来，下次拉起时带上走快速登录', async () => {

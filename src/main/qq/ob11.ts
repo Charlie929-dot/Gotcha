@@ -331,6 +331,28 @@ export function parsePrivateMessageEvent(raw: unknown): QqInbound | null {
   }
 }
 
+/**
+ * notice 里能进日志的结构性字段（2026-11-08 真机）：`bot_offline` 只记了 notice_type，
+ * 事后分不清是「账号被踢」还是「QQ 网络服务崩了」。这里把报文里实际带的这几个标量
+ * 原样透出并截断，不假设字段名、不收 message / user_id 等可能带正文或身份的字段。
+ */
+const NOTICE_DETAIL_KEYS = ['reason', 'tag', 'sub_type'] as const
+const NOTICE_DETAIL_MAX_CHARS = 80
+
+function noticeDetails(payload: Record<string, unknown>): Record<string, string | number | boolean> {
+  const out: Record<string, string | number | boolean> = {}
+  for (const key of NOTICE_DETAIL_KEYS) {
+    const value = payload[key]
+    if (typeof value === 'string') {
+      const text = value.trim().slice(0, NOTICE_DETAIL_MAX_CHARS)
+      if (text !== '') out[key] = text
+    } else if (typeof value === 'number' || typeof value === 'boolean') {
+      out[key] = value
+    }
+  }
+  return out
+}
+
 /** OneBot API 回执（只取用得上的几个字段） */
 interface Ob11Response {
   status?: string
@@ -482,13 +504,16 @@ export class QqOb11Server {
     const inbound = parsePrivateMessageEvent(payload)
     if (!inbound) {
       // 群聊 / 心跳 / 上线通知：M1 静默丢弃（只记一条 debug 级的 info，不打正文）。
-      // notice 带上 notice_type：掉线排查要看得出是「账号被踢 / 离线」还是「输入中」这类噪音。
+      // notice 带上 notice_type 和报文里的结构性字段：掉线排查要看得出是「账号被踢 /
+      // 离线」还是「输入中」这类噪音，以及离线到底是什么原因（2026-11-08）。
       const kind = String(payload['post_type'] ?? 'unknown')
       if (kind !== 'meta_event') {
         const noticeType = kind === 'notice' ? String(payload['notice_type'] ?? '') : ''
+        const details = kind === 'notice' ? noticeDetails(payload) : {}
         this.log('info', 'qq event ignored', {
           kind,
-          ...(noticeType !== '' ? { noticeType } : {})
+          ...(noticeType !== '' ? { noticeType } : {}),
+          ...details
         })
       }
       return

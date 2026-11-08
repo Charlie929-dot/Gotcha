@@ -263,6 +263,49 @@ describe('反向 WS 服务端', () => {
     expect(closed?.data?.['code']).toBe(4001)
   })
 
+  it('bot_offline 把 reason / tag 带进日志，不带正文或 QQ 号（2026-11-08 真机）', async () => {
+    const logs: Array<{ message: string; data?: Record<string, unknown> }> = []
+    server = new QqOb11Server()
+    const { port } = await server.start({
+      port: 0,
+      accessToken: TOKEN,
+      onMessage: () => {},
+      log: (_level, message, data) => logs.push({ message, ...(data !== undefined ? { data } : {}) })
+    })
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+    socket.send(
+      JSON.stringify({
+        post_type: 'notice',
+        notice_type: 'bot_offline',
+        self_id: 10001,
+        time: 1_700_000_000,
+        reason: 'kicked',
+        tag: 'network service crashed',
+        sub_type: 2,
+        message: '这段正文不该进日志',
+        user_id: 12345678
+      })
+    )
+    await new Promise((resolve) => setTimeout(resolve, 60))
+
+    const ignored = logs.find((entry) => entry.message === 'qq event ignored')
+    expect(ignored?.data).toMatchObject({
+      kind: 'notice',
+      noticeType: 'bot_offline',
+      reason: 'kicked',
+      tag: 'network service crashed',
+      sub_type: 2
+    })
+    expect(ignored?.data).not.toHaveProperty('message')
+    expect(ignored?.data).not.toHaveProperty('user_id')
+    socket.close()
+  })
+
   it('sendPrivate 走 action/echo 并等回执；retcode 非 0 就报错', async () => {
     server = new QqOb11Server()
     const { port } = await server.start({ port: 0, accessToken: TOKEN, onMessage: () => {} })

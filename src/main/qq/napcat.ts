@@ -1121,7 +1121,17 @@ export class NapcatManager {
     return this.webuiPort === null ? null : `http://127.0.0.1:${this.webuiPort}`
   }
 
-  private async webuiPost(path: string, body: Record<string, unknown> = {}): Promise<unknown> {
+  /**
+   * WebUI POST。凭据过期（`code -1 / Unauthorized`）时**当轮**作废旧凭据、重登并重试一次：
+   * 旧逻辑只清凭据就把这一轮整个抛掉，真机 2026-11-08 16:36 / 17:36 因此每小时多一条
+   * `napcat poll failed`。`/api/auth/login` 自己不参与重试（否则递归），且最多重试一次；
+   * 重登也连不上时仍抛原来的错，由 poll 如实记 warn，不静默降级。
+   */
+  private async webuiPost(
+    path: string,
+    body: Record<string, unknown> = {},
+    allowRelogin = true
+  ): Promise<unknown> {
     const base = this.webuiBase()
     if (base === null) return null
     const fetchImpl = this.deps.fetchImpl ?? fetch
@@ -1136,7 +1146,17 @@ export class NapcatManager {
     if (!response.ok) throw new Error(`WebUI ${path} HTTP ${response.status}`)
     const json = (await response.json()) as WebuiResponse
     if (typeof json.code === 'number' && json.code !== 0) {
-      if (json.message === 'Unauthorized') this.webuiCredential = null
+      if (json.message === 'Unauthorized') {
+        this.webuiCredential = null
+        if (allowRelogin && path !== '/api/auth/login') {
+          try {
+            await this.ensureWebui()
+          } catch {
+            // 重登也连不上：下面抛原来的 Unauthorized，交给 poll 记 warn
+          }
+          if (this.webuiCredential !== null) return this.webuiPost(path, body, false)
+        }
+      }
       throw new Error(`WebUI ${path} code ${json.code}${json.message ? `：${json.message}` : ''}`)
     }
     this.lastWebuiOkAt = this.now()

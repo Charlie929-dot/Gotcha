@@ -447,6 +447,46 @@ describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
     expect(manager.status().error).toBeUndefined()
   })
 
+  it('WebUI 凭据过期：当轮重登并重试，不把整轮废成 poll failed（2026-11-08 真机）', async () => {
+    const clock = (): number => Date.now()
+    const logs: string[] = []
+    let loginCalls = 0
+    let statusCalls = 0
+    let currentCredential = ''
+    const fetchImpl = (async (input: unknown, init?: { headers?: Record<string, string> }) => {
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) {
+        loginCalls += 1
+        currentCredential = `cred-${loginCalls}`
+        return jsonResponse({ code: 0, data: { Credential: currentCredential } })
+      }
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) {
+        statusCalls += 1
+        const auth = init?.headers?.['authorization'] ?? ''
+        if (auth !== `Bearer ${currentCredential}`) {
+          return jsonResponse({ code: -1, message: 'Unauthorized', data: null })
+        }
+        return jsonResponse({ code: 0, data: { isLogin: false } })
+      }
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = await attachedManager({ clock, fetchImpl, logs })
+    await settlePolling(manager)
+    const loginsBefore = loginCalls
+    const statusesBefore = statusCalls
+    const failuresBefore = logs.filter((message) => message === 'napcat poll failed').length
+
+    // NapCat 换了 WebUI 凭据：Gotcha 手里那张旧的立刻失效
+    currentCredential = 'cred-rotated'
+    await pollOnce(manager)
+
+    // 旧逻辑这一轮直接抛 Unauthorized，要等下一轮 poll 才重登（每小时一条 poll failed）
+    expect(loginCalls).toBe(loginsBefore + 1)
+    expect(statusCalls).toBe(statusesBefore + 2)
+    expect(logs.filter((message) => message === 'napcat poll failed')).toHaveLength(failuresBefore)
+  })
+
   it('本来在线又掉了：弹一次掉线提醒，不重复弹', async () => {
     const clock = (): number => Date.now()
     const notify = vi.fn()

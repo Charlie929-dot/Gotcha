@@ -457,4 +457,89 @@ describe('反向 WS 服务端', () => {
     await expect(server.getMsg(43)).resolves.toBeNull()
     socket.close()
   })
+
+  it('静默连接心跳失鲜后主动终止，不再把 OPEN 当成在线', async () => {
+    // 时钟注入：老化判定不依赖真实耗时，慢机器上也不会抖
+    let clock = 1_000
+    const logs: string[] = []
+    server = new QqOb11Server()
+    const { port } = await server.start({
+      port: 0,
+      accessToken: TOKEN,
+      onMessage: () => {},
+      heartbeatTimeoutMs: 1_000,
+      heartbeatCheckMs: 5,
+      now: () => clock,
+      log: (_level, message) => logs.push(message)
+    })
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+    expect(server.status().connections).toBe(1)
+
+    const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()))
+    clock += 1_001
+    await closed
+    expect(server.status().connections).toBe(0)
+    expect(logs).toContain('qq ws heartbeat stale')
+  })
+
+  it('持续有入站帧的连接算新鲜，不会被误杀', async () => {
+    let clock = 1_000
+    let frameSeen: () => void = () => {}
+    const frameReceived = new Promise<void>((resolve) => {
+      frameSeen = resolve
+    })
+    server = new QqOb11Server()
+    const { port } = await server.start({
+      port: 0,
+      accessToken: TOKEN,
+      onMessage: () => frameSeen(),
+      heartbeatTimeoutMs: 1_000,
+      heartbeatCheckMs: 5,
+      now: () => clock
+    })
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+
+    // 快到超时前来一帧：任意入站帧都刷新新鲜度，不只是心跳
+    clock += 900
+    socket.send(JSON.stringify(event({ message_id: 901 })))
+    await frameReceived
+    clock += 900
+    expect(server.status().connections).toBe(1)
+
+    const closed = new Promise<void>((resolve) => socket.once('close', () => resolve()))
+    clock += 101
+    await closed
+    expect(server.status().connections).toBe(0)
+  })
+
+  it('连接关闭时立刻拒绝它在途的 action，不等待回执超时', async () => {
+    server = new QqOb11Server()
+    const { port } = await server.start({
+      port: 0,
+      accessToken: TOKEN,
+      onMessage: () => {},
+      timeoutMs: 30_000
+    })
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+    const actionReceived = new Promise<void>((resolve) => {
+      socket.once('message', () => resolve())
+    })
+    const pending = server.sendPrivate(20002, '这条等不到回执')
+    await actionReceived
+    socket.terminate()
+    await expect(pending).rejects.toThrow('OneBot 连接已断开')
+    expect(server.status().connections).toBe(0)
+  })
 })

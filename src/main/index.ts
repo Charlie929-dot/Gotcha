@@ -150,6 +150,7 @@ import {
   type ProviderKeySaveResult
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
+import { createConversationSerializer } from './conversation-serializer'
 import { createAskConversationRegistry } from './ask-conversation'
 import {
   createCommandHandler,
@@ -340,6 +341,11 @@ let momentRuntime: MomentRuntime | null = null
 let themeOnlineRuntime: ThemeOnlineRuntime | null = null
 let disposeGraphIpc: (() => void) | null = null
 let disposeAskIpc: (() => void) | null = null
+/**
+ * 桌面与 QQ 共用的会话锁（2026-11-08）：同一 conversationId 的提问、命令、回答与落盘
+ * 整体串行，不同会话仍可并行。挂在组合根，两边拿到的是同一个调度器。
+ */
+const conversationSerializer = createConversationSerializer()
 /** 记忆仓定时器（D90）：退出时停掉，别留野定时器 */
 let stopMemorySchedule: (() => void) | null = null
 /** 任务运行时（自调用 v0.2）：任务库连接 + 到点调度器；退出时停掉 */
@@ -2998,6 +3004,8 @@ if (primaryInstance) {
       mediaGate: qqMediaGate,
       // C+D（2026-11-05）：QQ 的消息写进桌面正打开的那段会话，手机和桌面共用同一条上下文
       conversationFor: () => currentDesktopConversation(),
+      // 与桌面共用同一把会话锁：手机、电脑同时发消息不会乱序或互相覆盖
+      serialize: conversationSerializer.run,
       // 命令（M5）：与桌面同一个 handler；命中就不进模型，也不占限流 / 排队
       command,
       ask: async ({ text, conversationId, signal, images, files, quoted, recent }) => {
@@ -3451,6 +3459,8 @@ if (primaryInstance) {
     disposeAskIpc = registerAskIpc({
       getWindow: () => askWindow,
       ask: runAskOnce,
+      // 与 QQ 共用会话锁：同一段上下文里，桌面和手机的一轮问答完整串行
+      serialize: conversationSerializer.run,
       // 在途提问信号：任务到点靠它让位（先接用户、再提任务）
       onActiveChange: (active) => {
         askBusy = active

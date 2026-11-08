@@ -43,6 +43,10 @@ import type { GrowthEntryView, GrowthPage } from './growth'
 import { GROWTH_KINDS, type GrowthKind } from '../memory/growth'
 import type { ApiKeySource } from '../understand/cloud/providers'
 import type { FetchModelsResult } from '../understand/cloud/models'
+import {
+  createConversationSerializer,
+  type ConversationSerializer
+} from './conversation-serializer'
 
 export interface AskConsentView {
   /** D24 一次性出网授权 */
@@ -210,6 +214,11 @@ export interface AskIpcDeps {
    * 让手机和桌面共用同一条上下文。不传 = 不共享（QQ 仍按 `qq-<号>` 各聊各的）。
    */
   setActiveConversation?: (conversationId: string) => void
+  /**
+   * 与 QQ 共用的会话调度器：同一会话完整串行，不同会话可并行。
+   * 不传时仅串行当前这张 IPC handler 表内的提问。
+   */
+  serialize?: ConversationSerializer['run']
   /** 全部历史（最新在前） */
   history: () => AskHistoryEntry[]
   /** 清空历史（接记忆仓时会先提交一次再删会话文件，允许返回 Promise） */
@@ -377,9 +386,20 @@ function failure(message: string): ChainAskResult {
   }
 }
 
+/** 排队期间就被停止的那一轮：直接让位，别占着会话锁等一个已经没用的模型请求 */
+function aborted(): ChainAskResult {
+  return {
+    kind: 'error',
+    reason: 'aborted',
+    message: '已停止',
+    stats: { hits: 0, evidence: 0, cited: 0, questionChars: 0 }
+  }
+}
+
 export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown> {
   const ensureSender = createSenderCheck(deps)
-  /** 在途提问（同一时刻只跑一次；新提问会中止旧的，避免两次回答交错落进同一会话） */
+  const serialize = deps.serialize ?? createConversationSerializer().run
+  /** 在途提问：新提问中止旧的，再由会话锁保证同一会话一次只完整跑一轮 */
   let active: AbortController | null = null
   /** 挂起的「还要继续吗」：resumeId → 原始问题 + 会话 + 截图（答案没出来前不落历史） */
   const pendingResume = new Map<
@@ -455,8 +475,12 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         // 本地命令先过（方案 §6）：命中就在本地执行、回一条文本，不调模型、不写会话 / 历史。
         // 放在问题长度校验之前：命令的参数长度不该受「提问 500 字」限制。
         if (deps.command) {
+          const runCommand = deps.command
           try {
-            const handled = await deps.command(asked, { conversationId })
+            // 命令与 QQ 共用同一个 handler 实例，同样按会话排队，别和正在写这段会话的回答撞上。
+            const handled = await serialize(conversationId, () =>
+              runCommand(asked, { conversationId })
+            )
             if (handled !== null) return handled
           } catch (error) {
             deps.log('warn', 'ask command failed', { error: String(error) })
@@ -483,25 +507,30 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         active = controller
         deps.onActiveChange?.(true)
 
-        let history: readonly ChainAskTurnContext[] = []
         try {
-          history = (await deps.conversationHistory?.(conversationId)) ?? []
-        } catch (error) {
-          deps.log('warn', 'ask history context failed', { error: String(error) })
-        }
+          return await serialize(conversationId, async () => {
+            if (controller.signal.aborted) return aborted()
+            let history: readonly ChainAskTurnContext[] = []
+            try {
+              history = (await deps.conversationHistory?.(conversationId)) ?? []
+            } catch (error) {
+              deps.log('warn', 'ask history context failed', { error: String(error) })
+            }
 
-        try {
-          const result = await deps.ask(asked, {
-            conversationId,
-            history,
-            signal: controller.signal,
-            ...(imagePath ? { imagePath } : {}),
-            ...(attachments.length > 0 ? { attachments } : {})
+            try {
+              const result = await deps.ask(asked, {
+                conversationId,
+                history,
+                signal: controller.signal,
+                ...(imagePath ? { imagePath } : {}),
+                ...(attachments.length > 0 ? { attachments } : {})
+              })
+              return await settle(asked, conversationId, result, imagePath, attachments)
+            } catch (error) {
+              deps.log('error', 'ask:query failed', { error: String(error) })
+              return failure('问记忆出错，看日志')
+            }
           })
-          return await settle(asked, conversationId, result, imagePath, attachments)
-        } catch (error) {
-          deps.log('error', 'ask:query failed', { error: String(error) })
-          return failure('问记忆出错，看日志')
         } finally {
           if (active === controller) {
             active = null
@@ -534,6 +563,8 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         }
         if (decision !== 'continue' && decision !== 'stop') return failure('续查参数不合法')
         if (!deps.resume) return failure('当前版本不支持续查')
+        // 闭包里用局部常量，避免类型收窄在异步回调内失效
+        const runResume = deps.resume
         const pending = pendingResume.get(resumeId)
         if (!pending) return failure('这次追问已经过期（窗口重开或等太久），重新问一遍就好')
         pendingResume.delete(resumeId)
@@ -543,33 +574,38 @@ export function createAskIpcHandlers(deps: AskIpcDeps): Map<string, (event: IpcM
         active = controller
         deps.onActiveChange?.(true)
 
-        let history: readonly ChainAskTurnContext[] = []
         try {
-          history = (await deps.conversationHistory?.(pending.conversationId)) ?? []
-        } catch (error) {
-          deps.log('warn', 'ask history context failed', { error: String(error) })
-        }
+          return await serialize(pending.conversationId, async () => {
+            if (controller.signal.aborted) return aborted()
+            let history: readonly ChainAskTurnContext[] = []
+            try {
+              history = (await deps.conversationHistory?.(pending.conversationId)) ?? []
+            } catch (error) {
+              deps.log('warn', 'ask history context failed', { error: String(error) })
+            }
 
-        try {
-          const result = await deps.resume(resumeId, decision, {
-            conversationId: pending.conversationId,
-            history,
-            signal: controller.signal,
-            ...(pending.imagePath ? { imagePath: pending.imagePath } : {}),
-            ...(pending.attachments && pending.attachments.length > 0
-              ? { attachments: pending.attachments }
-              : {})
+            try {
+              const result = await runResume(resumeId, decision, {
+                conversationId: pending.conversationId,
+                history,
+                signal: controller.signal,
+                ...(pending.imagePath ? { imagePath: pending.imagePath } : {}),
+                ...(pending.attachments && pending.attachments.length > 0
+                  ? { attachments: pending.attachments }
+                  : {})
+              })
+              return await settle(
+                pending.question,
+                pending.conversationId,
+                result,
+                pending.imagePath,
+                pending.attachments
+              )
+            } catch (error) {
+              deps.log('error', 'ask:resume failed', { error: String(error) })
+              return failure('续查出错，看日志')
+            }
           })
-          return await settle(
-            pending.question,
-            pending.conversationId,
-            result,
-            pending.imagePath,
-            pending.attachments
-          )
-        } catch (error) {
-          deps.log('error', 'ask:resume failed', { error: String(error) })
-          return failure('续查出错，看日志')
         } finally {
           if (active === controller) {
             active = null

@@ -348,6 +348,12 @@ export interface QqServerOptions {
   log?: QqLog
   /** 等回执的超时（默认 10s） */
   timeoutMs?: number
+  /** 超过多久没收到任何 OneBot 帧就判连接失效（默认 75s = 2.5 个心跳周期） */
+  heartbeatTimeoutMs?: number
+  /** 失效连接巡检间隔（默认 10s） */
+  heartbeatCheckMs?: number
+  /** 测试注入时钟；生产用 Date.now */
+  now?: () => number
 }
 
 export interface QqTransportStatus {
@@ -365,9 +371,16 @@ export interface QqTransportStatus {
 export class QqOb11Server {
   private server: WebSocketServer | null = null
   private readonly sockets = new Set<WebSocket>()
+  /** 每条连接最近收到任意帧的时刻；OPEN 但没心跳也算假在线 */
+  private readonly lastSeenAt = new Map<WebSocket, number>()
   private readonly pending = new Map<
     string,
-    { resolve: (value: Ob11Response) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+    {
+      socket: WebSocket
+      resolve: (value: Ob11Response) => void
+      reject: (error: Error) => void
+      timer: NodeJS.Timeout
+    }
   >()
   /** 已处理过的 message_id（去重；上限 200 条，防无限涨） */
   private readonly seenMessages = new Set<number>()
@@ -385,12 +398,23 @@ export class QqOb11Server {
   private onMessage: ((inbound: QqInbound) => void) | null = null
   private log: QqLog = () => {}
   private timeoutMs = 10_000
+  private heartbeatTimeoutMs = 75_000
+  private heartbeatCheckMs = 10_000
+  private heartbeatTimer: NodeJS.Timeout | null = null
+  private now: () => number = Date.now
 
   async start(options: QqServerOptions): Promise<{ port: number }> {
     if (this.server) throw new Error('QQ 通道已经启动')
     this.onMessage = options.onMessage
     if (options.log) this.log = options.log
     if (options.timeoutMs && options.timeoutMs > 0) this.timeoutMs = options.timeoutMs
+    if (options.heartbeatTimeoutMs && options.heartbeatTimeoutMs > 0) {
+      this.heartbeatTimeoutMs = options.heartbeatTimeoutMs
+    }
+    if (options.heartbeatCheckMs && options.heartbeatCheckMs > 0) {
+      this.heartbeatCheckMs = options.heartbeatCheckMs
+    }
+    this.now = options.now ?? Date.now
 
     const host = options.host ?? '127.0.0.1'
     const wss = new WebSocketServer({ host, port: options.port })
@@ -413,6 +437,8 @@ export class QqOb11Server {
 
     wss.on('connection', (socket, req) => this.accept(socket, req, options.accessToken))
     wss.on('error', (error) => this.log('error', 'qq ws server error', { error: String(error) }))
+    this.heartbeatTimer = setInterval(() => this.expireStaleSockets(), this.heartbeatCheckMs)
+    this.heartbeatTimer.unref()
     this.log('info', 'qq ws listening', { host, port: this.port })
     return { port: this.port }
   }
@@ -442,19 +468,66 @@ export class QqOb11Server {
       return
     }
     this.sockets.add(socket)
-    this.log('info', 'qq ws connected', { connections: this.sockets.size })
-    socket.on('message', (data) => this.receive(data))
+    this.lastSeenAt.set(socket, this.now())
+    this.log('info', 'qq ws connected', { connections: this.freshConnectionCount() })
+    // 任意入站帧都证明连接还活着：心跳、通知、消息与 action 回执一视同仁。
+    socket.on('message', (data) => {
+      this.lastSeenAt.set(socket, this.now())
+      this.receive(data)
+    })
     socket.on('close', (code, reason) => {
       this.sockets.delete(socket)
+      this.lastSeenAt.delete(socket)
+      this.rejectSocketPending(socket)
       // 带上关闭码 / 原因：掉线排查最缺的就是「谁先关、为什么」（2026-11-04）
       const text = Buffer.isBuffer(reason) ? reason.toString('utf8') : String(reason ?? '')
       this.log('info', 'qq ws closed', {
-        connections: this.sockets.size,
+        connections: this.freshConnectionCount(),
         code,
         ...(text !== '' ? { reason: text.slice(0, 120) } : {})
       })
     })
     socket.on('error', (error) => this.log('warn', 'qq ws socket error', { error: String(error) }))
+  }
+
+  private isFresh(socket: WebSocket): boolean {
+    const seen = this.lastSeenAt.get(socket)
+    return (
+      socket.readyState === socket.OPEN &&
+      seen !== undefined &&
+      this.now() - seen <= this.heartbeatTimeoutMs
+    )
+  }
+
+  private freshConnectionCount(): number {
+    let count = 0
+    for (const socket of this.sockets) if (this.isFresh(socket)) count += 1
+    return count
+  }
+
+  private rejectSocketPending(socket: WebSocket): void {
+    for (const [echo, waiter] of this.pending) {
+      if (waiter.socket !== socket) continue
+      this.pending.delete(echo)
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error('OneBot 连接已断开'))
+    }
+  }
+
+  private expireStaleSockets(): void {
+    for (const socket of this.sockets) {
+      if (this.isFresh(socket)) continue
+      this.sockets.delete(socket)
+      this.lastSeenAt.delete(socket)
+      this.rejectSocketPending(socket)
+      this.log('warn', 'qq ws heartbeat stale', { connections: this.freshConnectionCount() })
+      try {
+        // 不发 close 握手：对端已经不应答，直接终止，NapCat 会按反向 WS 配置重连。
+        socket.terminate()
+      } catch {
+        // 已关闭的连接由 close 事件兜底清理。
+      }
+    }
   }
 
   private receive(data: RawData): void {
@@ -515,13 +588,27 @@ export class QqOb11Server {
     const socket = this.activeSocket()
     if (!socket) throw new Error('没有已连接的 OneBot 客户端')
     const echo = `gotcha-${++this.seq}`
-    socket.send(JSON.stringify({ action, params, echo }))
     return new Promise<Ob11Response>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(echo)
         reject(new Error('OneBot 回执超时'))
       }, this.timeoutMs)
-      this.pending.set(echo, { resolve, reject, timer })
+      // 先登记再发：本机回执可能紧随 send 到达，不能让快速回执漏等成超时。
+      this.pending.set(echo, { socket, resolve, reject, timer })
+      const fail = (error: unknown): void => {
+        const waiter = this.pending.get(echo)
+        if (!waiter) return
+        this.pending.delete(echo)
+        clearTimeout(waiter.timer)
+        waiter.reject(error instanceof Error ? error : new Error(String(error)))
+      }
+      try {
+        socket.send(JSON.stringify({ action, params, echo }), (error) => {
+          if (error) fail(error)
+        })
+      } catch (error) {
+        fail(error)
+      }
     })
   }
 
@@ -669,17 +756,25 @@ export class QqOb11Server {
   }
 
   private activeSocket(): WebSocket | null {
-    // 反向 WS 通常只有一条连接；有多条时用最后连上来的那条
+    // 反向 WS 通常只有一条连接；有多条时用最后连上来且心跳仍新鲜的那条。
     let last: WebSocket | null = null
-    for (const socket of this.sockets) last = socket
-    return last !== null && last.readyState === last.OPEN ? last : null
+    for (const socket of this.sockets) if (this.isFresh(socket)) last = socket
+    return last
   }
 
   status(): QqTransportStatus {
-    return { listening: this.server !== null, connections: this.sockets.size, port: this.port }
+    return {
+      listening: this.server !== null,
+      connections: this.freshConnectionCount(),
+      port: this.port
+    }
   }
 
   async stop(): Promise<void> {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
+    }
     for (const [, waiter] of this.pending) {
       clearTimeout(waiter.timer)
       waiter.reject(new Error('QQ 通道已停止'))
@@ -698,6 +793,7 @@ export class QqOb11Server {
       }
     }
     this.sockets.clear()
+    this.lastSeenAt.clear()
     const server = this.server
     this.server = null
     this.port = null

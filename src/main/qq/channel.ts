@@ -28,6 +28,10 @@ import {
   isTextFile,
   textFromBytes
 } from './media'
+import {
+  createConversationSerializer,
+  type ConversationSerializer
+} from '../conversation-serializer'
 
 /** 通道看到的台账记录（真实实现是 `ChatLog`；测试给内存假实现） */
 export interface QqChatRecordView {
@@ -174,6 +178,8 @@ export interface QqChannelDeps {
   askTimeoutMs?: number
   /** 分条之间隔多久（默认 200ms；测试传 0） */
   partGapMs?: number
+  /** 与桌面共用的会话调度器；不传时只在当前 QQ 通道内按会话串行 */
+  serialize?: ConversationSerializer['run']
   /**
    * 这条 QQ 消息该写进哪个会话（2026-11-05 拍板 C+D）：默认 `qq-<QQ号>`（各聊各的）；
    * 主进程传「桌面当前会话」时，QQ 与桌面共用同一条上下文——桌面能看到 QQ 说的话，
@@ -424,6 +430,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
   const maxQueue = Math.max(1, deps.maxQueue ?? 8)
   const askTimeoutMs = Math.max(10_000, deps.askTimeoutMs ?? 180_000)
   const partGapMs = Math.max(0, deps.partGapMs ?? 200)
+  const serialize = deps.serialize ?? createConversationSerializer().run
 
   let config: QqChannelConfig | null = null
   let running = false
@@ -543,14 +550,18 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     return window.count > perMinute
   }
 
-  const warnOnce = async (userId: number, text: string): Promise<void> => {
+  const warnOnce = async (
+    userId: number,
+    text: string,
+    fixedConversationId?: string
+  ): Promise<void> => {
     const at = now()
     const last = warnedAt.get(userId) ?? 0
     if (at - last < 60_000) return
     warnedAt.set(userId, at)
     try {
       // 提醒也算 ta 说的话：记进台账，用户引用它时能解出原话
-      await sendOne(userId, conversationFor(userId), text)
+      await sendOne(userId, fixedConversationId ?? conversationFor(userId), text)
     } catch (error) {
       log('warn', 'qq reply failed', { error: String(error) })
     }
@@ -588,9 +599,14 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
    * D96：只有第一段带引用；引用被拒（目标撤回 / 过期 / 风控）时重试一次纯文本，
    * 保证回答仍然送达——两次都失败才记 warn。
    */
-  const sendParts = async (userId: number, text: string, replyTo?: number): Promise<number> => {
+  const sendParts = async (
+    userId: number,
+    text: string,
+    replyTo?: number,
+    fixedConversationId?: string
+  ): Promise<number> => {
     const parts = splitForQq(text, config?.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
-    const conversationId = conversationFor(userId)
+    const conversationId = fixedConversationId ?? conversationFor(userId)
     for (let index = 0; index < parts.length; index += 1) {
       const part = parts[index] ?? ''
       const target = index === 0 ? replyTo : undefined
@@ -746,24 +762,23 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
    * 返回 true = 这条消息已经被命令吃掉，不再走提问。
    */
   const command = deps.command
-  const tryCommand = async (inbound: QqInbound): Promise<boolean> => {
+  const tryCommand = async (inbound: QqInbound, conversationId: string): Promise<boolean> => {
     if (command === undefined) return false
     let handled: ChainAskResult | null
     try {
-      handled = await command(inbound.text, { conversationId: conversationFor(inbound.userId) })
+      handled = await command(inbound.text, { conversationId })
     } catch (error) {
       log('warn', 'qq command failed', { userId: inbound.userId, error: String(error) })
-      await warnOnce(inbound.userId, '命令没跑成，细节看日志。')
+      await warnOnce(inbound.userId, '命令没跑成，细节看日志。', conversationId)
       return true
     }
     if (handled === null) return false
-    const parts = await sendParts(inbound.userId, formatAskResult(handled))
+    const parts = await sendParts(inbound.userId, formatAskResult(handled), undefined, conversationId)
     log('info', 'qq command handled', { userId: inbound.userId, parts })
     return true
   }
 
-  const answer = async (inbound: QqInbound): Promise<void> => {
-    const conversationId = conversationFor(inbound.userId)
+  const answer = async (inbound: QqInbound, conversationId: string): Promise<void> => {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | null = null
     // 挂着「要不要接着查」时，回 1 / 2 是选择，不是新问题（没接续查能力就当普通提问）
@@ -843,7 +858,12 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       } else {
         pendingChoices.delete(conversationId)
       }
-      const parts = await sendParts(inbound.userId, formatAskResult(result), result.replyTo)
+      const parts = await sendParts(
+        inbound.userId,
+        formatAskResult(result),
+        result.replyTo,
+        conversationId
+      )
       // 文字先送达，再发图（D96 / PR2 §6.4）；图失败不影响已经发出去的文字
       await sendOutboundMedia(inbound.userId, result.outboundMedia)
       log('info', 'qq answered', {
@@ -857,7 +877,8 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       const aborted = controller.signal.aborted
       await warnOnce(
         inbound.userId,
-        aborted ? '这条查得太久了，先停在这。' : '这次没问出来，待会儿再试。'
+        aborted ? '这条查得太久了，先停在这。' : '这次没问出来，待会儿再试。',
+        conversationId
       )
     } finally {
       if (timer !== null) clearTimeout(timer)
@@ -867,27 +888,40 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
 
   const handleMessage = async (inbound: QqInbound): Promise<void> => {
     if (!running) return
+    // 消息到达的瞬间就把会话定死：模型生成期间桌面切换会话，也不能把这一轮写进别的会话。
+    const conversationId = conversationFor(inbound.userId)
     if (!allow(inbound.userId)) {
       log('warn', 'qq message from non-allowlisted user dropped', { userId: inbound.userId })
       return
     }
-    // 命令放最前（与桌面 `ask:query` 一致）：参数可以比提问长，也不该吃限流 / 排队名额
-    if (await tryCommand(inbound)) return
+    // 命令放最前（与桌面 `ask:query` 一致）：参数可以比提问长，也不该吃限流 / 排队名额。
+    // 命令与桌面共用同一个 handler 实例，也要过会话锁，避免和正在写这段会话的回答撞上。
+    if (await serialize(conversationId, () => tryCommand(inbound, conversationId))) return
     if (Array.from(inbound.text).length > QQ_QUESTION_MAX_CHARS) {
-      await warnOnce(inbound.userId, `问题太长了（上限 ${QQ_QUESTION_MAX_CHARS} 字），只说关键那句吧。`)
+      await warnOnce(
+        inbound.userId,
+        `问题太长了（上限 ${QQ_QUESTION_MAX_CHARS} 字），只说关键那句吧。`,
+        conversationId
+      )
       return
     }
     if (rateLimited(inbound.userId)) {
-      await warnOnce(inbound.userId, '一分钟内问得太多了，缓一下。')
+      await warnOnce(inbound.userId, '一分钟内问得太多了，缓一下。', conversationId)
       return
     }
     if (pending >= maxQueue) {
-      await warnOnce(inbound.userId, '前面还有几问没答完，稍等。')
+      await warnOnce(inbound.userId, '前面还有几问没答完，稍等。', conversationId)
       return
     }
     pending += 1
     const previous = queues.get(inbound.userId) ?? Promise.resolve()
-    const next = previous.then(() => answer(inbound)).catch((error: unknown) => {
+    // 每用户队列保持原有顺序；真正跑一轮之前再拿共享会话锁，桌面与 QQ 就不会同时写同一会话。
+    // 锁在消息到达时就登记（per-user 队列只是任务内部的一次等待），顺序以到达先后为准。
+    const turn = serialize(conversationId, async () => {
+      await previous
+      await answer(inbound, conversationId)
+    })
+    const next = turn.catch((error: unknown) => {
       log('warn', 'qq queue task failed', { error: String(error) })
     })
     queues.set(inbound.userId, next)

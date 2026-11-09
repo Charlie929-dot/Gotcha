@@ -185,6 +185,14 @@ export interface QqChannelDeps {
 export interface QqChannelStatus extends QqTransportStatus {
   running: boolean
   lastError?: string
+  /**
+   * 最后一条**入站**消息的时刻（D111，2026-11-09）。
+   *
+   * 这条链上「出站」永远像好人：QQ 半死时 `send_private_msg` 照样成功、WS 连着、
+   * `isLogin` / `online` 全是 true，唯一变化就是再也收不到消息（19:42–21:38 那次）。
+   * 所以这是唯一能让人看见「在线但收不到」的线索；null = 本次启动还没收到过。
+   */
+  lastInboundAt: number | null
 }
 
 /** QQ 里的「还要继续查吗」选择：带着当初那一问，续查结果仍记在这条上 */
@@ -429,6 +437,8 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
   let running = false
   let lastError: string | undefined
   let pending = 0
+  /** 最后一条入站消息的时刻（D111）：设置抽屉与「入站体检」都看它 */
+  let lastInboundAt: number | null = null
   const queues = new Map<number, Promise<void>>()
   const windows = new Map<number, { start: number; count: number }>()
   const warnedAt = new Map<number, number>()
@@ -871,6 +881,16 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
       log('warn', 'qq message from non-allowlisted user dropped', { userId: inbound.userId })
       return
     }
+    // D111：入站本身留一条痕。排障时「最后一条入站是什么时候」比任何在线标志都可靠
+    // （2026-11-09 19:42–21:38 静默断流时，登录态、WS、出站全绿，只有这里会停）。
+    const now = Date.now()
+    const gapMs = lastInboundAt === null ? null : now - lastInboundAt
+    lastInboundAt = now
+    log('info', 'qq inbound', {
+      userId: inbound.userId,
+      chars: Array.from(inbound.text).length,
+      ...(gapMs !== null ? { gapMs } : {})
+    })
     // 命令放最前（与桌面 `ask:query` 一致）：参数可以比提问长，也不该吃限流 / 排队名额
     if (await tryCommand(inbound)) return
     if (Array.from(inbound.text).length > QQ_QUESTION_MAX_CHARS) {
@@ -966,6 +986,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
         ...transportStatus,
         running,
         port: transportStatus.port,
+        lastInboundAt,
         ...(lastError !== undefined ? { lastError } : {})
       }
     },

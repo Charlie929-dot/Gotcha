@@ -73,6 +73,11 @@ export interface QqSettingsView {
   replyMaxChars: number
   running: boolean
   connections: number
+  /**
+   * 最后一条入站消息的时刻（D111，2026-11-09）；null = 本次启动还没收到过。
+   * 界面用它显示「最后一次收到你的消息：X 分钟前」——出站永远报健康，只有这里会停。
+   */
+  lastInboundAt: number | null
   lastError?: string
 }
 
@@ -240,6 +245,7 @@ export function buildQqSettingsView(db: Db, status?: QqChannelStatus): QqSetting
     replyMaxChars: config.replyMaxChars,
     running: status?.running ?? false,
     connections: status?.connections ?? 0,
+    lastInboundAt: status?.lastInboundAt ?? null,
     ...(status?.lastError !== undefined ? { lastError: status.lastError } : {})
   }
 }

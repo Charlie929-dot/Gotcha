@@ -344,6 +344,7 @@
           <section>
             <h3>QQ 通道</h3>
             <p class="hint" id="qq-status">读取中…</p>
+            <p class="hint" id="qq-inbound"></p>
             <div class="qq-napcat">
               <p class="hint" id="qq-napcat-status">NapCat：读取中…</p>
               <img id="qq-napcat-qr" class="qq-napcat-qr" alt="NapCat 登录二维码" hidden />
@@ -352,6 +353,7 @@
                 <button id="qq-napcat-dir" type="button">选择目录…</button>
                 <button id="qq-napcat-start" type="button" class="primary">启动 NapCat</button>
                 <button id="qq-napcat-stop" type="button">停止</button>
+                <button id="qq-napcat-restart" type="button" title="整条收掉再拉一次：收不到消息但显示在线时用（可能要扫码）">重置链路</button>
               </div>
               <progress id="qq-napcat-progress" max="1" value="0" hidden></progress>
               <label class="check">

@@ -61,7 +61,6 @@ const form = must<HTMLFormElement>('form')
 const questionInput = must<HTMLInputElement>('question')
 const submitButton = must<HTMLButtonElement>('submit')
 const stopButton = must<HTMLButtonElement>('stop')
-const newChatButton = must<HTMLButtonElement>('new-chat')
 const resumeLastButton = must<HTMLButtonElement>('resume-last')
 const settingsButton = must<HTMLButtonElement>('settings-open')
 const drawerEl = must<HTMLElement>('drawer')
@@ -180,12 +179,14 @@ const THREAD_RENDER_LIMIT = 40
 let entries: AskHistoryEntry[] = []
 let activeConversationId: string | null = null
 /**
- * 切会话时顺手报给主进程（2026-11-05 C+D）：QQ 的消息要写进桌面正打开的这一段，
- * 手机和桌面共用同一条上下文。窗口还没开 / 刚清空（null）就不报，主进程自己回退。
+ * 切到哪一段会话（只改本地视图）。
+ *
+ * D110（2026-11-09）：不再把「当前会话」报给主进程——ta 只有一条线，
+ * QQ / 到点任务永远写那一条；这里翻看旧会话只是看，不会把主线拐走。
+ * 窗口打开时主进程会给一个 id（`currentConversation`），默认就落在主线上。
  */
 function setActiveConversationId(id: string | null): void {
   activeConversationId = id
-  if (id !== null) void api?.setActiveConversation(id)
 }
 let filter = ''
 let busy = false
@@ -1190,10 +1191,6 @@ function renderEvidence(evidence: SegmentEvidence): void {
 /* 提问                                                                */
 /* ------------------------------------------------------------------ */
 
-function newConversationId(): string {
-  return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
-}
-
 async function refreshHistory(): Promise<void> {
   if (!api) return
   try {
@@ -1223,7 +1220,6 @@ function setBusy(next: boolean): void {
   busy = next
   submitButton.disabled = next
   stopButton.hidden = !next
-  newChatButton.disabled = next
   attachButton.disabled = next
   questionInput.disabled = next
 }
@@ -1239,8 +1235,12 @@ async function ask(
     return
   }
   if (activeConversationId === null) {
-    activeConversationId = newConversationId()
-    setActiveConversationId(activeConversationId)
+    // D110：没有「新会话」这回事——拿主进程那一条（窗口刚开、id 还没拉回来时兜底）
+    activeConversationId = await api.currentConversation()
+    if (activeConversationId === null) {
+      setStatus('error', '没拿到会话（主进程没接上），先去托盘看一眼')
+      return
+    }
   }
   // 空会话里只摘掉空态提示：命令回执不落历史（主进程直接返回、不过 settle），
   // 这里整片 replaceChildren 会让连续几条命令只剩最后一条。
@@ -1360,18 +1360,6 @@ stopButton.addEventListener('click', () => {
   if (!api || !busy) return
   setStatus('busy', '正在停止…')
   void api.cancel()
-})
-
-newChatButton.addEventListener('click', () => {
-  if (busy) return
-  activeConversationId = null
-  currentThreadEntries = []
-  renderThread()
-  renderHistoryList()
-  questionInput.value = ''
-  clearAttachments()
-  questionInput.focus()
-  setStatus('idle', '新对话')
 })
 
 resumeLastButton.addEventListener('click', () => {
@@ -3187,7 +3175,10 @@ void (async () => {
     return
   }
   await refreshHistory()
-  // 默认新会话（D55 ②）：不静默接上最近一段；要接着问就点顶部「继续上一段」或左栏记录
+  // D110（2026-11-09）：不再默认给一个空白新会话——窗口打开就续上那一条线，
+  // 同一个 ta、同一份记忆。左栏翻旧会话只是看，不会把主线拐走。
+  activeConversationId = await api.currentConversation()
+  renderThread()
   await refreshConsent()
   // 读一次人设 / 卡库：模式条的「人格卡：xx」要显示真实启用的卡（读不到就显示未选卡）
   void refreshMemorySettings()

@@ -148,6 +148,32 @@ export function pickFallbackConversationId(
   }
 }
 
+/**
+ * 一条会话（D110，2026-11-09）：ta 的定位是长期陪伴，人这边只该有**一条线**。
+ *
+ * 第一次调用时按 D109 的顺序解析一次（最后一条 QQ 用户消息所在的会话 → 最近一段非 `qq-*`
+ * 会话 → `fallback`），之后永远返回同一个 id：到点任务、QQ、桌面提问都写这一条。
+ *
+ * 为什么要锁死：以前到点任务在进程重启后拿不到「上次会话」，就现造一个 `c<时间戳>`，
+ * 同一个人一天被劈成几条线（2026-11-09 真机：`cmw8qg74n` / `cmw94dqoi` / `cmw97lhfj`）。
+ * 拆开之后 ta 记得的只是其中一段，用户回一句它就对不上——「半死」的观感就是这么来的。
+ * 切节点 / 新分支不需要换 id：分支各自的 `conversations/` 里没有这个文件，天然从空会话开始。
+ */
+export function createCanonicalConversation(options: {
+  root: string
+  /** 全局台账里最后一条**用户**消息所在的会话（跨分支；没有就 null） */
+  lastUserConversation: () => string | null
+  /** 一点线索都没有时的兜底 id（默认 `main`） */
+  fallback?: string
+}): () => string {
+  const fallback = options.fallback ?? 'main'
+  let resolved: string | null = null
+  return () => {
+    resolved ??= pickFallbackConversationId(options.root, options.lastUserConversation()) ?? fallback
+    return resolved
+  }
+}
+
 function assetsDir(root: string): string {
   return join(root, 'conversations', 'assets')
 }

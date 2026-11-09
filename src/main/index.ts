@@ -150,7 +150,7 @@ import {
   type ProviderKeySaveResult
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
-import { createAskConversationRegistry, pickFallbackConversationId } from './ask-conversation'
+import { createAskConversationRegistry, createCanonicalConversation } from './ask-conversation'
 import {
   createCommandHandler,
   currentModeState,
@@ -2224,22 +2224,16 @@ if (primaryInstance) {
       log: (level, message, data) => captureLog(level, message, data)
     })
     /**
-     * 桌面「当前会话」（2026-11-05 C+D）：QQ 的消息写进这一段，手机和桌面共用同一条上下文。
-     * 渲染层每次切会话 / 提问都报上来（`ask:conversation:active`）；还没报过时按下面的顺序退：
-     * ① 最后一条 QQ **用户**消息所在的会话（2026-11-09 修：到点任务会新建只有 ta 说话的会话，
-     *    只按 mtime 取最近一段会把昨天的聊天顶掉）；② 最近一段会话（跳过旧的 `qq-*`，那是共享
-     *    之前各聊各的遗留）；③ 固定 `main`。
+     * 一条会话（D110，2026-11-09）：ta 是长期陪伴，人这边只有一条线——桌面 / QQ / 到点任务
+     * 都写这一条，谁也不许再新造会话 id。
+     *
+     * 解析顺序沿用 D109：① 最后一条 QQ **用户**消息所在的会话；② 最近一段会话（跳过旧的
+     * `qq-*`，那是共享之前各聊各的遗留）；③ 固定 `main`。进程里第一次用到时定下来就不再变。
      */
-    let desktopConversationId: string | null = null
-    const currentDesktopConversation = (): string => {
-      if (desktopConversationId !== null) return desktopConversationId
-      return (
-        pickFallbackConversationId(
-          memoryRepo.root,
-          qqChatLog?.lastConversationWithUser() ?? null
-        ) ?? 'main'
-      )
-    }
+    const currentConversation = createCanonicalConversation({
+      root: memoryRepo.root,
+      lastUserConversation: () => qqChatLog?.lastConversationWithUser() ?? null
+    })
     /** 启动自检：家谱（缺就建 / 坏就备份重建）+ 记忆仓（缺就 init）+ 快照进仓 */
     const ensureMemoryRepo = async (): Promise<void> => {
       try {
@@ -2991,8 +2985,8 @@ if (primaryInstance) {
       log: (level, message, data) => captureLog(level, message, data),
       chatLog: qqChatLog,
       mediaGate: qqMediaGate,
-      // C+D（2026-11-05）：QQ 的消息写进桌面正打开的那段会话，手机和桌面共用同一条上下文
-      conversationFor: () => currentDesktopConversation(),
+      // D110：QQ 与桌面共用**那一条**会话（不再跟着桌面窗口翻到哪段跑）
+      conversationFor: () => currentConversation(),
       // 命令（M5）：与桌面同一个 handler；命中就不进模型，也不占限流 / 排队
       command,
       ask: async ({ text, conversationId, signal, images, files, quoted, recent }) => {
@@ -3370,8 +3364,6 @@ if (primaryInstance) {
         .filter((turn) => turn.answer !== '')
     }
 
-    /** 最近一次提问用的会话（到点任务往这里说，没人说过就现开一个） */
-    let lastAskConversationId: string | null = null
     /** 有没有一轮用户问答在跑（任务到点先让位；由 ask-ipc 的在途状态回调维护） */
     let askBusy = false
 
@@ -3383,7 +3375,6 @@ if (primaryInstance) {
       question: string,
       context: AskQueryContext
     ): Promise<ChainAskResult> => {
-      lastAskConversationId = context.conversationId
         // 历史提交只读查看中：第一句话先从这里分叉成自己的节点（M2）；失败不阻塞提问
         await forkDetachedIfNeeded({
           repo: memoryRepo,
@@ -3518,10 +3509,8 @@ if (primaryInstance) {
         return isAskShotPath(root, path) ? readAskShotDataUrl(path) : null
       },
       conversationHistory: conversationHistoryFor,
-      // 桌面正打开哪段会话：QQ 的消息写进这一段（C+D，2026-11-05）
-      setActiveConversation: (conversationId) => {
-        desktopConversationId = conversationId
-      },
+      // D110：桌面没带会话 id 时落到这一条（渲染层打开窗口就用它续上），不再现造新 id
+      currentConversation: () => currentConversation(),
       history: () => readAskHistory(askHistoryPath),
       clearHistory: async () => {
         // 清空是破坏性操作：先从 git 留一份（失败也照清，只是少了这层保险）
@@ -3807,7 +3796,8 @@ if (primaryInstance) {
         // 后台交付（成长档案写作）：不开口、不进用户问答历史；只把真实结果留在记忆仓。
         // 前台 / auto 仍然走同一条通道，说完记进历史并通知窗口重画。
         const quiet = task.delivery === 'background'
-        const conversationId = lastAskConversationId ?? `c${at.toString(36)}`
+        // D110：到点就是往**这一条**会话里说一句，不再另起一段（另起 = 记忆被劈开）
+        const conversationId = currentConversation()
         const history = await conversationHistoryFor(conversationId)
         const controller = new AbortController()
         const result = await runAskOnce(task.instruction, {

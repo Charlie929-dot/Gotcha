@@ -95,7 +95,7 @@ describe('ask IPC：权限边界', () => {
       })
     )
     expect(result).toMatchObject({ kind: 'answer', answer: '答' })
-    // 非法会话 id 不进入上下文查找：现造一个合法 id
+    // 非法会话 id 不进入上下文查找：D110 起落到当前那一条，不再现造
     const ask2 = vi.fn(async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => ({
       kind: 'no-evidence',
       stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 }
@@ -104,7 +104,7 @@ describe('ask IPC：权限边界', () => {
       question: '问',
       conversationId: '带 空格/斜杠'
     })
-    expect(ask2.mock.calls[0]![1]).toMatchObject({ conversationId: expect.stringMatching(/^[A-Za-z0-9_-]{1,64}$/) })
+    expect(ask2.mock.calls[0]![1]).toMatchObject({ conversationId: 'main' })
   })
 
   it('askChain 抛错：变成可读错误，不把异常抛回渲染层', async () => {
@@ -986,23 +986,25 @@ describe('ask IPC：设置抽屉的任务 / 小本本（自调用 v0.2）', () =
   })
 })
 
-describe('ask IPC：桌面当前会话（C+D，2026-11-05）', () => {
-  it('渲染层报上来的会话 id 记进主进程；非法 id 不接', async () => {
-    const seen: string[] = []
-    const deps = buildDeps({ setActiveConversation: (id) => seen.push(id) })
-    const setActive = handler(deps, 'ask:conversation:active')
-    expect(await setActive(SENDER_OK as never, { conversationId: 'conv-9' })).toEqual({ ok: true })
-    expect(seen).toEqual(['conv-9'])
-    expect(await setActive(SENDER_OK as never, { conversationId: '带 空格' })).toMatchObject({
-      ok: false
-    })
-    expect(seen).toEqual(['conv-9'])
+describe('ask IPC：一条会话（D110，2026-11-09）', () => {
+  it('渲染层问「当前是哪一段」：回主进程解析好的那一条', async () => {
+    const read = handler(buildDeps({ currentConversation: () => 'cmw7c2xci' }), 'ask:conversation:current')
+    expect(await read(SENDER_OK as never)).toEqual({ ok: true, conversationId: 'cmw7c2xci' })
   })
 
-  it('桌面问一次也算当前会话：QQ 之后的消息跟着写进这一段', async () => {
-    const seen: string[] = []
-    const deps = buildDeps({ setActiveConversation: (id) => seen.push(id) })
-    await handler(deps, 'ask:query')(SENDER_OK as never, { question: '问', conversationId: 'conv-1' })
-    expect(seen).toContain('conv-1')
+  it('没带会话 id 的提问落到当前那一条，不再现造新 id', async () => {
+    const ask = vi.fn(
+      async (_question: string, _context: AskQueryContext): Promise<ChainAskResult> => ({
+        kind: 'no-evidence',
+        stats: { hits: 0, evidence: 0, cited: 0, questionChars: 1 }
+      })
+    )
+    const deps = buildDeps({ ask, currentConversation: () => 'cmw7c2xci' })
+    await handler(deps, 'ask:query')(SENDER_OK as never, { question: '问' })
+    expect(ask.mock.calls[0]![1]).toMatchObject({ conversationId: 'cmw7c2xci' })
+  })
+
+  it('旧的「桌面当前会话」上报通道已经撤掉（会话 id 由主进程独占）', () => {
+    expect(createAskIpcHandlers(buildDeps()).has('ask:conversation:active')).toBe(false)
   })
 })

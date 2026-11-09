@@ -123,8 +123,8 @@ export interface AskApi {
   qqNapcatStop(options?: { force?: boolean }): Promise<NapcatStopResult>
   qqNapcatInstall(): Promise<{ ok: boolean; error?: string }>
   qqNapcatChooseDir(): Promise<{ ok: boolean; error?: string; view?: NapcatView }>
-  /** 当前打开的是哪段会话（2026-11-05 C+D）：QQ 的消息写进这一段 */
-  setActiveConversation(conversationId: string): Promise<{ ok: boolean; error?: string }>
+  /** 当前那条会话（D110）：窗口打开时用它续上，不再新造 */
+  currentConversation(): Promise<string | null>
   /* ---- QQ 表情包（D96 / PR2）：列表 / 导入 / 改标签 / 回收站 ---- */
   qqStickers(): Promise<QqStickerListView | { error: string }>
   qqStickerImport(): Promise<QqStickerListView | { ok: false; error: string }>
@@ -236,10 +236,14 @@ const api: AskApi = {
       error?: string
       view?: NapcatView
     }>,
-  setActiveConversation: (conversationId) =>
-    ipcRenderer.invoke('ask:conversation:active', {
-      conversationId
-    }) as Promise<{ ok: boolean; error?: string }>,
+  currentConversation: async () => {
+    const result = (await ipcRenderer.invoke('ask:conversation:current')) as
+      | { ok: boolean; conversationId?: string }
+      | undefined
+    return result?.ok === true && typeof result.conversationId === 'string'
+      ? result.conversationId
+      : null
+  },
   qqStickers: () =>
     ipcRenderer.invoke('ask:qq:stickers:get') as Promise<QqStickerListView | { error: string }>,
   qqStickerImport: () =>

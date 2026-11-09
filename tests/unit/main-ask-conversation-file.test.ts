@@ -25,6 +25,7 @@ import {
   createAskConversationFileStore,
   createAskConversationRegistry,
   createAskConversationStore,
+  createCanonicalConversation,
   pickFallbackConversationId
 } from '../../src/main/ask-conversation'
 import type { CloudAskConversation } from '../../src/chain/agent/conversation'
@@ -260,5 +261,35 @@ describe('桌面当前会话的回退（D109）', () => {
   it('一个会话文件都没有时返回 null，由调用方退回固定 id', () => {
     const root = tempRoot()
     expect(pickFallbackConversationId(root, null)).toBeNull()
+  })
+})
+
+describe('一条会话（D110）', () => {
+  function seed(root: string, id: string, mtimeSec: number): void {
+    mkdirSync(join(root, 'conversations'), { recursive: true })
+    const file = conversationFilePath(root, id)
+    writeFileSync(file, '{"v":1,"digest":""}\n', 'utf8')
+    utimesSync(file, mtimeSec, mtimeSec)
+  }
+
+  it('第一次解析后永远返回同一个 id：台账后来变了也不跟着走', () => {
+    const root = tempRoot()
+    seed(root, 'cmw-chat', 1_700_000_000)
+    seed(root, 'cmw-other', 1_700_000_100)
+    let lastUser = 'cmw-chat'
+    const current = createCanonicalConversation({ root, lastUserConversation: () => lastUser })
+    expect(current()).toBe('cmw-chat')
+    // 中途有别的会话更新了、台账也指向了它：仍然不换（换 = 记忆被劈开）
+    lastUser = 'cmw-other'
+    utimesSync(conversationFilePath(root, 'cmw-other'), 1_700_000_900, 1_700_000_900)
+    expect(current()).toBe('cmw-chat')
+  })
+
+  it('一点线索都没有时退回固定 id（默认 main）', () => {
+    const root = tempRoot()
+    expect(createCanonicalConversation({ root, lastUserConversation: () => null })()).toBe('main')
+    expect(
+      createCanonicalConversation({ root, lastUserConversation: () => null, fallback: 'self' })()
+    ).toBe('self')
   })
 })

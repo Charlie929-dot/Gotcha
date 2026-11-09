@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, screen, shell } from 'electron'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { extname, basename, join } from 'node:path'
 import Database from 'better-sqlite3'
 import log from 'electron-log/main'
@@ -150,7 +150,7 @@ import {
   type ProviderKeySaveResult
 } from './graph-ipc'
 import { registerAskIpc, type AskConsentView, type AskQueryContext } from './ask-ipc'
-import { createAskConversationRegistry } from './ask-conversation'
+import { createAskConversationRegistry, pickFallbackConversationId } from './ask-conversation'
 import {
   createCommandHandler,
   currentModeState,
@@ -2225,25 +2225,20 @@ if (primaryInstance) {
     })
     /**
      * 桌面「当前会话」（2026-11-05 C+D）：QQ 的消息写进这一段，手机和桌面共用同一条上下文。
-     * 渲染层每次切会话 / 提问都报上来（`ask:conversation:active`）；还没报过就取最近一段
-     * （跳过旧的 `qq-*` 会话——那是共享之前各聊各的遗留）。
+     * 渲染层每次切会话 / 提问都报上来（`ask:conversation:active`）；还没报过时按下面的顺序退：
+     * ① 最后一条 QQ **用户**消息所在的会话（2026-11-09 修：到点任务会新建只有 ta 说话的会话，
+     *    只按 mtime 取最近一段会把昨天的聊天顶掉）；② 最近一段会话（跳过旧的 `qq-*`，那是共享
+     *    之前各聊各的遗留）；③ 固定 `main`。
      */
     let desktopConversationId: string | null = null
     const currentDesktopConversation = (): string => {
       if (desktopConversationId !== null) return desktopConversationId
-      try {
-        const dir = join(memoryRepo.root, 'conversations')
-        let newest: { id: string; mtime: number } | null = null
-        for (const name of readdirSync(dir)) {
-          if (!name.endsWith('.jsonl') || name.startsWith('qq-')) continue
-          const mtime = statSync(join(dir, name)).mtimeMs
-          if (newest === null || mtime > newest.mtime) newest = { id: name.slice(0, -6), mtime }
-        }
-        if (newest !== null) return newest.id
-      } catch {
-        // 目录不存在 / 读不了：退回固定 id，至少别把消息丢掉
-      }
-      return 'main'
+      return (
+        pickFallbackConversationId(
+          memoryRepo.root,
+          qqChatLog?.lastConversationWithUser() ?? null
+        ) ?? 'main'
+      )
     }
     /** 启动自检：家谱（缺就建 / 坏就备份重建）+ 记忆仓（缺就 init）+ 快照进仓 */
     const ensureMemoryRepo = async (): Promise<void> => {

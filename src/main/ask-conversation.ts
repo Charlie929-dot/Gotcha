@@ -26,6 +26,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync
 } from 'node:fs'
@@ -113,6 +114,38 @@ export function conversationFileName(conversationId: string): string {
 
 export function conversationFilePath(root: string, conversationId: string): string {
   return join(root, 'conversations', `${conversationFileName(conversationId)}.jsonl`)
+}
+
+/**
+ * 桌面「当前会话」的回退目标（2026-11-09 / D109）：优先 QQ 台账里**最后一条用户消息**
+ * 所在的会话，再取 `conversations/` 里 mtime 最新的非 `qq-*` 文件；都没有就给 null
+ * （调用方退回固定 id）。
+ *
+ * 为什么不能只看 mtime：到点任务会新建一个只有 ta 说话的会话，那个文件更新，
+ * 但它不是用户在聊的那条线——按 mtime 取会把昨天的聊天顶掉。
+ * 台账是全局的，切分支后旧会话文件可能不在当前节点，所以优先项要做存在性校验；
+ * 共享之前的旧 `qq-*` 会话保持只读（D106 ⑤）。
+ */
+export function pickFallbackConversationId(
+  root: string,
+  lastQqConversation: string | null
+): string | null {
+  if (lastQqConversation !== null && !lastQqConversation.startsWith('qq-')) {
+    if (existsSync(conversationFilePath(root, lastQqConversation))) return lastQqConversation
+  }
+  try {
+    const dir = join(root, 'conversations')
+    let newest: { id: string; mtime: number } | null = null
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.jsonl') || name.startsWith('qq-')) continue
+      const mtime = statSync(join(dir, name)).mtimeMs
+      if (newest === null || mtime > newest.mtime) newest = { id: name.slice(0, -6), mtime }
+    }
+    return newest?.id ?? null
+  } catch {
+    // 目录不存在 / 读不了：由调用方退回固定 id，至少别把消息丢掉
+    return null
+  }
 }
 
 function assetsDir(root: string): string {

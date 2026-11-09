@@ -200,6 +200,34 @@ export class ChatLog {
   }
 
   /**
+   * 最后一条**用户说什么**落在哪个会话（2026-11-09）。
+   *
+   * 用途只有一个：桌面没上报「当前会话」时，QQ 的续聊落点跟着它走。
+   * 不能按会话文件的 mtime 取最近一段——到点任务会新开一个只有 ta 说话的会话，
+   * 那个文件更新、但它不是用户在聊的那条线。只认 `role === 'user'` 就能把两者分开。
+   */
+  lastConversationWithUser(): string | null {
+    this.ensureLoaded()
+    let bestId: string | null = null
+    let bestAt = Number.NEGATIVE_INFINITY
+    let bestSeq = -1
+    for (const [id, state] of this.conversations) {
+      // 每个会话只看最后一条 user：records 按 seq 递增，倒着找到第一条就够
+      for (let index = state.records.length - 1; index >= 0; index -= 1) {
+        const record = state.records[index]
+        if (record === undefined || record.role !== 'user') continue
+        if (record.at > bestAt || (record.at === bestAt && record.seq > bestSeq)) {
+          bestId = id
+          bestAt = record.at
+          bestSeq = record.seq
+        }
+        break
+      }
+    }
+    return bestId
+  }
+
+  /**
    * 清空全部台账（设置抽屉「清空聊天索引」，D96 §5.4）：
    * 只删本机的引用索引，**不影响 QQ 服务器上的聊天**；清完短号从 #1 重新开始。
    */

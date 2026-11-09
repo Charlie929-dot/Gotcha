@@ -107,6 +107,40 @@ describe('上限与淘汰', () => {
   })
 })
 
+describe('续聊落点（2026-11-09）', () => {
+  it('取最后一条用户消息所在会话；只有 ta 主动说话的任务会话不算', () => {
+    const file = tempFile()
+    const log = new ChatLog({ file, flushDelayMs: 0 })
+    log.append('cmw-old', { qqId: 1, role: 'user', text: '昨天的话', at: 100 })
+    log.append('cmw-old', { qqId: 2, role: 'ta', text: '昨天的回答', at: 101 })
+    // 到点任务新开的会话：只有 ta 的推送，mtime 比 cmw-old 新
+    log.append('cmw-task', { qqId: 3, role: 'ta', text: '到点啦', at: 200 })
+    expect(log.lastConversationWithUser()).toBe('cmw-old')
+    log.dispose()
+  })
+
+  it('多个会话都有用户消息时取最近的一条；重启后仍一致', () => {
+    const file = tempFile()
+    const first = new ChatLog({ file, flushDelayMs: 0 })
+    first.append('cmw-a', { qqId: 1, role: 'user', text: 'a', at: 100 })
+    first.append('cmw-b', { qqId: 2, role: 'user', text: 'b', at: 200 })
+    first.append('cmw-a', { qqId: 3, role: 'user', text: 'a 的续聊', at: 300 })
+    first.dispose()
+
+    const second = new ChatLog({ file, flushDelayMs: 0 })
+    expect(second.lastConversationWithUser()).toBe('cmw-a')
+    second.dispose()
+  })
+
+  it('一条用户消息都没有时返回 null，不凭空挑会话', () => {
+    const file = tempFile()
+    const log = new ChatLog({ file, flushDelayMs: 0 })
+    log.append('qq-1', { qqId: 1, role: 'ta', text: '只有我说话', at: 1 })
+    expect(log.lastConversationWithUser()).toBeNull()
+    log.dispose()
+  })
+})
+
 describe('坏文件降级', () => {
   it('不是 JSON：按空台账启动，记一条 warn，不删用户文件', () => {
     const file = tempFile()

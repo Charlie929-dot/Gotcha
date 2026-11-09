@@ -13,6 +13,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  utimesSync,
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -23,7 +24,8 @@ import {
   conversationFileName,
   createAskConversationFileStore,
   createAskConversationRegistry,
-  createAskConversationStore
+  createAskConversationStore,
+  pickFallbackConversationId
 } from '../../src/main/ask-conversation'
 import type { CloudAskConversation } from '../../src/chain/agent/conversation'
 
@@ -222,5 +224,41 @@ describe('会话落盘', () => {
     store.save({ ...conversation(), compactedTurns: 1 })
     expect(store.load().compactedTurns).toBe(1)
     expect(store.load().turns).toHaveLength(2)
+  })
+})
+
+describe('桌面当前会话的回退（D109）', () => {
+  function seed(root: string, id: string, mtimeSec: number): void {
+    mkdirSync(join(root, 'conversations'), { recursive: true })
+    const file = conversationFilePath(root, id)
+    writeFileSync(file, '{"v":1,"digest":""}\n', 'utf8')
+    utimesSync(file, mtimeSec, mtimeSec)
+  }
+
+  it('优先最后一条 QQ 用户消息所在的会话，即使任务会话的 mtime 更新', () => {
+    const root = tempRoot()
+    seed(root, 'cmw-old', 1_700_000_000)
+    seed(root, 'cmw-task', 1_700_000_100)
+    expect(pickFallbackConversationId(root, 'cmw-old')).toBe('cmw-old')
+  })
+
+  it('优先项不存在（切了分支 / 已清空）时退回 mtime 最新的非 qq-* 会话', () => {
+    const root = tempRoot()
+    seed(root, 'cmw-old', 1_700_000_000)
+    seed(root, 'cmw-new', 1_700_000_100)
+    seed(root, 'qq-1', 1_700_000_200)
+    expect(pickFallbackConversationId(root, 'cmw-missing')).toBe('cmw-new')
+  })
+
+  it('旧 qq-* 会话只读：台账最后一条用户消息在那边也不选（D106 ⑤）', () => {
+    const root = tempRoot()
+    seed(root, 'qq-1', 1_700_000_300)
+    seed(root, 'cmw-old', 1_700_000_000)
+    expect(pickFallbackConversationId(root, 'qq-1')).toBe('cmw-old')
+  })
+
+  it('一个会话文件都没有时返回 null，由调用方退回固定 id', () => {
+    const root = tempRoot()
+    expect(pickFallbackConversationId(root, null)).toBeNull()
   })
 })

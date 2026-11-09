@@ -3758,6 +3758,37 @@ if (primaryInstance) {
     void refreshQqChannel()
 
     /**
+     * 入站体检（D111，2026-11-09）：这条链上出站永远像好人（19:42–21:38 静默断流时，
+     * 出站、WS、登录态全绿，只有入站停了，我们这边没有任何信号能测出来）。唯一的兜底
+     * 是晚上发现「一整天没收到你的消息」时，用出站问一句——顺带让用户知道要去点「重置链路」。
+     * 一天最多一条，通道不在线不发。
+     */
+    let inboundNoticeDay = ''
+    const inboundWatchTimer = setInterval(() => {
+      if (qqChannel === null) return
+      const status = qqChannel.status()
+      if (!status.running || status.connections === 0) return
+      const now = Date.now()
+      const clock = new Date(now)
+      if (clock.getHours() < 21) return
+      const day = `${clock.getFullYear()}-${clock.getMonth() + 1}-${clock.getDate()}`
+      if (inboundNoticeDay === day) return
+      if (status.lastInboundAt !== null && now - status.lastInboundAt < 12 * 60 * 60 * 1000) return
+      inboundNoticeDay = day
+      void qqChannel
+        .push('在吗？今天一整天没收到你的消息。回我一个字试试——要是我还是没反应，就去设置里点「重置链路」。')
+        .then((pushed) => {
+          captureLog(pushed.sent ? 'info' : 'warn', 'qq inbound check', {
+            sent: pushed.sent,
+            ...(pushed.reason !== undefined ? { reason: pushed.reason } : {})
+          })
+        })
+        .catch((error) => captureLog('warn', 'qq inbound check failed', { error: String(error) }))
+    }, 10 * 60 * 1000)
+    // 别让这个定时器拖住退出
+    inboundWatchTimer.unref()
+
+    /**
      * 任务运行时（自调用 v0.2 §9）：任务库独立写连接 + 到点调度器。
      *
      * 到点走 `runAskOnce`（与桌面提问同一条通道）：

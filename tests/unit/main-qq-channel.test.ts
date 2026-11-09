@@ -1036,3 +1036,38 @@ describe('引用与台账（D96 / PR1）', () => {
     expect(seen[0]?.images).toHaveLength(1)
   })
 })
+
+describe('入站记账（D111，2026-11-09）', () => {
+  it('收到一条就记 lastInboundAt，并落一条 qq inbound（出站永远绿，只有这里会停）', async () => {
+    const transport = new FakeTransport()
+    const logs: { message: string; data?: Record<string, unknown> }[] = []
+    const channel = createQqChannel(transport, {
+      ask: async () => answer('在'),
+      log: (_level, message, data) => {
+        logs.push({ message, ...(data !== undefined ? { data } : {}) })
+      },
+      partGapMs: 0
+    })
+    await channel.start(config())
+    expect(channel.status().lastInboundAt).toBeNull()
+    await channel.handleMessage(inbound('在吗'))
+    expect(typeof channel.status().lastInboundAt).toBe('number')
+    expect(logs.find((item) => item.message === 'qq inbound')?.data).toMatchObject({
+      userId: 20002,
+      chars: 2
+    })
+    // 第二条带「距上一条多久」，排障时直接看得出断流了多久
+    await channel.handleMessage(inbound('再来'))
+    const inboundLogs = logs.filter((item) => item.message === 'qq inbound')
+    expect(inboundLogs).toHaveLength(2)
+    expect(inboundLogs[1]?.data).toHaveProperty('gapMs')
+  })
+
+  it('非白名单的消息不算「收到你的消息」，不记时间', async () => {
+    const transport = new FakeTransport()
+    const channel = createQqChannel(transport, { ask: async () => answer('x'), log: () => {} })
+    await channel.start(config())
+    await channel.handleMessage(inbound('别理我', 99999))
+    expect(channel.status().lastInboundAt).toBeNull()
+  })
+})

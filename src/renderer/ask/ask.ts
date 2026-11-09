@@ -148,6 +148,7 @@ const personaCardStatus = must<HTMLElement>('persona-card-status')
 const personaCardMsg = must<HTMLElement>('persona-card-msg')
 /* ---- 设置抽屉 · QQ 通道（D63） ---- */
 const qqStatusEl = must<HTMLElement>('qq-status')
+const qqInboundEl = must<HTMLElement>('qq-inbound')
 const qqEnabledInput = must<HTMLInputElement>('set-qq-enabled')
 const qqLanInput = must<HTMLInputElement>('set-qq-lan')
 const qqPortInput = must<HTMLInputElement>('set-qq-port')
@@ -162,6 +163,7 @@ const qqNapcatInstallButton = must<HTMLButtonElement>('qq-napcat-install')
 const qqNapcatDirButton = must<HTMLButtonElement>('qq-napcat-dir')
 const qqNapcatStartButton = must<HTMLButtonElement>('qq-napcat-start')
 const qqNapcatStopButton = must<HTMLButtonElement>('qq-napcat-stop')
+const qqNapcatRestartButton = must<HTMLButtonElement>('qq-napcat-restart')
 const qqNapcatProgressEl = must<HTMLProgressElement>('qq-napcat-progress')
 const qqNapcatAutoInput = must<HTMLInputElement>('set-qq-napcat-auto')
 /* QQ 表情包（D96 / PR2）：列表 / 导入 / 回收站 / 清空聊天索引 */
@@ -2464,6 +2466,22 @@ function fillQqSettings(view: QqSettingsView): void {
       ? `已开启但没起来${view.lastError !== undefined ? `（${view.lastError}）` : ''}`
       : '未开启（不监听任何端口）'
   qqStatusEl.style.color = view.enabled && !view.running ? 'var(--error)' : ''
+  // D111：出站永远报健康，只有「最后一条入站」会停——这是看出「在线但收不到消息」的唯一线索
+  if (view.lastInboundAt === null) {
+    qqInboundEl.textContent = '还没收到过你的消息（本次启动以来）'
+    qqInboundEl.style.color = ''
+  } else {
+    const minutes = Math.max(0, Math.round((Date.now() - view.lastInboundAt) / 60_000))
+    const ago =
+      minutes < 1
+        ? '刚刚'
+        : minutes < 60
+          ? `${minutes} 分钟前`
+          : `${Math.floor(minutes / 60)} 小时前`
+    qqInboundEl.textContent = `最后一次收到你的消息：${ago}`
+    // 超过 2 小时只黄不红：半夜也会长，红会天天误报；黄是在提醒「可能又断了，发一条试试」
+    qqInboundEl.style.color = minutes >= 120 ? 'var(--warn, #b8860b)' : ''
+  }
 }
 
 /** 读一次 QQ 通道设置并回填（开抽屉 / 保存后都走这里） */
@@ -2846,6 +2864,8 @@ function renderNapcatView(view: NapcatView): void {
   qqNapcatStopButton.disabled =
     // 出错 / 空闲时也允许点：用来收掉上次留下的 NapCat（D105）
     !view.installed || working
+  // D111：「重置链路」是「在线但收不到消息」时的出路，除安装中之外一律可点
+  qqNapcatRestartButton.disabled = !view.installed || working
 
   if (view.qrDataUrl !== undefined) {
     qqNapcatQrEl.src = view.qrDataUrl
@@ -2912,7 +2932,16 @@ async function stopNapcat(): Promise<NapcatStopResult> {
   return yes ? await api.qqNapcatStop({ force: true }) : { ok: false, error: '已取消停止' }
 }
 
-async function runNapcatAction(action: 'start' | 'stop' | 'install' | 'dir'): Promise<void> {
+async function restartNapcatChain(): Promise<{ ok: boolean; error?: string }> {
+  // D111：「重置链路」= 整条收掉再拉一次。走快速登录；落到二维码页就由状态栏如实显示
+  // （2026-11-09 两次重启都要求扫码，所以不假装在自愈）。
+  if (!api) return { ok: false, error: '界面没准备好' }
+  const stopped = await stopNapcat()
+  if (!stopped.ok) return stopped
+  return await api.qqNapcatStart()
+}
+
+async function runNapcatAction(action: 'start' | 'stop' | 'install' | 'dir' | 'restart'): Promise<void> {
   if (!api || qqNapcatBusy) return
   qqNapcatBusy = true
   qqNapcatStatusEl.style.color = ''
@@ -2923,16 +2952,20 @@ async function runNapcatAction(action: 'start' | 'stop' | 'install' | 'dir'): Pr
         ? 'NapCat：启动中…'
         : action === 'stop'
           ? 'NapCat：停止中…'
-          : 'NapCat：选择目录…'
+          : action === 'restart'
+            ? 'NapCat：正在重置链路…（可能要扫码）'
+            : 'NapCat：选择目录…'
   try {
     const result =
       action === 'start'
         ? await api.qqNapcatStart()
         : action === 'stop'
           ? await stopNapcat()
-          : action === 'install'
-            ? await api.qqNapcatInstall()
-            : await api.qqNapcatChooseDir()
+          : action === 'restart'
+            ? await restartNapcatChain()
+            : action === 'install'
+              ? await api.qqNapcatInstall()
+              : await api.qqNapcatChooseDir()
     if (!result.ok && result.error !== undefined) {
       qqNapcatStatusEl.textContent = `NapCat：${result.error}`
       qqNapcatStatusEl.style.color = 'var(--error)'
@@ -2954,6 +2987,7 @@ if (api) {
   qqNapcatDirButton.addEventListener('click', () => void runNapcatAction('dir'))
   qqNapcatStartButton.addEventListener('click', () => void runNapcatAction('start'))
   qqNapcatStopButton.addEventListener('click', () => void runNapcatAction('stop'))
+  qqNapcatRestartButton.addEventListener('click', () => void runNapcatAction('restart'))
 }
 
 /* ------------------------------------------------------------------ */

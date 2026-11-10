@@ -71,6 +71,41 @@ export const NAPCAT_SHELL_ASSET = 'NapCat.Shell.zip'
 const NAPCAT_RELEASE_API = 'https://api.github.com/repos/NapNeko/NapCatQQ/releases/latest'
 const NAPCAT_LATEST_DOWNLOAD = `https://github.com/NapNeko/NapCatQQ/releases/latest/download/${NAPCAT_SHELL_ASSET}`
 
+/**
+ * 掉线原因（2026-11-10 分层）：从「大概会自己好」到「必须人扫码」。
+ * 提醒按这个顺序升级——后面的可以覆盖前面的，反过来不行。
+ */
+export type NapcatOfflineReason = 'webui-down' | 'link' | 'kicked' | 'login-required'
+
+const NAPCAT_OFFLINE_RANK: Readonly<Record<NapcatOfflineReason, number>> = {
+  // NapCat 重启 / WebUI 抖动：等 60s 宽限期，多半自己回来
+  'webui-down': 0,
+  // 已登录但没拨回 Gotcha：改端口 / token 就能好
+  link: 1,
+  // 被腾讯踢下线 / 确认没登录：同一个动作——重新扫码
+  kicked: 2,
+  'login-required': 2
+}
+
+const NAPCAT_OFFLINE_NOTICE: Readonly<Record<NapcatOfflineReason, { title: string; content: string }>> = {
+  'webui-down': {
+    title: 'QQ 掉线了',
+    content: 'NapCat 暂时没响应，正在后台重试；恢复了会自动接上'
+  },
+  link: {
+    title: 'QQ 掉线了',
+    content: 'NapCat 登录正常但没连上 Gotcha（检查 access_token / 端口），正在后台重试'
+  },
+  kicked: {
+    title: 'QQ 被踢下线了',
+    content: '腾讯把这次登录作废了（登录已失效），不会自己接上：打开「设置 → QQ 通道」重新扫码'
+  },
+  'login-required': {
+    title: 'QQ 掉线了',
+    content: '去「设置 → QQ 通道」扫一下码就能接上'
+  }
+}
+
 export type NapcatPhase =
   | 'idle'
   | 'downloading'
@@ -100,6 +135,11 @@ export interface NapcatView {
   progress?: number
   loggedIn: boolean
   uin?: string
+  /**
+   * 这次掉线是「被腾讯踢下线」（登录票据作废）：界面要把话说明白——要重新扫码，
+   * 不是等它自己接上（2026-11-10）。
+   */
+  kicked?: boolean
   /** 可读的失败原因 */
   error?: string
 }
@@ -517,6 +557,10 @@ export class NapcatManager {
   private wasOnline = false
   /** 本轮掉线已经提醒过；恢复在线后重置，别每 1.5 秒弹一次 */
   private offlineNotified = false
+  /** 本轮已经提醒到的原因等级（null = 没提醒过）：只允许升级成更「要人动手」的原因 */
+  private notifiedRank: number | null = null
+  /** 最近一次被腾讯踢下线的时刻：界面据此说「要重新扫码」，登录成功后清掉 */
+  private kickedAt: number | null = null
   /** 上一次 WebUI 真的响应成功的时刻（判断「WebUI 掉线」用；start 时置为当前） */
   private lastWebuiOkAt = 0
   /**
@@ -570,6 +614,7 @@ export class NapcatManager {
     }
     if (this.progress !== null) view.progress = this.progress
     if (this.uin !== null) view.uin = this.uin
+    if (this.kickedAt !== null && !this.loggedIn) view.kicked = true
     if (this.error !== null) view.error = this.error
     return view
   }
@@ -713,6 +758,8 @@ export class NapcatManager {
     this.stopping = false
     this.wasOnline = false
     this.offlineNotified = false
+    this.notifiedRank = null
+    this.kickedAt = null
     this.errorKind = null
     this.lastWebuiOkAt = 0
     return { ok: true }
@@ -805,21 +852,45 @@ export class NapcatManager {
   private markOnline(): void {
     this.wasOnline = true
     this.offlineNotified = false
+    this.notifiedRank = null
+    this.kickedAt = null
   }
 
-  /** 掉线提醒：只在本会话「在线过又掉了」时弹一次，别每轮轮询都弹 */
-  private notifyOffline(reason: 'login-required' | 'webui-down' | 'link'): void {
-    if (!this.wasOnline || this.offlineNotified) return
+  /**
+   * 账号被腾讯踢下线（OneBot `bot_offline`，2026-11-10）。
+   *
+   * 现场：`[KickedOffLine] 你的账号当前登录已失效，请重新登录` → 4 秒后 `qq ws closed 1006` →
+   * NapCat 自己重启 worker → 5 秒后回到扫码页。**这条链上不会自愈**（登录票据被作废，
+   * 快速登录也过一次不了一次），只能人重新扫码。
+   *
+   * 以前这条 notice 在传输层被当噪音丢掉，轮询随后只按「WebUI 连不上」报一句
+   * 「正在后台重试；恢复了会自动接上」——人以为不用管，今天 12:41 / 14:12 / 19:38 三次
+   * 分别空了 1 小时 / 3.5 小时 / 2 小时以上。这里把它当成第一手信号，立刻说清楚要扫码。
+   */
+  noteAccountOffline(): void {
+    this.log('warn', 'qq account kicked offline')
+    // 这条通知本身就证明「刚才是登录着的」：不走 markOnline，但要让提醒的守卫放行
+    this.wasOnline = true
+    // 账号确实已经下线：别等下一轮轮询才认（界面也靠这个把「要扫码」说出来）
+    this.loggedIn = false
+    this.loggedInSince = null
+    this.kickedAt = this.now()
+    this.notifyOffline('kicked')
+  }
+
+  /**
+   * 掉线提醒：同一轮掉线只弹一次，但**可读性更高的原因可以覆盖**——
+   * `webui-down` 只是「NapCat 重启中，等它回来」，`kicked` / `login-required` 是
+   * 「必须扫码」。以前只用一个布尔去重，先到的 webui-down 会把后面「要扫码」整条吞掉。
+   */
+  private notifyOffline(reason: NapcatOfflineReason): void {
+    if (!this.wasOnline) return
+    const rank = NAPCAT_OFFLINE_RANK[reason]
+    if (this.notifiedRank !== null && rank <= this.notifiedRank) return
+    this.notifiedRank = rank
     this.offlineNotified = true
     this.log('warn', 'qq offline detected', { reason })
-    this.deps.notify?.(
-      'QQ 掉线了',
-      reason === 'login-required'
-        ? '去「设置 → QQ 通道」扫一下码就能接上'
-        : reason === 'link'
-          ? 'NapCat 登录正常但没连上 Gotcha（检查 access_token / 端口），正在后台重试'
-          : 'NapCat 暂时没响应，正在后台重试；恢复了会自动接上'
-    )
+    this.deps.notify?.(NAPCAT_OFFLINE_NOTICE[reason].title, NAPCAT_OFFLINE_NOTICE[reason].content)
   }
 
   private log(level: 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>): void {
@@ -1041,6 +1112,8 @@ export class NapcatManager {
           this.qrFailCount = 0
           this.qrNextAttemptAt = 0
           this.qrStuckNotified = false
+          // 「被踢下线」的标记只活到重新登录为止：界面别一直挂着「要扫码」
+          this.kickedAt = null
           if (this.loggedInSince === null) this.loggedInSince = this.now()
           if (this.uin === null) await this.refreshLoginInfo()
           if (!this.configApplied && this.now() - this.lastConfigAttempt > 10_000) {

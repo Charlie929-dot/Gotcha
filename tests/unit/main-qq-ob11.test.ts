@@ -8,7 +8,7 @@
  * 4. 长答分条不漏字、不劈坏 emoji，Markdown 不原样回给 QQ。
  */
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebSocket } from 'ws'
 
 import {
@@ -261,6 +261,51 @@ describe('反向 WS 服务端', () => {
     await new Promise((resolve) => setTimeout(resolve, 60))
     const closed = logs.find((entry) => entry.message === 'qq ws closed')
     expect(closed?.data?.['code']).toBe(4001)
+  })
+
+  it('bot_offline（账号被踢下线）：交给上层去提醒，不再当普通 notice 丢掉（2026-11-10）', async () => {
+    const kicked = vi.fn()
+    const logs: string[] = []
+    server = new QqOb11Server()
+    const { port } = await server.start({
+      port: 0,
+      accessToken: TOKEN,
+      onMessage: () => {},
+      onAccountOffline: kicked,
+      log: (_level, message) => logs.push(message)
+    })
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}?access_token=${TOKEN}`)
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => resolve())
+      socket.once('error', reject)
+    })
+    socket.send(
+      JSON.stringify({
+        post_type: 'notice',
+        notice_type: 'bot_offline',
+        self_id: 10001,
+        time: 1_700_000_000
+      })
+    )
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(kicked).toHaveBeenCalledTimes(1)
+    expect(logs).toContain('qq account kicked offline')
+    expect(logs).not.toContain('qq event ignored')
+
+    // 别的 notice 照旧静默丢弃：不能因为它们误触「要扫码」的提醒
+    socket.send(
+      JSON.stringify({
+        post_type: 'notice',
+        notice_type: 'friend_recall',
+        self_id: 10001,
+        time: 1_700_000_001
+      })
+    )
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(kicked).toHaveBeenCalledTimes(1)
+    expect(logs).toContain('qq event ignored')
+    socket.close()
   })
 
   it('sendPrivate 走 action/echo 并等回执；retcode 非 0 就报错', async () => {

@@ -2987,6 +2987,12 @@ if (primaryInstance) {
       mediaGate: qqMediaGate,
       // D110：QQ 与桌面共用**那一条**会话（不再跟着桌面窗口翻到哪段跑）
       conversationFor: () => currentConversation(),
+      // 被腾讯踢下线（bot_offline，2026-11-10）：立刻告诉人「要重新扫码」。
+      // 以前这条通知在传输层被当噪音丢掉，界面只显示「正在后台重试，会自动接上」——
+      // 今天三次踢下线，人都是等了 1–3.5 小时才发现要扫码。
+      onAccountOffline: () => {
+        qqNapcat?.noteAccountOffline()
+      },
       // 命令（M5）：与桌面同一个 handler；命中就不进模型，也不占限流 / 排队
       command,
       ask: async ({ text, conversationId, signal, images, files, quoted, recent }) => {

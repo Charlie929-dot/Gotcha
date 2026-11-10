@@ -85,6 +85,8 @@ export interface QqTransport {
     accessToken: string
     onMessage: (inbound: QqInbound) => void
     log: QqLog
+    /** 账号被服务器踢下线（`bot_offline`）：可选，假实现不接就当没这条信号 */
+    onAccountOffline?: () => void
   }): Promise<{ port: number }>
   stop(): Promise<void>
   /**
@@ -180,6 +182,12 @@ export interface QqChannelDeps {
    * QQ 也能接上桌面说过的话。
    */
   conversationFor?: (userId: number) => string
+  /**
+   * 账号被腾讯踢下线（OneBot `notice_type=bot_offline`，2026-11-10）：
+   * 这条通知证明「刚才是登录着的」，但腾讯把这次登录作废了——只能重新扫码。
+   * 主进程接到 NapCat 托管器上，立刻弹一条「要扫码」的提醒（别再说「会自动接上」）。
+   */
+  onAccountOffline?: () => void
 }
 
 export interface QqChannelStatus extends QqTransportStatus {
@@ -947,6 +955,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
           onMessage: (inbound) => {
             void handleMessage(inbound)
           },
+          ...(deps.onAccountOffline !== undefined ? { onAccountOffline: deps.onAccountOffline } : {}),
           log
         })
         running = true

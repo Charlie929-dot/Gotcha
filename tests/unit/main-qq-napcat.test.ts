@@ -399,7 +399,9 @@ describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
     const result = await manager.start()
     expect(result.ok).toBe(true)
     manager.dispose() // 只停自动轮询；下面手动驱动
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    // 等 start() 顺手触发的那次 poll 真正收尾（固定 sleep 30ms 在 187 个 worker 并行时会不够，
+    // 手动 poll 被 `polling` 守卫挡掉 → 用例假红，2026-11-05 / 11-08 / 11-10 各见过一次）
+    await settlePolling(manager)
     return manager
   }
 
@@ -490,6 +492,108 @@ describe('NapcatManager 掉线自愈 / 提醒（2026-11-04 真机）', () => {
     loggedIn = false
     await pollOnce(manager)
     expect(notify).toHaveBeenCalledTimes(2)
+  })
+
+  it('被踢下线（bot_offline）：立刻说「要重新扫码」，后面的 webui-down / 掉线不再重复弹', async () => {
+    let clock = Date.now()
+    const notify = vi.fn()
+    let connected = false
+    let loggedIn = true
+    let webuiUp = true
+    const fetchImpl = (async (input: unknown) => {
+      if (!webuiUp) throw new TypeError('fetch failed')
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: loggedIn } })
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = await attachedManager({
+      clock: () => clock,
+      fetchImpl,
+      isConnected: () => connected,
+      notify
+    })
+    // 先「登录着但还没拨回来」，再连上：markOnline 之后才算「在线过」
+    await pollOnce(manager)
+    connected = true
+    await pollOnce(manager)
+    expect(manager.status().phase).toBe('connected')
+    expect(notify).not.toHaveBeenCalled()
+
+    // 腾讯踢下线：传输层把 bot_offline 交上来 → 立刻提醒，且不能再说「会自动接上」
+    loggedIn = false
+    manager.noteAccountOffline()
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenCalledWith(
+      'QQ 被踢下线了',
+      '腾讯把这次登录作废了（登录已失效），不会自己接上：打开「设置 → QQ 通道」重新扫码'
+    )
+    expect(manager.status().kicked).toBe(true)
+
+    // 掉线现场：WS 断、WebUI 抖一下 → 低等级原因不许把「要扫码」顶掉，也不重复弹
+    connected = false
+    webuiUp = false
+    clock += NAPCAT_WEBUI_GRACE_MS + 1_000
+    await pollOnce(manager)
+    webuiUp = true
+    await pollOnce(manager)
+    expect(notify).toHaveBeenCalledTimes(1)
+
+    // 扫上码、重新登录：kicked 标记收掉；下一轮掉线还要能再提醒
+    connected = true
+    loggedIn = true
+    await pollOnce(manager)
+    expect(manager.status().kicked).toBeUndefined()
+    connected = false
+    loggedIn = false
+    await pollOnce(manager)
+    expect(notify).toHaveBeenCalledTimes(2)
+    expect(notify).toHaveBeenLastCalledWith('QQ 掉线了', '去「设置 → QQ 通道」扫一下码就能接上')
+  })
+
+  it('先报「WebUI 连不上」、后来才知道要扫码：更该让人动手的那条必须补弹（2026-11-10 今天三次掉线）', async () => {
+    let clock = Date.now()
+    const notify = vi.fn()
+    let connected = false
+    let loggedIn = true
+    let webuiUp = true
+    const fetchImpl = (async (input: unknown) => {
+      if (!webuiUp) throw new TypeError('fetch failed')
+      const url = String(input)
+      if (url.endsWith('/api/auth/login')) return jsonResponse({ code: 0, data: { Credential: 'cred-1' } })
+      if (url.endsWith('/api/QQLogin/CheckLoginStatus')) return jsonResponse({ code: 0, data: { isLogin: loggedIn } })
+      return jsonResponse({ code: 0, data: {} })
+    }) as unknown as typeof fetch
+
+    const manager = await attachedManager({
+      clock: () => clock,
+      fetchImpl,
+      isConnected: () => connected,
+      notify
+    })
+    await pollOnce(manager)
+    connected = true
+    await pollOnce(manager)
+    expect(notify).not.toHaveBeenCalled()
+
+    // 踢下线后 WebUI 闪一下：先弹的是「正在后台重试」
+    connected = false
+    webuiUp = false
+    clock += NAPCAT_WEBUI_GRACE_MS + 1_000
+    await pollOnce(manager)
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(notify).toHaveBeenLastCalledWith(
+      'QQ 掉线了',
+      'NapCat 暂时没响应，正在后台重试；恢复了会自动接上'
+    )
+
+    // WebUI 回来了，但账号其实已经掉线：这条才是要人扫码的——旧逻辑在这里被布尔去重吞掉
+    webuiUp = true
+    loggedIn = false
+    await pollOnce(manager)
+    expect(notify).toHaveBeenCalledTimes(2)
+    expect(notify).toHaveBeenLastCalledWith('QQ 掉线了', '去「设置 → QQ 通道」扫一下码就能接上')
   })
 
   it('从没连过就不弹提醒（首次扫码不算掉线）', async () => {

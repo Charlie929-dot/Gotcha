@@ -348,6 +348,14 @@ export interface QqServerOptions {
   log?: QqLog
   /** 等回执的超时（默认 10s） */
   timeoutMs?: number
+  /**
+   * 账号被服务器踢下线（`notice_type=bot_offline`，2026-11-10）。
+   *
+   * 这条 notice 与「输入中 / 撤回」不是一类：腾讯把这次登录作废了（NapCat 侧对应
+   * `[KickedOffLine] 你的账号当前登录已失效`），**只能重新扫码才能接上**。
+   * 交给上层去提醒人 / 改界面状态，传输层自己不做业务判断。
+   */
+  onAccountOffline?: () => void
 }
 
 export interface QqTransportStatus {
@@ -383,12 +391,14 @@ export class QqOb11Server {
   private seq = 0
   private port: number | null = null
   private onMessage: ((inbound: QqInbound) => void) | null = null
+  private onAccountOffline: (() => void) | null = null
   private log: QqLog = () => {}
   private timeoutMs = 10_000
 
   async start(options: QqServerOptions): Promise<{ port: number }> {
     if (this.server) throw new Error('QQ 通道已经启动')
     this.onMessage = options.onMessage
+    this.onAccountOffline = options.onAccountOffline ?? null
     if (options.log) this.log = options.log
     if (options.timeoutMs && options.timeoutMs > 0) this.timeoutMs = options.timeoutMs
 
@@ -486,6 +496,14 @@ export class QqOb11Server {
       const kind = String(payload['post_type'] ?? 'unknown')
       if (kind !== 'meta_event') {
         const noticeType = kind === 'notice' ? String(payload['notice_type'] ?? '') : ''
+        // 账号被踢下线（2026-11-10）：腾讯作废了这次登录，只能重新扫码。
+        // 以前和「输入中 / 撤回」一样只记一句 ignored，上层根本不知道要人扫码——
+        // 掉线后一直显示「正在后台重试，会自动接上」，人等了两个多小时才发现要扫码。
+        if (noticeType === 'bot_offline') {
+          this.log('warn', 'qq account kicked offline')
+          this.onAccountOffline?.()
+          return
+        }
         this.log('info', 'qq event ignored', {
           kind,
           ...(noticeType !== '' ? { noticeType } : {})

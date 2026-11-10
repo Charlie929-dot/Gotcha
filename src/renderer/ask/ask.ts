@@ -2837,6 +2837,12 @@ function napcatStatusText(view: NapcatView): string {
       return 'NapCat：正在启动 QQ…'
     case 'waiting-login':
       if (view.loggedIn) return 'NapCat：QQ 已登录，正在接入 Gotcha…'
+      // 被腾讯踢下线（2026-11-10）：登录票据作废，等不会等回来，必须重新扫码
+      if (view.kicked === true) {
+        return view.qrDataUrl !== undefined
+          ? 'NapCat：QQ 被腾讯踢下线了（登录已失效），用手机 QQ 重新扫码'
+          : 'NapCat：QQ 被腾讯踢下线了，等二维码出来再扫（不会自己接上）'
+      }
       return view.qrDataUrl !== undefined
         ? 'NapCat：用手机 QQ 扫码登录（二维码约 2 分钟有效）'
         : 'NapCat：等待二维码…（QQ 登录窗口可能已经弹出）'

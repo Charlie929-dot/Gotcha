@@ -143,6 +143,8 @@ export interface QqAskInput {
 
 export interface QqChannelDeps {
   ask: (input: QqAskInput) => Promise<ChainAskResult>
+  /** 成功推送后，在收件人的串行队列内持久化提醒上下文。 */
+  pushed?: (input: { conversationId: string; question: string; text: string; at: number }) => Promise<void>
   /**
    * 「还要继续查吗」的选择（2026-11-01 修）：桌面能点按钮，QQ 只能回字，
    * 所以这里接上与桌面同一个续查通道——会话里挂着待选时，回「1」继续查 /「2」按现有结果收尾。
@@ -423,7 +425,7 @@ export interface QqChannel {
    * 主动推一条（前台任务到点，2026-11-01 拍板 D93）：窗口没开时手机上也能看到。
    * 只在通道跑着、白名单非空时发，发给白名单第一个人；失败只记日志、不重试。
    */
-  push(text: string): Promise<QqPushResult>
+  push(text: string, question?: string): Promise<QqPushResult>
 }
 
 /** `push` 的结果：没发出去时带原因（调用方只记日志，不重试也不改口） */
@@ -738,7 +740,7 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
    * - 发给白名单第一个人（用户在设置里填的那个号），不发群、不发所有人；
    * - 发送失败也不抛：到点这一轮已经算交付过，重试只会重复提醒。
    */
-  const push = async (text: string): Promise<QqPushResult> => {
+  const push = async (text: string, question?: string): Promise<QqPushResult> => {
     if (!running) return { sent: false, parts: 0, reason: 'not-running' }
     const current = config
     if (current === null || current.allowUsers.length === 0) {
@@ -748,14 +750,37 @@ export function createQqChannel(transport: QqTransport, deps: QqChannelDeps): Qq
     if (!Number.isInteger(owner) || owner <= 0) return { sent: false, parts: 0, reason: 'no-owner' }
     const parts = splitForQq(text, current.replyMaxChars ?? QQ_REPLY_DEFAULT_CHARS)
     if (parts.length === 0) return { sent: false, parts: 0, reason: 'empty' }
+    // 与同一用户的问答共用队列；先完成发送与记账，再允许下一问加载历史。
+    const previous = queues.get(owner) ?? Promise.resolve()
+    let result: QqPushResult = { sent: false, parts: 0, reason: 'send-failed' }
+    const next = previous.then(async () => {
+      if (!running) {
+        result = { sent: false, parts: 0, reason: 'not-running' }
+        return
+      }
+      try {
+        const sent = await sendParts(owner, text)
+        result = { sent: true, parts: sent }
+        log('info', 'qq push sent', { parts: sent })
+      } catch (error) {
+        log('warn', 'qq push failed', { error: String(error) })
+        return
+      }
+      if (question !== undefined && deps.pushed !== undefined) {
+        try {
+          await deps.pushed({ conversationId: `qq-${owner}`, question, text, at: now() })
+        } catch (error) {
+          log('warn', 'qq push context failed', { error: String(error) })
+        }
+      }
+    })
+    queues.set(owner, next)
     try {
-      const sent = await sendParts(owner, text)
-      log('info', 'qq push sent', { parts: sent })
-      return { sent: true, parts: sent }
-    } catch (error) {
-      log('warn', 'qq push failed', { error: String(error) })
-      return { sent: false, parts: 0, reason: 'send-failed' }
+      await next
+    } finally {
+      if (queues.get(owner) === next) queues.delete(owner)
     }
+    return result
   }
 
   /**
